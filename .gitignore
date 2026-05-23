@@ -1,0 +1,147 @@
+# =============================================================================
+# memex .gitignore
+#
+# This repo is PUBLIC. Personal data must NEVER be committed.
+# Anything resembling a data file, secret, or local-only artifact is blocked
+# below. When in doubt, add the path explicitly here before staging.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Data — the hard boundary
+# -----------------------------------------------------------------------------
+data/
+datasets/
+exports/
+dumps/
+raw/
+processed/
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.arrow
+*.orc
+*.avro
+*.jsonl
+*.ndjson
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.duckdb
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.npz
+*.npy
+
+# Notebook outputs (often contain rendered data)
+*.ipynb_checkpoints/
+# Keep the .ipynb files themselves but never their outputs — strip with nbstripout
+
+# -----------------------------------------------------------------------------
+# Secrets
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.cer
+*.p12
+*.pfx
+secrets/
+credentials/
+.doppler/
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.tox/
+.hypothesis/
+pip-wheel-metadata/
+*.egg-info/
+build/
+dist/
+
+# -----------------------------------------------------------------------------
+# Node / JS
+# -----------------------------------------------------------------------------
+node_modules/
+.next/
+.nuxt/
+.svelte-kit/
+out/
+.cache/
+.parcel-cache/
+.turbo/
+.vercel/
+.netlify/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# -----------------------------------------------------------------------------
+# Rust / Go
+# -----------------------------------------------------------------------------
+target/
+Cargo.lock.bak
+bin/
+pkg/
+
+# -----------------------------------------------------------------------------
+# Tooling
+# -----------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+.terragrunt-cache/
+
+# -----------------------------------------------------------------------------
+# IDE / OS
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Logs
+# -----------------------------------------------------------------------------
+*.log
+logs/
+
+# -----------------------------------------------------------------------------
+# Claude Code / agent caches
+# -----------------------------------------------------------------------------
+.claude/cache/
+.claude/local/
