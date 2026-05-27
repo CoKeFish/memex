@@ -1,0 +1,14 @@
+# Plugin outlook-desktop — lee del Outlook desktop ya logueado en este Windows.
+# No requiere credenciales: usa la sesión de Outlook autenticada con SSO.
+
+# SMTP de la cuenta. Si Outlook tiene varias cuentas y querés una específica:
+account = "tabares_rr@javeriana.edu.co"
+
+# Máx. correos por corrida (evita inundar memex al primer arranque).
+max_items_per_run = 50
+
+# Cuántos días hacia atrás capturar la primera vez (sin checkpoint).
+since_days = 3
+
+# Tope de bytes para el body (texto plano se trunca, no se descarta).
+max_body_bytes = 524288

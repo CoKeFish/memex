@@ -1,0 +1,25 @@
+# Config del plugin imap-university.
+# Copialo a ~/.memex-local/plugins/imap-university/config.toml y rellena los campos.
+# El plugin no almacena valores de credenciales — solo nombres de env vars.
+
+server = "imap.tu-universidad.edu"
+port = 993
+auth = "basic"                       # "basic" | "oauth2"
+folders = ["INBOX"]
+
+# auth = "basic"
+username_env = "UNI_IMAP_USER"
+password_env = "UNI_IMAP_PASS"
+
+# auth = "oauth2" (descomenta los siguientes si usás OAuth2)
+# username_env = "UNI_IMAP_USER"
+# oauth_provider = "google"          # google | microsoft
+# oauth_client_secret_path_env = "UNI_OAUTH_CLIENT_SECRET_PATH"
+# oauth_token_path_env = "UNI_OAUTH_TOKEN_PATH"
+
+# Tunables
+since_days = 7
+batch_size = 50
+fetch_body = true
+max_body_bytes = 524288
+use_ssl = true

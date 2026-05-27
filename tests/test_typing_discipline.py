@@ -23,6 +23,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src" / "memex"
+SRC_LOCAL = REPO_ROOT / "src" / "memex_local"
 
 
 def _file_imports(path: Path) -> set[str]:
@@ -81,6 +82,31 @@ def test_ingestor_does_not_import_memex_internals(py_file: Path) -> None:
     assert not offenders, (
         f"{py_file.relative_to(REPO_ROOT)} imports forbidden modules: {offenders}. "
         "Ingestors must only depend on memex.core.* and memex.logging."
+    )
+
+
+def _local_client_py_files() -> list[Path]:
+    if not SRC_LOCAL.exists():
+        return []
+    return sorted(p for p in SRC_LOCAL.rglob("*.py") if "__pycache__" not in p.parts)
+
+
+@pytest.mark.parametrize(
+    "py_file",
+    _local_client_py_files(),
+    ids=lambda p: str(p.relative_to(REPO_ROOT)),
+)
+def test_local_client_does_not_import_memex_internals(py_file: Path) -> None:
+    """ADR-001: el cliente local cumple el rol Ingestor — mismas restricciones."""
+    imports = _file_imports(py_file)
+    offenders = [
+        imp
+        for imp in imports
+        if any(imp == f or imp.startswith(f + ".") for f in FORBIDDEN_FOR_INGESTORS)
+    ]
+    assert not offenders, (
+        f"{py_file.relative_to(REPO_ROOT)} imports forbidden modules: {offenders}. "
+        "memex_local must only depend on memex.core.*, memex.ingestors.* and memex.logging."
     )
 
 
