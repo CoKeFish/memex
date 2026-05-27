@@ -30,6 +30,40 @@ class IngestBatchResponse(BaseModel):
     errors: int
 
 
+class BridgeRecord(BaseModel):
+    """Record que viaja al bridge — sin source_id (lo resuelve el bridge desde el URL)."""
+
+    external_id: str
+    occurred_at: datetime
+    payload: dict[str, Any]
+    dedupe_keys: list[str] = Field(default_factory=list)
+
+
+class BridgeStateRequest(BaseModel):
+    source_type: str
+
+
+class BridgeStateResponse(BaseModel):
+    source_id: int
+    cursor: dict[str, Any] | None = None
+    created: bool
+
+
+class BridgeCursorRequest(BaseModel):
+    cursor: dict[str, Any]
+
+
+class BridgePluginIngestRequest(BaseModel):
+    records: list[BridgeRecord]
+
+
+class BridgeIngestStats(BaseModel):
+    source_id: int
+    inserted: int
+    duplicates: int
+    errors: int
+
+
 class InboxRow(BaseModel):
     id: int
     source_id: int

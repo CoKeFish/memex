@@ -9,10 +9,13 @@ from memex.api.auth import current_user_id
 from memex.api.schemas import CheckpointBody, SourceCreate, SourceRow
 from memex.core import checkpoint
 from memex.db import connection
+from memex.logging import get_logger
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
 UserID = Annotated[int, Depends(current_user_id)]
+
+_log = get_logger("memex.sources")
 
 
 def _assert_owns_source(conn: Any, user_id: int, source_id: int) -> None:
@@ -71,6 +74,75 @@ async def create_source(body: SourceCreate, user_id: UserID) -> dict[str, Any]:
             status_code=409, detail="source with that name already exists for this user"
         ) from e
     assert row is not None
+    _log.info(
+        "sources.created",
+        user_id=user_id,
+        source_id=row["id"],
+        name=row["name"],
+        source_type=row["type"],
+    )
+    return dict(row)
+
+
+@router.post("/ensure", response_model=SourceRow)
+async def ensure_source(body: SourceCreate, user_id: UserID) -> dict[str, Any]:
+    """Get-or-create idempotente por (user_id, name).
+
+    Si la fuente ya existe para este usuario con ese nombre, la devuelve sin
+    tocarla. Si no existe, la crea con `type` y `config` provistos.
+    """
+    with connection() as conn:
+        existing = (
+            conn.execute(
+                text(
+                    """
+                    SELECT id, user_id, name, type, enabled, config, created_at
+                    FROM sources WHERE user_id = :uid AND name = :name
+                    """
+                ),
+                {"uid": user_id, "name": body.name},
+            )
+            .mappings()
+            .first()
+        )
+        if existing is not None:
+            _log.info(
+                "sources.ensured",
+                user_id=user_id,
+                source_id=existing["id"],
+                name=existing["name"],
+                source_type=existing["type"],
+                action="existed",
+            )
+            return dict(existing)
+        row = (
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO sources (user_id, name, type, config)
+                    VALUES (:uid, :name, :type, CAST(:cfg AS JSONB))
+                    RETURNING id, user_id, name, type, enabled, config, created_at
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "name": body.name,
+                    "type": body.type,
+                    "cfg": json.dumps(body.config),
+                },
+            )
+            .mappings()
+            .first()
+        )
+    assert row is not None
+    _log.info(
+        "sources.ensured",
+        user_id=user_id,
+        source_id=row["id"],
+        name=row["name"],
+        source_type=row["type"],
+        action="created",
+    )
     return dict(row)
 
 
@@ -87,4 +159,9 @@ async def put_checkpoint(source_id: int, body: CheckpointBody, user_id: UserID) 
     with connection() as conn:
         _assert_owns_source(conn, user_id, source_id)
         checkpoint.save_cursor(conn, source_id, body.cursor)
+    _log.info(
+        "sources.checkpoint.updated",
+        user_id=user_id,
+        source_id=source_id,
+    )
     return {"cursor": body.cursor}

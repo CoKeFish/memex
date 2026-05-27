@@ -38,6 +38,40 @@ def test_list_sources_returns_only_current_user(
     assert names == {"imap-test"}
 
 
+def test_ensure_source_creates_when_missing(client: Any) -> None:
+    r = client.post(
+        "/sources/ensure",
+        json={"name": "imap-uni", "type": "imap", "config": {"folder": "INBOX"}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "imap-uni"
+    assert body["type"] == "imap"
+    assert body["config"] == {"folder": "INBOX"}
+    assert isinstance(body["id"], int)
+
+
+def test_ensure_source_returns_existing_without_mutating(client: Any) -> None:
+    first = client.post("/sources/ensure", json={"name": "x", "type": "imap"}).json()
+    second = client.post(
+        "/sources/ensure",
+        json={"name": "x", "type": "imap", "config": {"foo": "bar"}},
+    ).json()
+    assert second["id"] == first["id"]
+    assert second["config"] == first["config"]  # no se sobreescribió
+
+
+def test_ensure_source_isolates_per_user(client: Any, seed_user2: int, conn: Any) -> None:
+    conn.execute(
+        text("INSERT INTO sources (user_id, name, type) VALUES (:uid, 'shared-name', 'imap')"),
+        {"uid": seed_user2},
+    )
+    r = client.post("/sources/ensure", json={"name": "shared-name", "type": "imap"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user_id"] == 1  # del cliente, no del otro user
+
+
 def test_get_checkpoint_returns_none_initially(client: Any, seed_source: dict[str, Any]) -> None:
     r = client.get(f"/sources/{seed_source['id']}/checkpoint")
     assert r.status_code == 200

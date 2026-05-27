@@ -58,6 +58,34 @@ def test_post_ingest_batch_returns_counts() -> None:
         assert result == {"inserted": 3, "duplicates": 1, "errors": 0}
 
 
+def test_ensure_source_returns_row() -> None:
+    row = {
+        "id": 7,
+        "user_id": 1,
+        "name": "imap-uni",
+        "type": "imap",
+        "enabled": True,
+        "config": {"folder": "INBOX"},
+        "created_at": "2026-05-27T10:00:00Z",
+    }
+    with respx.mock(base_url=BASE_URL) as router:
+        route = router.post("/sources/ensure").respond(json=row)
+        with MemexClient(base_url=BASE_URL) as client:
+            result = client.ensure_source("imap-uni", "imap", config={"folder": "INBOX"})
+        assert result["id"] == 7
+        body = json.loads(router.calls[0].request.read())
+        assert body == {"name": "imap-uni", "type": "imap", "config": {"folder": "INBOX"}}
+        assert route.called
+
+
+def test_post_ingest_batch_honors_custom_ingest_path() -> None:
+    with respx.mock(base_url=BASE_URL) as router:
+        router.post("/bridge/ingest").respond(json={"inserted": 1, "duplicates": 0, "errors": 0})
+        with MemexClient(base_url=BASE_URL, ingest_path="/bridge/ingest") as client:
+            result = client.post_ingest_batch([{"source_id": 1, "external_id": "e1"}])
+        assert result == {"inserted": 1, "duplicates": 0, "errors": 0}
+
+
 def test_retries_on_5xx_then_succeeds() -> None:
     with respx.mock(base_url=BASE_URL) as router:
         router.get("/sources").mock(

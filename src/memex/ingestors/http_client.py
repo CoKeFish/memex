@@ -34,10 +34,12 @@ class MemexClient:
         timeout: float = 30.0,
         max_retries: int = 3,
         backoff_base: float = 0.5,
+        ingest_path: str = "/ingest/batch",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.max_retries = max_retries
         self.backoff_base = backoff_base
+        self._ingest_path = ingest_path
         self._log = get_logger("memex.ingestors.http_client")
 
         headers: dict[str, str] = {}
@@ -65,6 +67,21 @@ class MemexClient:
         data = self._request("GET", "/sources").json()
         return [s for s in data if s.get("type") == source_type and s.get("enabled", True)]
 
+    def ensure_source(
+        self,
+        name: str,
+        source_type: str,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Get-or-create idempotente. Devuelve la fila completa de la source.
+
+        Útil para clientes que conocen el `name` lógico pero no el id en
+        memex. El servidor decide si existía o se acaba de crear.
+        """
+        body = {"name": name, "type": source_type, "config": config or {}}
+        result: dict[str, Any] = self._request("POST", "/sources/ensure", json=body).json()
+        return result
+
     def get_checkpoint(self, source_id: int) -> dict[str, Any] | None:
         data = self._request("GET", f"/sources/{source_id}/checkpoint").json()
         cursor = data.get("cursor")
@@ -74,7 +91,7 @@ class MemexClient:
         self._request("PUT", f"/sources/{source_id}/checkpoint", json={"cursor": cursor})
 
     def post_ingest_batch(self, records: list[dict[str, Any]]) -> dict[str, int]:
-        resp = self._request("POST", "/ingest/batch", json={"records": records})
+        resp = self._request("POST", self._ingest_path, json={"records": records})
         result: dict[str, int] = resp.json()
         return result
 

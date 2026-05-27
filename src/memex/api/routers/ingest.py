@@ -13,11 +13,14 @@ from memex.api.schemas import (
 from memex.core.inbox import insert_record
 from memex.core.source import SourceRecord
 from memex.db import connection
+from memex.logging import get_logger
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
 UserID = Annotated[int, Depends(current_user_id)]
 DryRun = Annotated[str | None, Header(alias="X-Dry-Run")]
+
+_log = get_logger("memex.ingest")
 
 
 def _to_source_record(req: IngestRequest) -> SourceRecord:
@@ -45,6 +48,13 @@ async def ingest_one(
             raise HTTPException(status_code=404, detail="source not found")
         return {"would_insert": True, "validations": {"source_ownership": "ok"}}
 
+    _log.info(
+        "ingest.received",
+        user_id=user_id,
+        source_id=body.source_id,
+        count=1,
+        external_id=body.external_id,
+    )
     try:
         with connection() as conn:
             result = insert_record(
@@ -54,12 +64,35 @@ async def ingest_one(
                 record=_to_source_record(body),
             )
     except ValueError as e:
+        _log.warning(
+            "ingest.committed",
+            user_id=user_id,
+            source_id=body.source_id,
+            inserted=0,
+            duplicates=0,
+            errors=1,
+            reason=str(e),
+        )
         raise HTTPException(status_code=404, detail=str(e)) from e
+    _log.info(
+        "ingest.committed",
+        user_id=user_id,
+        source_id=body.source_id,
+        inserted=1 if result.inserted else 0,
+        duplicates=0 if result.inserted else 1,
+        errors=0,
+    )
     return {"inserted": result.inserted, "id": result.id, "reason": result.reason}
 
 
 @router.post("/batch", response_model=IngestBatchResponse)
 async def ingest_batch(body: IngestBatchRequest, user_id: UserID) -> dict[str, int]:
+    _log.info(
+        "ingest.received",
+        user_id=user_id,
+        count=len(body.records),
+        source_ids=sorted({r.source_id for r in body.records}),
+    )
     inserted = duplicates = errors = 0
     with connection() as conn:
         for req in body.records:
@@ -76,4 +109,12 @@ async def ingest_batch(body: IngestBatchRequest, user_id: UserID) -> dict[str, i
                     duplicates += 1
             except ValueError:
                 errors += 1
+    _log.info(
+        "ingest.committed",
+        user_id=user_id,
+        count=len(body.records),
+        inserted=inserted,
+        duplicates=duplicates,
+        errors=errors,
+    )
     return {"inserted": inserted, "duplicates": duplicates, "errors": errors}
