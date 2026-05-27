@@ -146,5 +146,7 @@ logs/
 .claude/cache/
 .claude/local/
 
-# Generated diagram renders (regenerable from .dot/.mmd sources)
-*-architecture.png
+# Diagramas de arquitectura — artefactos locales, no se versionan.
+# Las fuentes (.dot/.mmd) y los renders (.png/.svg) son regenerables y
+# pueden contener referencias personales temporales mientras se trabaja.
+*-architecture.*
