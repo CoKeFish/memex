@@ -54,7 +54,9 @@ def _make_scheduler(state: State, plugins_root: Any) -> Scheduler:
     )
 
 
-def test_run_once_dispatches_enabled_plugin(plugin_dir_factory, monkeypatch) -> None:
+def test_run_once_dispatches_enabled_plugin(
+    plugin_dir_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     plugin_dir_factory.make("p1", _VALID)
     state = State(":memory:")
     disc = discover_plugins(plugin_dir_factory.root)
@@ -76,7 +78,9 @@ def test_run_once_dispatches_enabled_plugin(plugin_dir_factory, monkeypatch) -> 
     assert calls == ["p1"]
 
 
-def test_run_once_skips_disabled_plugins(plugin_dir_factory, monkeypatch) -> None:
+def test_run_once_skips_disabled_plugins(
+    plugin_dir_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     plugin_dir_factory.make("p1", _VALID)
     state = State(":memory:")  # sin enable
     sched = _make_scheduler(state, plugin_dir_factory.root)
@@ -92,7 +96,9 @@ def test_run_once_skips_disabled_plugins(plugin_dir_factory, monkeypatch) -> Non
     assert calls == []
 
 
-def test_plugin_failure_triggers_backoff(plugin_dir_factory, monkeypatch) -> None:
+def test_plugin_failure_triggers_backoff(
+    plugin_dir_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     plugin_dir_factory.make("p1", _VALID)
     state = State(":memory:")
     disc = discover_plugins(plugin_dir_factory.root)
@@ -107,7 +113,9 @@ def test_plugin_failure_triggers_backoff(plugin_dir_factory, monkeypatch) -> Non
     sched.run_once()
 
 
-def test_run_once_handles_bad_schedule_gracefully(plugin_dir_factory, monkeypatch) -> None:
+def test_run_once_handles_bad_schedule_gracefully(
+    plugin_dir_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     plugin_dir_factory.make("p1", _VALID)
     state = State(":memory:")
     disc = discover_plugins(plugin_dir_factory.root)

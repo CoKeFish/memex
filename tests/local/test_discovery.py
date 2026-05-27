@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from memex_local.discovery import discover_plugins
 
 _VALID_PLUGIN = '''
@@ -44,7 +46,7 @@ def validate_requirements(local_config): return []
 """
 
 
-def test_discovery_loads_valid_plugin(plugin_dir_factory) -> None:
+def test_discovery_loads_valid_plugin(plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("fake", _VALID_PLUGIN)
     result = discover_plugins(plugin_dir_factory.root)
     assert "fake" in result.plugins
@@ -54,7 +56,7 @@ def test_discovery_loads_valid_plugin(plugin_dir_factory) -> None:
     assert p.default_schedule == "PT1M"
 
 
-def test_discovery_reports_import_failure(plugin_dir_factory) -> None:
+def test_discovery_reports_import_failure(plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("explodes", _BROKEN_PLUGIN_IMPORT)
     result = discover_plugins(plugin_dir_factory.root)
     assert "explodes" not in result.plugins
@@ -62,27 +64,27 @@ def test_discovery_reports_import_failure(plugin_dir_factory) -> None:
     assert "boom on import" in result.errors[0].reason
 
 
-def test_discovery_rejects_incomplete_protocol(plugin_dir_factory) -> None:
+def test_discovery_rejects_incomplete_protocol(plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("incomplete", _INCOMPLETE_PLUGIN)
     result = discover_plugins(plugin_dir_factory.root)
     assert "incomplete" not in result.plugins
     assert any("LocalPlugin protocol" in e.reason for e in result.errors)
 
 
-def test_discovery_rejects_name_mismatch(plugin_dir_factory) -> None:
+def test_discovery_rejects_name_mismatch(plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("mismatch", _MISMATCHED_NAME)
     result = discover_plugins(plugin_dir_factory.root)
     assert "mismatch" not in result.plugins
     assert any("does not match directory name" in e.reason for e in result.errors)
 
 
-def test_discovery_skips_missing_init(plugin_dir_factory) -> None:
+def test_discovery_skips_missing_init(plugin_dir_factory: Any) -> None:
     (plugin_dir_factory.root / "no-init").mkdir()
     result = discover_plugins(plugin_dir_factory.root)
     assert any("missing __init__.py" in e.reason for e in result.errors)
 
 
-def test_discovery_one_broken_doesnt_block_valid(plugin_dir_factory) -> None:
+def test_discovery_one_broken_doesnt_block_valid(plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("fake", _VALID_PLUGIN)
     plugin_dir_factory.make("explodes", _BROKEN_PLUGIN_IMPORT)
     result = discover_plugins(plugin_dir_factory.root)

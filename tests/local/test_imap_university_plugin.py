@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -13,7 +14,7 @@ PLUGIN_DIR = REPO_ROOT / "plugins" / "imap-university"
 
 
 @pytest.fixture(scope="module")
-def plugin_module():
+def plugin_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location(
         "_test_imap_university", PLUGIN_DIR / "__init__.py"
     )
@@ -24,14 +25,14 @@ def plugin_module():
     return mod
 
 
-def test_plugin_attributes(plugin_module) -> None:
+def test_plugin_attributes(plugin_module: ModuleType) -> None:
     assert plugin_module.name == "imap-university"
     assert plugin_module.source_type == "imap"
     assert plugin_module.default_schedule.startswith("PT")
 
 
 def test_validate_requirements_flags_missing_envvars(
-    plugin_module, monkeypatch: pytest.MonkeyPatch
+    plugin_module: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("UNI_IMAP_USER", raising=False)
     monkeypatch.delenv("UNI_IMAP_PASS", raising=False)
@@ -48,7 +49,7 @@ def test_validate_requirements_flags_missing_envvars(
 
 
 def test_validate_requirements_passes_with_envvars(
-    plugin_module, monkeypatch: pytest.MonkeyPatch
+    plugin_module: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("UNI_IMAP_USER", "alumno@uni.edu")
     monkeypatch.setenv("UNI_IMAP_PASS", "p")
@@ -62,7 +63,9 @@ def test_validate_requirements_passes_with_envvars(
     assert plugin_module.validate_requirements(cfg) == []
 
 
-def test_build_source_returns_imap_source(plugin_module, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_source_returns_imap_source(
+    plugin_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from memex.ingestors.imap.source import ImapSource
 
     monkeypatch.setenv("UNI_IMAP_USER", "alumno@uni.edu")

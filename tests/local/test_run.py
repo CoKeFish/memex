@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import respx
 
@@ -56,7 +57,7 @@ def test_load_plugin_config_missing_returns_empty(local_home: Path) -> None:
     assert cfg == {}
 
 
-def test_execute_plugin_calls_state_ingest_and_cursor(plugin_dir_factory) -> None:
+def test_execute_plugin_calls_state_ingest_and_cursor(plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("p2", _PLUGIN_WITH_TWO_RECORDS)
     disc = discover_plugins(plugin_dir_factory.root)
     plugin = disc.plugins["p2"]
@@ -99,7 +100,7 @@ def test_execute_plugin_calls_state_ingest_and_cursor(plugin_dir_factory) -> Non
     assert runs[0].posted == 2
 
 
-def test_execute_plugin_marks_error_on_build_source_failure(plugin_dir_factory) -> None:
+def test_execute_plugin_marks_error_on_build_source_failure(plugin_dir_factory: Any) -> None:
     bad_plugin_body = """
 from collections.abc import Mapping
 from typing import Any
@@ -138,7 +139,7 @@ def validate_requirements(local_config: Mapping[str, Any]) -> list:
     assert "source construction exploded" in (runs[0].error_msg or "")
 
 
-def test_execute_plugin_marks_error_on_runner_failure(plugin_dir_factory) -> None:
+def test_execute_plugin_marks_error_on_runner_failure(plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("p2", _PLUGIN_WITH_TWO_RECORDS)
     disc = discover_plugins(plugin_dir_factory.root)
     plugin = disc.plugins["p2"]

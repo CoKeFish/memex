@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -57,7 +58,7 @@ def test_install_overwrites(local_home: Path, tmp_path: Path) -> None:
     assert "0.2.0" in body
 
 
-def test_enable_marks_in_state(local_home: Path, plugin_dir_factory) -> None:
+def test_enable_marks_in_state(local_home: Path, plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("p1", _VALID)
     disc = discover_plugins(plugin_dir_factory.root)
     with State(":memory:") as state:
@@ -68,13 +69,13 @@ def test_enable_marks_in_state(local_home: Path, plugin_dir_factory) -> None:
         assert row.schedule == "PT1M"
 
 
-def test_enable_unknown_plugin_raises(plugin_dir_factory) -> None:
+def test_enable_unknown_plugin_raises(plugin_dir_factory: Any) -> None:
     disc = discover_plugins(plugin_dir_factory.root)
     with State(":memory:") as state, pytest.raises(RegistryError):
         enable("not-there", state, disc.plugins)
 
 
-def test_disable(local_home: Path, plugin_dir_factory) -> None:
+def test_disable(local_home: Path, plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("p1", _VALID)
     disc = discover_plugins(plugin_dir_factory.root)
     with State(":memory:") as state:
@@ -85,7 +86,7 @@ def test_disable(local_home: Path, plugin_dir_factory) -> None:
         assert row.enabled is False
 
 
-def test_list_views_combines_fs_and_state(local_home: Path, plugin_dir_factory) -> None:
+def test_list_views_combines_fs_and_state(local_home: Path, plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("p1", _VALID)
     plugin_dir_factory.make("p2", _VALID.replace('"p1"', '"p2"'))
     disc = discover_plugins(plugin_dir_factory.root)
@@ -99,7 +100,7 @@ def test_list_views_combines_fs_and_state(local_home: Path, plugin_dir_factory) 
         assert names["p2"].installed is True
 
 
-def test_uninstall_removes_fs_and_state(local_home: Path, plugin_dir_factory) -> None:
+def test_uninstall_removes_fs_and_state(local_home: Path, plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("p1", _VALID)
     disc = discover_plugins(plugin_dir_factory.root)
     with State(":memory:") as state:
@@ -110,7 +111,7 @@ def test_uninstall_removes_fs_and_state(local_home: Path, plugin_dir_factory) ->
         assert state.get_plugin("p1") is None
 
 
-def test_attach_source_id_persists(plugin_dir_factory) -> None:
+def test_attach_source_id_persists(plugin_dir_factory: Any) -> None:
     plugin_dir_factory.make("p1", _VALID)
     disc = discover_plugins(plugin_dir_factory.root)
     with State(":memory:") as state:
