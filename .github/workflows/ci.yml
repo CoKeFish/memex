@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: memex
+          POSTGRES_PASSWORD: memex
+          POSTGRES_DB: postgres
+        ports:
+          - 5454:5432
+        options: >-
+          --health-cmd "pg_isready -U memex"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.9.28"
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format check
+        run: uv run ruff format --check .
+
+      - name: mypy (strict)
+        run: uv run mypy src tests
+
+      - name: pytest
+        env:
+          MEMEX_DATABASE_URL: postgresql+psycopg://memex:memex@localhost:5454/memex_test
+          MEMEX_AUTH_ENFORCED: "false"
+          MEMEX_API_TOKEN: ""
+        run: uv run pytest -q

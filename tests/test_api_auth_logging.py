@@ -47,12 +47,12 @@ def test_current_user_id_does_not_bind_on_rejected_request(
     monkeypatch.setattr(settings, "auth_enforced", True)
     monkeypatch.setattr(settings, "api_token", "secret-test")
 
-    async def _check() -> object:
+    async def _check() -> tuple[int, dict[str, object]] | None:
         clear_request_context()
         try:
             await current_user_id(authorization=None)
         except HTTPException as exc:
-            return exc.status_code, structlog.contextvars.get_contextvars()
+            return exc.status_code, dict(structlog.contextvars.get_contextvars())
         return None
 
     result = asyncio.run(_check())

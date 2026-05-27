@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import respx
@@ -12,7 +13,11 @@ from memex.ingestors.bridge_client import BridgeClient
 BASE = "http://localhost:8787"
 
 
-def _state_response(source_id: int = 42, cursor: dict | None = None, created: bool = False):
+def _state_response(
+    source_id: int = 42,
+    cursor: dict[str, Any] | None = None,
+    created: bool = False,
+) -> dict[str, Any]:
     return {"source_id": source_id, "cursor": cursor, "created": created}
 
 
@@ -55,7 +60,7 @@ def test_state_called_only_once_across_methods() -> None:
 
 
 def test_post_ingest_strips_source_id_field() -> None:
-    captured: list[dict] = []
+    captured: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(json.loads(request.read()))

@@ -85,7 +85,7 @@ def _build_runtimes(
 
 def _backoff_seconds(failures: int) -> float:
     """Backoff exponencial con techo de 1h."""
-    return min(60 * (2 ** min(failures, 6)), 3600)
+    return float(min(60 * (2 ** min(failures, 6)), 3600))
 
 
 class Scheduler:

@@ -19,3 +19,26 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: check-added-large-files
+
+  # mypy corre via uv run para que use el venv del proyecto con todas las
+  # deps tipadas (pydantic, sqlalchemy, etc.). Pass-filenames=false porque
+  # mypy analiza el árbol completo, no por archivo modificado.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        args: [src, tests]
+
+      # pytest solo en pre-push — correr 241 tests en cada commit sería
+      # demasiado lento. Bloquea solo cuando vas a empujar código.
+      - id: pytest
+        name: pytest (full suite, pre-push)
+        entry: uv run pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]

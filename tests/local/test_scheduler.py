@@ -82,10 +82,12 @@ def test_run_once_skips_disabled_plugins(plugin_dir_factory, monkeypatch) -> Non
     sched = _make_scheduler(state, plugin_dir_factory.root)
 
     calls: list[str] = []
-    monkeypatch.setattr(
-        "memex_local.scheduler.execute_plugin",
-        lambda plugin, **kw: calls.append(plugin.name) or RunStats(0, 0, 0, 0, 1),
-    )
+
+    def record(plugin: Any, **kw: Any) -> RunStats:
+        calls.append(plugin.name)
+        return RunStats(0, 0, 0, 0, 1)
+
+    monkeypatch.setattr("memex_local.scheduler.execute_plugin", record)
     sched.run_once()
     assert calls == []
 
@@ -114,9 +116,11 @@ def test_run_once_handles_bad_schedule_gracefully(plugin_dir_factory, monkeypatc
     sched = _make_scheduler(state, plugin_dir_factory.root)
 
     calls: list[str] = []
-    monkeypatch.setattr(
-        "memex_local.scheduler.execute_plugin",
-        lambda plugin, **kw: calls.append(plugin.name) or RunStats(0, 0, 0, 0, 1),
-    )
+
+    def record(plugin: Any, **kw: Any) -> RunStats:
+        calls.append(plugin.name)
+        return RunStats(0, 0, 0, 0, 1)
+
+    monkeypatch.setattr("memex_local.scheduler.execute_plugin", record)
     sched.run_once()
     assert calls == []

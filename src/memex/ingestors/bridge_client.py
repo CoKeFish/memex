@@ -52,6 +52,9 @@ class BridgeClient(MemexClient):
         self._initial_cursor: dict[str, Any] | None = None
         self._state_loaded = False
 
+    def __enter__(self) -> BridgeClient:
+        return self
+
     # --- override para que el runner no toque /sources/* ni /ingest/batch ---
 
     def get_sources_by_type(self, source_type: str) -> list[dict[str, Any]]:
@@ -70,19 +73,21 @@ class BridgeClient(MemexClient):
             "BridgeClient no expone /sources/ensure; usar /bridge/plugins/<name>/state",
         )
 
-    def get_checkpoint(self, source_id: int | None = None) -> dict[str, Any] | None:
+    def get_checkpoint(self, source_id: int = 0) -> dict[str, Any] | None:
         """Carga estado vía POST /bridge/plugins/{name}/state.
 
         Ignora `source_id` (el bridge lo resuelve desde el URL). Cachea el
         `source_id` real (asignado/encontrado por el servidor) para que
         callers puedan inspeccionarlo si lo necesitan.
         """
+        del source_id  # se resuelve desde el URL del bridge
         self._load_state()
         cur = self._initial_cursor
         return cur if isinstance(cur, dict) else None
 
     def put_checkpoint(self, source_id: int, cursor: dict[str, Any]) -> None:
         """Persiste el cursor vía PUT /bridge/plugins/{name}/cursor."""
+        del source_id  # se resuelve desde el URL del bridge
         if not self._state_loaded:
             self._load_state()
         self._request(
