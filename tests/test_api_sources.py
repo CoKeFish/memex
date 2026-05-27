@@ -26,7 +26,7 @@ def test_create_source_duplicate_name_returns_409(client: Any) -> None:
 
 
 def test_list_sources_returns_only_current_user(
-    client: Any, seed_source: dict, seed_user2: int, conn: Any
+    client: Any, seed_source: dict[str, Any], seed_user2: int, conn: Any
 ) -> None:
     conn.execute(
         text("INSERT INTO sources (user_id, name, type) " "VALUES (:uid, 'other-src', 'imap')"),
@@ -38,13 +38,13 @@ def test_list_sources_returns_only_current_user(
     assert names == {"imap-test"}
 
 
-def test_get_checkpoint_returns_none_initially(client: Any, seed_source: dict) -> None:
+def test_get_checkpoint_returns_none_initially(client: Any, seed_source: dict[str, Any]) -> None:
     r = client.get(f"/sources/{seed_source['id']}/checkpoint")
     assert r.status_code == 200
     assert r.json() == {"cursor": None}
 
 
-def test_put_then_get_checkpoint(client: Any, seed_source: dict) -> None:
+def test_put_then_get_checkpoint(client: Any, seed_source: dict[str, Any]) -> None:
     cur = {"uidvalidity": 1, "last_uid": 42}
     r = client.put(f"/sources/{seed_source['id']}/checkpoint", json={"cursor": cur})
     assert r.status_code == 200

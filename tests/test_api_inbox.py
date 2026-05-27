@@ -26,7 +26,7 @@ def _seed_n(source_id: int, user_id: int, n: int, prefix: str = "r") -> None:
             )
 
 
-def test_list_inbox_returns_user_rows(client: Any, seed_source: dict) -> None:
+def test_list_inbox_returns_user_rows(client: Any, seed_source: dict[str, Any]) -> None:
     _seed_n(seed_source["id"], 1, 3)
     r = client.get("/inbox")
     assert r.status_code == 200
@@ -35,7 +35,7 @@ def test_list_inbox_returns_user_rows(client: Any, seed_source: dict) -> None:
     assert body["next_cursor"] is None
 
 
-def test_list_inbox_filters_by_source(client: Any, seed_source: dict) -> None:
+def test_list_inbox_filters_by_source(client: Any, seed_source: dict[str, Any]) -> None:
     with connection() as c:
         src2 = c.execute(
             text(
@@ -43,6 +43,7 @@ def test_list_inbox_filters_by_source(client: Any, seed_source: dict) -> None:
                 "VALUES (1, 'other-src', 'imap') RETURNING id"
             )
         ).scalar()
+    assert isinstance(src2, int)
     _seed_n(seed_source["id"], 1, 2, prefix="a")
     _seed_n(src2, 1, 3, prefix="b")
     r = client.get(f"/inbox?source_id={seed_source['id']}")
@@ -51,7 +52,7 @@ def test_list_inbox_filters_by_source(client: Any, seed_source: dict) -> None:
     assert len(r.json()["items"]) == 3
 
 
-def test_list_inbox_pagination(client: Any, seed_source: dict) -> None:
+def test_list_inbox_pagination(client: Any, seed_source: dict[str, Any]) -> None:
     _seed_n(seed_source["id"], 1, 5)
     r1 = client.get("/inbox?limit=2")
     body1 = r1.json()
@@ -64,7 +65,7 @@ def test_list_inbox_pagination(client: Any, seed_source: dict) -> None:
     assert body2["items"][0]["id"] > body1["items"][-1]["id"]
 
 
-def test_list_inbox_processed_filter(client: Any, seed_source: dict) -> None:
+def test_list_inbox_processed_filter(client: Any, seed_source: dict[str, Any]) -> None:
     _seed_n(seed_source["id"], 1, 3)
     # Mark one as processed
     with connection() as c:
@@ -74,7 +75,7 @@ def test_list_inbox_processed_filter(client: Any, seed_source: dict) -> None:
     assert len(client.get("/inbox?processed=all").json()["items"]) == 3
 
 
-def test_get_inbox_by_id(client: Any, seed_source: dict) -> None:
+def test_get_inbox_by_id(client: Any, seed_source: dict[str, Any]) -> None:
     _seed_n(seed_source["id"], 1, 1)
     list_resp = client.get("/inbox").json()
     rid = list_resp["items"][0]["id"]
@@ -83,12 +84,15 @@ def test_get_inbox_by_id(client: Any, seed_source: dict) -> None:
     assert r.json()["external_id"] == "r0"
 
 
-def test_get_inbox_cross_tenant_is_404(client: Any, seed_source: dict, seed_user2: int) -> None:
+def test_get_inbox_cross_tenant_is_404(
+    client: Any, seed_source: dict[str, Any], seed_user2: int
+) -> None:
     with connection() as c:
         src2 = c.execute(
             text("INSERT INTO sources (user_id, name, type) " "VALUES (:u, 's', 'x') RETURNING id"),
             {"u": seed_user2},
         ).scalar()
+    assert isinstance(src2, int)
     _seed_n(src2, seed_user2, 1, prefix="u2-")
     # Find user 2's row id
     with connection() as c:
@@ -100,12 +104,15 @@ def test_get_inbox_cross_tenant_is_404(client: Any, seed_source: dict, seed_user
     assert r.status_code == 404
 
 
-def test_inbox_stats_scoped_to_user(client: Any, seed_source: dict, seed_user2: int) -> None:
+def test_inbox_stats_scoped_to_user(
+    client: Any, seed_source: dict[str, Any], seed_user2: int
+) -> None:
     with connection() as c:
         src2 = c.execute(
             text("INSERT INTO sources (user_id, name, type) " "VALUES (:u, 's', 'x') RETURNING id"),
             {"u": seed_user2},
         ).scalar()
+    assert isinstance(src2, int)
     _seed_n(seed_source["id"], 1, 2)
     _seed_n(src2, seed_user2, 5, prefix="u2-")
     r = client.get("/inbox/stats")

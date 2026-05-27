@@ -22,10 +22,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from memex.core.source import SourceConfigError
 from memex.ingestors.http_client import MemexAPIError, MemexClient
-from memex.ingestors.imap.config import ImapConfig, ImapConfigError
 from memex.ingestors.imap.oauth import OAuthError, authorize_interactive
-from memex.ingestors.imap.source import ImapSource
+from memex.ingestors.imap.source import make_source
 from memex.ingestors.runner import run_ingestor
 from memex.logging import get_logger, setup_logging
 
@@ -93,18 +93,17 @@ def _cmd_run(args: argparse.Namespace, client: MemexClient, log: Any) -> int:
         src_log.info("ingestor_run_start")
 
         try:
-            cfg = ImapConfig.from_source_config(cfg_dict)
-        except ImapConfigError as e:
-            src_log.error("imap_config_invalid", reason=str(e))
+            source = make_source(cfg_dict)
+        except SourceConfigError as e:
+            src_log.error("source_config_invalid", reason=str(e))
             had_fatal = True
             continue
 
         try:
-            source = ImapSource(cfg)
             stats = run_ingestor(
                 source,
                 source_id=sid,
-                client=client,
+                sink=client,
                 chunk_size=args.chunk_size,
                 chunk_sleep_ms=args.chunk_sleep_ms,
             )

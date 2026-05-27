@@ -1,0 +1,139 @@
+"""Architectural / typing discipline checks.
+
+These tests fail loud when someone bypasses the abstractions intentionally
+declared in `memex.core.*`. They act as lint rules that the rest of the
+codebase doesn't already enforce (mypy can't tell us "use Protocol instead
+of concrete class" — that's an architectural choice).
+
+Things checked here:
+
+  * Ingestors don't import memex internals other than `memex.core.*` and
+    `memex.logging` (ADR-001 isolation).
+  * The runner types against `MemexSink` Protocol, not `MemexClient`.
+  * Source-specific config errors derive from `SourceConfigError` so generic
+    catches work.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC = REPO_ROOT / "src" / "memex"
+
+
+def _file_imports(path: Path) -> set[str]:
+    """Return the full dotted names imported in the file."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.add(alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.add(node.module)
+    return imports
+
+
+def _collect_annotations(path: Path) -> list[str]:
+    """Unparse every type annotation (params and returns) in a file."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    annotations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            for arg in node.args.args + node.args.kwonlyargs + node.args.posonlyargs:
+                if arg.annotation:
+                    annotations.append(ast.unparse(arg.annotation))
+            if node.returns:
+                annotations.append(ast.unparse(node.returns))
+        elif isinstance(node, ast.AnnAssign) and node.annotation:
+            annotations.append(ast.unparse(node.annotation))
+    return annotations
+
+
+def _ingestor_py_files() -> list[Path]:
+    root = SRC / "ingestors"
+    return sorted(p for p in root.rglob("*.py") if "__pycache__" not in p.parts)
+
+
+# ----- Isolation: ingestors only talk to memex via HTTP --------------------- #
+
+FORBIDDEN_FOR_INGESTORS = (
+    "memex.db",
+    "memex.api",
+    "memex.core.inbox",
+    "memex.core.checkpoint",
+)
+
+
+@pytest.mark.parametrize("py_file", _ingestor_py_files(), ids=lambda p: str(p.relative_to(SRC)))
+def test_ingestor_does_not_import_memex_internals(py_file: Path) -> None:
+    """ADR-001: ingestors are isolated from memex internals."""
+    imports = _file_imports(py_file)
+    offenders = [
+        imp
+        for imp in imports
+        if any(imp == f or imp.startswith(f + ".") for f in FORBIDDEN_FOR_INGESTORS)
+    ]
+    assert not offenders, (
+        f"{py_file.relative_to(REPO_ROOT)} imports forbidden modules: {offenders}. "
+        "Ingestors must only depend on memex.core.* and memex.logging."
+    )
+
+
+# ----- Runner uses Protocol, not concrete client ---------------------------- #
+
+
+def test_runner_types_against_memexsink_not_memexclient() -> None:
+    """The runner depends on the Protocol, not the concrete HTTP class."""
+    runner = SRC / "ingestors" / "runner.py"
+    annotations = _collect_annotations(runner)
+    joined = " ".join(annotations)
+    assert "MemexSink" in joined, "runner.py must annotate against MemexSink Protocol"
+    assert "MemexClient" not in joined, (
+        "runner.py must not annotate against MemexClient — use MemexSink Protocol "
+        "so the runner is transport-agnostic"
+    )
+
+
+def test_runner_does_not_import_memexclient() -> None:
+    """The runner only knows about the Protocol; it never sees the concrete class."""
+    runner = SRC / "ingestors" / "runner.py"
+    imports = _file_imports(runner)
+    assert "memex.ingestors.http_client" not in imports, (
+        "runner.py imports http_client (concrete); should only depend on "
+        "memex.core.sink (Protocol)"
+    )
+    assert "memex.core.sink" in imports, "runner.py must import MemexSink from memex.core.sink"
+
+
+# ----- Source config errors derive from generic base ------------------------ #
+
+
+def test_imap_config_error_is_source_config_error() -> None:
+    """ImapConfigError must inherit from SourceConfigError so generic catches work."""
+    from memex.core.source import SourceConfigError
+    from memex.ingestors.imap.config import ImapConfigError
+
+    assert issubclass(ImapConfigError, SourceConfigError), (
+        "ImapConfigError must subclass SourceConfigError so callers can use "
+        "the generic except clause across source types"
+    )
+
+
+# ----- MemexClient satisfies MemexSink (runtime structural check) ----------- #
+
+
+def test_memex_client_satisfies_memex_sink() -> None:
+    """The concrete HTTP client must structurally satisfy the MemexSink Protocol."""
+    from memex.core.sink import MemexSink
+    from memex.ingestors.http_client import MemexClient
+
+    client = MemexClient(base_url="http://localhost", api_token=None)
+    assert isinstance(client, MemexSink), (
+        "MemexClient does not satisfy MemexSink Protocol — either a method "
+        "signature drifted or the Protocol changed"
+    )

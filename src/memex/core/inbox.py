@@ -1,17 +1,20 @@
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import Connection, text
 
 from memex.core.source import SourceRecord
+
+InsertReason = Literal["duplicate"]
+"""Why an insert was rejected. Extend as new rejection cases appear."""
 
 
 @dataclass(frozen=True)
 class InsertResult:
     inserted: bool
     id: int | None
-    reason: str | None = None  # "duplicate" when inserted=False
+    reason: InsertReason | None = None
 
 
 def insert_record(

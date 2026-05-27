@@ -7,8 +7,9 @@ from email.header import decode_header, make_header
 from email.message import Message
 from html.parser import HTMLParser
 from io import StringIO
-from typing import Any
+from typing import Literal
 
+from memex.core.payloads import Address, Attachment, EmailPayload
 from memex.core.source import SourceRecord
 
 RAW_HEADERS_WHITELIST = (
@@ -16,6 +17,8 @@ RAW_HEADERS_WHITELIST = (
     "Received-SPF",
     "Authentication-Results",
 )
+
+BodySource = Literal["text", "html_stripped"]
 
 
 def parse_email_message(
@@ -38,6 +41,11 @@ def parse_email_message(
     `internaldate` is the IMAP server's INTERNALDATE for the message. It serves
     as fallback when the Date header is missing, malformed, or absurd (clock skew,
     date in the future, pre-2000).
+
+    The payload is built via the typed `EmailPayload` Pydantic model — typos in
+    field names become static type errors here, not silent JSONB misses at
+    classification time. The model is serialized to dict at the SourceRecord
+    boundary; the storage layer stays schema-agnostic.
     """
     msg_id = _strip_brackets(msg.get("Message-ID"))
     in_reply_to = _strip_brackets(msg.get("In-Reply-To"))
@@ -56,14 +64,18 @@ def parse_email_message(
     )
 
     body_text = ""
-    body_source = "text"
+    body_source: BodySource = "text"
     body_truncated = False
     if fetch_body:
         body_text, body_source, body_truncated = _extract_body(msg, max_body_bytes)
 
     attachments = _extract_attachment_meta(msg)
 
-    raw_headers = {h: msg.get(h) for h in RAW_HEADERS_WHITELIST if msg.get(h) is not None}
+    raw_headers: dict[str, str] = {}
+    for h in RAW_HEADERS_WHITELIST:
+        v = msg.get(h)
+        if v is not None:
+            raw_headers[h] = str(v)
 
     external_id = f"imap:{server}:{uidvalidity}:{uid}"
     dedupe_keys: list[str] = []
@@ -71,40 +83,48 @@ def parse_email_message(
         dedupe_keys.append(f"msgid:{msg_id}")
     dedupe_keys.append(external_id)
 
-    payload: dict[str, Any] = {
-        "from": from_addr,
-        "to": to_addrs,
-        "cc": cc_addrs,
-        "reply_to": reply_to_addrs,
-        "subject": _decode_header(msg.get("Subject")),
-        "date": occurred_at.isoformat(),
-        "message_id": msg_id,
-        "in_reply_to": in_reply_to,
-        "references": references,
-        "list_id": msg.get("List-ID") or msg.get("List-Id"),
-        "list_unsubscribe": msg.get("List-Unsubscribe"),
-        "list_unsubscribe_post": msg.get("List-Unsubscribe-Post"),
-        "precedence": msg.get("Precedence"),
-        "auto_submitted": msg.get("Auto-Submitted"),
-        "body_text": body_text,
-        "body_source": body_source,
-        "body_truncated": body_truncated,
-        "folder": folder,
-        "flags": list(flags),
-        "size_bytes": size_bytes,
-        "attachments": attachments,
-        "raw_headers": raw_headers,
-    }
+    payload_model = EmailPayload(
+        from_=from_addr,
+        to=to_addrs,
+        cc=cc_addrs,
+        reply_to=reply_to_addrs,
+        subject=_decode_header(msg.get("Subject")),
+        date=occurred_at,
+        message_id=msg_id,
+        in_reply_to=in_reply_to,
+        references=references,
+        list_id=_nonempty(msg.get("List-ID") or msg.get("List-Id")),
+        list_unsubscribe=_nonempty(msg.get("List-Unsubscribe")),
+        list_unsubscribe_post=_nonempty(msg.get("List-Unsubscribe-Post")),
+        precedence=_nonempty(msg.get("Precedence")),
+        auto_submitted=_nonempty(msg.get("Auto-Submitted")),
+        body_text=body_text,
+        body_source=body_source,
+        body_truncated=body_truncated,
+        folder=folder,
+        flags=list(flags),
+        size_bytes=size_bytes,
+        attachments=attachments,
+        raw_headers=raw_headers,
+    )
 
     return SourceRecord(
         external_id=external_id,
         occurred_at=occurred_at,
-        payload=payload,
+        payload=payload_model.model_dump(mode="json", by_alias=True),
         dedupe_keys=dedupe_keys,
     )
 
 
 # ----- Helpers (pure functions) ----------------------------------------------
+
+
+def _nonempty(raw: str | None) -> str | None:
+    """Return None for missing or whitespace-only header values."""
+    if not raw:
+        return None
+    stripped = raw.strip()
+    return stripped or None
 
 
 def _decode_header(raw: str | None) -> str | None:
@@ -134,28 +154,26 @@ def _parse_references(value: str | None) -> list[str]:
     return _REF_RE.findall(value)
 
 
-def _parse_address(raw: str | None) -> dict[str, str | None] | None:
+def _parse_address(raw: str | None) -> Address | None:
     if not raw:
         return None
     name, email_addr = email.utils.parseaddr(raw)
     decoded_name = _decode_header(name) if name else None
     if not email_addr:
         return None
-    return {"email": email_addr, "name": decoded_name or None}
+    return Address(email=email_addr, name=decoded_name or None)
 
 
-def _parse_address_list(
-    raw_headers: list[str] | None,
-) -> list[dict[str, str | None]]:
+def _parse_address_list(raw_headers: list[str] | None) -> list[Address]:
     if not raw_headers:
         return []
-    result: list[dict[str, str | None]] = []
+    result: list[Address] = []
     for header_value in raw_headers:
         for name, email_addr in email.utils.getaddresses([header_value]):
             if not email_addr:
                 continue
             decoded_name = _decode_header(name) if name else None
-            result.append({"email": email_addr, "name": decoded_name or None})
+            result.append(Address(email=email_addr, name=decoded_name or None))
     return result
 
 
@@ -180,7 +198,7 @@ def _is_reasonable_date(dt: datetime) -> bool:
     return lower <= dt <= upper
 
 
-def _extract_body(msg: Message, max_bytes: int) -> tuple[str, str, bool]:
+def _extract_body(msg: Message, max_bytes: int) -> tuple[str, BodySource, bool]:
     """Returns (body_text, body_source, body_truncated).
 
     Prefer text/plain. Fallback to text/html stripped to text. Attachments are
@@ -227,11 +245,12 @@ def _decode_part(part: Message) -> str:
     return str(payload)
 
 
-def _maybe_truncate(text: str, max_bytes: int, *, source: str) -> tuple[str, str, bool]:
+def _maybe_truncate(
+    text: str, max_bytes: int, *, source: BodySource
+) -> tuple[str, BodySource, bool]:
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return text, source, False
-    # Truncate by decoding from the byte-truncated form to preserve UTF-8 boundaries.
     truncated = encoded[:max_bytes].decode("utf-8", errors="ignore")
     return truncated, source, True
 
@@ -268,16 +287,14 @@ def _html_to_text(html: str) -> str:
         parser.feed(html)
         parser.close()
     except Exception:
-        # Malformed HTML — return what we have so far
         pass
     raw = parser.text()
-    # Normalize: collapse runs of whitespace within lines, drop blank lines
     lines = [re.sub(r"\s+", " ", line).strip() for line in raw.split("\n")]
     return "\n".join(line for line in lines if line)
 
 
-def _extract_attachment_meta(msg: Message) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
+def _extract_attachment_meta(msg: Message) -> list[Attachment]:
+    result: list[Attachment] = []
     for part in msg.walk():
         if part.is_multipart():
             continue
@@ -286,18 +303,17 @@ def _extract_attachment_meta(msg: Message) -> list[dict[str, Any]]:
         is_attachment = "attachment" in cdisp or "inline" in cdisp or bool(filename)
         if not is_attachment:
             continue
-        # Don't list inline text/html parts that have no filename — those are body.
         if not filename and part.get_content_type() in ("text/plain", "text/html"):
             continue
         decoded_filename = _decode_header(filename) if filename else None
         payload = part.get_payload(decode=True)
         size = len(payload) if isinstance(payload, bytes) else 0
         result.append(
-            {
-                "filename": decoded_filename,
-                "content_type": part.get_content_type(),
-                "size": size,
-                "content_id": _strip_brackets(part.get("Content-ID")),
-            }
+            Attachment(
+                filename=decoded_filename,
+                content_type=part.get_content_type(),
+                size=size,
+                content_id=_strip_brackets(part.get("Content-ID")),
+            )
         )
     return result

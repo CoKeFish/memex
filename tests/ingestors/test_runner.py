@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 from memex.core.source import SourceRecord
@@ -10,7 +10,7 @@ from memex.ingestors.runner import run_ingestor
 
 
 class FakeSource:
-    type = "fake"
+    type: ClassVar[str] = "fake"
 
     def __init__(self, records: list[SourceRecord]) -> None:
         self._records = records
@@ -40,7 +40,7 @@ def test_run_ingestor_with_no_records_does_no_work() -> None:
     client = MagicMock()
     client.get_checkpoint.return_value = None
 
-    stats = run_ingestor(source, source_id=1, client=client)
+    stats = run_ingestor(source, source_id=1, sink=client)
 
     assert stats.posted == 0
     assert stats.inserted == 0
@@ -61,7 +61,7 @@ def test_run_ingestor_single_chunk_posts_and_advances() -> None:
         "errors": 0,
     }
 
-    stats = run_ingestor(source, source_id=42, client=client, chunk_size=10, chunk_sleep_ms=0)
+    stats = run_ingestor(source, source_id=42, sink=client, chunk_size=10, chunk_sleep_ms=0)
 
     assert stats.posted == 3
     assert stats.inserted == 3
@@ -83,7 +83,7 @@ def test_run_ingestor_multiple_chunks_advances_after_each() -> None:
         "errors": 0,
     }
 
-    run_ingestor(source, source_id=1, client=client, chunk_size=2, chunk_sleep_ms=0)
+    run_ingestor(source, source_id=1, sink=client, chunk_size=2, chunk_sleep_ms=0)
 
     # Chunks: [e0,e1], [e2,e3], [e4] → 3 flushes
     assert client.post_ingest_batch.call_count == 3
@@ -102,7 +102,7 @@ def test_run_ingestor_aggregates_stats_across_chunks() -> None:
         {"inserted": 1, "duplicates": 1, "errors": 0},
     ]
 
-    stats = run_ingestor(source, source_id=1, client=client, chunk_size=2, chunk_sleep_ms=0)
+    stats = run_ingestor(source, source_id=1, sink=client, chunk_size=2, chunk_sleep_ms=0)
 
     assert stats.posted == 4
     assert stats.inserted == 3
@@ -115,6 +115,6 @@ def test_run_ingestor_passes_loaded_checkpoint_to_source() -> None:
     client = MagicMock()
     client.get_checkpoint.return_value = {"folders": {"INBOX": {"uid": 5}}}
 
-    run_ingestor(source, source_id=1, client=client)
+    run_ingestor(source, source_id=1, sink=client)
 
     assert source.last_checkpoint_seen == {"folders": {"INBOX": {"uid": 5}}}

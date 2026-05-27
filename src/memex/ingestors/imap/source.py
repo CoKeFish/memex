@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
-from memex.core.source import SourceRecord
+from memex.core.cursors import FolderState, ImapCursor
+from memex.core.source import Source, SourceRecord
 from memex.ingestors.imap.client import ImapClient
 from memex.ingestors.imap.config import ImapConfig
 from memex.ingestors.imap.parser import parse_email_message
@@ -28,39 +29,35 @@ class ImapSource:
     """IMAP Source — implements memex.core.source.Source Protocol.
 
     One ImapSource = one IMAP account (one set of credentials), processing
-    one or more folders. The cursor JSONB has shape:
-
-        {"folders": {"INBOX": {"uidvalidity": 17, "last_uid": 12345}, ...}}
+    one or more folders. The cursor lives as `ImapCursor` (Pydantic) internally
+    and is validated at the boundary with the dict that memex provides.
     """
 
-    type = "imap"
+    type: ClassVar[str] = "imap"
 
     def __init__(self, cfg: ImapConfig) -> None:
         self.cfg = cfg
         self._log = get_logger("memex.ingestors.imap.source").bind(server=cfg.server)
 
     def fetch(self, checkpoint: dict[str, Any] | None) -> Iterable[SourceRecord]:
-        folders_cp: dict[str, dict[str, int]] = (checkpoint or {}).get("folders", {}) or {}
+        cursor = self._load_cursor(checkpoint)
         since_date = datetime.now(UTC) - timedelta(days=self.cfg.since_days)
 
         with ImapClient(self.cfg) as client:
             for folder in self.cfg.folders:
                 folder_log = self._log.bind(folder=folder)
                 current_uidvalidity = client.folder_uidvalidity(folder)
-                folder_cp = folders_cp.get(folder, {})
-                stored_uidvalidity = folder_cp.get("uidvalidity")
-                last_uid = int(folder_cp.get("last_uid", 0))
+                folder_state = cursor.folders.get(folder)
 
-                if (
-                    stored_uidvalidity is not None
-                    and int(stored_uidvalidity) != current_uidvalidity
-                ):
+                if folder_state is not None and folder_state.uidvalidity != current_uidvalidity:
                     folder_log.warning(
                         "uidvalidity_changed",
-                        old=stored_uidvalidity,
+                        old=folder_state.uidvalidity,
                         new=current_uidvalidity,
                     )
                     last_uid = 0
+                else:
+                    last_uid = folder_state.last_uid if folder_state else 0
 
                 folder_log.info(
                     "folder_fetch_start",
@@ -83,26 +80,39 @@ class ImapSource:
     def advance_checkpoint(
         self, checkpoint: dict[str, Any] | None, last: SourceRecord
     ) -> dict[str, Any]:
-        cp: dict[str, Any] = dict(checkpoint or {})
-        cp_folders: dict[str, dict[str, int]] = dict(cp.get("folders", {}) or {})
+        cursor = self._load_cursor(checkpoint)
 
         folder = last.payload.get("folder")
         if not folder or not isinstance(folder, str):
-            return cp
+            return cursor.model_dump(mode="json")
 
         # external_id shape: imap:{server}:{uidvalidity}:{uid}
         parts = last.external_id.split(":")
         if len(parts) < 4 or parts[0] != "imap":
-            return cp
+            return cursor.model_dump(mode="json")
         try:
             uidvalidity = int(parts[-2])
             uid = int(parts[-1])
         except ValueError:
-            return cp
+            return cursor.model_dump(mode="json")
 
-        cp_folders[folder] = {"uidvalidity": uidvalidity, "last_uid": uid}
-        cp["folders"] = cp_folders
-        return cp
+        new_folders = dict(cursor.folders)
+        new_folders[folder] = FolderState(uidvalidity=uidvalidity, last_uid=uid)
+        return ImapCursor(folders=new_folders).model_dump(mode="json")
+
+    def _load_cursor(self, checkpoint: dict[str, Any] | None) -> ImapCursor:
+        """Validate the dict cursor into a typed model.
+
+        A None or malformed cursor degrades to an empty one — the source will
+        do a full SINCE-based fetch instead of UID-based incremental.
+        """
+        if not checkpoint:
+            return ImapCursor()
+        try:
+            return ImapCursor.model_validate(checkpoint)
+        except Exception as e:
+            self._log.warning("checkpoint_invalid", error=str(e))
+            return ImapCursor()
 
     def _mailmsg_to_record(
         self,
@@ -135,3 +145,13 @@ class ImapSource:
             max_body_bytes=self.cfg.max_body_bytes,
             fetch_body=self.cfg.fetch_body,
         )
+
+
+def make_source(cfg: dict[str, Any]) -> Source:
+    """SourceFactory for IMAP — validates config dict and returns an ImapSource.
+
+    Matches the `SourceFactory` Protocol; this is what the registry returns when
+    `resolve("imap")` is called.
+    """
+    imap_cfg = ImapConfig.from_source_config(cfg)
+    return ImapSource(imap_cfg)

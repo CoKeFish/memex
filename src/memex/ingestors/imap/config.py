@@ -5,9 +5,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from memex.core.source import SourceConfigError
 
-class ImapConfigError(Exception):
-    """Raised when sources.config is invalid or env-var-resolved values are missing."""
+
+class ImapConfigError(SourceConfigError):
+    """Raised when an IMAP source config is invalid or env-var-resolved values are missing.
+
+    Subclasses `SourceConfigError` so callers can catch the generic base and
+    handle any source's config failure uniformly.
+    """
 
 
 AuthMethod = Literal["basic", "oauth2"]

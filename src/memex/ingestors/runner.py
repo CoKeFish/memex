@@ -4,8 +4,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from memex.core.sink import MemexSink
 from memex.core.source import Source, SourceRecord
-from memex.ingestors.http_client import MemexClient
 from memex.logging import get_logger
 
 
@@ -31,27 +31,26 @@ def _record_to_request(record: SourceRecord, source_id: int) -> dict[str, Any]:
 def run_ingestor(
     source: Source,
     source_id: int,
-    client: MemexClient,
+    sink: MemexSink,
     *,
     chunk_size: int = 20,
     chunk_sleep_ms: int = 100,
 ) -> RunStats:
-    """Drive a Source through memex's HTTP API.
+    """Drive a Source through memex's API.
 
-    Reads the source's checkpoint from memex, iterates records produced by
-    `source.fetch`, posts in chunks of `chunk_size` to `/ingest/batch`,
-    advances the checkpoint after each successful chunk via
-    `source.advance_checkpoint`, and persists the cursor back to memex.
+    Types against the `Source` and `MemexSink` Protocols — never against a
+    concrete class. That lets us swap the transport (HTTP today, in-process
+    or queue-backed tomorrow) without touching the runner.
 
-    Idempotent on failure: if any HTTP call raises, the checkpoint is left
-    at the last successfully-flushed position. The next run re-fetches the
+    Idempotent on failure: if any sink call raises, the checkpoint is left at
+    the last successfully-flushed position. The next run re-fetches the
     affected records and memex deduplicates via UNIQUE(source_id, external_id).
     """
     log = get_logger("memex.ingestors.runner").bind(source_id=source_id)
     stats = RunStats()
     started = time.monotonic()
 
-    checkpoint: dict[str, Any] | None = client.get_checkpoint(source_id)
+    checkpoint: dict[str, Any] | None = sink.get_checkpoint(source_id)
     chunk: list[SourceRecord] = []
 
     def flush() -> None:
@@ -60,13 +59,13 @@ def run_ingestor(
             return
         last_record = chunk[-1]
         payload = [_record_to_request(r, source_id) for r in chunk]
-        result = client.post_ingest_batch(payload)
+        result = sink.post_ingest_batch(payload)
         stats.posted += len(chunk)
         stats.inserted += int(result.get("inserted", 0))
         stats.duplicates += int(result.get("duplicates", 0))
         stats.errors += int(result.get("errors", 0))
         checkpoint = source.advance_checkpoint(checkpoint, last_record)
-        client.put_checkpoint(source_id, checkpoint)
+        sink.put_checkpoint(source_id, checkpoint)
         log.info(
             "chunk_flushed",
             chunk_size=len(chunk),

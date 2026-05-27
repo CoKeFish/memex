@@ -83,4 +83,6 @@ def test_advance_checkpoint_ignores_malformed_external_id() -> None:
 
     new_cp = source.advance_checkpoint({}, bad_record)
 
-    assert new_cp == {}
+    # Cursor now always normalizes to the typed shape — empty input still
+    # becomes a well-formed {"folders": {}}, never a bare {}.
+    assert new_cp == {"folders": {}}

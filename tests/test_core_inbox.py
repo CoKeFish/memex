@@ -11,7 +11,9 @@ from memex.core.source import SourceRecord
 
 
 def _rec(
-    external_id: str = "x1", payload: dict | None = None, dedupe_keys: list[str] | None = None
+    external_id: str = "x1",
+    payload: dict[str, Any] | None = None,
+    dedupe_keys: list[str] | None = None,
 ) -> SourceRecord:
     return SourceRecord(
         external_id=external_id,
@@ -21,14 +23,14 @@ def _rec(
     )
 
 
-def test_insert_record_succeeds(conn: Any, seed_source: dict) -> None:
+def test_insert_record_succeeds(conn: Any, seed_source: dict[str, Any]) -> None:
     r = insert_record(conn, user_id=1, source_id=seed_source["id"], record=_rec())
     assert r.inserted is True
     assert r.id is not None
     assert r.reason is None
 
 
-def test_insert_record_duplicate_is_noop(conn: Any, seed_source: dict) -> None:
+def test_insert_record_duplicate_is_noop(conn: Any, seed_source: dict[str, Any]) -> None:
     rec = _rec("dup1")
     r1 = insert_record(conn, user_id=1, source_id=seed_source["id"], record=rec)
     r2 = insert_record(conn, user_id=1, source_id=seed_source["id"], record=rec)
@@ -44,12 +46,14 @@ def test_insert_record_rejects_unknown_source(conn: Any) -> None:
         insert_record(conn, user_id=1, source_id=9999, record=_rec())
 
 
-def test_insert_record_rejects_cross_tenant(conn: Any, seed_source: dict, seed_user2: int) -> None:
+def test_insert_record_rejects_cross_tenant(
+    conn: Any, seed_source: dict[str, Any], seed_user2: int
+) -> None:
     with pytest.raises(ValueError, match="does not belong to user"):
         insert_record(conn, user_id=seed_user2, source_id=seed_source["id"], record=_rec())
 
 
-def test_dedupe_keys_persisted(conn: Any, seed_source: dict) -> None:
+def test_dedupe_keys_persisted(conn: Any, seed_source: dict[str, Any]) -> None:
     rec = _rec("k1", dedupe_keys=["msgid:<a@x>", "imap:1:5"])
     r = insert_record(conn, user_id=1, source_id=seed_source["id"], record=rec)
     rows = (
@@ -64,7 +68,7 @@ def test_dedupe_keys_persisted(conn: Any, seed_source: dict) -> None:
 
 
 def test_dedupe_keys_collision_between_users_allowed(
-    conn: Any, seed_source: dict, seed_user2: int
+    conn: Any, seed_source: dict[str, Any], seed_user2: int
 ) -> None:
     """Two users may have the same dedupe key (PK is (user_id, key))."""
     # source for user 2
@@ -88,7 +92,7 @@ def test_dedupe_keys_collision_between_users_allowed(
     assert count == 2
 
 
-def test_claim_batch_returns_pending_only(conn: Any, seed_source: dict) -> None:
+def test_claim_batch_returns_pending_only(conn: Any, seed_source: dict[str, Any]) -> None:
     for i in range(3):
         insert_record(conn, user_id=1, source_id=seed_source["id"], record=_rec(f"p{i}"))
     batch = claim_batch(conn, user_id=1, limit=10)
@@ -99,7 +103,7 @@ def test_claim_batch_returns_pending_only(conn: Any, seed_source: dict) -> None:
     assert len(remaining) == 2
 
 
-def test_claim_batch_filters_by_source(conn: Any, seed_source: dict) -> None:
+def test_claim_batch_filters_by_source(conn: Any, seed_source: dict[str, Any]) -> None:
     src2 = conn.execute(
         text(
             "INSERT INTO sources (user_id, name, type) "
@@ -112,7 +116,9 @@ def test_claim_batch_filters_by_source(conn: Any, seed_source: dict) -> None:
     assert {r["external_id"] for r in only_first} == {"a"}
 
 
-def test_claim_batch_scopes_by_user(conn: Any, seed_source: dict, seed_user2: int) -> None:
+def test_claim_batch_scopes_by_user(
+    conn: Any, seed_source: dict[str, Any], seed_user2: int
+) -> None:
     src2 = conn.execute(
         text(
             "INSERT INTO sources (user_id, name, type) "
@@ -128,8 +134,11 @@ def test_claim_batch_scopes_by_user(conn: Any, seed_source: dict, seed_user2: in
     assert {r["external_id"] for r in u2} == {"for-u2"}
 
 
-def test_mark_processed_records_error_and_bumps_attempts(conn: Any, seed_source: dict) -> None:
+def test_mark_processed_records_error_and_bumps_attempts(
+    conn: Any, seed_source: dict[str, Any]
+) -> None:
     r = insert_record(conn, user_id=1, source_id=seed_source["id"], record=_rec("e1"))
+    assert r.id is not None
     mark_processed(conn, user_id=1, inbox_id=r.id, error="parse failed")
     row = (
         conn.execute(
@@ -145,7 +154,7 @@ def test_mark_processed_records_error_and_bumps_attempts(conn: Any, seed_source:
 
 
 def test_mark_processed_does_not_affect_other_users_rows(
-    conn: Any, seed_source: dict, seed_user2: int
+    conn: Any, seed_source: dict[str, Any], seed_user2: int
 ) -> None:
     src2 = conn.execute(
         text(
@@ -155,6 +164,7 @@ def test_mark_processed_does_not_affect_other_users_rows(
         {"uid": seed_user2},
     ).scalar()
     r2 = insert_record(conn, user_id=seed_user2, source_id=src2, record=_rec("u2row"))
+    assert r2.id is not None
     # user 1 tries to mark user 2's row — no rows affected
     mark_processed(conn, user_id=1, inbox_id=r2.id, error=None)
     still_pending = conn.execute(
