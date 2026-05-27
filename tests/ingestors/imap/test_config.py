@@ -119,6 +119,7 @@ VALID_OAUTH_CFG = {
     "server": "imap.gmail.com",
     "port": 993,
     "auth": "oauth2",
+    "oauth_provider": "google",
     "username_env": "TEST_IMAP_USER",
     "oauth_client_secret_path_env": "TEST_OAUTH_CLIENT_SECRET",
     "oauth_token_path_env": "TEST_OAUTH_TOKEN",
@@ -134,6 +135,7 @@ VALID_OAUTH_ENV = {
 def test_oauth_happy_path() -> None:
     cfg = ImapConfig.from_source_config(VALID_OAUTH_CFG, env=VALID_OAUTH_ENV)
     assert cfg.auth_method == "oauth2"
+    assert cfg.oauth_provider == "google"
     assert cfg.username == "alice@gmail.com"
     assert cfg.password == ""  # no password in oauth mode
     assert cfg.oauth_client_secret_path == "/path/to/client_secret.json"
@@ -165,3 +167,29 @@ def test_oauth_doesnt_require_password_env() -> None:
     config = ImapConfig.from_source_config(cfg, env=VALID_OAUTH_ENV)
     assert config.auth_method == "oauth2"
     assert config.password == ""
+
+
+def test_oauth_requires_oauth_provider_field() -> None:
+    cfg = {k: v for k, v in VALID_OAUTH_CFG.items() if k != "oauth_provider"}
+    with pytest.raises(ImapConfigError, match="oauth_provider"):
+        ImapConfig.from_source_config(cfg, env=VALID_OAUTH_ENV)
+
+
+def test_oauth_empty_provider_raises() -> None:
+    cfg = {**VALID_OAUTH_CFG, "oauth_provider": ""}
+    with pytest.raises(ImapConfigError, match="oauth_provider"):
+        ImapConfig.from_source_config(cfg, env=VALID_OAUTH_ENV)
+
+
+def test_oauth_unknown_provider_raises() -> None:
+    cfg = {**VALID_OAUTH_CFG, "oauth_provider": "nope"}
+    with pytest.raises(ImapConfigError, match="unknown oauth_provider"):
+        ImapConfig.from_source_config(cfg, env=VALID_OAUTH_ENV)
+
+
+def test_oauth_provider_microsoft_accepted_in_config() -> None:
+    # "microsoft" is in the registry as a stub. Config validation should pass
+    # even though actually using the provider raises NotImplementedError.
+    cfg = {**VALID_OAUTH_CFG, "oauth_provider": "microsoft"}
+    config = ImapConfig.from_source_config(cfg, env=VALID_OAUTH_ENV)
+    assert config.oauth_provider == "microsoft"

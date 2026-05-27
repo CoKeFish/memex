@@ -52,9 +52,10 @@ def run_ingestor(
 
     checkpoint: dict[str, Any] | None = sink.get_checkpoint(source_id)
     chunk: list[SourceRecord] = []
+    chunk_index = 0
 
     def flush() -> None:
-        nonlocal checkpoint
+        nonlocal checkpoint, chunk_index
         if not chunk:
             return
         last_record = chunk[-1]
@@ -67,12 +68,14 @@ def run_ingestor(
         checkpoint = source.advance_checkpoint(checkpoint, last_record)
         sink.put_checkpoint(source_id, checkpoint)
         log.info(
-            "chunk_flushed",
+            "ingestor.chunk.flushed",
+            chunk_index=chunk_index,
             chunk_size=len(chunk),
             inserted=result.get("inserted"),
             duplicates=result.get("duplicates"),
             errors=result.get("errors"),
         )
+        chunk_index += 1
         chunk.clear()
         if chunk_sleep_ms > 0:
             time.sleep(chunk_sleep_ms / 1000.0)

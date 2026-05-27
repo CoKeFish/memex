@@ -1,5 +1,5 @@
 # mypy: disable-error-code="no-any-return, no-untyped-call"
-"""OAuth2 token management for Gmail IMAP (XOAUTH2 SASL).
+"""Google OAuth2 provider for Gmail IMAP (XOAUTH2 SASL).
 
 Initial authorization uses google-auth-oauthlib's Desktop App flow (opens a
 browser, captures the redirect, exchanges the code for tokens). After that,
@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import contextlib
 from pathlib import Path
+from typing import ClassVar
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
+
+from memex.ingestors.imap.oauth import OAuthError
 
 # Gmail IMAP requires the full mail scope ("https://mail.google.com/").
 # The narrower "gmail.readonly" scope only works for the REST Gmail API, not
@@ -27,35 +30,44 @@ from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-un
 GMAIL_IMAP_SCOPES = ["https://mail.google.com/"]
 
 
-class OAuthError(Exception):
-    """Raised when OAuth flow or token refresh fails."""
+class GoogleOAuthProvider:
+    """OAuth provider for Gmail. Implements memex.ingestors.imap.oauth.OAuthProvider."""
+
+    name: ClassVar[str] = "google"
+
+    def authorize_interactive(
+        self,
+        *,
+        client_secret_path: str | Path,
+        token_path: str | Path,
+    ) -> None:
+        """Run the interactive OAuth flow and persist tokens to `token_path`.
+
+        Opens the user's default browser to Google's consent page. Captures the
+        redirect locally on a randomly-chosen port. Stores the resulting tokens
+        to `token_path` in google-auth's JSON format.
+        """
+        cs_path = Path(client_secret_path)
+        if not cs_path.exists():
+            raise OAuthError(f"client_secret file not found: {cs_path}")
+
+        flow = InstalledAppFlow.from_client_secrets_file(str(cs_path), GMAIL_IMAP_SCOPES)
+        creds = flow.run_local_server(port=0, open_browser=True)
+        _save_credentials(creds, token_path)
+
+    def get_access_token(
+        self,
+        *,
+        token_path: str | Path,
+    ) -> str:
+        """Load credentials, refresh if needed, return the access_token string."""
+        creds = _load_and_refresh(token_path)
+        if not creds.token:
+            raise OAuthError("no access_token after refresh")
+        return creds.token
 
 
-def authorize_interactive(
-    client_secret_path: str | Path,
-    token_path: str | Path,
-    *,
-    scopes: list[str] | None = None,
-    port: int = 0,
-) -> Credentials:
-    """Run the interactive OAuth flow and persist tokens to `token_path`.
-
-    Opens the user's default browser to Google's consent page. Captures the
-    redirect locally on a randomly-chosen port (or `port` if specified).
-    Stores the resulting tokens to `token_path` in google-auth's JSON format.
-    """
-    cs_path = Path(client_secret_path)
-    if not cs_path.exists():
-        raise OAuthError(f"client_secret file not found: {cs_path}")
-
-    effective_scopes = scopes if scopes is not None else GMAIL_IMAP_SCOPES
-    flow = InstalledAppFlow.from_client_secrets_file(str(cs_path), effective_scopes)
-    creds = flow.run_local_server(port=port, open_browser=True)
-    _save_credentials(creds, token_path)
-    return creds
-
-
-def load_and_refresh(token_path: str | Path) -> Credentials:
+def _load_and_refresh(token_path: str | Path) -> Credentials:
     """Load credentials from disk and refresh them if needed.
 
     Persists the refreshed token back to disk so subsequent runs reuse the
@@ -89,14 +101,6 @@ def load_and_refresh(token_path: str | Path) -> Credentials:
 
     _save_credentials(creds, path)
     return creds
-
-
-def get_access_token(token_path: str | Path) -> str:
-    """Convenience: load, refresh if needed, return access_token string."""
-    creds = load_and_refresh(token_path)
-    if not creds.token:
-        raise OAuthError("no access_token after refresh")
-    return creds.token
 
 
 def _save_credentials(creds: Credentials, token_path: str | Path) -> None:

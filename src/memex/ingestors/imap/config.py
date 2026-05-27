@@ -28,8 +28,10 @@ class ImapConfig:
     - ``"basic"`` (default): username + password from env vars. The env var
       *names* live in `sources.config` under `username_env` / `password_env`;
       the secret values never touch the DB.
-    - ``"oauth2"``: XOAUTH2 SASL using Google OAuth2 tokens. `username_env`
-      points to the account email. Two file paths (from env vars
+    - ``"oauth2"``: XOAUTH2 SASL using OAuth2 tokens from an external identity
+      provider. Which provider is determined by `oauth_provider` in
+      `sources.config` (e.g. ``"google"``). `username_env` points to the
+      account email. Two file paths (from env vars
       `oauth_client_secret_path_env` and `oauth_token_path_env`) point to the
       OAuth client_secret.json and the persisted token.json respectively.
 
@@ -46,6 +48,7 @@ class ImapConfig:
     password: str = ""
 
     # OAuth2 fields (paths on disk; the files themselves contain the secrets).
+    oauth_provider: str = ""
     oauth_client_secret_path: str = ""
     oauth_token_path: str = ""
 
@@ -68,6 +71,7 @@ class ImapConfig:
             f"server={self.server!r}, port={self.port}, "
             f"username={self.username!r}, auth_method={self.auth_method!r}, "
             f"password=<redacted>, "
+            f"oauth_provider={self.oauth_provider!r}, "
             f"oauth_client_secret_path={self.oauth_client_secret_path!r}, "
             f"oauth_token_path={self.oauth_token_path!r}, "
             f"folders={self.folders!r}, since_days={self.since_days}, "
@@ -135,6 +139,23 @@ class ImapConfig:
             )
 
         # auth_method == "oauth2"
+        # Import lazily to avoid pulling the oauth registry (and any future
+        # provider-specific libs) when only basic auth is used.
+        from memex.ingestors.imap import oauth as oauth_registry
+
+        provider = cfg.get("oauth_provider")
+        if not provider:
+            raise ImapConfigError(
+                "auth='oauth2' requires 'oauth_provider' in sources.config "
+                f"(known: {oauth_registry.known_providers()})."
+            )
+        provider_str = str(provider)
+        if provider_str not in oauth_registry.known_providers():
+            raise ImapConfigError(
+                f"unknown oauth_provider={provider_str!r}. "
+                f"Known: {oauth_registry.known_providers()}"
+            )
+
         cs_env = cfg.get("oauth_client_secret_path_env")
         token_env = cfg.get("oauth_token_path_env")
         if not cs_env or not token_env:
@@ -146,6 +167,7 @@ class ImapConfig:
         token_path = _require_env(env_map, str(token_env))
         return cls(
             **common_kwargs,
+            oauth_provider=provider_str,
             oauth_client_secret_path=client_secret_path,
             oauth_token_path=token_path,
             oauth_client_secret_path_env=str(cs_env),

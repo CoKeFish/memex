@@ -31,7 +31,7 @@ async def list_sources(user_id: UserID) -> list[dict[str, Any]]:
             conn.execute(
                 text(
                     """
-                    SELECT id, name, type, enabled, config, created_at
+                    SELECT id, user_id, name, type, enabled, config, created_at
                     FROM sources WHERE user_id = :uid ORDER BY id
                     """
                 ),
@@ -53,7 +53,7 @@ async def create_source(body: SourceCreate, user_id: UserID) -> dict[str, Any]:
                         """
                         INSERT INTO sources (user_id, name, type, config)
                         VALUES (:uid, :name, :type, CAST(:cfg AS JSONB))
-                        RETURNING id, name, type, enabled, config, created_at
+                        RETURNING id, user_id, name, type, enabled, config, created_at
                         """
                     ),
                     {

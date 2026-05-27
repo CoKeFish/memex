@@ -65,6 +65,7 @@ class SourceCreate(BaseModel):
 
 class SourceRow(BaseModel):
     id: int
+    user_id: int
     name: str
     type: str
     enabled: bool

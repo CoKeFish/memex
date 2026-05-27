@@ -9,8 +9,8 @@ from typing import Any
 
 from imap_tools import MailBox, MailBoxUnencrypted
 
+from memex.ingestors.imap import oauth
 from memex.ingestors.imap.config import ImapConfig
-from memex.ingestors.imap.oauth import get_access_token
 from memex.logging import get_logger
 
 
@@ -40,7 +40,8 @@ class ImapClient(AbstractContextManager["ImapClient"]):
         if self.cfg.auth_method == "basic":
             self._mailbox = mb.login(self.cfg.username, self.cfg.password)
         elif self.cfg.auth_method == "oauth2":
-            access_token = get_access_token(self.cfg.oauth_token_path)
+            provider = oauth.resolve(self.cfg.oauth_provider)
+            access_token = provider.get_access_token(token_path=self.cfg.oauth_token_path)
             self._mailbox = mb.xoauth2(self.cfg.username, access_token)
         else:
             raise RuntimeError(f"unsupported auth_method: {self.cfg.auth_method!r}")

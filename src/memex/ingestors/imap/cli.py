@@ -22,9 +22,10 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from memex.core.observability import ingestion_run
 from memex.core.source import SourceConfigError
 from memex.ingestors.http_client import MemexAPIError, MemexClient
-from memex.ingestors.imap.oauth import OAuthError, authorize_interactive
+from memex.ingestors.imap import oauth
 from memex.ingestors.imap.source import make_source
 from memex.ingestors.runner import run_ingestor
 from memex.logging import get_logger, setup_logging
@@ -79,49 +80,43 @@ def _cmd_run(args: argparse.Namespace, client: MemexClient, log: Any) -> int:
     sources = _select_sources(client, args.source_id)
     if not sources:
         if args.source_id is not None:
-            log.error("source_not_found_or_not_imap", source_id=args.source_id)
+            log.error("ingestor.source.not_found", source_id=args.source_id)
             return 1
-        log.info("no_imap_sources_found")
+        log.info("ingestor.no_sources_found")
         return 0
 
     had_fatal = False
     for src in sources:
         sid = int(src["id"])
+        uid = int(src["user_id"])
         name = str(src.get("name", "unknown"))
         cfg_dict = src.get("config", {}) or {}
-        src_log = log.bind(source_id=sid, source_name=name)
-        src_log.info("ingestor_run_start")
 
-        try:
-            source = make_source(cfg_dict)
-        except SourceConfigError as e:
-            src_log.error("source_config_invalid", reason=str(e))
-            had_fatal = True
-            continue
+        with ingestion_run(user_id=uid, source_id=sid, trigger="cli") as run:
+            try:
+                source = make_source(cfg_dict)
+            except SourceConfigError as e:
+                log.error(
+                    "ingestor.source.config_invalid",
+                    source_name=name,
+                    reason=str(e),
+                )
+                run.fail(e)
+                had_fatal = True
+                continue
 
-        try:
-            stats = run_ingestor(
-                source,
-                source_id=sid,
-                sink=client,
-                chunk_size=args.chunk_size,
-                chunk_sleep_ms=args.chunk_sleep_ms,
-            )
-            src_log.info(
-                "ingestor_run_end",
-                posted=stats.posted,
-                inserted=stats.inserted,
-                duplicates=stats.duplicates,
-                errors=stats.errors,
-                ms_elapsed=stats.ms_elapsed,
-            )
-        except Exception as e:
-            src_log.exception(
-                "ingestor_run_fatal",
-                exc_type=type(e).__name__,
-                exc_msg=str(e),
-            )
-            had_fatal = True
+            try:
+                stats = run_ingestor(
+                    source,
+                    source_id=sid,
+                    sink=client,
+                    chunk_size=args.chunk_size,
+                    chunk_sleep_ms=args.chunk_sleep_ms,
+                )
+                run.finalize(stats)
+            except Exception as e:
+                run.fail(e)
+                had_fatal = True
 
     return 1 if had_fatal else 0
 
@@ -139,6 +134,26 @@ def _cmd_authorize(args: argparse.Namespace, client: MemexClient, log: Any) -> i
             "source_not_configured_for_oauth",
             source_id=args.source_id,
             hint="set 'auth': 'oauth2' in sources.config",
+        )
+        return 1
+
+    provider_name = cfg_dict.get("oauth_provider")
+    if not provider_name:
+        log.error(
+            "ingestor.oauth.provider_missing",
+            source_id=args.source_id,
+            hint=(f"set 'oauth_provider' in sources.config " f"(known: {oauth.known_providers()})"),
+        )
+        return 1
+
+    try:
+        provider = oauth.resolve(str(provider_name))
+    except KeyError as e:
+        log.error(
+            "ingestor.oauth.unknown_provider",
+            source_id=args.source_id,
+            provider=provider_name,
+            reason=str(e),
         )
         return 1
 
@@ -164,16 +179,29 @@ def _cmd_authorize(args: argparse.Namespace, client: MemexClient, log: Any) -> i
         return 1
 
     print("\nIniciando flujo OAuth2 — se abrirá el navegador para consentimiento.")
+    print(f"  proveedor:     {provider_name}")
     print(f"  client_secret: {cs_path}")
     print(f"  destino token: {token_path}\n")
 
     try:
-        authorize_interactive(cs_path, token_path)
-    except OAuthError as e:
+        provider.authorize_interactive(client_secret_path=cs_path, token_path=token_path)
+    except oauth.OAuthError as e:
         log.error("oauth_authorize_failed", reason=str(e))
         return 1
+    except NotImplementedError as e:
+        log.error(
+            "ingestor.oauth.provider_not_implemented",
+            provider=provider_name,
+            reason=str(e),
+        )
+        return 1
 
-    log.info("oauth_authorized", source_id=args.source_id, token_path=token_path)
+    log.info(
+        "oauth_authorized",
+        source_id=args.source_id,
+        provider=provider_name,
+        token_path=token_path,
+    )
     print(f"\nTokens guardados en {token_path}.")
     print("El refresh_token se renueva automáticamente en cada corrida del CLI.")
     return 0
@@ -190,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     base_url = os.environ.get("MEMEX_BASE_URL", "http://localhost:8787")
     api_token = os.environ.get("MEMEX_API_TOKEN", "") or None
 
-    log.info("cli_start", cmd=args.cmd, base_url=base_url)
+    log.info("ingestor.cli.start", cmd=args.cmd, base_url=base_url)
 
     try:
         with MemexClient(base_url=base_url, api_token=api_token) as client:
