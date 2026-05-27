@@ -29,7 +29,7 @@ def test_list_sources_returns_only_current_user(
     client: Any, seed_source: dict[str, Any], seed_user2: int, conn: Any
 ) -> None:
     conn.execute(
-        text("INSERT INTO sources (user_id, name, type) " "VALUES (:uid, 'other-src', 'imap')"),
+        text("INSERT INTO sources (user_id, name, type) VALUES (:uid, 'other-src', 'imap')"),
         {"uid": seed_user2},
     )
     r = client.get("/sources")
@@ -89,8 +89,7 @@ def test_put_then_get_checkpoint(client: Any, seed_source: dict[str, Any]) -> No
 def test_checkpoint_cross_tenant_is_404(client: Any, seed_user2: int, conn: Any) -> None:
     other_id = conn.execute(
         text(
-            "INSERT INTO sources (user_id, name, type) "
-            "VALUES (:uid, 'u2-src', 'imap') RETURNING id"
+            "INSERT INTO sources (user_id, name, type) VALUES (:uid, 'u2-src', 'imap') RETURNING id"
         ),
         {"uid": seed_user2},
     ).scalar()

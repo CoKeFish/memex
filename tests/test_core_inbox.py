@@ -121,8 +121,7 @@ def test_claim_batch_scopes_by_user(
 ) -> None:
     src2 = conn.execute(
         text(
-            "INSERT INTO sources (user_id, name, type) "
-            "VALUES (:uid, 'u2-src', 'imap') RETURNING id"
+            "INSERT INTO sources (user_id, name, type) VALUES (:uid, 'u2-src', 'imap') RETURNING id"
         ),
         {"uid": seed_user2},
     ).scalar()
@@ -158,8 +157,7 @@ def test_mark_processed_does_not_affect_other_users_rows(
 ) -> None:
     src2 = conn.execute(
         text(
-            "INSERT INTO sources (user_id, name, type) "
-            "VALUES (:uid, 'u2-src', 'imap') RETURNING id"
+            "INSERT INTO sources (user_id, name, type) VALUES (:uid, 'u2-src', 'imap') RETURNING id"
         ),
         {"uid": seed_user2},
     ).scalar()

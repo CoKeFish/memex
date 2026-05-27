@@ -130,8 +130,7 @@ def test_runner_does_not_import_memexclient() -> None:
     runner = SRC / "ingestors" / "runner.py"
     imports = _file_imports(runner)
     assert "memex.ingestors.http_client" not in imports, (
-        "runner.py imports http_client (concrete); should only depend on "
-        "memex.core.sink (Protocol)"
+        "runner.py imports http_client (concrete); should only depend on memex.core.sink (Protocol)"
     )
     assert "memex.core.sink" in imports, "runner.py must import MemexSink from memex.core.sink"
 

@@ -26,9 +26,7 @@ def test_save_overwrites_existing(conn: Any, seed_source: dict[str, Any]) -> Non
 
 def test_checkpoints_isolated_by_source(conn: Any, seed_source: dict[str, Any]) -> None:
     src2 = conn.execute(
-        text(
-            "INSERT INTO sources (user_id, name, type) " "VALUES (1, 'imap-2', 'imap') RETURNING id"
-        )
+        text("INSERT INTO sources (user_id, name, type) VALUES (1, 'imap-2', 'imap') RETURNING id")
     ).scalar()
     checkpoint.save_cursor(conn, seed_source["id"], {"a": 1})
     checkpoint.save_cursor(conn, src2, {"b": 2})

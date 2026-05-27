@@ -142,8 +142,7 @@ def test_state_isolates_per_user(client: Any, seed_user2: int, conn: Any) -> Non
     """Un plugin con el mismo nombre en otro user no debe ser visible."""
     other_id = conn.execute(
         text(
-            "INSERT INTO sources (user_id, name, type) "
-            "VALUES (:u, 'shared', 'imap') RETURNING id"
+            "INSERT INTO sources (user_id, name, type) VALUES (:u, 'shared', 'imap') RETURNING id"
         ),
         {"u": seed_user2},
     ).scalar()

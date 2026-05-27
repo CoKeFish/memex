@@ -93,7 +93,7 @@ class ImapClient(AbstractContextManager["ImapClient"]):
         if last_uid > 0:
             criteria = f"UID {last_uid + 1}:*"
         else:
-            criteria = f'SINCE {since_date.strftime("%d-%b-%Y")}'
+            criteria = f"SINCE {since_date.strftime('%d-%b-%Y')}"
 
         self._log.info(
             "imap_fetch_start",

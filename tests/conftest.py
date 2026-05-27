@@ -67,7 +67,7 @@ def _reset_tables() -> None:
             )
         )
         conn.execute(
-            text("INSERT INTO users (id, email, display_name) " "VALUES (1, 'me@local', 'default')")
+            text("INSERT INTO users (id, email, display_name) VALUES (1, 'me@local', 'default')")
         )
         conn.execute(text("SELECT setval(pg_get_serial_sequence('users','id'), 1)"))
 

@@ -142,7 +142,7 @@ def _cmd_authorize(args: argparse.Namespace, client: MemexClient, log: Any) -> i
         log.error(
             "ingestor.oauth.provider_missing",
             source_id=args.source_id,
-            hint=(f"set 'oauth_provider' in sources.config " f"(known: {oauth.known_providers()})"),
+            hint=(f"set 'oauth_provider' in sources.config (known: {oauth.known_providers()})"),
         )
         return 1
 

@@ -104,7 +104,7 @@ class ImapConfig:
         username_env = cfg.get("username_env")
         if not username_env:
             raise ImapConfigError(
-                "sources.config must reference the account identity via " "'username_env'."
+                "sources.config must reference the account identity via 'username_env'."
             )
         username = _require_env(env_map, str(username_env))
 

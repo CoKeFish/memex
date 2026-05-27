@@ -89,7 +89,7 @@ def test_get_inbox_cross_tenant_is_404(
 ) -> None:
     with connection() as c:
         src2 = c.execute(
-            text("INSERT INTO sources (user_id, name, type) " "VALUES (:u, 's', 'x') RETURNING id"),
+            text("INSERT INTO sources (user_id, name, type) VALUES (:u, 's', 'x') RETURNING id"),
             {"u": seed_user2},
         ).scalar()
     assert isinstance(src2, int)
@@ -109,7 +109,7 @@ def test_inbox_stats_scoped_to_user(
 ) -> None:
     with connection() as c:
         src2 = c.execute(
-            text("INSERT INTO sources (user_id, name, type) " "VALUES (:u, 's', 'x') RETURNING id"),
+            text("INSERT INTO sources (user_id, name, type) VALUES (:u, 's', 'x') RETURNING id"),
             {"u": seed_user2},
         ).scalar()
     assert isinstance(src2, int)

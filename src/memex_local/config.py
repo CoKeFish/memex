@@ -40,7 +40,7 @@ class LocalConfig:
         ).strip()
         if not bridge_url:
             raise LocalConfigError(
-                "missing bridge_url. Set MEMEX_LOCAL_BRIDGE_URL or define " f"bridge_url in {path}"
+                f"missing bridge_url. Set MEMEX_LOCAL_BRIDGE_URL or define bridge_url in {path}"
             )
 
         api_token = str(os.environ.get("MEMEX_LOCAL_TOKEN") or data.get("api_token") or "").strip()
