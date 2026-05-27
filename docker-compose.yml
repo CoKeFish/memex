@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: memex-postgres
+    environment:
+      POSTGRES_USER: memex
+      POSTGRES_PASSWORD: memex
+      POSTGRES_DB: memex
+    ports:
+      # 5454 host → 5432 container — evita colisión con otros postgres locales
+      - "5454:5432"
+    volumes:
+      - memex_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  memex_pgdata:
