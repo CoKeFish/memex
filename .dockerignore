@@ -1,0 +1,27 @@
+# Build context: nada de venv, caches, ni cosas del PC que no van al servidor.
+.venv/
+.git/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+**/__pycache__/
+**/*.pyc
+
+# Cliente local: vive en el PC del usuario, no en el container del servidor.
+src/memex_local/
+plugins/
+tests/
+
+# Artefactos de generación local que no importan al runtime.
+*.dot
+*.mmd
+*.png
+*.svg
+ingestors-architecture.*
+bridge-architecture.*
+
+# Secretos / config local que jamás deben terminar en una imagen.
+.env
+.env.*
+*.token
+*.json.token

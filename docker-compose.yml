@@ -18,5 +18,23 @@ services:
       retries: 5
     restart: unless-stopped
 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: memex-api
+    environment:
+      # Dentro del compose, postgres se resuelve por nombre de servicio.
+      MEMEX_DATABASE_URL: postgresql+psycopg://memex:memex@postgres:5432/memex
+      MEMEX_AUTH_ENFORCED: "false"
+      MEMEX_API_TOKEN: ""
+      MEMEX_LOG_LEVEL: INFO
+    ports:
+      - "8787:8787"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   memex_pgdata:
