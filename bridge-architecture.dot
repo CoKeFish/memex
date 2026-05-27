@@ -1,0 +1,87 @@
+digraph bridge {
+  rankdir=LR;
+  graph [fontname="Helvetica", fontsize=11, splines=spline, nodesep=0.45, ranksep=1.0, bgcolor="white"];
+  node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", penwidth=1.2];
+  edge  [fontname="Helvetica", fontsize=9, color="#555555"];
+
+  // ---------- mundo externo ----------
+  subgraph cluster_ext {
+    label="cliente local (PC)";
+    style="rounded,filled"; fillcolor="#fff4e5"; color="#c97a00"; fontcolor="#8a5400";
+    LOCAL [label="memex_local (futuro)\ncumple rol Ingestor (ADR-001)\nfiltro pre-ingest local\nPOST /bridge/ingest\nBearer <token>", fillcolor="#ffffff", color="#c97a00"];
+  }
+
+  // ---------- memex API ----------
+  subgraph cluster_api {
+    label="memex API (FastAPI, en VPS)";
+    style="rounded,filled"; fillcolor="#eef7ff"; color="#2d6cdf"; fontcolor="#1d4f9e";
+
+    // app + middleware
+    APP    [label="api/app.py\nFastAPI()\ninclude_router(bridge.router)", fillcolor="#dceeff", color="#2d6cdf"];
+    MW     [label="api/middleware\nRequestContextMiddleware", fillcolor="#dceeff", color="#2d6cdf"];
+
+    // routers
+    subgraph cluster_routers {
+      label="api/routers/  (peers)";
+      style="rounded,filled"; fillcolor="#dceeff"; color="#2d6cdf";
+      BRIDGE [label="bridge.py  (NUEVO)\nPOST /bridge/ingest\n recibe + valida shape\n SourceRecord → insert_record\n→ {inserted, duplicates, errors}", fillcolor="#ffffff", color="#2d6cdf", penwidth=2.0];
+      INGEST [label="ingest.py\nPOST /ingest\nPOST /ingest/batch", fillcolor="#ffffff", color="#2d6cdf"];
+      INBOX  [label="inbox.py\nGET  /inbox\nGET  /inbox/stats", fillcolor="#ffffff", color="#2d6cdf"];
+      SRCS   [label="sources.py\nCRUD /sources", fillcolor="#ffffff", color="#2d6cdf"];
+      HEAL   [label="health.py\nGET  /healthz", fillcolor="#ffffff", color="#2d6cdf"];
+    }
+
+    // auth
+    AUTH [label="api/auth.py\ncurrent_user_id\n(Bearer → user_id)", fillcolor="#ffffff", color="#2d6cdf"];
+
+    // schemas
+    SCH  [label="api/schemas.py\nIngestRequest\nIngestBatchRequest\nIngestBatchResponse", fillcolor="#ffffff", color="#2d6cdf"];
+  }
+
+  // ---------- memex.core ----------
+  subgraph cluster_core {
+    label="memex.core";
+    style="rounded,filled"; fillcolor="#f6f1ff"; color="#7a4ddb"; fontcolor="#4a2da0";
+    SR     [label="core.source.SourceRecord\n(dataclass: external_id,\noccurred_at, payload, dedupe_keys)", fillcolor="#ffffff", color="#7a4ddb"];
+    INSERT [label="core.inbox.insert_record\nvalida user_id == owner(source_id)\nINSERT ... ON CONFLICT DO NOTHING\nescribe dedupe_keys", fillcolor="#ffffff", color="#7a4ddb"];
+  }
+
+  // ---------- memex.db ----------
+  subgraph cluster_db {
+    label="memex.db";
+    style="rounded,filled"; fillcolor="#ecffe8"; color="#2f8f2f"; fontcolor="#1f6b1f";
+    CONN [label="db.connection()\n(context mgr,\nSQLAlchemy)", fillcolor="#ffffff", color="#2f8f2f"];
+    DB   [label="Postgres\n  sources\n  inbox  (UNIQUE source_id+external_id)\n  inbox_dedupe_keys\n  users", shape=cylinder, fillcolor="#ffffff", color="#2f8f2f"];
+  }
+
+  // ---------- flujo principal del request ----------
+  LOCAL  -> BRIDGE  [label="HTTP POST\n+ Bearer", color="#c97a00", penwidth=1.6];
+  BRIDGE -> MW      [label="passes through", style=dotted];
+  BRIDGE -> AUTH    [label="Depends\n→ user_id"];
+  BRIDGE -> SCH     [label="parse / validate"];
+  BRIDGE -> SR      [label="construct"];
+  BRIDGE -> CONN    [label="open conn"];
+  BRIDGE -> INSERT  [label="insert_record(conn,\n  user_id, source_id, record)"];
+  INSERT -> CONN    [label="SQL via conn"];
+  CONN   -> DB      [label="SQLAlchemy"];
+  INSERT -> BRIDGE  [label="InsertResult\n(inserted/duplicate)", style=dashed];
+  BRIDGE -> LOCAL   [label="200 OK\n{inserted, duplicates, errors}", color="#c97a00", style=dashed];
+
+  // ---------- mounting ----------
+  APP -> BRIDGE [label="include_router", style=dotted];
+  APP -> INGEST [style=dotted];
+  APP -> INBOX  [style=dotted];
+  APP -> SRCS   [style=dotted];
+  APP -> HEAL   [style=dotted];
+  APP -> MW     [style=dotted, label="add_middleware"];
+
+  // ---------- relaciones de contrato ----------
+  INGEST -> INSERT [label="(idéntica\nllamada)", style=dashed, color="#7a4ddb"];
+
+  // ---------- nota out-of-scope ----------
+  subgraph cluster_outscope {
+    label="NO incluido en el bridge";
+    style="rounded,dashed"; color="#999999"; fontcolor="#666666";
+    OUT [label="filtros server-side\nclasificación\nfeedback al cliente\n(esos viven en el Ingestor\nlado PC, o en futuros ADRs)", fillcolor="#f6f6f6", color="#999999", style="rounded,filled,dashed"];
+  }
+}

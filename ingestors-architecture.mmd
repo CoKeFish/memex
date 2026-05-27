@@ -1,0 +1,87 @@
+%% Arquitectura actual de ingestors (memex)
+%% Render: https://mermaid.live  o VSCode con extensión Mermaid
+
+flowchart LR
+    subgraph EXT["Mundo externo"]
+      GMAIL[("Gmail / IMAP server")]
+      MS[("Outlook / IMAP server")]
+      OTHER[("...futuras fuentes\n(Telegram, social, etc.)")]
+    end
+
+    subgraph CORE["memex.core (contratos, sin I/O)"]
+      direction TB
+      SRC["Source (Protocol)\nfetch / advance_checkpoint"]
+      FAC["SourceFactory (Protocol)\nmake_source(cfg) -> Source"]
+      REC["SourceRecord (dataclass)\nexternal_id, occurred_at,\npayload, dedupe_keys"]
+      SNK["MemexSink (Protocol)\nget_sources_by_type\nget/put_checkpoint\npost_ingest_batch"]
+      CUR["ImapCursor / FolderState\n(Pydantic, validado en bordes)"]
+      ERR["SourceConfigError"]
+    end
+
+    subgraph ING["memex.ingestors (aislado de memex internals — ADR-001)"]
+      direction TB
+
+      subgraph RUN_SUB["Genérico"]
+        RUNNER["runner.run_ingestor\n(chunking + checkpoint + retry)"]
+        HTTPC["http_client.MemexClient\n(httpx + retry 5xx/backoff)\nimplementa MemexSink"]
+      end
+
+      subgraph IMAP_SUB["imap/  (primer Source concreto)"]
+        CLI["cli.py\n run | authorize"]
+        CFG["config.ImapConfig\n(env vars resolved at boundary)"]
+        SOURCE["source.ImapSource\nimplementa Source\nmake_source(cfg) = factory"]
+        CLIENT["client.ImapClient\n(imap_tools wrapper, ctx mgr)"]
+        PARSER["parser.parse_email_message\n-> SourceRecord"]
+        subgraph OAUTH["oauth/ (registry lazy)"]
+          OREG["__init__.resolve(name)\nOAuthProvider Protocol"]
+          OG["google.GoogleOAuthProvider"]
+          OM["microsoft.MicrosoftOAuthProvider"]
+        end
+      end
+    end
+
+    subgraph MEMEX["memex API (HTTP)"]
+      API["FastAPI\n GET  /sources\n GET  /sources/{id}/checkpoint\n PUT  /sources/{id}/checkpoint\n POST /ingest/batch"]
+      DB[("DB\nsources, checkpoints,\ninbox (dedupe by\nsource_id+external_id)")]
+      OBS["observability.ingestion_run\n(context manager)"]
+    end
+
+    %% relaciones contratos
+    SOURCE -.implements.-> SRC
+    HTTPC -.implements.-> SNK
+    OG    -.implements.-> OREG
+    OM    -.implements.-> OREG
+    CFG   -.raises.-> ERR
+
+    %% flujo de ejecución
+    CLI -->|build| CFG
+    CLI -->|factory| SOURCE
+    CLI -->|drives via| RUNNER
+    CLI -->|wraps in| OBS
+
+    RUNNER -->|fetch chunks| SOURCE
+    SOURCE --> CLIENT
+    CLIENT -->|XOAUTH2 token| OREG
+    OREG --> OG
+    OREG --> OM
+    CLIENT --> GMAIL
+    CLIENT --> MS
+    SOURCE --> PARSER
+    PARSER --> REC
+    SOURCE -->|persists cursor as| CUR
+
+    RUNNER -->|post_ingest_batch\nget/put_checkpoint| HTTPC
+    HTTPC -->|HTTP+Bearer| API
+    API --> DB
+    OBS --> API
+
+    OTHER -.future.-> ING
+
+    classDef proto fill:#f6f1ff,stroke:#7a4ddb,stroke-dasharray: 4 3;
+    classDef impl  fill:#eef7ff,stroke:#2d6cdf;
+    classDef ext   fill:#fff4e5,stroke:#c97a00;
+    classDef api   fill:#ecffe8,stroke:#2f8f2f;
+    class SRC,FAC,SNK,OREG proto;
+    class SOURCE,CLIENT,PARSER,CFG,RUNNER,HTTPC,CLI,OG,OM,CUR,REC,ERR impl;
+    class GMAIL,MS,OTHER ext;
+    class API,DB,OBS api;

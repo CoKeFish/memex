@@ -145,3 +145,6 @@ logs/
 # -----------------------------------------------------------------------------
 .claude/cache/
 .claude/local/
+
+# Generated diagram renders (regenerable from .dot/.mmd sources)
+*-architecture.png

@@ -1,0 +1,126 @@
+digraph memex_local {
+  rankdir=LR;
+  graph [fontname="Helvetica", fontsize=11, splines=spline, nodesep=0.4, ranksep=0.9, bgcolor="white"];
+  node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", penwidth=1.2];
+  edge  [fontname="Helvetica", fontsize=9, color="#555555"];
+
+  // ---------- entrada (usuario) ----------
+  subgraph cluster_user {
+    label="usuario (terminal)";
+    style="rounded,filled"; fillcolor="#fff4e5"; color="#c97a00"; fontcolor="#8a5400";
+    USER [label="memex-local …\nCLI subcomandos:\n daemon start\n plugin install/enable/disable/doctor\n status / runs", fillcolor="#ffffff", color="#c97a00"];
+  }
+
+  // ---------- memex_local package ----------
+  subgraph cluster_local {
+    label="memex_local   (src/memex_local/)";
+    style="rounded,filled"; fillcolor="#eef7ff"; color="#2d6cdf"; fontcolor="#1d4f9e";
+
+    CLI    [label="cli.py\nargparse + entry point", fillcolor="#ffffff", color="#2d6cdf"];
+    CONFIG [label="config.py\nLocalConfig\n(bridge_url, token,\ningest_path)", fillcolor="#ffffff", color="#2d6cdf"];
+    PATHS  [label="paths.py\n~/.memex-local/...\n(override MEMEX_LOCAL_HOME)", fillcolor="#ffffff", color="#2d6cdf"];
+    PROTO  [label="protocol.py\nLocalPlugin Protocol\n(name, version,\n source_type,\n default_schedule,\n build_source,\n validate_requirements)\nProblem dataclass", fillcolor="#dceeff", color="#2d6cdf", style="rounded,filled,dashed"];
+    DISC   [label="discovery.py\nimportlib + spec_from_file_location\nvalida contra LocalPlugin\nreporta DiscoveryErrors\nsin tumbar el resto", fillcolor="#ffffff", color="#2d6cdf"];
+    REG    [label="registry.py\ninstall (copia FS)\nenable/disable (en SQLite)\nuninstall\nlist_views (FS + SQLite)\nattach_source_id", fillcolor="#ffffff", color="#2d6cdf"];
+    STATE  [label="state.py\nState (SQLite local)\n· plugins(name,enabled,schedule,source_id)\n· runs(plugin,status,stats,error)\n· pending(buffer offline)\nstart_run(ctx) auto-finaliza\non error", fillcolor="#ffffff", color="#2d6cdf"];
+    SCHED  [label="scheduler.py\nScheduler loop\n· parse_duration ISO 8601\n· _PluginRuntime + next_run_at\n· backoff exponencial\n· SIGINT/SIGTERM signals", fillcolor="#ffffff", color="#2d6cdf"];
+    RUN    [label="run.py\nexecute_plugin\n· resolve_source_id\n  (cache local + ensure_source)\n· load_plugin_config TOML\n· wrapper start_run/finalize_run\n· delega en run_ingestor", fillcolor="#ffffff", color="#2d6cdf"];
+  }
+
+  // ---------- plugins (filesystem) ----------
+  subgraph cluster_plugins {
+    label="~/.memex-local/plugins/   (drop-in)";
+    style="rounded,dashed"; color="#c97a00"; fontcolor="#8a5400";
+    PLUGIN_OUT [label="outlook-desktop/\n __init__.py\n config.toml\n→ _OutlookSource\n   (pywin32 COM lazy)", fillcolor="#fffaf0", color="#c97a00"];
+    PLUGIN_IMP [label="imap-university/\n __init__.py\n config.toml\n→ ImapSource (reusada)", fillcolor="#fffaf0", color="#c97a00"];
+    PLUGIN_X   [label="...futuros plugins", fillcolor="#fffaf0", color="#c97a00", style="rounded,filled,dashed"];
+  }
+
+  // ---------- archivos en disco ----------
+  subgraph cluster_disk {
+    label="~/.memex-local/   (disco local)";
+    style="rounded,dotted"; color="#999"; fontcolor="#666";
+    CFG_FILE   [label="config.toml\n+ env vars\nMEMEX_LOCAL_*", shape=note, fillcolor="#fafafa", color="#999"];
+    SQLITE     [label="state.db\n(plugins, runs, pending)", shape=cylinder, fillcolor="#fafafa", color="#999"];
+    SECRETS    [label="secrets/\n(tokens OAuth)", shape=folder, fillcolor="#fafafa", color="#999"];
+  }
+
+  // ---------- bordes externos ----------
+  subgraph cluster_reuse {
+    label="reuso desde memex (sin importar internals del servidor)";
+    style="rounded,filled"; fillcolor="#f6f1ff"; color="#7a4ddb"; fontcolor="#4a2da0";
+    SRC_PROTO [label="memex.core.source.Source\n(Protocol)", fillcolor="#ece1ff", color="#7a4ddb", style="rounded,filled,dashed"];
+    SINK_PROTO[label="memex.core.sink.MemexSink\n(Protocol)", fillcolor="#ece1ff", color="#7a4ddb", style="rounded,filled,dashed"];
+    RUNNER    [label="memex.ingestors.runner.run_ingestor", fillcolor="#ffffff", color="#7a4ddb"];
+    HTTPC     [label="memex.ingestors.http_client.MemexClient\nensure_source · post_ingest_batch\nget/put_checkpoint\nimplementa MemexSink", fillcolor="#ffffff", color="#7a4ddb"];
+    IMAP_REUSE[label="memex.ingestors.imap.\nImapSource · ImapConfig · oauth/", fillcolor="#ffffff", color="#7a4ddb"];
+    PAYLOAD   [label="memex.core.payloads.EmailPayload", fillcolor="#ffffff", color="#7a4ddb"];
+  }
+
+  // ---------- mundo externo ----------
+  subgraph cluster_world {
+    label="mundo externo";
+    style="rounded,filled"; fillcolor="#ecffe8"; color="#2f8f2f"; fontcolor="#1f6b1f";
+    OUTLOOK [label="Outlook desktop\n(sesión SSO Javeriana,\n COM/MAPI vía pywin32)", shape=cylinder, fillcolor="#ffffff", color="#2f8f2f"];
+    BRIDGE  [label="memex API en docker\nPOST /bridge/ingest\nPOST /sources/ensure\nGET/PUT /sources/{id}/checkpoint", fillcolor="#ffffff", color="#2f8f2f", penwidth=1.6];
+  }
+
+  // ---------- relaciones ----------
+
+  // contratos
+  PLUGIN_OUT -> PROTO       [label="implements", style=dashed, color="#7a4ddb"];
+  PLUGIN_IMP -> PROTO       [label="implements", style=dashed, color="#7a4ddb"];
+  PLUGIN_OUT -> SRC_PROTO   [label="produce Source", style=dashed, color="#7a4ddb"];
+  PLUGIN_IMP -> SRC_PROTO   [label="produce Source", style=dashed, color="#7a4ddb"];
+  HTTPC      -> SINK_PROTO  [label="implements", style=dashed, color="#7a4ddb"];
+  PLUGIN_OUT -> PAYLOAD     [label="emite", style=dashed, color="#7a4ddb"];
+  PLUGIN_IMP -> IMAP_REUSE  [label="reusa", style=dashed, color="#7a4ddb"];
+
+  // entrada
+  USER  -> CLI;
+
+  // CLI orquesta
+  CLI -> CONFIG  [label="load"];
+  CLI -> PATHS   [label="ensure_layout"];
+  CLI -> DISC    [label="plugin list / doctor"];
+  CLI -> REG     [label="install / enable /\ndisable / uninstall"];
+  CLI -> STATE   [label="status / runs"];
+  CLI -> SCHED   [label="daemon start"];
+
+  // archivos
+  CONFIG -> CFG_FILE  [label="lee", style=dotted];
+  PATHS  -> CFG_FILE  [style=dotted];
+  PATHS  -> SQLITE    [style=dotted];
+  PATHS  -> SECRETS   [style=dotted];
+  STATE  -> SQLITE    [label="sqlite3", style=dotted];
+
+  // discovery
+  DISC  -> PLUGIN_OUT [label="importlib", style=dotted];
+  DISC  -> PLUGIN_IMP [label="importlib", style=dotted];
+  DISC  -> PLUGIN_X   [style=dotted];
+
+  // registry
+  REG   -> STATE   [label="enabled?\nschedule\nsource_id"];
+  REG   -> DISC    [label="filter by\ninstalled"];
+
+  // scheduler
+  SCHED -> DISC    [label="scan plugins"];
+  SCHED -> STATE   [label="list_enabled\nschedule"];
+  SCHED -> RUN     [label="dispatch when\nnext_run_at venció"];
+
+  // execute_plugin
+  RUN -> PROTO     [label="build_source(cfg)"];
+  RUN -> STATE     [label="start_run /\nfinalize_run"];
+  RUN -> HTTPC     [label="ensure_source\n(primera vez,\ndespués cache local)"];
+  RUN -> RUNNER    [label="drives"];
+
+  // runner
+  RUNNER -> SRC_PROTO  [label="fetch chunks"];
+  RUNNER -> SINK_PROTO [label="post_ingest_batch\nget/put_checkpoint"];
+
+  // transporte HTTP
+  HTTPC -> BRIDGE  [label="POST /bridge/ingest\nGET/PUT checkpoint\nensure_source", color="#c97a00", penwidth=1.6];
+
+  // origen del dato
+  PLUGIN_OUT -> OUTLOOK [label="COM/MAPI:\nGetDefaultFolder(6)\nItems.Sort + iterate"];
+}
