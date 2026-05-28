@@ -31,8 +31,15 @@ def _imap_loader() -> SourceFactory:
     return make_source
 
 
+def _telegram_loader() -> SourceFactory:
+    from memex.ingestors.telegram.source import make_source
+
+    return make_source
+
+
 _LAZY_FACTORIES: dict[str, Callable[[], SourceFactory]] = {
     "imap": _imap_loader,
+    "telegram": _telegram_loader,
 }
 
 

@@ -29,8 +29,16 @@ services:
       MEMEX_AUTH_ENFORCED: "false"
       MEMEX_API_TOKEN: ""
       MEMEX_LOG_LEVEL: INFO
+      # Telegram session files persistidos en volumen — sin esto cada reboot
+      # del container exige correr `memex-telegram auth` interactivo de nuevo.
+      MEMEX_TG_SESSION_PATH: /var/lib/memex/telegram
+      MEMEX_TG_API_ID: ${MEMEX_TG_API_ID:-}
+      MEMEX_TG_API_HASH: ${MEMEX_TG_API_HASH:-}
+      MEMEX_TG_PHONE: ${MEMEX_TG_PHONE:-}
     ports:
       - "8787:8787"
+    volumes:
+      - memex_telegram_sessions:/var/lib/memex/telegram
     depends_on:
       postgres:
         condition: service_healthy
@@ -38,3 +46,4 @@ services:
 
 volumes:
   memex_pgdata:
+  memex_telegram_sessions:

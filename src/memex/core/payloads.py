@@ -88,3 +88,57 @@ class EmailPayload(BasePayload):
 
     attachments: list[Attachment] = Field(default_factory=list)
     raw_headers: dict[str, str] = Field(default_factory=dict)
+
+
+class TelegramSender(BaseModel):
+    """Quien envió un mensaje de Telegram.
+
+    `None` para service messages o canales con autoría anónima (broadcast posts
+    sin sender concreto). `display_name` se arma de `first_name + last_name` o
+    `title` según el tipo de peer.
+    """
+
+    user_id: int
+    username: str | None = None
+    display_name: str | None = None
+    is_bot: bool = False
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class TelegramPayload(BasePayload):
+    """Payload schema para mensajes de Telegram ingestados (grupos / supergrupos / canales).
+
+    DMs (chats privados con un usuario) NO se persisten — el parser las rechaza
+    explícitamente antes de construir este payload. Si llegás a ver un payload
+    con `chat_kind="dm"`, es un bug del parser.
+
+    `chat_id` viene normalizado al "marked format" estable de Telethon vía
+    `telethon.utils.get_peer_id`: `-(1e12 + id)` para Channel/supergroup,
+    `-<id>` para grupos básicos, `<id>` para usuarios. Ese id marcado se
+    puede pasar a `iter_messages`/`get_entity` y Telethon lo acepta;
+    persistir SIN normalizar lleva a mismatches silenciosos vs allowlist.
+
+    `topic_id` aplica solo a foros (supergrupos con topics habilitados); usa
+    el `reply_to_top_id` de Telethon (el root del topic), NO el
+    `reply_to_msg_id` (que es el mensaje al que respondés dentro del topic).
+    """
+
+    chat_id: int
+    chat_kind: Literal["group", "supergroup", "channel"]
+    chat_title: str | None = None
+    topic_id: int | None = None
+
+    message_id: int
+    sender: TelegramSender | None = None
+    date: datetime
+
+    text: str = ""
+
+    reply_to_message_id: int | None = None
+    forwarded_from: str | None = None
+
+    media_kind: Literal[
+        "none", "photo", "video", "document", "audio", "voice", "sticker", "other"
+    ] = "none"
+    media_caption: str | None = None

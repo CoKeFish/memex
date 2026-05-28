@@ -150,3 +150,11 @@ logs/
 # Las fuentes (.dot/.mmd) y los renders (.png/.svg) son regenerables y
 # pueden contener referencias personales temporales mientras se trabaja.
 *-architecture.*
+
+# -----------------------------------------------------------------------------
+# Telethon session files (Telegram ingestor)
+# -----------------------------------------------------------------------------
+# `.session` y `.session-journal` son SQLite con credenciales de la cuenta
+# Telegram — committearlos = leak total de la cuenta.
+*.session
+*.session-journal

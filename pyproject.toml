@@ -18,6 +18,7 @@ dependencies = [
     "google-auth-oauthlib>=1.2",
     "google-auth>=2.35",
     "pywin32>=311; sys_platform == 'win32'",
+    "telethon>=1.38,<2",
 ]
 
 [dependency-groups]
@@ -40,6 +41,7 @@ packages = ["src/memex", "src/memex_local_client"]
 [project.scripts]
 memex-local-client = "memex_local_client.cli:main"
 memex-filters = "memex.cli.filters:main"
+memex-telegram = "memex.ingestors.telegram.cli:main"
 
 [tool.ruff]
 target-version = "py312"
@@ -57,6 +59,13 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# Telethon no incluye un py.typed marker — sus tipos son dinámicos.
+# Aceptamos `Any` en los puntos de contacto (parser, client, cli) y mantenemos
+# las garantías de tipos en nuestros propios payloads/cursors.
+module = "telethon.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
