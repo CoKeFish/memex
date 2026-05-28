@@ -40,13 +40,12 @@ propios events (`streaming_runner.*`).
 
 from __future__ import annotations
 
-from builtins import type as _type
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import ClassVar, Protocol, TypeVar, runtime_checkable
+from typing import Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel
 
-from memex.core.source import SourceRecord
+from memex.core.source import SourceContract, SourceRecord
 
 CursorT = TypeVar("CursorT", bound=BaseModel)
 
@@ -60,16 +59,19 @@ de checkpoint. La fuente NO debe inventar este handler; lo recibe de afuera.
 
 
 @runtime_checkable
-class StreamingSource(Protocol[CursorT]):
+class StreamingSource(SourceContract, Protocol[CursorT]):
     """Fuente event-driven (push, long-running).
+
+    Extiende `SourceContract` con los métodos específicos de streaming. Los
+    atributos comunes (`type`, `kind`, `payload_schema`, `config_schema`,
+    `checkpoint_schema`, `health_check`) vienen heredados del contrato base
+    — así un `StreamingSource` cumple las mismas garantías que un `Source`
+    polling y los módulos downstream lo consumen idénticamente.
 
     Genérica en `CursorT` por las mismas razones que `Source` — el cursor está
     tipado y validado en la frontera por el runner, nunca llega como `dict` ni
     como `None`.
     """
-
-    type: ClassVar[str]
-    checkpoint_schema: ClassVar[_type[BaseModel]]
 
     def advance_checkpoint(self, checkpoint: CursorT, last: SourceRecord) -> CursorT:
         """Devolver el cursor actualizado después de procesar `last`.

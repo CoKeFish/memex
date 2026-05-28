@@ -18,7 +18,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from memex.core.source import SourceRecord
+from memex.core.payloads import BasePayload
+from memex.core.source import HealthResult, SourceKind, SourceRecord
 
 name = "p2"
 version = "0.1.0"
@@ -30,9 +31,23 @@ class _FakeCursor(BaseModel):
     last: str | None = None
 
 
+class _FakePayload(BasePayload):
+    k: int
+
+
+class _FakeConfig(BaseModel):
+    name: str = "p2"
+
+
 class _S:
     type = "fake"
+    kind = SourceKind.EMAIL
+    payload_schema = _FakePayload
+    config_schema = _FakeConfig
     checkpoint_schema = _FakeCursor
+
+    async def health_check(self) -> HealthResult:
+        return HealthResult(status="healthy", detail="ok", checked_at=datetime.now(UTC))
 
     def fetch(self, checkpoint):
         yield SourceRecord(

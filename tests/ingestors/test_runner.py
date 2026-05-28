@@ -8,7 +8,8 @@ from unittest.mock import MagicMock
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from memex.core.source import SourceRecord
+from memex.core.payloads import BasePayload
+from memex.core.source import HealthResult, SourceKind, SourceRecord
 from memex.ingestors.runner import run_ingestor
 
 
@@ -19,9 +20,23 @@ class FakeRunnerCursor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class FakeRunnerPayload(BasePayload):
+    eid: str
+
+
+class FakeRunnerConfig(BaseModel):
+    name: str = "fake"
+
+
 class FakeSource:
     type: ClassVar[str] = "fake"
+    kind: ClassVar[SourceKind] = SourceKind.EMAIL
+    payload_schema: ClassVar[_type[BasePayload]] = FakeRunnerPayload
+    config_schema: ClassVar[_type[BaseModel]] = FakeRunnerConfig
     checkpoint_schema: ClassVar[_type[BaseModel]] = FakeRunnerCursor
+
+    async def health_check(self) -> HealthResult:
+        return HealthResult(status="healthy", detail="fake", checked_at=datetime.now(UTC))
 
     def __init__(self, records: list[SourceRecord]) -> None:
         self._records = records

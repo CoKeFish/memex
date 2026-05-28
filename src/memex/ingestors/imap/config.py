@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any, Literal, cast
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from memex.core.source import SourceConfigError
 
@@ -19,9 +20,15 @@ class ImapConfigError(SourceConfigError):
 AuthMethod = Literal["basic", "oauth2"]
 
 
-@dataclass(frozen=True)
-class ImapConfig:
+class ImapConfig(BaseModel):
     """Resolved IMAP configuration for a single source.
+
+    Pydantic model so it satisfies `Source.config_schema: ClassVar[type[BaseModel]]`
+    and downstream callers (bridge endpoint, CLI) can validate raw dicts via
+    `model_validate` directly. `from_source_config` remains the canonical
+    constructor because it ALSO resolves env vars (the bare `model_validate`
+    is structural only — it does not look up `username_env` to fill in
+    `username`).
 
     Two authentication modes:
 
@@ -37,6 +44,8 @@ class ImapConfig:
 
     See ADR-001 for the rationale of keeping secrets out of the DB.
     """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     server: str
     port: int
@@ -173,6 +182,11 @@ class ImapConfig:
             oauth_client_secret_path_env=str(cs_env),
             oauth_token_path_env=str(token_env),
         )
+
+
+# Field used to silence "unused import" — keeps Field re-exported for callers
+# that want to reuse the same Pydantic primitives.
+_ = Field
 
 
 def _require_env(env_map: Mapping[str, str], var: str) -> str:

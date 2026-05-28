@@ -17,7 +17,8 @@ from typing import Any, ClassVar
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
-from memex.core.source import SourceRecord
+from memex.core.payloads import BasePayload
+from memex.core.source import HealthResult, SourceKind, SourceRecord
 from memex.core.streaming import StreamHandler
 from memex.core.streaming_runner import (
     RegisteredStreamingSource,
@@ -31,6 +32,18 @@ class _FakeCursor(BaseModel):
     seen: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")
+
+
+class _FakeChatPayload(BasePayload):
+    """Payload mínimo que la fake streaming source emite."""
+
+    eid: str
+
+
+class _FakeChatConfig(BaseModel):
+    """Config mínima que la fake streaming source acepta."""
+
+    name: str = "fake"
 
 
 def _rec(eid: str) -> SourceRecord:
@@ -49,7 +62,13 @@ class _FakeStreamingSource:
     """
 
     type: ClassVar[str] = "fake"
+    kind: ClassVar[SourceKind] = SourceKind.CHAT
+    payload_schema: ClassVar[_type[BasePayload]] = _FakeChatPayload
+    config_schema: ClassVar[_type[BaseModel]] = _FakeChatConfig
     checkpoint_schema: ClassVar[_type[BaseModel]] = _FakeCursor
+
+    async def health_check(self) -> HealthResult:
+        return HealthResult(status="healthy", detail="fake", checked_at=datetime.now(UTC))
 
     def __init__(
         self,

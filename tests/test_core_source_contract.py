@@ -15,7 +15,8 @@ from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from memex.core.source import Source, SourceRecord
+from memex.core.payloads import BasePayload
+from memex.core.source import HealthResult, Source, SourceKind, SourceRecord
 
 
 class _DemoCursor(BaseModel):
@@ -27,11 +28,29 @@ class _DemoCursor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _DemoPayload(BasePayload):
+    """Toy payload — what `_DemoSource` records carry."""
+
+    eid: str
+
+
+class _DemoConfig(BaseModel):
+    """Toy config — what `_DemoSource`'s factory would expect."""
+
+    name: str = "demo"
+
+
 class _DemoSource:
     """Concrete Source[_DemoCursor] that uses the cursor properly."""
 
     type: ClassVar[str] = "demo"
+    kind: ClassVar[SourceKind] = SourceKind.SOCIAL
+    payload_schema: ClassVar[_type[BasePayload]] = _DemoPayload
+    config_schema: ClassVar[_type[BaseModel]] = _DemoConfig
     checkpoint_schema: ClassVar[_type[BaseModel]] = _DemoCursor
+
+    async def health_check(self) -> HealthResult:
+        return HealthResult(status="healthy", detail="demo", checked_at=datetime.now(UTC))
 
     def __init__(self, records: list[SourceRecord]) -> None:
         self._records = records
@@ -98,3 +117,38 @@ def test_default_cursor_constructs_from_empty() -> None:
     assert isinstance(cursor, _DemoCursor)
     assert cursor.seq == 0
     assert cursor.seen == []
+
+
+def test_source_declares_kind_payload_and_config_schemas() -> None:
+    """All four ClassVars from `SourceContract` must be present on a concrete
+    Source. mypy strict would catch missing ones at type-check time; this is
+    the runtime sanity check that complements it."""
+    assert _DemoSource.kind == SourceKind.SOCIAL
+    assert _DemoSource.payload_schema is _DemoPayload
+    assert _DemoSource.config_schema is _DemoConfig
+    assert _DemoSource.checkpoint_schema is _DemoCursor
+
+
+def test_source_kind_is_a_str_enum() -> None:
+    """`SourceKind` values are usable as plain strings (StrEnum) so JSON
+    serialization and DB filters don't need conversion."""
+    assert SourceKind.EMAIL.value == "email"
+    assert SourceKind.CHAT.value == "chat"
+    assert SourceKind.SOCIAL.value == "social"
+    assert isinstance(SourceKind.EMAIL, str)
+    # iteration covers the currently-defined universe
+    assert set(SourceKind) == {SourceKind.EMAIL, SourceKind.CHAT, SourceKind.SOCIAL}
+
+
+import pytest  # noqa: E402 — keep import close to async tests for readability
+
+
+@pytest.mark.asyncio
+async def test_source_health_check_returns_healthresult() -> None:
+    """`health_check` must be async and return a `HealthResult` dataclass."""
+    src = _DemoSource([])
+    result = await src.health_check()
+    assert isinstance(result, HealthResult)
+    assert result.status in ("healthy", "degraded", "unhealthy")
+    assert isinstance(result.detail, str)
+    assert isinstance(result.checked_at, datetime)
