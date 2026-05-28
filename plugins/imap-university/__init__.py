@@ -3,14 +3,14 @@
 Reusa `ImapSource` y `ImapConfig` de `memex.ingestors.imap` sin modificarlos —
 el plugin es un envoltorio fino que:
 
-1. Toma el config TOML local (`~/.memex-local/plugins/imap-university/config.toml`).
+1. Toma el config TOML local (`~/.memex-local-client/plugins/imap-university/config.toml`).
 2. Lo pasa por `ImapConfig.from_source_config` para resolver env vars.
 3. Devuelve un `ImapSource` listo para el runner.
 
 Soporta auth básica y OAuth2 — el plugin no decide cuál: lee `auth` del
 config y delega en la maquinaria existente del ingestor IMAP.
 
-Para autorizar OAuth la primera vez: `memex-local plugin authorize imap-university`.
+Para autorizar OAuth la primera vez: `memex-local-client plugin authorize imap-university`.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def build_source(local_config: Mapping[str, Any]) -> Source:
 
 def validate_requirements(local_config: Mapping[str, Any]) -> list:
     """Chequea que los env vars referidos por el config existan y no estén vacíos."""
-    from memex_local.protocol import Problem
+    from memex_local_client.protocol import Problem
 
     problems: list[Problem] = []
 

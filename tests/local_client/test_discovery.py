@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from memex_local.discovery import discover_plugins
+from memex_local_client.discovery import discover_plugins
 
 _VALID_PLUGIN = '''
 """fake plugin"""

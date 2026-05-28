@@ -24,7 +24,7 @@ class ImapConfig(BaseModel):
     """Resolved IMAP configuration for a single source.
 
     Pydantic model so it satisfies `Source.config_schema: ClassVar[type[BaseModel]]`
-    and downstream callers (bridge endpoint, CLI) can validate raw dicts via
+    and downstream callers (gateway endpoint, CLI) can validate raw dicts via
     `model_validate` directly. `from_source_config` remains the canonical
     constructor because it ALSO resolves env vars (the bare `model_validate`
     is structural only — it does not look up `username_env` to fill in

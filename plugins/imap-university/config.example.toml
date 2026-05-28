@@ -1,5 +1,5 @@
 # Config del plugin imap-university.
-# Copialo a ~/.memex-local/plugins/imap-university/config.toml y rellena los campos.
+# Copialo a ~/.memex-local-client/plugins/imap-university/config.toml y rellena los campos.
 # El plugin no almacena valores de credenciales — solo nombres de env vars.
 
 server = "imap.tu-universidad.edu"

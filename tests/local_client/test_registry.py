@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-from memex_local.discovery import discover_plugins
-from memex_local.registry import (
+from memex_local_client.discovery import discover_plugins
+from memex_local_client.registry import (
     RegistryError,
     attach_source_id,
     disable,
@@ -15,7 +15,7 @@ from memex_local.registry import (
     list_views,
     uninstall_plugin,
 )
-from memex_local.state import State
+from memex_local_client.state import State
 
 _VALID = """
 from collections.abc import Mapping

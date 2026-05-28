@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 
 from memex.api.middleware import RequestContextMiddleware
-from memex.api.routers import bridge, health, inbox, ingest, sources
+from memex.api.routers import gateway, health, inbox, ingest, sources
 from memex.logging import setup_logging
 
 setup_logging()
@@ -18,4 +18,4 @@ app.include_router(health.router)
 app.include_router(ingest.router)
 app.include_router(inbox.router)
 app.include_router(sources.router)
-app.include_router(bridge.router)
+app.include_router(gateway.router)

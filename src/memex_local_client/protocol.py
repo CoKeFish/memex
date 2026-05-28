@@ -46,7 +46,7 @@ class LocalPlugin(Protocol):
         """Construye un `Source` listo para ser drenado por el runner.
 
         `local_config` es el dict deserializado del TOML del plugin
-        (ej. `~/.memex-local/plugins/<nombre>/config.toml`).
+        (ej. `~/.memex-local-client/plugins/<nombre>/config.toml`).
         """
         ...
 

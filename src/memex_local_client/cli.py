@@ -1,4 +1,4 @@
-"""CLI del cliente local: `memex-local <subcomando>`.
+"""CLI del cliente local: `memex-local-client <subcomando>`.
 
 Subcomandos:
 
@@ -13,7 +13,7 @@ Subcomandos:
 - `status`                             — resumen de últimas corridas por plugin.
 - `runs [--plugin X] [--limit N]`      — historial detallado de corridas.
 
-Auth setup separado: el comando `memex-local plugin authorize` se invoca una
+Auth setup separado: el comando `memex-local-client plugin authorize` se invoca una
 vez por plugin que use OAuth (típicamente el IMAP universitario).
 """
 
@@ -27,11 +27,11 @@ from typing import Any
 from dotenv import load_dotenv
 
 from memex.logging import get_logger, setup_logging
-from memex_local.config import LocalConfig, LocalConfigError
-from memex_local.discovery import discover_plugins
-from memex_local.paths import ensure_layout, plugins_dir
-from memex_local.protocol import Problem
-from memex_local.registry import (
+from memex_local_client.config import LocalConfig, LocalConfigError
+from memex_local_client.discovery import discover_plugins
+from memex_local_client.paths import ensure_layout, plugins_dir
+from memex_local_client.protocol import Problem
+from memex_local_client.registry import (
     RegistryError,
     disable,
     enable,
@@ -39,13 +39,13 @@ from memex_local.registry import (
     list_views,
     uninstall_plugin,
 )
-from memex_local.run import load_plugin_config
-from memex_local.scheduler import Scheduler
-from memex_local.state import open_state
+from memex_local_client.run import load_plugin_config
+from memex_local_client.scheduler import Scheduler
+from memex_local_client.state import open_state
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="memex-local")
+    p = argparse.ArgumentParser(prog="memex-local-client")
     sub = p.add_subparsers(dest="group", required=True)
 
     daemon = sub.add_parser("daemon", help="Daemon lifecycle.")
@@ -80,7 +80,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
-    log = get_logger("memex_local.cli")
+    log = get_logger("memex_local_client.cli")
     ensure_layout()
 
     parser = _build_parser()
@@ -96,13 +96,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.group == "runs":
             return _cmd_runs(args)
     except LocalConfigError as e:
-        log.error("memex_local.cli.config_error", reason=str(e))
+        log.error("memex_local_client.cli.config_error", reason=str(e))
         return 1
     except RegistryError as e:
-        log.error("memex_local.cli.registry_error", reason=str(e))
+        log.error("memex_local_client.cli.registry_error", reason=str(e))
         return 1
     except Exception as e:
-        log.exception("memex_local.cli.fatal", exc=str(e))
+        log.exception("memex_local_client.cli.fatal", exc=str(e))
         return 1
 
     parser.print_help()
@@ -111,11 +111,11 @@ def main(argv: list[str] | None = None) -> int:
 
 def _cmd_daemon_start(log: Any) -> int:
     cfg = LocalConfig.load()
-    log.info("memex_local.daemon.starting", bridge_url=cfg.bridge_url)
+    log.info("memex_local_client.daemon.starting", gateway_url=cfg.gateway_url)
     state = open_state()
     sched = Scheduler(
         state=state,
-        bridge_url=cfg.bridge_url,
+        gateway_url=cfg.gateway_url,
         api_token=cfg.api_token or None,
         plugins_root=plugins_dir(),
     )
@@ -139,7 +139,7 @@ def _cmd_plugin(args: argparse.Namespace, log: Any) -> int:
 
     if args.cmd == "install":
         name = install_plugin(Path(args.path))
-        log.info("memex_local.cli.plugin_installed", name=name)
+        log.info("memex_local_client.cli.plugin_installed", name=name)
         print(f"plugin {name!r} instalado en {plugins_dir() / name}")
         return 0
 
@@ -147,13 +147,13 @@ def _cmd_plugin(args: argparse.Namespace, log: Any) -> int:
         disc = discover_plugins(plugins_dir())
         with open_state() as state:
             enable(args.name, state, disc.plugins)
-        log.info("memex_local.cli.plugin_enabled", name=args.name)
+        log.info("memex_local_client.cli.plugin_enabled", name=args.name)
         return 0
 
     if args.cmd == "disable":
         with open_state() as state:
             disable(args.name, state)
-        log.info("memex_local.cli.plugin_disabled", name=args.name)
+        log.info("memex_local_client.cli.plugin_disabled", name=args.name)
         return 0
 
     if args.cmd == "uninstall":
@@ -162,7 +162,7 @@ def _cmd_plugin(args: argparse.Namespace, log: Any) -> int:
         if not removed:
             print(f"plugin {args.name!r} no encontrado.")
             return 1
-        log.info("memex_local.cli.plugin_uninstalled", name=args.name)
+        log.info("memex_local_client.cli.plugin_uninstalled", name=args.name)
         return 0
 
     if args.cmd == "doctor":
@@ -209,7 +209,7 @@ def _cmd_plugin_authorize(name: str, log: Any) -> int:
     try:
         authorize(cfg)
     except Exception as e:
-        log.exception("memex_local.cli.authorize_failed", plugin=name, exc=str(e))
+        log.exception("memex_local_client.cli.authorize_failed", plugin=name, exc=str(e))
         return 1
     print(f"autorización completada para {name!r}.")
     return 0

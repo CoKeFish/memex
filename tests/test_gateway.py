@@ -1,4 +1,4 @@
-"""Tests del bridge — endpoints /bridge/plugins/{name}/state, /cursor, /ingest."""
+"""Tests del gateway — endpoints /gateway/plugins/{name}/state, /cursor, /ingest."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def _record(eid: str) -> dict[str, Any]:
 
 
 def test_state_creates_source_when_missing(client: Any) -> None:
-    r = client.post("/bridge/plugins/outlook-test/state", json={"source_type": "outlook"})
+    r = client.post("/gateway/plugins/outlook-test/state", json={"source_type": "outlook"})
     assert r.status_code == 200
     body = r.json()
     assert body["created"] is True
@@ -31,24 +31,24 @@ def test_state_creates_source_when_missing(client: Any) -> None:
 
 
 def test_state_returns_existing_source_unchanged(client: Any) -> None:
-    first = client.post("/bridge/plugins/p1/state", json={"source_type": "imap"}).json()
-    second = client.post("/bridge/plugins/p1/state", json={"source_type": "imap"}).json()
+    first = client.post("/gateway/plugins/p1/state", json={"source_type": "imap"}).json()
+    second = client.post("/gateway/plugins/p1/state", json={"source_type": "imap"}).json()
     assert second["source_id"] == first["source_id"]
     assert second["created"] is False
 
 
 def test_state_rejects_malformed_plugin_name(client: Any) -> None:
-    r = client.post("/bridge/plugins/has spaces/state", json={"source_type": "imap"})
+    r = client.post("/gateway/plugins/has spaces/state", json={"source_type": "imap"})
     assert r.status_code in (400, 404)  # FastAPI puede rechazar el path antes
-    r = client.post("/bridge/plugins/-leading-dash/state", json={"source_type": "imap"})
+    r = client.post("/gateway/plugins/-leading-dash/state", json={"source_type": "imap"})
     assert r.status_code == 400
 
 
 def test_state_returns_existing_cursor(client: Any) -> None:
-    state = client.post("/bridge/plugins/p2/state", json={"source_type": "imap"}).json()
+    state = client.post("/gateway/plugins/p2/state", json={"source_type": "imap"}).json()
     cursor = {"last_received_at": "2026-05-27T10:00:00+00:00"}
-    client.put("/bridge/plugins/p2/cursor", json={"cursor": cursor})
-    re_state = client.post("/bridge/plugins/p2/state", json={"source_type": "imap"}).json()
+    client.put("/gateway/plugins/p2/cursor", json={"cursor": cursor})
+    re_state = client.post("/gateway/plugins/p2/state", json={"source_type": "imap"}).json()
     assert re_state["cursor"] == cursor
     assert re_state["source_id"] == state["source_id"]
 
@@ -58,16 +58,16 @@ def test_state_returns_existing_cursor(client: Any) -> None:
 
 def test_cursor_put_unknown_plugin_is_404(client: Any) -> None:
     r = client.put(
-        "/bridge/plugins/never-registered/cursor",
+        "/gateway/plugins/never-registered/cursor",
         json={"cursor": {"x": 1}},
     )
     assert r.status_code == 404
 
 
 def test_cursor_roundtrip(client: Any) -> None:
-    client.post("/bridge/plugins/p3/state", json={"source_type": "imap"})
+    client.post("/gateway/plugins/p3/state", json={"source_type": "imap"})
     cur = {"last_received_at": "2026-01-01T00:00:00+00:00"}
-    r = client.put("/bridge/plugins/p3/cursor", json={"cursor": cur})
+    r = client.put("/gateway/plugins/p3/cursor", json={"cursor": cur})
     assert r.status_code == 200
     assert r.json()["cursor"] == cur
 
@@ -76,10 +76,10 @@ def test_cursor_roundtrip(client: Any) -> None:
 
 
 def test_ingest_persists_and_counts(client: Any) -> None:
-    state = client.post("/bridge/plugins/p4/state", json={"source_type": "outlook"}).json()
+    state = client.post("/gateway/plugins/p4/state", json={"source_type": "outlook"}).json()
     sid = state["source_id"]
     r = client.post(
-        "/bridge/plugins/p4/ingest",
+        "/gateway/plugins/p4/ingest",
         json={"records": [_record("a"), _record("b"), _record("a")]},
     )
     assert r.status_code == 200
@@ -95,15 +95,15 @@ def test_ingest_persists_and_counts(client: Any) -> None:
 
 def test_ingest_unknown_plugin_is_404(client: Any) -> None:
     r = client.post(
-        "/bridge/plugins/never-registered/ingest",
+        "/gateway/plugins/never-registered/ingest",
         json={"records": [_record("x")]},
     )
     assert r.status_code == 404
 
 
 def test_ingest_empty_batch_ok(client: Any) -> None:
-    client.post("/bridge/plugins/p5/state", json={"source_type": "imap"})
-    r = client.post("/bridge/plugins/p5/ingest", json={"records": []})
+    client.post("/gateway/plugins/p5/state", json={"source_type": "imap"})
+    r = client.post("/gateway/plugins/p5/ingest", json={"records": []})
     assert r.status_code == 200
     body = r.json()
     assert body["inserted"] == 0
@@ -112,11 +112,11 @@ def test_ingest_empty_batch_ok(client: Any) -> None:
 
 
 def test_ingest_strips_source_id_field(client: Any) -> None:
-    """Si llega source_id en el record, debe ser ignorado — el bridge usa el del URL."""
-    client.post("/bridge/plugins/p6/state", json={"source_type": "imap"})
+    """Si llega source_id en el record, debe ser ignorado — el gateway usa el del URL."""
+    client.post("/gateway/plugins/p6/state", json={"source_type": "imap"})
     # Forzamos un source_id ajeno en cada record para verificar que NO termina en otra source.
     poisoned = {**_record("p"), "source_id": 99999}
-    r = client.post("/bridge/plugins/p6/ingest", json={"records": [poisoned]})
+    r = client.post("/gateway/plugins/p6/ingest", json={"records": [poisoned]})
     assert r.status_code == 200
     sid = r.json()["source_id"]
     with connection() as c:
@@ -127,11 +127,11 @@ def test_ingest_strips_source_id_field(client: Any) -> None:
 
 def test_ingest_requires_auth_when_enforced(auth_client: Any) -> None:
     # Sin token: 401 ya en /state.
-    r = auth_client.post("/bridge/plugins/auth-probe/state", json={"source_type": "imap"})
+    r = auth_client.post("/gateway/plugins/auth-probe/state", json={"source_type": "imap"})
     assert r.status_code == 401
     # Con token correcto: 200.
     r2 = auth_client.post(
-        "/bridge/plugins/auth-probe/state",
+        "/gateway/plugins/auth-probe/state",
         json={"source_type": "imap"},
         headers={"Authorization": "Bearer secret-test"},
     )
@@ -147,7 +147,7 @@ def test_state_isolates_per_user(client: Any, seed_user2: int, conn: Any) -> Non
         {"u": seed_user2},
     ).scalar()
     assert isinstance(other_id, int)
-    r = client.post("/bridge/plugins/shared/state", json={"source_type": "imap"})
+    r = client.post("/gateway/plugins/shared/state", json={"source_type": "imap"})
     assert r.status_code == 200
     mine = r.json()
     assert mine["source_id"] != other_id

@@ -24,9 +24,9 @@ from dotenv import load_dotenv
 
 from memex.core.observability import ingestion_run
 from memex.core.source import SourceConfigError
-from memex.ingestors.http_client import MemexAPIError, MemexClient
 from memex.ingestors.imap import oauth
 from memex.ingestors.imap.source import make_source
+from memex.ingestors.memex_server_client import MemexAPIError, MemexServerClient
 from memex.ingestors.runner import run_ingestor
 from memex.logging import get_logger, setup_logging
 
@@ -69,14 +69,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _select_sources(client: MemexClient, source_id: int | None) -> list[dict[str, Any]]:
+def _select_sources(client: MemexServerClient, source_id: int | None) -> list[dict[str, Any]]:
     all_imap = client.get_sources_by_type("imap")
     if source_id is None:
         return all_imap
     return [s for s in all_imap if int(s.get("id", 0)) == source_id]
 
 
-def _cmd_run(args: argparse.Namespace, client: MemexClient, log: Any) -> int:
+def _cmd_run(args: argparse.Namespace, client: MemexServerClient, log: Any) -> int:
     sources = _select_sources(client, args.source_id)
     if not sources:
         if args.source_id is not None:
@@ -121,7 +121,7 @@ def _cmd_run(args: argparse.Namespace, client: MemexClient, log: Any) -> int:
     return 1 if had_fatal else 0
 
 
-def _cmd_authorize(args: argparse.Namespace, client: MemexClient, log: Any) -> int:
+def _cmd_authorize(args: argparse.Namespace, client: MemexServerClient, log: Any) -> int:
     sources = _select_sources(client, args.source_id)
     if not sources:
         log.error("source_not_found_or_not_imap", source_id=args.source_id)
@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("ingestor.cli.start", cmd=args.cmd, base_url=base_url)
 
     try:
-        with MemexClient(base_url=base_url, api_token=api_token) as client:
+        with MemexServerClient(base_url=base_url, api_token=api_token) as client:
             if args.cmd == "run":
                 return _cmd_run(args, client, log)
             if args.cmd == "authorize":

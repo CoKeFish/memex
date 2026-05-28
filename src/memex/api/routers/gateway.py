@@ -1,6 +1,6 @@
-"""Bridge — surface única para ingestors externos.
+"""Gateway — surface única para clientes externos (memex_local_client + futuros).
 
-Tres endpoints bajo /bridge/plugins/{plugin_name}/:
+Tres endpoints bajo /gateway/plugins/{plugin_name}/:
 
 - POST  /state   — get-or-create del source asociado al plugin; devuelve
                    `{source_id, cursor, created}`. Es la operación que el
@@ -10,8 +10,8 @@ Tres endpoints bajo /bridge/plugins/{plugin_name}/:
                    URL, no del payload — los records pasan SourceRecord-shaped
                    sin esa columna.
 
-Todas las operaciones loggean eventos estructurados (`bridge.state.fetched`,
-`bridge.cursor.updated`, `bridge.ingest.received`, `bridge.ingest.committed`)
+Todas las operaciones loggean eventos estructurados (`gateway.state.fetched`,
+`gateway.cursor.updated`, `gateway.ingest.received`, `gateway.ingest.committed`)
 con `plugin`, `user_id`, `source_id` y counts para que el audit log sirva
 para correlacionar con lo que el cliente externo cree haber enviado.
 
@@ -30,11 +30,11 @@ from sqlalchemy import Connection, text
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
-    BridgeCursorRequest,
-    BridgeIngestStats,
-    BridgePluginIngestRequest,
-    BridgeStateRequest,
-    BridgeStateResponse,
+    GatewayCursorRequest,
+    GatewayIngestStats,
+    GatewayPluginIngestRequest,
+    GatewayStateRequest,
+    GatewayStateResponse,
 )
 from memex.core import checkpoint
 from memex.core.inbox import insert_record
@@ -42,11 +42,11 @@ from memex.core.source import SourceRecord
 from memex.db import connection
 from memex.logging import get_logger
 
-router = APIRouter(prefix="/bridge", tags=["bridge"])
+router = APIRouter(prefix="/gateway", tags=["gateway"])
 
 UserID = Annotated[int, Depends(current_user_id)]
 
-_log = get_logger("memex.bridge")
+_log = get_logger("memex.gateway")
 
 _PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
@@ -88,15 +88,15 @@ def _resolve_source_id(conn: Connection, user_id: int, name: str) -> int:
     if sid is None:
         raise HTTPException(
             status_code=404,
-            detail=f"plugin {name!r} not registered; call POST /bridge/plugins/{name}/state first",
+            detail=f"plugin {name!r} not registered; call POST /gateway/plugins/{name}/state first",
         )
     return int(sid)
 
 
-@router.post("/plugins/{plugin_name}/state", response_model=BridgeStateResponse)
+@router.post("/plugins/{plugin_name}/state", response_model=GatewayStateResponse)
 async def plugin_state(
     plugin_name: str,
-    body: BridgeStateRequest,
+    body: GatewayStateRequest,
     user_id: UserID,
 ) -> dict[str, Any]:
     _validate_plugin_name(plugin_name)
@@ -106,7 +106,7 @@ async def plugin_state(
         )
         cursor = checkpoint.get_cursor(conn, source_id)
     _log.info(
-        "bridge.state.fetched",
+        "gateway.state.fetched",
         plugin=plugin_name,
         user_id=user_id,
         source_id=source_id,
@@ -117,10 +117,10 @@ async def plugin_state(
     return {"source_id": source_id, "cursor": cursor, "created": created}
 
 
-@router.put("/plugins/{plugin_name}/cursor", response_model=BridgeStateResponse)
+@router.put("/plugins/{plugin_name}/cursor", response_model=GatewayStateResponse)
 async def plugin_cursor(
     plugin_name: str,
-    body: BridgeCursorRequest,
+    body: GatewayCursorRequest,
     user_id: UserID,
 ) -> dict[str, Any]:
     _validate_plugin_name(plugin_name)
@@ -128,7 +128,7 @@ async def plugin_cursor(
         source_id = _resolve_source_id(conn, user_id, plugin_name)
         checkpoint.save_cursor(conn, source_id, body.cursor)
     _log.info(
-        "bridge.cursor.updated",
+        "gateway.cursor.updated",
         plugin=plugin_name,
         user_id=user_id,
         source_id=source_id,
@@ -136,17 +136,17 @@ async def plugin_cursor(
     return {"source_id": source_id, "cursor": body.cursor, "created": False}
 
 
-@router.post("/plugins/{plugin_name}/ingest", response_model=BridgeIngestStats)
+@router.post("/plugins/{plugin_name}/ingest", response_model=GatewayIngestStats)
 async def plugin_ingest(
     plugin_name: str,
-    body: BridgePluginIngestRequest,
+    body: GatewayPluginIngestRequest,
     user_id: UserID,
 ) -> dict[str, Any]:
     _validate_plugin_name(plugin_name)
     with connection() as conn:
         source_id = _resolve_source_id(conn, user_id, plugin_name)
         _log.info(
-            "bridge.ingest.received",
+            "gateway.ingest.received",
             plugin=plugin_name,
             user_id=user_id,
             source_id=source_id,
@@ -173,7 +173,7 @@ async def plugin_ingest(
             except ValueError:
                 errors += 1
     _log.info(
-        "bridge.ingest.committed",
+        "gateway.ingest.committed",
         plugin=plugin_name,
         user_id=user_id,
         source_id=source_id,

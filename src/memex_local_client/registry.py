@@ -1,6 +1,6 @@
 """Lógica de install/enable/disable/list/uninstall de plugins.
 
-Coordina filesystem (`~/.memex-local/plugins/<name>/`) con SQLite local
+Coordina filesystem (`~/.memex-local-client/plugins/<name>/`) con SQLite local
 (`state.plugins`). El filesystem es la fuente de verdad de QUÉ plugins
 existen físicamente; la SQLite es la fuente de verdad de cuál está
 habilitado y con qué schedule.
@@ -15,10 +15,10 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from memex_local.discovery import DiscoveryResult, discover_plugins
-from memex_local.paths import plugins_dir
-from memex_local.protocol import LocalPlugin
-from memex_local.state import PluginRow, State
+from memex_local_client.discovery import DiscoveryResult, discover_plugins
+from memex_local_client.paths import plugins_dir
+from memex_local_client.protocol import LocalPlugin
+from memex_local_client.state import PluginRow, State
 
 
 class RegistryError(Exception):

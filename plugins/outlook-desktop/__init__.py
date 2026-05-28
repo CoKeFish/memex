@@ -43,7 +43,7 @@ def build_source(local_config: Mapping[str, Any]) -> Source:
 
 
 def validate_requirements(local_config: Mapping[str, Any]) -> list:
-    from memex_local.protocol import Problem
+    from memex_local_client.protocol import Problem
 
     problems: list[Problem] = []
     accs: list[str] = []

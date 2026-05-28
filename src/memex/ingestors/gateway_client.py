@@ -1,17 +1,17 @@
-"""BridgeClient — cliente HTTP para `/bridge/plugins/<name>/*` de memex.
+"""GatewayClient — cliente HTTP para `/gateway/plugins/<name>/*` de memex.
 
-Subclasea `MemexClient` para reusar transport (httpx, retries, bearer auth)
-pero cambia las URLs hacia el namespace del bridge. Un BridgeClient se
+Subclasea `MemexServerClient` para reusar transport (httpx, retries, bearer
+auth) pero cambia las URLs hacia el namespace del gateway. Un GatewayClient se
 construye **por plugin** — el `plugin_name` se fija en el constructor y se
 inyecta en cada URL.
 
 Sigue siendo un `MemexSink` (estructuralmente compatible con el Protocol),
 así que se le pasa al `run_ingestor` reusable sin cambiar el runner. La
 ilusión es transparente: el runner llama `get_checkpoint(source_id)` y
-`post_ingest_batch(records)` igual que con MemexClient — internamente,
-BridgeClient ignora el `source_id` de los args (lo resuelve solo vía el
+`post_ingest_batch(records)` igual que con MemexServerClient — internamente,
+GatewayClient ignora el `source_id` de los args (lo resuelve solo vía el
 endpoint `/state` por primera vez y lo cachea) y elimina la columna
-`source_id` de cada record antes de enviarlo (el bridge la rellena).
+`source_id` de cada record antes de enviarlo (el gateway la rellena).
 """
 
 from __future__ import annotations
@@ -20,11 +20,11 @@ from typing import Any
 
 import httpx
 
-from memex.ingestors.http_client import MemexAPIError, MemexClient
+from memex.ingestors.memex_server_client import MemexAPIError, MemexServerClient
 
 
-class BridgeClient(MemexClient):
-    """Cliente para el surface bridge — uno por plugin."""
+class GatewayClient(MemexServerClient):
+    """Cliente para el surface gateway — uno por plugin."""
 
     def __init__(
         self,
@@ -52,13 +52,13 @@ class BridgeClient(MemexClient):
         self._initial_cursor: dict[str, Any] | None = None
         self._state_loaded = False
 
-    def __enter__(self) -> BridgeClient:
+    def __enter__(self) -> GatewayClient:
         return self
 
     # --- override para que el runner no toque /sources/* ni /ingest/batch ---
 
     def get_sources_by_type(self, source_type: str) -> list[dict[str, Any]]:
-        """No aplica al bridge — devuelve lista vacía para satisfacer el Protocol."""
+        """No aplica al gateway — devuelve lista vacía para satisfacer el Protocol."""
         return []
 
     def ensure_source(
@@ -67,43 +67,43 @@ class BridgeClient(MemexClient):
         source_type: str,
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """No usar — el bridge resuelve identidad implícitamente vía /state."""
+        """No usar — el gateway resuelve identidad implícitamente vía /state."""
         raise MemexAPIError(
             400,
-            "BridgeClient no expone /sources/ensure; usar /bridge/plugins/<name>/state",
+            "GatewayClient no expone /sources/ensure; usar /gateway/plugins/<name>/state",
         )
 
     def get_checkpoint(self, source_id: int = 0) -> dict[str, Any] | None:
-        """Carga estado vía POST /bridge/plugins/{name}/state.
+        """Carga estado vía POST /gateway/plugins/{name}/state.
 
-        Ignora `source_id` (el bridge lo resuelve desde el URL). Cachea el
+        Ignora `source_id` (el gateway lo resuelve desde el URL). Cachea el
         `source_id` real (asignado/encontrado por el servidor) para que
         callers puedan inspeccionarlo si lo necesitan.
         """
-        del source_id  # se resuelve desde el URL del bridge
+        del source_id  # se resuelve desde el URL del gateway
         self._load_state()
         cur = self._initial_cursor
         return cur if isinstance(cur, dict) else None
 
     def put_checkpoint(self, source_id: int, cursor: dict[str, Any]) -> None:
-        """Persiste el cursor vía PUT /bridge/plugins/{name}/cursor."""
-        del source_id  # se resuelve desde el URL del bridge
+        """Persiste el cursor vía PUT /gateway/plugins/{name}/cursor."""
+        del source_id  # se resuelve desde el URL del gateway
         if not self._state_loaded:
             self._load_state()
         self._request(
             "PUT",
-            f"/bridge/plugins/{self.plugin_name}/cursor",
+            f"/gateway/plugins/{self.plugin_name}/cursor",
             json={"cursor": cursor},
         )
 
     def post_ingest_batch(self, records: list[dict[str, Any]]) -> dict[str, int]:
-        """Envía records al endpoint del bridge — strip de `source_id` interno."""
+        """Envía records al endpoint del gateway — strip de `source_id` interno."""
         if not self._state_loaded:
             self._load_state()
         stripped = [{k: v for k, v in r.items() if k != "source_id"} for r in records]
         resp = self._request(
             "POST",
-            f"/bridge/plugins/{self.plugin_name}/ingest",
+            f"/gateway/plugins/{self.plugin_name}/ingest",
             json={"records": stripped},
         )
         data = resp.json()
@@ -113,7 +113,7 @@ class BridgeClient(MemexClient):
             "errors": int(data.get("errors", 0)),
         }
 
-    # --- introspección útil para callers (ej. memex_local.run) ---
+    # --- introspección útil para callers (ej. memex_local_client.run) ---
 
     @property
     def resolved_source_id(self) -> int | None:
@@ -125,7 +125,7 @@ class BridgeClient(MemexClient):
     def _load_state(self) -> None:
         resp = self._request(
             "POST",
-            f"/bridge/plugins/{self.plugin_name}/state",
+            f"/gateway/plugins/{self.plugin_name}/state",
             json={"source_type": self.source_type},
         )
         data = resp.json()

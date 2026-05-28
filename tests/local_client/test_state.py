@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from memex_local.state import State
+from memex_local_client.state import State
 
 
 @pytest.fixture

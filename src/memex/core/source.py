@@ -29,7 +29,7 @@ Contract guarantees (enforced by mypy strict):
     Pydantic class describing the records' `payload` shape. Filter rules
     and downstream classifiers introspect it to know what keys exist.
   * `config_schema: ClassVar[type[BaseModel]]` is required — declares what
-    the SourceFactory's input dict must validate against. Lets the bridge
+    the SourceFactory's input dict must validate against. Lets the gateway
     endpoint and CLI validate at the boundary instead of mid-fetch.
   * `checkpoint_schema: ClassVar[type[BaseModel]]` is required — declares
     the cursor shape. The runner does JSONB ↔ CursorT conversion using it.

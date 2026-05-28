@@ -17,12 +17,12 @@ class MemexAPIError(Exception):
         self.body = body
 
 
-class MemexClient:
-    """HTTP client for memex API.
+class MemexServerClient:
+    """HTTP client for the memex server API.
 
-    The only channel by which ingestors communicate with memex (ADR-001).
-    Retries 5xx and network errors with exponential backoff; 4xx are
-    non-retryable and surface immediately as MemexAPIError.
+    The only channel by which ingestors (server-side or local) communicate with
+    memex (ADR-001). Retries 5xx and network errors with exponential backoff;
+    4xx are non-retryable and surface immediately as MemexAPIError.
     """
 
     def __init__(
@@ -40,7 +40,7 @@ class MemexClient:
         self.max_retries = max_retries
         self.backoff_base = backoff_base
         self._ingest_path = ingest_path
-        self._log = get_logger("memex.ingestors.http_client")
+        self._log = get_logger("memex.ingestors.memex_server_client")
 
         headers: dict[str, str] = {}
         if api_token:
@@ -57,7 +57,7 @@ class MemexClient:
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> MemexClient:
+    def __enter__(self) -> MemexServerClient:
         return self
 
     def __exit__(self, *args: object) -> None:

@@ -1,4 +1,4 @@
-"""Tests del BridgeClient — la cara HTTP del cliente local hacia /bridge/plugins/<name>/."""
+"""Tests del GatewayClient — la cara HTTP del cliente local hacia /gateway/plugins/<name>/."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import respx
 
-from memex.ingestors.bridge_client import BridgeClient
+from memex.ingestors.gateway_client import GatewayClient
 
 BASE = "http://localhost:8787"
 
@@ -24,10 +24,10 @@ def _state_response(
 def test_get_checkpoint_calls_state_and_returns_cursor() -> None:
     cursor = {"last": "x"}
     with respx.mock(base_url=BASE) as router:
-        route = router.post("/bridge/plugins/p/state").respond(
+        route = router.post("/gateway/plugins/p/state").respond(
             json=_state_response(source_id=7, cursor=cursor)
         )
-        with BridgeClient(BASE, "p", "outlook") as c:
+        with GatewayClient(BASE, "p", "outlook") as c:
             assert c.get_checkpoint() == cursor
             assert c.resolved_source_id == 7
         assert route.called
@@ -37,12 +37,12 @@ def test_get_checkpoint_calls_state_and_returns_cursor() -> None:
 
 def test_state_called_only_once_across_methods() -> None:
     with respx.mock(base_url=BASE) as router:
-        router.post("/bridge/plugins/p/state").respond(json=_state_response(source_id=7))
-        router.post("/bridge/plugins/p/ingest").respond(
+        router.post("/gateway/plugins/p/state").respond(json=_state_response(source_id=7))
+        router.post("/gateway/plugins/p/ingest").respond(
             json={"source_id": 7, "inserted": 1, "duplicates": 0, "errors": 0}
         )
-        router.put("/bridge/plugins/p/cursor").respond(json=_state_response(source_id=7))
-        with BridgeClient(BASE, "p", "outlook") as c:
+        router.put("/gateway/plugins/p/cursor").respond(json=_state_response(source_id=7))
+        with GatewayClient(BASE, "p", "outlook") as c:
             c.get_checkpoint()
             c.post_ingest_batch(
                 [
@@ -69,9 +69,9 @@ def test_post_ingest_strips_source_id_field() -> None:
         )
 
     with respx.mock(base_url=BASE) as router:
-        router.post("/bridge/plugins/p/state").respond(json=_state_response(source_id=7))
-        router.post("/bridge/plugins/p/ingest").mock(side_effect=handler)
-        with BridgeClient(BASE, "p", "outlook") as c:
+        router.post("/gateway/plugins/p/state").respond(json=_state_response(source_id=7))
+        router.post("/gateway/plugins/p/ingest").mock(side_effect=handler)
+        with GatewayClient(BASE, "p", "outlook") as c:
             c.post_ingest_batch(
                 [
                     {
@@ -98,11 +98,11 @@ def test_post_ingest_strips_source_id_field() -> None:
 
 def test_put_checkpoint_sends_cursor() -> None:
     with respx.mock(base_url=BASE) as router:
-        router.post("/bridge/plugins/p/state").respond(json=_state_response(source_id=7))
-        put_route = router.put("/bridge/plugins/p/cursor").respond(
+        router.post("/gateway/plugins/p/state").respond(json=_state_response(source_id=7))
+        put_route = router.put("/gateway/plugins/p/cursor").respond(
             json=_state_response(source_id=7, cursor={"x": 1})
         )
-        with BridgeClient(BASE, "p", "outlook") as c:
+        with GatewayClient(BASE, "p", "outlook") as c:
             c.put_checkpoint(0, {"x": 1})
         assert put_route.called
         body = json.loads(router.calls[-1].request.read())
@@ -111,22 +111,22 @@ def test_put_checkpoint_sends_cursor() -> None:
 
 def test_bearer_auth_propagates() -> None:
     with respx.mock(base_url=BASE) as router:
-        router.post("/bridge/plugins/p/state").respond(json=_state_response(source_id=7))
-        with BridgeClient(BASE, "p", "outlook", api_token="tok") as c:
+        router.post("/gateway/plugins/p/state").respond(json=_state_response(source_id=7))
+        with GatewayClient(BASE, "p", "outlook", api_token="tok") as c:
             c.get_checkpoint()
         assert router.calls[0].request.headers["authorization"] == "Bearer tok"
 
 
 def test_get_sources_by_type_returns_empty() -> None:
-    """No aplica al bridge — solo verifica que la firma MemexSink no rompa."""
-    with BridgeClient(BASE, "p", "outlook") as c:
+    """No aplica al gateway — solo verifica que la firma MemexSink no rompa."""
+    with GatewayClient(BASE, "p", "outlook") as c:
         assert c.get_sources_by_type("imap") == []
 
 
 def test_ensure_source_is_disabled() -> None:
     import pytest
 
-    from memex.ingestors.http_client import MemexAPIError
+    from memex.ingestors.memex_server_client import MemexAPIError
 
-    with BridgeClient(BASE, "p", "outlook") as c, pytest.raises(MemexAPIError):
+    with GatewayClient(BASE, "p", "outlook") as c, pytest.raises(MemexAPIError):
         c.ensure_source("x", "imap")

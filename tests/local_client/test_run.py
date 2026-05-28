@@ -6,10 +6,10 @@ from typing import Any
 import respx
 
 from memex.ingestors.runner import RunStats
-from memex_local.discovery import discover_plugins
-from memex_local.registry import enable
-from memex_local.run import execute_plugin, load_plugin_config
-from memex_local.state import State
+from memex_local_client.discovery import discover_plugins
+from memex_local_client.registry import enable
+from memex_local_client.run import execute_plugin, load_plugin_config
+from memex_local_client.state import State
 
 _PLUGIN_WITH_TWO_RECORDS = """
 from collections.abc import Mapping
@@ -92,20 +92,20 @@ def test_execute_plugin_calls_state_ingest_and_cursor(plugin_dir_factory: Any) -
     enable("p2", state, disc.plugins)
 
     with respx.mock(base_url=BASE_URL) as router:
-        router.post("/bridge/plugins/p2/state").respond(
+        router.post("/gateway/plugins/p2/state").respond(
             json={"source_id": 77, "cursor": None, "created": True}
         )
-        ingest_route = router.post("/bridge/plugins/p2/ingest").respond(
+        ingest_route = router.post("/gateway/plugins/p2/ingest").respond(
             json={"source_id": 77, "inserted": 2, "duplicates": 0, "errors": 0}
         )
-        router.put("/bridge/plugins/p2/cursor").respond(
+        router.put("/gateway/plugins/p2/cursor").respond(
             json={"source_id": 77, "cursor": {"last": "e2"}, "created": False}
         )
 
         stats: RunStats = execute_plugin(
             plugin,
             state=state,
-            bridge_url=BASE_URL,
+            gateway_url=BASE_URL,
             api_token=None,
             plugins_root=plugin_dir_factory.root,
             chunk_size=10,
@@ -153,7 +153,7 @@ def validate_requirements(local_config: Mapping[str, Any]) -> list:
         execute_plugin(
             plugin,
             state=state,
-            bridge_url=BASE_URL,
+            gateway_url=BASE_URL,
             api_token=None,
             plugins_root=plugin_dir_factory.root,
         )
@@ -175,20 +175,20 @@ def test_execute_plugin_marks_error_on_runner_failure(plugin_dir_factory: Any) -
 
     with respx.mock(base_url=BASE_URL) as router:
         # /state OK, /ingest 500 — el runner re-lanza tras agotar retries
-        router.post("/bridge/plugins/p2/state").respond(
+        router.post("/gateway/plugins/p2/state").respond(
             json={"source_id": 77, "cursor": None, "created": True}
         )
-        router.post("/bridge/plugins/p2/ingest").respond(500)
+        router.post("/gateway/plugins/p2/ingest").respond(500)
 
         import pytest
 
-        from memex.ingestors.http_client import MemexAPIError
+        from memex.ingestors.memex_server_client import MemexAPIError
 
         with pytest.raises(MemexAPIError):
             execute_plugin(
                 plugin,
                 state=state,
-                bridge_url=BASE_URL,
+                gateway_url=BASE_URL,
                 api_token=None,
                 plugins_root=plugin_dir_factory.root,
                 chunk_sleep_ms=0,

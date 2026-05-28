@@ -23,12 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from memex.logging import get_logger
-from memex_local.discovery import discover_plugins
-from memex_local.protocol import LocalPlugin
-from memex_local.run import execute_plugin
-from memex_local.state import State
+from memex_local_client.discovery import discover_plugins
+from memex_local_client.protocol import LocalPlugin
+from memex_local_client.run import execute_plugin
+from memex_local_client.state import State
 
-_log = get_logger("memex_local.scheduler")
+_log = get_logger("memex_local_client.scheduler")
 
 # ISO 8601 PnDTnHnMnS, subconjunto: PT5M, PT1H, PT24H, P1D, P1DT2H30M, etc.
 _DURATION_RE = re.compile(
@@ -73,7 +73,7 @@ def _build_runtimes(
             interval = parse_duration(schedule)
         except ValueError as e:
             _log.warning(
-                "memex_local.scheduler.bad_schedule",
+                "memex_local_client.scheduler.bad_schedule",
                 plugin=name,
                 schedule=schedule,
                 error=str(e),
@@ -91,8 +91,8 @@ def _backoff_seconds(failures: int) -> float:
 class Scheduler:
     """Loop principal. Single-thread, polling-based.
 
-    Recibe el URL del bridge y el token al construirse; por cada dispatch
-    el wrapper `execute_plugin` levanta un BridgeClient específico al plugin
+    Recibe el URL del gateway y el token al construirse; por cada dispatch
+    el wrapper `execute_plugin` levanta un GatewayClient específico al plugin
     que está corriendo en ese momento. No hay cliente HTTP compartido entre
     plugins — cada uno tiene el suyo y vive solo el tiempo de su corrida.
     """
@@ -101,13 +101,13 @@ class Scheduler:
         self,
         *,
         state: State,
-        bridge_url: str,
+        gateway_url: str,
         api_token: str | None,
         plugins_root: Path,
         tick_seconds: float = 1.0,
     ) -> None:
         self._state = state
-        self._bridge_url = bridge_url
+        self._gateway_url = gateway_url
         self._api_token = api_token
         self._plugins_root = plugins_root
         self._tick_s = tick_seconds
@@ -133,14 +133,14 @@ class Scheduler:
         self._tick(runtimes, now)
 
     def run_forever(self) -> None:
-        _log.info("memex_local.scheduler.start")
+        _log.info("memex_local_client.scheduler.start")
         while not self._stop.is_set():
             try:
                 self.run_once()
             except Exception as e:
-                _log.exception("memex_local.scheduler.tick_failed", exc=str(e))
+                _log.exception("memex_local_client.scheduler.tick_failed", exc=str(e))
             self._stop.wait(self._tick_s)
-        _log.info("memex_local.scheduler.stop")
+        _log.info("memex_local_client.scheduler.stop")
 
     def _tick(self, runtimes: dict[str, _PluginRuntime], now: float) -> None:
         for name, rt in runtimes.items():
@@ -151,7 +151,7 @@ class Scheduler:
                 execute_plugin(
                     rt.plugin,
                     state=self._state,
-                    bridge_url=self._bridge_url,
+                    gateway_url=self._gateway_url,
                     api_token=self._api_token,
                     plugins_root=self._plugins_root,
                 )
@@ -162,7 +162,7 @@ class Scheduler:
                 backoff = _backoff_seconds(rt.failure_count)
                 rt.next_run_at = now + backoff
                 log.warning(
-                    "memex_local.scheduler.plugin_unhealthy",
+                    "memex_local_client.scheduler.plugin_unhealthy",
                     failures=rt.failure_count,
                     backoff_s=backoff,
                     error=str(e),

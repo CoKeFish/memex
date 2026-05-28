@@ -1,6 +1,6 @@
 """MemexSink Protocol — the contract any "thing that talks to memex" must satisfy.
 
-Why a Protocol instead of using `MemexClient` directly: code that consumes
+Why a Protocol instead of using `MemexServerClient` directly: code that consumes
 this contract (notably `run_ingestor`) types against the Protocol, not the
 concrete HTTP client. That means:
 
@@ -8,11 +8,11 @@ concrete HTTP client. That means:
   * Future transports (e.g. an in-process call when ingestor and API are
     colocated, or a gRPC client, or a queue producer) drop in without
     touching the consumer.
-  * The `MemexClient` class is one valid implementation, not THE only one.
+  * The `MemexServerClient` class is one valid implementation, not THE only one.
 
 The discipline is enforced by lint (see tests/test_typing_discipline.py):
 modules that orchestrate ingestion must reference `MemexSink` in annotations,
-never `MemexClient` directly.
+never `MemexServerClient` directly.
 """
 
 from __future__ import annotations

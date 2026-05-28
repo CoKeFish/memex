@@ -9,7 +9,7 @@ def home_dir() -> Path:
     override = os.environ.get("MEMEX_LOCAL_HOME")
     if override:
         return Path(override)
-    return Path.home() / ".memex-local"
+    return Path.home() / ".memex-local-client"
 
 
 def plugins_dir() -> Path:

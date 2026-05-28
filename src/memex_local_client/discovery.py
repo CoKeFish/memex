@@ -1,7 +1,7 @@
 """Carga dinámica de plugins desde el filesystem.
 
 El usuario dropea un plugin (paquete Python con `__init__.py` que cumple
-`LocalPlugin`) en `~/.memex-local/plugins/<nombre>/`. Al arrancar el daemon
+`LocalPlugin`) en `~/.memex-local-client/plugins/<nombre>/`. Al arrancar el daemon
 (o vía `plugin list`), se escanea ese directorio y se intenta importar cada
 subdirectorio como módulo.
 
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from memex_local.protocol import LocalPlugin
+from memex_local_client.protocol import LocalPlugin
 
 
 @dataclass(frozen=True)
@@ -94,7 +94,7 @@ def _load_plugin(plugin_dir: Path) -> Any:
     módulo entero (un módulo puede satisfacer el Protocol estructuralmente
     si sus top-level vars + funciones cumplen la firma).
     """
-    mod_name = f"memex_local._plugins.{plugin_dir.name}"
+    mod_name = f"memex_local_client._plugins.{plugin_dir.name}"
     spec = importlib.util.spec_from_file_location(
         mod_name, plugin_dir / "__init__.py", submodule_search_locations=[str(plugin_dir)]
     )

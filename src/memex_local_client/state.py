@@ -6,10 +6,10 @@ Tres tablas:
               su última corrida.
 - `runs`     — historial de ciclos de ingestión (uno por intento por plugin),
               con stats y error si lo hubo.
-- `pending`  — buffer de registros que no pudieron entregarse al bridge
+- `pending`  — buffer de registros que no pudieron entregarse al gateway
               (transporte caído, retry). Memex deduplica server-side, pero
               tener un buffer local ahorra re-fetchear desde la fuente
-              cuando el bridge vuelve.
+              cuando el gateway vuelve.
 
 Los checkpoints (cursores IMAP, etc.) **no viven acá** — viven en memex vía
 `/sources/{id}/checkpoint`, igual que para los ingestors del VPS. Decisión
@@ -265,7 +265,7 @@ def _row_to_run(r: sqlite3.Row) -> RunRow:
 def open_state(db_path: Path | str | None = None) -> State:
     """Helper para abrir la SQLite con el path por defecto del cliente."""
     if db_path is None:
-        from memex_local.paths import ensure_layout, state_db_path
+        from memex_local_client.paths import ensure_layout, state_db_path
 
         ensure_layout()
         db_path = state_db_path()

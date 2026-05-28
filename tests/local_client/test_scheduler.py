@@ -5,10 +5,10 @@ from typing import Any
 import pytest
 
 from memex.ingestors.runner import RunStats
-from memex_local.discovery import discover_plugins
-from memex_local.registry import enable
-from memex_local.scheduler import Scheduler, parse_duration
-from memex_local.state import State
+from memex_local_client.discovery import discover_plugins
+from memex_local_client.registry import enable
+from memex_local_client.scheduler import Scheduler, parse_duration
+from memex_local_client.state import State
 
 _VALID = """
 from collections.abc import Mapping
@@ -48,7 +48,7 @@ def test_parse_duration_rejects_garbage() -> None:
 def _make_scheduler(state: State, plugins_root: Any) -> Scheduler:
     return Scheduler(
         state=state,
-        bridge_url="http://localhost:8787",
+        gateway_url="http://localhost:8787",
         api_token=None,
         plugins_root=plugins_root,
     )
@@ -67,13 +67,13 @@ def test_run_once_dispatches_enabled_plugin(
 
     def fake_execute(plugin: Any, **kwargs: Any) -> RunStats:
         # Verifica que el scheduler pasa los args correctos.
-        assert kwargs["bridge_url"] == "http://localhost:8787"
+        assert kwargs["gateway_url"] == "http://localhost:8787"
         assert kwargs["api_token"] is None
         assert kwargs["state"] is state
         calls.append(plugin.name)
         return RunStats(posted=0, inserted=0, duplicates=0, errors=0, ms_elapsed=1)
 
-    monkeypatch.setattr("memex_local.scheduler.execute_plugin", fake_execute)
+    monkeypatch.setattr("memex_local_client.scheduler.execute_plugin", fake_execute)
     sched.run_once()
     assert calls == ["p1"]
 
@@ -91,7 +91,7 @@ def test_run_once_skips_disabled_plugins(
         calls.append(plugin.name)
         return RunStats(0, 0, 0, 0, 1)
 
-    monkeypatch.setattr("memex_local.scheduler.execute_plugin", record)
+    monkeypatch.setattr("memex_local_client.scheduler.execute_plugin", record)
     sched.run_once()
     assert calls == []
 
@@ -108,7 +108,7 @@ def test_plugin_failure_triggers_backoff(
     def explode(plugin: Any, **kwargs: Any) -> RunStats:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("memex_local.scheduler.execute_plugin", explode)
+    monkeypatch.setattr("memex_local_client.scheduler.execute_plugin", explode)
     # Si no absorbe el error, el run_once levanta.
     sched.run_once()
 
@@ -129,6 +129,6 @@ def test_run_once_handles_bad_schedule_gracefully(
         calls.append(plugin.name)
         return RunStats(0, 0, 0, 0, 1)
 
-    monkeypatch.setattr("memex_local.scheduler.execute_plugin", record)
+    monkeypatch.setattr("memex_local_client.scheduler.execute_plugin", record)
     sched.run_once()
     assert calls == []
