@@ -1,7 +1,7 @@
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import text
+from sqlalchemy import Connection, text
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
@@ -10,6 +10,7 @@ from memex.api.schemas import (
     IngestRequest,
     IngestResponse,
 )
+from memex.core import filters
 from memex.core.inbox import insert_record
 from memex.core.source import SourceRecord
 from memex.db import connection
@@ -30,6 +31,15 @@ def _to_source_record(req: IngestRequest) -> SourceRecord:
         payload=req.payload,
         dedupe_keys=req.dedupe_keys,
     )
+
+
+def _resolve_source_type(conn: Connection, source_id: int) -> str | None:
+    """Lookup `sources.type` for a given source_id. None if not found."""
+    row = conn.execute(
+        text("SELECT type FROM sources WHERE id = :sid"),
+        {"sid": source_id},
+    ).scalar()
+    return str(row) if row is not None else None
 
 
 @router.post("", response_model=IngestResponse)
@@ -57,11 +67,35 @@ async def ingest_one(
     )
     try:
         with connection() as conn:
+            source_type = _resolve_source_type(conn, body.source_id)
+            rules = filters.load_active_rules(
+                conn,
+                user_id=user_id,
+                source_type=source_type,
+                source_id=body.source_id,
+            )
+            kept, drops = filters.apply(
+                [_to_source_record(body)],
+                rules,
+                source_id=body.source_id,
+                source_type=source_type,
+            )
+            if not kept:
+                _log.info(
+                    "ingest.committed",
+                    user_id=user_id,
+                    source_id=body.source_id,
+                    inserted=0,
+                    duplicates=0,
+                    errors=0,
+                    filtered=sum(drops.values()),
+                )
+                return {"inserted": False, "id": None, "reason": "filtered"}
             result = insert_record(
                 conn,
                 user_id=user_id,
                 source_id=body.source_id,
-                record=_to_source_record(body),
+                record=kept[0],
             )
     except ValueError as e:
         _log.warning(
@@ -93,22 +127,51 @@ async def ingest_batch(body: IngestBatchRequest, user_id: UserID) -> dict[str, i
         count=len(body.records),
         source_ids=sorted({r.source_id for r in body.records}),
     )
-    inserted = duplicates = errors = 0
+    inserted = duplicates = errors = filtered = 0
     with connection() as conn:
+        # Cache per (source_id) — lookup source_type once, load rules once.
+        type_cache: dict[int, str | None] = {}
+        rules_cache: dict[int, list[filters.FilterRule]] = {}
+
+        # Group records by source_id so apply() can batch the drop counter
+        # per source (the structlog event aggregates by rule_id).
+        by_source: dict[int, list[IngestRequest]] = {}
         for req in body.records:
-            try:
-                result = insert_record(
+            by_source.setdefault(req.source_id, []).append(req)
+
+        for source_id, reqs in by_source.items():
+            if source_id not in type_cache:
+                type_cache[source_id] = _resolve_source_type(conn, source_id)
+            source_type = type_cache[source_id]
+            if source_id not in rules_cache:
+                rules_cache[source_id] = filters.load_active_rules(
                     conn,
                     user_id=user_id,
-                    source_id=req.source_id,
-                    record=_to_source_record(req),
+                    source_type=source_type,
+                    source_id=source_id,
                 )
-                if result.inserted:
-                    inserted += 1
-                else:
-                    duplicates += 1
-            except ValueError:
-                errors += 1
+            records = [_to_source_record(r) for r in reqs]
+            kept, drops = filters.apply(
+                records,
+                rules_cache[source_id],
+                source_id=source_id,
+                source_type=source_type,
+            )
+            filtered += sum(drops.values())
+            for record in kept:
+                try:
+                    result = insert_record(
+                        conn,
+                        user_id=user_id,
+                        source_id=source_id,
+                        record=record,
+                    )
+                    if result.inserted:
+                        inserted += 1
+                    else:
+                        duplicates += 1
+                except ValueError:
+                    errors += 1
     _log.info(
         "ingest.committed",
         user_id=user_id,
@@ -116,5 +179,6 @@ async def ingest_batch(body: IngestBatchRequest, user_id: UserID) -> dict[str, i
         inserted=inserted,
         duplicates=duplicates,
         errors=errors,
+        filtered=filtered,
     )
     return {"inserted": inserted, "duplicates": duplicates, "errors": errors}

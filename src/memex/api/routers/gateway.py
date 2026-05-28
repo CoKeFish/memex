@@ -36,7 +36,7 @@ from memex.api.schemas import (
     GatewayStateRequest,
     GatewayStateResponse,
 )
-from memex.core import checkpoint
+from memex.core import checkpoint, filters
 from memex.core.inbox import insert_record
 from memex.core.source import SourceRecord
 from memex.db import connection
@@ -93,6 +93,14 @@ def _resolve_source_id(conn: Connection, user_id: int, name: str) -> int:
     return int(sid)
 
 
+def _resolve_source_type(conn: Connection, source_id: int) -> str | None:
+    row = conn.execute(
+        text("SELECT type FROM sources WHERE id = :sid"),
+        {"sid": source_id},
+    ).scalar()
+    return str(row) if row is not None else None
+
+
 @router.post("/plugins/{plugin_name}/state", response_model=GatewayStateResponse)
 async def plugin_state(
     plugin_name: str,
@@ -145,6 +153,7 @@ async def plugin_ingest(
     _validate_plugin_name(plugin_name)
     with connection() as conn:
         source_id = _resolve_source_id(conn, user_id, plugin_name)
+        source_type = _resolve_source_type(conn, source_id)
         _log.info(
             "gateway.ingest.received",
             plugin=plugin_name,
@@ -152,19 +161,36 @@ async def plugin_ingest(
             source_id=source_id,
             count=len(body.records),
         )
+        rules = filters.load_active_rules(
+            conn,
+            user_id=user_id,
+            source_type=source_type,
+            source_id=source_id,
+        )
+        records = [
+            SourceRecord(
+                external_id=req.external_id,
+                occurred_at=req.occurred_at,
+                payload=req.payload,
+                dedupe_keys=req.dedupe_keys,
+            )
+            for req in body.records
+        ]
+        kept, drops = filters.apply(
+            records,
+            rules,
+            source_id=source_id,
+            source_type=source_type,
+        )
+        filtered = sum(drops.values())
         inserted = duplicates = errors = 0
-        for req in body.records:
+        for record in kept:
             try:
                 result = insert_record(
                     conn,
                     user_id=user_id,
                     source_id=source_id,
-                    record=SourceRecord(
-                        external_id=req.external_id,
-                        occurred_at=req.occurred_at,
-                        payload=req.payload,
-                        dedupe_keys=req.dedupe_keys,
-                    ),
+                    record=record,
                 )
                 if result.inserted:
                     inserted += 1
@@ -180,6 +206,7 @@ async def plugin_ingest(
         inserted=inserted,
         duplicates=duplicates,
         errors=errors,
+        filtered=filtered,
     )
     return {
         "source_id": source_id,

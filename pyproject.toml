@@ -39,6 +39,7 @@ packages = ["src/memex", "src/memex_local_client"]
 
 [project.scripts]
 memex-local-client = "memex_local_client.cli:main"
+memex-filters = "memex.cli.filters:main"
 
 [tool.ruff]
 target-version = "py312"
