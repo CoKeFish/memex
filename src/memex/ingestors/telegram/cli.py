@@ -1,6 +1,6 @@
-"""CLI `memex-telegram` — auth, run, discover.
+"""CLI `memex-telegram` — auth, run, discover, listen.
 
-Tres subcomandos:
+Subcomandos:
 
   auth      — interactiva (SMS). Crea/renueva el session file de Telethon.
               Bloquea pidiendo el código por stdin. Run-once por VPS.
@@ -10,6 +10,10 @@ Tres subcomandos:
   discover  — lista los dialogs (chats) accesibles desde la session
               actual, imprimiendo `chat_id` + nombre + tipo. Útil para
               poblar `allowed_chats` en `sources.config`. NO persiste nada.
+  listen    — dev/debug: escucha los chats `streaming=True` en vivo e imprime
+              cada mensaje a stdout. NO persiste — sirve para verificar
+              allowlist/topics sin tocar la DB. En producción el listener
+              corre dentro del lifespan de FastAPI (`StreamingRunner`), NO acá.
 
 Reads `MEMEX_BASE_URL` y `MEMEX_API_TOKEN` del entorno (con `.env` auto-load).
 
@@ -29,13 +33,15 @@ from typing import Any
 from dotenv import load_dotenv
 from telethon import TelegramClient
 
+from memex.core.cursors import TelegramCursor
 from memex.core.observability import ingestion_run
-from memex.core.source import SourceConfigError
+from memex.core.source import SourceConfigError, SourceRecord
 from memex.ingestors.memex_server_client import MemexAPIError, MemexServerClient
 from memex.ingestors.runner import run_ingestor
 from memex.ingestors.telegram.client import TelegramClientWrapper
 from memex.ingestors.telegram.config import TelegramConfig, TelegramConfigError
 from memex.ingestors.telegram.source import make_source
+from memex.ingestors.telegram.streaming import TelegramStreamingSource
 from memex.logging import get_logger, setup_logging
 
 
@@ -89,6 +95,17 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=200,
         help="Max dialogs to list (default 200).",
+    )
+
+    listen_p = sub.add_parser(
+        "listen",
+        help="Dev/debug: stream streaming=True chats live to stdout (no persistence).",
+    )
+    listen_p.add_argument(
+        "--source-id",
+        type=int,
+        required=True,
+        help="Source id whose streaming chats we listen to.",
     )
 
     return parser
@@ -258,6 +275,52 @@ def _cmd_discover(args: argparse.Namespace, client: MemexServerClient, log: Any)
     return asyncio.run(_do_discover())
 
 
+def _cmd_listen(args: argparse.Namespace, client: MemexServerClient, log: Any) -> int:
+    """Dev/debug: escucha chats streaming en vivo e imprime a stdout.
+
+    NO persiste — solo imprime. Para depurar allowlist/topics. El cursor
+    inicial se lee de memex vía HTTP para que el catchup arranque del punto
+    guardado (sin re-imprimir todo el historial).
+    """
+    sources = _select_sources(client, args.source_id)
+    if not sources:
+        log.error("telegram.cli.source.not_found", source_id=args.source_id)
+        return 1
+    cfg = _resolve_config(sources[0], log)
+    if cfg is None:
+        return 1
+
+    source = TelegramStreamingSource(cfg)
+    raw_cursor = client.get_checkpoint(args.source_id) or {}
+    cursor = TelegramCursor.model_validate(raw_cursor)
+
+    async def _print(record: SourceRecord) -> None:
+        text = str(record.payload.get("text", ""))[:100]
+        print(f"[{record.external_id}] {text}")
+
+    async def _run() -> None:
+        print("\nCatchup desde el cursor guardado...\n")
+        async for rec in source.catchup(cursor):
+            await _print(rec)
+        print("\nEscuchando en vivo (Ctrl+C para salir)...\n")
+        await source.listen(_print)
+
+    try:
+        asyncio.run(_run())
+        return 0
+    except KeyboardInterrupt:
+        print("\nDetenido.")
+        return 0
+    except Exception as e:
+        log.error(
+            "telegram.cli.listen.failed",
+            source_id=args.source_id,
+            exc_type=type(e).__name__,
+            exc_msg=str(e),
+        )
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -279,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_auth(args, client, log)
             if args.cmd == "discover":
                 return _cmd_discover(args, client, log)
+            if args.cmd == "listen":
+                return _cmd_listen(args, client, log)
             log.error("telegram.cli.unknown_command", cmd=args.cmd)
             return 1
     except MemexAPIError as e:

@@ -40,20 +40,32 @@ from memex.core.payloads import TelegramPayload, TelegramSender
 from memex.core.source import SourceRecord
 
 
-def parse_telegram_message(msg: Any) -> SourceRecord | None:
+def parse_telegram_message(
+    msg: Any,
+    *,
+    chat: Any = None,
+    sender: Any = None,
+) -> SourceRecord | None:
     """Convierte un `telethon.tl.custom.message.Message` en `SourceRecord`.
 
     Retorna `None` si el mensaje debe descartarse (DM, sin chat, sin id, etc.).
     El caller debe filtrar `None` antes de yieldear.
 
+    `chat` / `sender` son overrides opcionales. En el path de **polling**
+    (`iter_messages`) el `msg` ya trae `.chat` y `.sender` resueltos, así que
+    se omiten. En el path de **streaming** (eventos live), `msg.chat`/`.sender`
+    pueden venir `None` o "min" — el caller resuelve `await event.get_chat()`
+    y `await event.get_sender()` y los pasa explícitos. Defaults `None` →
+    fallback a `msg.chat` / `msg.sender`.
+
     Acepta `Any` en la signature porque Telethon no exporta el tipo `Message`
     completo en estable; el contrato real es structural-typing.
     """
-    chat = _get_attr(msg, "chat", None)
-    if chat is None:
+    resolved_chat = chat if chat is not None else _get_attr(msg, "chat", None)
+    if resolved_chat is None:
         return None
 
-    chat_kind = _classify_chat(chat)
+    chat_kind = _classify_chat(resolved_chat)
     if chat_kind is None or chat_kind == "dm":
         # Fail-closed: tipo desconocido o DM → no persistimos. La política de
         # privacidad excluye DMs y agregar un tipo nuevo de peer no debe
@@ -64,8 +76,8 @@ def parse_telegram_message(msg: Any) -> SourceRecord | None:
     if not isinstance(message_id, int) or message_id <= 0:
         return None
 
-    chat_id = get_peer_id(chat)
-    chat_title = _get_attr(chat, "title", None)
+    chat_id = get_peer_id(resolved_chat)
+    chat_title = _get_attr(resolved_chat, "title", None)
 
     occurred_at = _get_attr(msg, "date", None)
     if occurred_at is None:
@@ -74,7 +86,8 @@ def parse_telegram_message(msg: Any) -> SourceRecord | None:
         occurred_at = occurred_at.replace(tzinfo=UTC)
 
     topic_id = _extract_topic_id(msg)
-    sender = _build_sender(msg)
+    resolved_sender = sender if sender is not None else _get_attr(msg, "sender", None)
+    sender_model = _build_sender_from(resolved_sender)
     text = _get_attr(msg, "message", None) or _get_attr(msg, "text", None) or ""
     reply_to_message_id = _extract_reply_to_message_id(msg, topic_id)
     forwarded_from = _extract_forwarded_from(msg)
@@ -86,7 +99,7 @@ def parse_telegram_message(msg: Any) -> SourceRecord | None:
         chat_title=chat_title,
         topic_id=topic_id,
         message_id=message_id,
-        sender=sender,
+        sender=sender_model,
         date=occurred_at,
         text=text,
         reply_to_message_id=reply_to_message_id,
@@ -166,12 +179,12 @@ def _extract_reply_to_message_id(msg: Any, topic_id: int | None) -> int | None:
     return raw
 
 
-def _build_sender(msg: Any) -> TelegramSender | None:
-    """Construye `TelegramSender` desde `msg.sender` o `msg.from_id`.
+def _build_sender_from(sender: Any) -> TelegramSender | None:
+    """Construye `TelegramSender` desde un objeto sender ya resuelto.
 
-    Retorna None para service messages, posts de canal anónimos, etc.
+    Retorna None para service messages, posts de canal anónimos, o cuando el
+    sender no se pudo resolver.
     """
-    sender = _get_attr(msg, "sender", None)
     if sender is None:
         return None
     user_id = _get_attr(sender, "id", None)

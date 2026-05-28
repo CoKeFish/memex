@@ -83,7 +83,16 @@ def conn() -> Iterator[Any]:
 
 @pytest.fixture
 def client() -> Any:
-    """FastAPI TestClient with auth NOT enforced."""
+    """FastAPI TestClient with auth NOT enforced.
+
+    NOTE: returned WITHOUT a context manager on purpose. The ASGI lifespan
+    (which calls `build_streaming_runner()` + starts the StreamingRunner and
+    touches the DB) only runs when the client is used as
+    `with TestClient(app) as client:`. Plain `client.get(...)` tests must NOT
+    pay that cost or start a Telegram listener — keep this returning the bare
+    client. Lifespan startup/shutdown is covered explicitly in
+    tests/test_streaming_bootstrap.py.
+    """
     from fastapi.testclient import TestClient
 
     from memex.api.app import app

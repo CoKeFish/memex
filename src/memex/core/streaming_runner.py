@@ -191,23 +191,34 @@ class StreamingRunner:
         self._tasks = []
 
     async def _supervise(self, reg: RegisteredStreamingSource) -> None:
-        """Run-loop con backoff. Reconnecta hasta dead-letter o stop."""
-        cursor_raw = self._load(reg.source_id) or {}
-        cursor: BaseModel = reg.source.checkpoint_schema.model_validate(cursor_raw)
-        running = _RunningSource(
-            registered=reg,
-            cursor=cursor,
-            save=self._save,
-            log=self._log.bind(source_id=reg.source_id, source_type=reg.source.type),
-        )
-        running.log.info("streaming_runner.source_started")
+        """Run-loop con backoff. Reconnecta hasta dead-letter o stop.
 
+        El checkpoint inicial se carga DENTRO del loop supervisado (no antes):
+        si el store está caído cuando arranca el task, la falla entra al mismo
+        camino de backoff + retry + dead_letter que cualquier otra, en vez de
+        matar el task asyncio en silencio. Una vez cargado, el `_RunningSource`
+        conserva el cursor en memoria (avanzado por record) a través de
+        reconnects — no se re-lee del store en cada reintento.
+        """
+        log = self._log.bind(source_id=reg.source_id, source_type=reg.source.type)
+        log.info("streaming_runner.source_started")
+
+        running: _RunningSource | None = None
         backoff = self._initial_backoff
         retries = 0
         reason = "disconnect"
         try:
             while not self._stopping:
                 try:
+                    if running is None:
+                        cursor_raw = self._load(reg.source_id) or {}
+                        cursor: BaseModel = reg.source.checkpoint_schema.model_validate(cursor_raw)
+                        running = _RunningSource(
+                            registered=reg,
+                            cursor=cursor,
+                            save=self._save,
+                            log=log,
+                        )
                     await running.run_once()
                     reason = "disconnect"
                     break
@@ -217,14 +228,14 @@ class StreamingRunner:
                 except Exception as e:
                     retries += 1
                     if retries > self._max_retries:
-                        running.log.error(
+                        log.error(
                             "streaming_runner.source_dead_letter",
                             retries=retries,
                             error=str(e),
                         )
                         reason = "dead_letter"
                         break
-                    running.log.warning(
+                    log.warning(
                         "streaming_runner.source_reconnect",
                         retry=retries,
                         backoff_s=backoff,
@@ -237,4 +248,4 @@ class StreamingRunner:
                         raise
                     backoff = min(backoff * 2.0, self._max_backoff)
         finally:
-            running.log.info("streaming_runner.source_stopped", reason=reason)
+            log.info("streaming_runner.source_stopped", reason=reason)

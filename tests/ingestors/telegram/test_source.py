@@ -132,7 +132,7 @@ def test_fetch_includes_polling_chats_excludes_streaming(
             yield  # pragma: no cover
 
     monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _FakeTC)
-    monkeypatch.setattr("memex.ingestors.telegram.source.parse_telegram_message", lambda _m: None)
+    monkeypatch.setattr("memex.ingestors.telegram._common.parse_telegram_message", lambda _m: None)
 
     list(src.fetch(TelegramCursor()))
     assert chats_queried == [-100, -300]  # -200 excluded
@@ -173,7 +173,7 @@ def test_fetch_passes_per_chat_min_id_from_cursor(
             yield  # pragma: no cover
 
     monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _FakeTC)
-    monkeypatch.setattr("memex.ingestors.telegram.source.parse_telegram_message", lambda _m: None)
+    monkeypatch.setattr("memex.ingestors.telegram._common.parse_telegram_message", lambda _m: None)
 
     list(src.fetch(cursor))
     assert seen == [(-100, 42), (-200, 99)]
@@ -206,7 +206,7 @@ def test_fetch_uses_min_id_zero_when_chat_not_in_cursor(
             yield  # pragma: no cover
 
     monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _FakeTC)
-    monkeypatch.setattr("memex.ingestors.telegram.source.parse_telegram_message", lambda _m: None)
+    monkeypatch.setattr("memex.ingestors.telegram._common.parse_telegram_message", lambda _m: None)
 
     list(src.fetch(cursor))
     assert seen == [(-100, 0)]
@@ -242,7 +242,7 @@ def test_fetch_yields_records_from_parser(monkeypatch: pytest.MonkeyPatch) -> No
         return expected[i]
 
     monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _FakeTC)
-    monkeypatch.setattr("memex.ingestors.telegram.source.parse_telegram_message", _fake_parse)
+    monkeypatch.setattr("memex.ingestors.telegram._common.parse_telegram_message", _fake_parse)
 
     records = list(src.fetch(TelegramCursor()))
     assert records == expected
@@ -276,7 +276,7 @@ def test_fetch_drops_records_when_parser_returns_none(
     return_seq = iter([None, kept, None])
     monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _FakeTC)
     monkeypatch.setattr(
-        "memex.ingestors.telegram.source.parse_telegram_message",
+        "memex.ingestors.telegram._common.parse_telegram_message",
         lambda _m: next(return_seq),
     )
 
@@ -314,7 +314,7 @@ def test_fetch_topic_filter_drops_records_in_disallowed_topic(
     return_seq = iter([in_topic, out_topic, no_topic])
     monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _FakeTC)
     monkeypatch.setattr(
-        "memex.ingestors.telegram.source.parse_telegram_message",
+        "memex.ingestors.telegram._common.parse_telegram_message",
         lambda _m: next(return_seq),
     )
 
@@ -431,7 +431,8 @@ async def test_health_check_returns_healthy_when_client_connects(
 
             return _Me()
 
-    monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _FakeTC)
+    # health_check delega a _common.telegram_health_probe, que abre el wrapper.
+    monkeypatch.setattr("memex.ingestors.telegram._common.TelegramClientWrapper", _FakeTC)
     result = await TelegramSource(_cfg()).health_check()
     assert isinstance(result, HealthResult)
     assert result.status == "healthy"
@@ -452,7 +453,7 @@ async def test_health_check_returns_unhealthy_when_client_fails(
         async def __aexit__(self, *a: Any) -> None:
             pass
 
-    monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _BadTC)
+    monkeypatch.setattr("memex.ingestors.telegram._common.TelegramClientWrapper", _BadTC)
     result = await TelegramSource(_cfg()).health_check()
     assert result.status == "unhealthy"
     assert "ConnectionRefusedError" in result.detail

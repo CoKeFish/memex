@@ -19,16 +19,20 @@ exige sync).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from types import TracebackType
 from typing import Any
 
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.tl.custom.dialog import Dialog
 from telethon.tl.custom.message import Message
 
 from memex.ingestors.telegram.config import TelegramConfig
 from memex.logging import get_logger
+
+EventCallback = Callable[[Any], Awaitable[None]]
+"""Callback async para un evento Telethon. Recibe el `event` (proxy sobre el
+Message); el caller resuelve `await event.get_chat()` / `get_sender()`."""
 
 
 class TelegramClientWrapper:
@@ -46,8 +50,14 @@ class TelegramClientWrapper:
     bloquearse pidiendo SMS code.
     """
 
-    def __init__(self, cfg: TelegramConfig) -> None:
+    def __init__(self, cfg: TelegramConfig, *, sequential_updates: bool = False) -> None:
         self.cfg = cfg
+        # `sequential_updates=True` hace que Telethon procese los handlers de
+        # update UNO A LA VEZ (en vez del default concurrente). Es obligatorio
+        # para el listener streaming: el runner avanza el cursor por record y
+        # handlers concurrentes lo correrían. El polling no usa update dispatch,
+        # así que su default (False) es indiferente.
+        self._sequential_updates = sequential_updates
         self._log = get_logger("memex.ingestors.telegram.client").bind(
             phone=cfg.phone_masked,
             session_name=cfg.session_name,
@@ -68,6 +78,7 @@ class TelegramClientWrapper:
             # 60s cubre el caso común de bursts breves. Más allá lo dejamos
             # propagar — el supervisor del runner decide reintentar el batch.
             flood_sleep_threshold=60,
+            sequential_updates=self._sequential_updates,
         )
         await client.connect()
         if not await client.is_user_authorized():
@@ -135,6 +146,40 @@ class TelegramClientWrapper:
         client = self._require_client()
         async for dialog in client.iter_dialogs():
             yield dialog
+
+    # ---- streaming (event-driven) ---- #
+
+    def add_new_message_handler(self, callback: EventCallback, chat_ids: list[int]) -> None:
+        """Registra `callback` para mensajes nuevos en `chat_ids`.
+
+        `chat_ids` deben estar en formato marked (`get_peer_id`) — Telethon los
+        toma tal cual sin resolución de red si son negativos. Registración
+        programática vía `add_event_handler` (el decorator `@client.on` es solo
+        azúcar sobre esto). El callback recibe el `event`; debe resolver
+        `await event.get_chat()` / `get_sender()` antes de parsear porque en
+        eventos live esas entidades pueden venir `None`/`min`.
+        """
+        client = self._require_client()
+        client.add_event_handler(callback, events.NewMessage(chats=chat_ids))
+
+    async def run_until_disconnected(self) -> None:
+        """Bloquea hasta que el cliente se desconecte.
+
+        Retorna LIMPIO (sin excepción) cuando `disconnect()` se llama desde
+        otra task — exactamente lo que el `StreamingRunner.stop()` necesita.
+        Solo propaga si hubo un error inesperado de update-handling.
+        """
+        client = self._require_client()
+        await client.run_until_disconnected()
+
+    async def disconnect(self) -> None:
+        """Desconecta el cliente. Idempotente y seguro desde otra task.
+
+        Llamarlo mientras `run_until_disconnected()` bloquea hace que ese await
+        retorne limpio. Telethon cancela y espera los handlers en vuelo.
+        """
+        if self._client is not None:
+            await self._client.disconnect()
 
 
 class TelegramAuthError(RuntimeError):

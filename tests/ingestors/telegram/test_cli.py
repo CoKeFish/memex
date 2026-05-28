@@ -25,7 +25,7 @@ def test_help_for_each_subcommand() -> None:
     p = _parser()
     # subparsers action exposes `choices` as the dict of subcommand names.
     subs = p._subparsers._group_actions[0].choices
-    assert set(subs.keys()) == {"auth", "run", "discover"}
+    assert set(subs.keys()) == {"auth", "run", "discover", "listen"}
 
 
 def test_run_with_no_telegram_sources_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:

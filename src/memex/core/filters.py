@@ -47,6 +47,7 @@ Para uso desde streaming (Fase 3), también se exporta
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Callable, Iterable
 from typing import Any, Literal
@@ -221,7 +222,9 @@ class DeterministicFilterMiddleware(IngestMiddleware):
         ctx: IngestContext,
         next: Next,
     ) -> None:
-        rules = self._load(ctx.user_id, ctx.source_type, ctx.source_id)
+        # `_load` hace un query síncrono a Postgres; lo corremos en threadpool
+        # para no bloquear el event loop del listener bajo ráfagas de eventos.
+        rules = await asyncio.to_thread(self._load, ctx.user_id, ctx.source_type, ctx.source_id)
         rule = decide(rules, record.payload)
         if rule is not None and rule.action == "ignore":
             _log.info(
