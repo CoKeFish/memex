@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import BaseModel
+
 from memex.core.sink import MemexSink
 from memex.core.source import Source, SourceRecord
 from memex.logging import get_logger
@@ -29,7 +31,7 @@ def _record_to_request(record: SourceRecord, source_id: int) -> dict[str, Any]:
 
 
 def run_ingestor(
-    source: Source,
+    source: Source[Any],
     source_id: int,
     sink: MemexSink,
     *,
@@ -45,12 +47,19 @@ def run_ingestor(
     Idempotent on failure: if any sink call raises, the checkpoint is left at
     the last successfully-flushed position. The next run re-fetches the
     affected records and memex deduplicates via UNIQUE(source_id, external_id).
+
+    Adapter at the wire boundary: the sink stores cursors as JSONB (`dict`),
+    but the Source contract requires a typed `CursorT`. The runner is the
+    only place that does the dict ↔ CursorT conversion — Sources never see
+    `dict` or `None`. If a Source has no prior checkpoint, the runner
+    constructs `checkpoint_schema()` (Pydantic defaults) and passes that.
     """
     log = get_logger("memex.ingestors.runner").bind(source_id=source_id)
     stats = RunStats()
     started = time.monotonic()
 
-    checkpoint: dict[str, Any] | None = sink.get_checkpoint(source_id)
+    cursor_raw = sink.get_checkpoint(source_id) or {}
+    checkpoint: BaseModel = source.checkpoint_schema.model_validate(cursor_raw)
     chunk: list[SourceRecord] = []
     chunk_index = 0
 
@@ -66,7 +75,7 @@ def run_ingestor(
         stats.duplicates += int(result.get("duplicates", 0))
         stats.errors += int(result.get("errors", 0))
         checkpoint = source.advance_checkpoint(checkpoint, last_record)
-        sink.put_checkpoint(source_id, checkpoint)
+        sink.put_checkpoint(source_id, checkpoint.model_dump(mode="json"))
         log.info(
             "ingestor.chunk.flushed",
             chunk_index=chunk_index,

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from builtins import type as _type
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Protocol
+
+from pydantic import BaseModel
 
 from memex.core.cursors import FolderState, ImapCursor
 from memex.core.source import Source, SourceRecord
@@ -26,28 +29,29 @@ class _MailMessageLike(Protocol):
 
 
 class ImapSource:
-    """IMAP Source — implements memex.core.source.Source Protocol.
+    """IMAP Source — implements memex.core.source.Source[ImapCursor].
 
     One ImapSource = one IMAP account (one set of credentials), processing
-    one or more folders. The cursor lives as `ImapCursor` (Pydantic) internally
-    and is validated at the boundary with the dict that memex provides.
+    one or more folders. The cursor is `ImapCursor` (Pydantic); the runner
+    handles the JSONB ↔ ImapCursor conversion at the wire boundary, so this
+    class only ever sees the typed value.
     """
 
     type: ClassVar[str] = "imap"
+    checkpoint_schema: ClassVar[_type[BaseModel]] = ImapCursor
 
     def __init__(self, cfg: ImapConfig) -> None:
         self.cfg = cfg
         self._log = get_logger("memex.ingestors.imap.source").bind(server=cfg.server)
 
-    def fetch(self, checkpoint: dict[str, Any] | None) -> Iterable[SourceRecord]:
-        cursor = self._load_cursor(checkpoint)
+    def fetch(self, checkpoint: ImapCursor) -> Iterable[SourceRecord]:
         since_date = datetime.now(UTC) - timedelta(days=self.cfg.since_days)
 
         with ImapClient(self.cfg) as client:
             for folder in self.cfg.folders:
                 folder_log = self._log.bind(folder=folder)
                 current_uidvalidity = client.folder_uidvalidity(folder)
-                folder_state = cursor.folders.get(folder)
+                folder_state = checkpoint.folders.get(folder)
 
                 if folder_state is not None and folder_state.uidvalidity != current_uidvalidity:
                     folder_log.warning(
@@ -77,42 +81,24 @@ class ImapSource:
 
                 folder_log.info("folder_fetch_end", count=count)
 
-    def advance_checkpoint(
-        self, checkpoint: dict[str, Any] | None, last: SourceRecord
-    ) -> dict[str, Any]:
-        cursor = self._load_cursor(checkpoint)
-
+    def advance_checkpoint(self, checkpoint: ImapCursor, last: SourceRecord) -> ImapCursor:
         folder = last.payload.get("folder")
         if not folder or not isinstance(folder, str):
-            return cursor.model_dump(mode="json")
+            return checkpoint
 
         # external_id shape: imap:{server}:{uidvalidity}:{uid}
         parts = last.external_id.split(":")
         if len(parts) < 4 or parts[0] != "imap":
-            return cursor.model_dump(mode="json")
+            return checkpoint
         try:
             uidvalidity = int(parts[-2])
             uid = int(parts[-1])
         except ValueError:
-            return cursor.model_dump(mode="json")
+            return checkpoint
 
-        new_folders = dict(cursor.folders)
+        new_folders = dict(checkpoint.folders)
         new_folders[folder] = FolderState(uidvalidity=uidvalidity, last_uid=uid)
-        return ImapCursor(folders=new_folders).model_dump(mode="json")
-
-    def _load_cursor(self, checkpoint: dict[str, Any] | None) -> ImapCursor:
-        """Validate the dict cursor into a typed model.
-
-        A None or malformed cursor degrades to an empty one — the source will
-        do a full SINCE-based fetch instead of UID-based incremental.
-        """
-        if not checkpoint:
-            return ImapCursor()
-        try:
-            return ImapCursor.model_validate(checkpoint)
-        except Exception as e:
-            self._log.warning("checkpoint_invalid", error=str(e))
-            return ImapCursor()
+        return ImapCursor(folders=new_folders)
 
     def _mailmsg_to_record(
         self,
@@ -147,7 +133,7 @@ class ImapSource:
         )
 
 
-def make_source(cfg: dict[str, Any]) -> Source:
+def make_source(cfg: dict[str, Any]) -> Source[Any]:
     """SourceFactory for IMAP — validates config dict and returns an ImapSource.
 
     Matches the `SourceFactory` Protocol; this is what the registry returns when

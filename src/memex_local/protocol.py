@@ -42,7 +42,7 @@ class LocalPlugin(Protocol):
     source_type: ClassVar[str]
     default_schedule: ClassVar[str]
 
-    def build_source(self, local_config: Mapping[str, Any]) -> Source:
+    def build_source(self, local_config: Mapping[str, Any]) -> Source[Any]:
         """Construye un `Source` listo para ser drenado por el runner.
 
         `local_config` es el dict deserializado del TOML del plugin

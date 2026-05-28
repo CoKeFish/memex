@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import BaseModel
+
 from memex.core.source import SourceRecord
 
 name = "p2"
@@ -23,8 +25,15 @@ version = "0.1.0"
 source_type = "fake"
 default_schedule = "PT1M"
 
+
+class _FakeCursor(BaseModel):
+    last: str | None = None
+
+
 class _S:
     type = "fake"
+    checkpoint_schema = _FakeCursor
+
     def fetch(self, checkpoint):
         yield SourceRecord(
             external_id="e1",
@@ -38,11 +47,14 @@ class _S:
             payload={"k": 2},
             dedupe_keys=[],
         )
+
     def advance_checkpoint(self, checkpoint, last):
-        return {"last": last.external_id}
+        return _FakeCursor(last=last.external_id)
+
 
 def build_source(local_config: Mapping[str, Any]) -> Any:
     return _S()
+
 
 def validate_requirements(local_config: Mapping[str, Any]) -> list:
     return []

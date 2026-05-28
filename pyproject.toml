@@ -27,6 +27,7 @@ dev = [
     "pre-commit>=4.0",
     "pytest>=9.0.3",
     "respx>=0.21",
+    "pytest-asyncio>=1.4.0",
 ]
 
 [build-system]
@@ -59,3 +60,5 @@ plugins = ["pydantic.mypy"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --tb=short --strict-markers"
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from memex.core.cursors import FolderState, ImapCursor
 from memex.core.source import SourceRecord
 from memex.ingestors.imap.config import ImapConfig
 from memex.ingestors.imap.source import ImapSource
@@ -32,30 +33,31 @@ def test_advance_checkpoint_initializes_folder_entry() -> None:
     source = _make_source()
     last = _record("INBOX", uidvalidity=17, uid=42)
 
-    new_cp = source.advance_checkpoint(None, last)
+    new_cp = source.advance_checkpoint(ImapCursor(), last)
 
-    assert new_cp == {"folders": {"INBOX": {"uidvalidity": 17, "last_uid": 42}}}
+    assert isinstance(new_cp, ImapCursor)
+    assert new_cp.folders == {"INBOX": FolderState(uidvalidity=17, last_uid=42)}
 
 
 def test_advance_checkpoint_updates_existing_folder_entry() -> None:
     source = _make_source()
-    existing = {"folders": {"INBOX": {"uidvalidity": 17, "last_uid": 30}}}
+    existing = ImapCursor(folders={"INBOX": FolderState(uidvalidity=17, last_uid=30)})
     last = _record("INBOX", uidvalidity=17, uid=42)
 
     new_cp = source.advance_checkpoint(existing, last)
 
-    assert new_cp["folders"]["INBOX"] == {"uidvalidity": 17, "last_uid": 42}
+    assert new_cp.folders["INBOX"] == FolderState(uidvalidity=17, last_uid=42)
 
 
 def test_advance_checkpoint_adds_new_folder_without_touching_others() -> None:
     source = _make_source()
-    existing = {"folders": {"INBOX": {"uidvalidity": 17, "last_uid": 99}}}
+    existing = ImapCursor(folders={"INBOX": FolderState(uidvalidity=17, last_uid=99)})
     last = _record("Sent", uidvalidity=9, uid=5)
 
     new_cp = source.advance_checkpoint(existing, last)
 
-    assert new_cp["folders"]["INBOX"] == {"uidvalidity": 17, "last_uid": 99}
-    assert new_cp["folders"]["Sent"] == {"uidvalidity": 9, "last_uid": 5}
+    assert new_cp.folders["INBOX"] == FolderState(uidvalidity=17, last_uid=99)
+    assert new_cp.folders["Sent"] == FolderState(uidvalidity=9, last_uid=5)
 
 
 def test_advance_checkpoint_ignores_record_without_folder() -> None:
@@ -66,10 +68,12 @@ def test_advance_checkpoint_ignores_record_without_folder() -> None:
         payload={},  # no folder
         dedupe_keys=[],
     )
+    existing = ImapCursor()
 
-    new_cp = source.advance_checkpoint({"folders": {}}, bad_record)
+    new_cp = source.advance_checkpoint(existing, bad_record)
 
-    assert new_cp == {"folders": {}}
+    # Bad record left the cursor unchanged.
+    assert new_cp is existing
 
 
 def test_advance_checkpoint_ignores_malformed_external_id() -> None:
@@ -80,9 +84,9 @@ def test_advance_checkpoint_ignores_malformed_external_id() -> None:
         payload={"folder": "INBOX"},
         dedupe_keys=[],
     )
+    existing = ImapCursor()
 
-    new_cp = source.advance_checkpoint({}, bad_record)
+    new_cp = source.advance_checkpoint(existing, bad_record)
 
-    # Cursor now always normalizes to the typed shape — empty input still
-    # becomes a well-formed {"folders": {}}, never a bare {}.
-    assert new_cp == {"folders": {}}
+    # Malformed external_id left the cursor unchanged.
+    assert new_cp is existing

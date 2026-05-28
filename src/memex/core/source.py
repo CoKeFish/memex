@@ -15,14 +15,34 @@ The discipline (enforced by tests/test_typing_discipline.py):
 
 This is what lets us add a new ingestor (Telegram, social, ...) without
 touching anything that already works.
+
+Contract guarantees (enforced by mypy strict):
+
+  * A Source is `Source[CursorT]` parameterized by a Pydantic `BaseModel`.
+    There is no "cursorless" Source — `fetch` is `(self, checkpoint: CursorT)`
+    with no `| None`. The runner constructs `checkpoint_schema()` for a
+    fresh source instead of letting the Source see `None`.
+  * `checkpoint_schema` is a `ClassVar[type[BaseModel]]` that every concrete
+    Source must declare. mypy errors if missing on a `Source[...]` subclass.
+  * `advance_checkpoint` returns the same `CursorT`, never a raw dict — the
+    runner does the JSONB ↔ CursorT conversion at the wire boundary.
+
+This is what guarantees recovery: any Source can always continue from the
+last successfully-flushed checkpoint, because the contract forbids
+implementations that ignore the cursor.
 """
 
 from __future__ import annotations
 
+from builtins import type as _type
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, TypeVar, runtime_checkable
+
+from pydantic import BaseModel
+
+CursorT = TypeVar("CursorT", bound=BaseModel)
 
 
 class SourceConfigError(Exception):
@@ -53,22 +73,29 @@ class SourceRecord:
 
 
 @runtime_checkable
-class Source(Protocol):
+class Source(Protocol[CursorT]):
     """Anything memex can pull data from.
 
     `type` is the string under which this source is registered (matches
-    `sources.type` in the DB). `fetch` yields records lazily; the runner
-    chunks them. `advance_checkpoint` updates the cursor given the last
-    successfully posted record.
+    `sources.type` in the DB). `checkpoint_schema` is the Pydantic class
+    that describes the cursor shape — declared once per Source and used by
+    the runner to (de)serialize the JSONB row in `source_checkpoints`.
+    `fetch` yields records lazily; the runner chunks them.
+    `advance_checkpoint` updates the cursor given the last successfully
+    posted record.
+
+    Generic in `CursorT` so mypy verifies the cursor flow end-to-end: a
+    `Source[ImapCursor]` receives and returns `ImapCursor`, not `dict`. If
+    a concrete Source's `fetch` declares `checkpoint: dict` instead of the
+    parameterized type, mypy raises a signature-mismatch error.
     """
 
     type: ClassVar[str]
+    checkpoint_schema: ClassVar[_type[BaseModel]]
 
-    def fetch(self, checkpoint: dict[str, Any] | None) -> Iterable[SourceRecord]: ...
+    def fetch(self, checkpoint: CursorT) -> Iterable[SourceRecord]: ...
 
-    def advance_checkpoint(
-        self, checkpoint: dict[str, Any] | None, last: SourceRecord
-    ) -> dict[str, Any]: ...
+    def advance_checkpoint(self, checkpoint: CursorT, last: SourceRecord) -> CursorT: ...
 
 
 @runtime_checkable
@@ -78,6 +105,10 @@ class SourceFactory(Protocol):
     Each ingestor module exports a `make_source(cfg)` function matching this
     Protocol. The registry (`memex.sources.resolve`) returns one of these for
     a given source type string.
+
+    Returns `Source[Any]` because the factory is invoked behind a string-keyed
+    registry — the caller (the runner) recovers the cursor type at runtime
+    via `source.checkpoint_schema`.
     """
 
-    def __call__(self, cfg: dict[str, Any]) -> Source: ...
+    def __call__(self, cfg: dict[str, Any]) -> Source[Any]: ...
