@@ -45,6 +45,17 @@ from memex.ingestors.telegram.streaming import TelegramStreamingSource
 from memex.logging import get_logger, setup_logging
 
 
+def _safe(text: str) -> str:
+    """Sanea un string para el encoding de la consola actual.
+
+    En Windows la consola suele ser cp1252 y `print()` revienta con
+    UnicodeEncodeError ante emojis / CJK en nombres de chat o texto de
+    mensajes. Reemplaza lo no-encodeable en vez de crashear.
+    """
+    enc = sys.stdout.encoding or "utf-8"
+    return text.encode(enc, errors="replace").decode(enc, errors="replace")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="memex-telegram")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -259,7 +270,7 @@ def _cmd_discover(args: argparse.Namespace, client: MemexServerClient, log: Any)
                     )
                     dialog_id = getattr(dialog, "id", "?")
                     name = getattr(dialog, "name", None) or "(unnamed)"
-                    print(f"{dialog_id!s:>20s}  {kind:<10s}  {name}")
+                    print(f"{dialog_id!s:>20s}  {kind:<10s}  {_safe(name)}")
                     count += 1
                 print(f"\nlisted {count} dialog(s)")
             return 0
@@ -296,7 +307,7 @@ def _cmd_listen(args: argparse.Namespace, client: MemexServerClient, log: Any) -
 
     async def _print(record: SourceRecord) -> None:
         text = str(record.payload.get("text", ""))[:100]
-        print(f"[{record.external_id}] {text}")
+        print(f"[{record.external_id}] {_safe(text)}")
 
     async def _run() -> None:
         print("\nCatchup desde el cursor guardado...\n")

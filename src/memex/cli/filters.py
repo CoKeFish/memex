@@ -108,7 +108,8 @@ def cmd_list(args: argparse.Namespace) -> int:
         print("(no rules)")
         return 0
     for r in rows:
-        flag = "✓" if r["enabled"] else "✗"
+        # ASCII en vez de ✓/✗ — la consola Windows (cp1252) revienta con unicode.
+        flag = "on " if r["enabled"] else "off"
         st = r["source_type"] or "*"
         sid = r["source_id"] if r["source_id"] is not None else "*"
         print(
