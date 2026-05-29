@@ -37,9 +37,30 @@ def _telegram_loader() -> SourceFactory:
     return make_source
 
 
+def _instagram_loader() -> SourceFactory:
+    from memex.ingestors.social.source import make_instagram_source
+
+    return make_instagram_source
+
+
+def _facebook_loader() -> SourceFactory:
+    from memex.ingestors.social.source import make_facebook_source
+
+    return make_facebook_source
+
+
+def _x_loader() -> SourceFactory:
+    from memex.ingestors.social.source import make_x_source
+
+    return make_x_source
+
+
 _LAZY_FACTORIES: dict[str, Callable[[], SourceFactory]] = {
     "imap": _imap_loader,
     "telegram": _telegram_loader,
+    "instagram": _instagram_loader,
+    "facebook": _facebook_loader,
+    "x": _x_loader,
 }
 
 

@@ -7,6 +7,8 @@ boundary instead of letting them propagate as KeyErrors mid-fetch.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -55,5 +57,36 @@ class TelegramCursor(BaseModel):
     """
 
     chats: dict[str, ChatCursor] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class AccountCursor(BaseModel):
+    """Checkpoint por cuenta social: el post más nuevo ya flusheado.
+
+    `last_post_id` es el id de plataforma del último post posteado para esta
+    cuenta; `last_posted_at` su timestamp. El filtro de novedad usa
+    `last_posted_at` porque los scrapers no tienen cursor nativo — devuelven los
+    últimos N posts y memex filtra client-side lo más nuevo que el cursor.
+    `last_post_id` desempata posts del mismo segundo.
+    """
+
+    last_post_id: str = ""
+    last_posted_at: datetime | None = None
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class SocialCursor(BaseModel):
+    """Social checkpoint: por cuenta de la allowlist, el último post visto.
+
+    Las keys del dict son el identificador normalizado de la cuenta (handle /
+    página en minúsculas, sin `@` ni URL) — el mismo string que la allowlist y
+    el `external_id` (`{platform}:{account}:{post_id}`). Compartido por las tres
+    sources sociales (`instagram` / `facebook` / `x`); las keys nunca colisionan
+    porque cada source solo ve sus propias cuentas.
+    """
+
+    accounts: dict[str, AccountCursor] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid")

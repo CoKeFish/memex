@@ -142,3 +142,53 @@ class TelegramPayload(BasePayload):
         "none", "photo", "video", "document", "audio", "voice", "sticker", "other"
     ] = "none"
     media_caption: str | None = None
+
+
+class SocialEngagement(BaseModel):
+    """Métricas de engagement de un post social. Todas opcionales — no toda
+    plataforma expone todas, y un scraper puede no devolverlas.
+
+    Convención de mapeo entre plataformas: en X (Twitter) `shares`=retweets y
+    `comments`=replies; en Facebook `shares`=shares; en Instagram `shares` suele
+    no existir (queda `None`).
+    """
+
+    likes: int | None = None
+    comments: int | None = None
+    shares: int | None = None
+    views: int | None = None
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class SocialPostPayload(BasePayload):
+    """Payload schema para un post público de red social (broadcast).
+
+    Compartido por las tres sources sociales (`instagram`, `facebook`, `x`),
+    discriminadas por `platform`. El downstream (classifier / summarizer de
+    oportunidades) es agnóstico de plataforma: le importan `text`, `url` y
+    `posted_at`; los campos específicos (`shortcode`, `is_paid_partnership`) son
+    opcionales y quedan `None` donde no aplican.
+
+    `account` es SIEMPRE el identificador de la allowlist (el handle / página que
+    se pidió scrapear), NUNCA el owner scrapeado (ej. el `pageId` numérico de
+    Facebook). El `external_id` y el cursor quedan keyed por ese mismo string,
+    así `fetch` puede buscar el checkpoint y `advance_checkpoint` recuperarlo del
+    `external_id` sin mirar el payload. Si el parser usara el owner scrapeado, la
+    key no matchearía y el checkpoint nunca persistiría.
+    """
+
+    platform: Literal["instagram", "facebook", "x"]
+    account: str
+    account_name: str | None = None
+
+    post_id: str
+    shortcode: str | None = None
+    url: str
+    text: str = ""
+    posted_at: datetime
+
+    media_kind: Literal["none", "image", "video", "carousel", "reel", "other"] = "none"
+    engagement: SocialEngagement | None = None
+    is_paid_partnership: bool | None = None
+    raw_type: str | None = None
