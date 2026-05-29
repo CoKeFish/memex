@@ -84,7 +84,7 @@ def test_ingest_persists_and_counts(client: Any) -> None:
     )
     assert r.status_code == 200
     body = r.json()
-    assert body == {"source_id": sid, "inserted": 2, "duplicates": 1, "errors": 0}
+    assert body == {"source_id": sid, "inserted": 2, "duplicates": 1, "errors": 0, "filtered": 0}
 
     with connection() as c:
         count = c.execute(
@@ -109,6 +109,7 @@ def test_ingest_empty_batch_ok(client: Any) -> None:
     assert body["inserted"] == 0
     assert body["duplicates"] == 0
     assert body["errors"] == 0
+    assert body["filtered"] == 0
 
 
 def test_ingest_strips_source_id_field(client: Any) -> None:

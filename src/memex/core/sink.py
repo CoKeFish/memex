@@ -37,5 +37,5 @@ class MemexSink(Protocol):
         ...
 
     def post_ingest_batch(self, records: list[dict[str, Any]]) -> dict[str, int]:
-        """Submit a batch of records. Returns counters: inserted, duplicates, errors."""
+        """Submit a batch of records. Returns counters: inserted, duplicates, errors, filtered."""
         ...

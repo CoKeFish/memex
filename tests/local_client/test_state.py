@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
+
 import pytest
 
 from memex_local_client.state import State
@@ -8,6 +11,42 @@ from memex_local_client.state import State
 @pytest.fixture
 def state() -> State:
     return State(":memory:")
+
+
+def test_ensure_columns_adds_filtered_to_legacy_db(tmp_path: Path) -> None:
+    """Una DB creada antes de la columna `filtered` la gana al abrir State.
+
+    `CREATE TABLE IF NOT EXISTS` no altera tablas existentes, así que sin el
+    ALTER idempotente de `_ensure_columns` una DB vieja rompería al leer/escribir
+    `filtered`. Acá simulamos el schema viejo y verificamos que se migra solo.
+    """
+    db = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(str(db))
+    legacy.execute(
+        """
+        CREATE TABLE runs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            plugin_name  TEXT NOT NULL,
+            started_at   TEXT NOT NULL,
+            finished_at  TEXT,
+            status       TEXT NOT NULL,
+            posted       INTEGER NOT NULL DEFAULT 0,
+            inserted     INTEGER NOT NULL DEFAULT 0,
+            duplicates   INTEGER NOT NULL DEFAULT 0,
+            errors       INTEGER NOT NULL DEFAULT 0,
+            error_msg    TEXT
+        )
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    with State(db) as state:
+        state.upsert_plugin("p1")
+        with state.start_run("p1") as run_id:
+            state.finalize_run(run_id, status="ok", filtered=3)
+        # La fila vieja se lee sin romper y la columna nueva quedó funcional.
+        assert state.recent_runs("p1")[0].filtered == 3
 
 
 def test_upsert_and_get_plugin(state: State) -> None:
@@ -61,13 +100,14 @@ def test_remove_plugin(state: State) -> None:
 def test_start_run_and_finalize_ok(state: State) -> None:
     state.upsert_plugin("p1")
     with state.start_run("p1") as run_id:
-        state.finalize_run(run_id, status="ok", posted=3, inserted=2, duplicates=1)
+        state.finalize_run(run_id, status="ok", posted=3, inserted=2, duplicates=1, filtered=1)
     runs = state.recent_runs("p1")
     assert len(runs) == 1
     r = runs[0]
     assert r.status == "ok"
     assert r.inserted == 2
     assert r.duplicates == 1
+    assert r.filtered == 1
     assert r.finished_at is not None
 
 

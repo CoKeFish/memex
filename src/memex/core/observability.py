@@ -60,7 +60,8 @@ class IngestionRunHandle:
                       posted      = :posted,
                       inserted    = :inserted,
                       duplicates  = :duplicates,
-                      errors      = :errors
+                      errors      = :errors,
+                      filtered    = :filtered
                     WHERE id = :id
                     """
                 ),
@@ -71,6 +72,7 @@ class IngestionRunHandle:
                     "inserted": stats.inserted,
                     "duplicates": stats.duplicates,
                     "errors": stats.errors,
+                    "filtered": stats.filtered,
                 },
             )
         _log.info(
@@ -79,6 +81,7 @@ class IngestionRunHandle:
             inserted=stats.inserted,
             duplicates=stats.duplicates,
             errors=stats.errors,
+            filtered=stats.filtered,
             duration_ms=duration_ms,
         )
 

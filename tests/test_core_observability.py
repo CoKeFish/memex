@@ -19,7 +19,7 @@ def _last_run(uid: int) -> dict[str, Any]:
                 text(
                     """
                     SELECT id, status, posted, inserted, duplicates, errors,
-                           error_class, error_message, duration_ms, trigger
+                           filtered, error_class, error_message, duration_ms, trigger
                     FROM ingestion_runs
                     WHERE user_id = :uid
                     ORDER BY started_at DESC
@@ -40,14 +40,19 @@ def test_ingestion_run_happy_path_marks_status_ok(seed_source: dict[str, Any]) -
     uid = int(seed_source["user_id"])
 
     with ingestion_run(user_id=uid, source_id=sid, trigger="test") as run:
-        run.finalize(RunStats(posted=5, inserted=4, duplicates=1, errors=0, ms_elapsed=123))
+        run.finalize(
+            RunStats(posted=7, inserted=4, duplicates=1, errors=0, filtered=2, ms_elapsed=123)
+        )
 
     row = _last_run(uid)
     assert row["status"] == "ok"
-    assert row["posted"] == 5
+    assert row["posted"] == 7
     assert row["inserted"] == 4
     assert row["duplicates"] == 1
     assert row["errors"] == 0
+    assert row["filtered"] == 2
+    # Invariante: posted = inserted + duplicates + errors + filtered.
+    assert row["posted"] == row["inserted"] + row["duplicates"] + row["errors"] + row["filtered"]
     assert row["error_class"] is None
     assert row["error_message"] is None
     assert row["duration_ms"] is not None and row["duration_ms"] >= 0

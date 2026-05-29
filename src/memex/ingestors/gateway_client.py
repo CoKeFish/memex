@@ -111,6 +111,7 @@ class GatewayClient(MemexServerClient):
             "inserted": int(data.get("inserted", 0)),
             "duplicates": int(data.get("duplicates", 0)),
             "errors": int(data.get("errors", 0)),
+            "filtered": int(data.get("filtered", 0)),
         }
 
     # --- introspección útil para callers (ej. memex_local_client.run) ---

@@ -222,7 +222,7 @@ def _cmd_status() -> int:
             last = recent[0] if recent else None
             last_str = (
                 f"last={last.status}@{last.finished_at or last.started_at} "
-                f"ins={last.inserted} dup={last.duplicates} err={last.errors}"
+                f"ins={last.inserted} dup={last.duplicates} err={last.errors} flt={last.filtered}"
                 if last
                 else "no runs yet"
             )
@@ -238,7 +238,7 @@ def _cmd_runs(args: argparse.Namespace) -> int:
             print(
                 f"  #{r.id:5d} {r.plugin_name:25s} {r.status:8s} "
                 f"started={r.started_at} finished={r.finished_at or '-'} "
-                f"ins={r.inserted} dup={r.duplicates} err={r.errors}"
+                f"ins={r.inserted} dup={r.duplicates} err={r.errors} flt={r.filtered}"
                 + (f" reason={r.error_msg}" if r.error_msg else "")
             )
     return 0

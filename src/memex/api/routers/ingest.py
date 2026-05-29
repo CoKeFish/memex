@@ -181,4 +181,9 @@ async def ingest_batch(body: IngestBatchRequest, user_id: UserID) -> dict[str, i
         errors=errors,
         filtered=filtered,
     )
-    return {"inserted": inserted, "duplicates": duplicates, "errors": errors}
+    return {
+        "inserted": inserted,
+        "duplicates": duplicates,
+        "errors": errors,
+        "filtered": filtered,
+    }

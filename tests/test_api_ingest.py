@@ -66,4 +66,4 @@ def test_ingest_batch_mixed_outcomes(client: Any, seed_source: dict[str, Any]) -
     ]
     r = client.post("/ingest/batch", json={"records": records})
     assert r.status_code == 200
-    assert r.json() == {"inserted": 2, "duplicates": 1, "errors": 1}
+    assert r.json() == {"inserted": 2, "duplicates": 1, "errors": 1, "filtered": 0}

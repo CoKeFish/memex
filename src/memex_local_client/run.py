@@ -95,6 +95,7 @@ def execute_plugin(
                 inserted=stats.inserted,
                 duplicates=stats.duplicates,
                 errors=stats.errors,
+                filtered=stats.filtered,
             )
             state.mark_seen(plugin.name)
             log.info(
@@ -104,6 +105,7 @@ def execute_plugin(
                 inserted=stats.inserted,
                 duplicates=stats.duplicates,
                 errors=stats.errors,
+                filtered=stats.filtered,
                 ms_elapsed=stats.ms_elapsed,
             )
             return stats

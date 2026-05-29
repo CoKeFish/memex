@@ -96,6 +96,33 @@ def test_post_ingest_strips_source_id_field() -> None:
         }
 
 
+def test_post_ingest_extracts_filtered_counter() -> None:
+    with respx.mock(base_url=BASE) as router:
+        router.post("/gateway/plugins/p/state").respond(json=_state_response(source_id=7))
+        router.post("/gateway/plugins/p/ingest").respond(
+            json={"source_id": 7, "inserted": 1, "duplicates": 0, "errors": 0, "filtered": 2}
+        )
+        with GatewayClient(BASE, "p", "outlook") as c:
+            result = c.post_ingest_batch(
+                [{"external_id": "e", "occurred_at": "2026-01-01T00:00:00Z", "payload": {}}]
+            )
+        assert result == {"inserted": 1, "duplicates": 0, "errors": 0, "filtered": 2}
+
+
+def test_post_ingest_defaults_filtered_to_zero_when_absent() -> None:
+    """Servidor viejo sin `filtered` en el response → default 0, no rompe."""
+    with respx.mock(base_url=BASE) as router:
+        router.post("/gateway/plugins/p/state").respond(json=_state_response(source_id=7))
+        router.post("/gateway/plugins/p/ingest").respond(
+            json={"source_id": 7, "inserted": 1, "duplicates": 0, "errors": 0}
+        )
+        with GatewayClient(BASE, "p", "outlook") as c:
+            result = c.post_ingest_batch(
+                [{"external_id": "e", "occurred_at": "2026-01-01T00:00:00Z", "payload": {}}]
+            )
+        assert result["filtered"] == 0
+
+
 def test_put_checkpoint_sends_cursor() -> None:
     with respx.mock(base_url=BASE) as router:
         router.post("/gateway/plugins/p/state").respond(json=_state_response(source_id=7))

@@ -28,6 +28,7 @@ class IngestBatchResponse(BaseModel):
     inserted: int
     duplicates: int
     errors: int
+    filtered: int
 
 
 class GatewayRecord(BaseModel):
@@ -62,6 +63,7 @@ class GatewayIngestStats(BaseModel):
     inserted: int
     duplicates: int
     errors: int
+    filtered: int
 
 
 class InboxRow(BaseModel):

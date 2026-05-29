@@ -75,6 +75,7 @@ def test_run_ingestor_with_no_records_does_no_work() -> None:
     assert stats.inserted == 0
     assert stats.duplicates == 0
     assert stats.errors == 0
+    assert stats.filtered == 0
     client.post_ingest_batch.assert_not_called()
     client.put_checkpoint.assert_not_called()
 
@@ -88,12 +89,14 @@ def test_run_ingestor_single_chunk_posts_and_advances() -> None:
         "inserted": 3,
         "duplicates": 0,
         "errors": 0,
+        "filtered": 0,
     }
 
     stats = run_ingestor(source, source_id=42, sink=client, chunk_size=10, chunk_sleep_ms=0)
 
     assert stats.posted == 3
     assert stats.inserted == 3
+    assert stats.filtered == 0
     client.post_ingest_batch.assert_called_once()
     posted = client.post_ingest_batch.call_args[0][0]
     assert [r["external_id"] for r in posted] == ["e0", "e1", "e2"]
@@ -112,6 +115,7 @@ def test_run_ingestor_multiple_chunks_advances_after_each() -> None:
         "inserted": 2,
         "duplicates": 0,
         "errors": 0,
+        "filtered": 0,
     }
 
     run_ingestor(source, source_id=1, sink=client, chunk_size=2, chunk_sleep_ms=0)
@@ -130,17 +134,23 @@ def test_run_ingestor_aggregates_stats_across_chunks() -> None:
     source = FakeSource(records)
     client = MagicMock()
     client.get_checkpoint.return_value = None
+    # Realista: lo que el runner postea (len del chunk) lo reparte la API entre
+    # inserted/duplicates/errors/filtered. Chunk 1: 1 insertado + 1 dropeado;
+    # chunk 2: 1 insertado + 1 duplicado.
     client.post_ingest_batch.side_effect = [
-        {"inserted": 2, "duplicates": 0, "errors": 0},
-        {"inserted": 1, "duplicates": 1, "errors": 0},
+        {"inserted": 1, "duplicates": 0, "errors": 0, "filtered": 1},
+        {"inserted": 1, "duplicates": 1, "errors": 0, "filtered": 0},
     ]
 
     stats = run_ingestor(source, source_id=1, sink=client, chunk_size=2, chunk_sleep_ms=0)
 
     assert stats.posted == 4
-    assert stats.inserted == 3
+    assert stats.inserted == 2
     assert stats.duplicates == 1
     assert stats.errors == 0
+    assert stats.filtered == 1
+    # Invariante: posted = inserted + duplicates + errors + filtered.
+    assert stats.posted == stats.inserted + stats.duplicates + stats.errors + stats.filtered
 
 
 def test_run_ingestor_passes_loaded_checkpoint_typed_to_source() -> None:

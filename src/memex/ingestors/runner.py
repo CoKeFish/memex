@@ -17,6 +17,7 @@ class RunStats:
     inserted: int = 0
     duplicates: int = 0
     errors: int = 0
+    filtered: int = 0
     ms_elapsed: int = 0
 
 
@@ -74,6 +75,7 @@ def run_ingestor(
         stats.inserted += int(result.get("inserted", 0))
         stats.duplicates += int(result.get("duplicates", 0))
         stats.errors += int(result.get("errors", 0))
+        stats.filtered += int(result.get("filtered", 0))
         checkpoint = source.advance_checkpoint(checkpoint, last_record)
         sink.put_checkpoint(source_id, checkpoint.model_dump(mode="json"))
         log.info(
@@ -83,6 +85,7 @@ def run_ingestor(
             inserted=result.get("inserted"),
             duplicates=result.get("duplicates"),
             errors=result.get("errors"),
+            filtered=result.get("filtered"),
         )
         chunk_index += 1
         chunk.clear()

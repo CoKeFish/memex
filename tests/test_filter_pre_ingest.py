@@ -95,6 +95,7 @@ def test_ingest_batch_drops_records_matching_ignore_rule(
     assert data["inserted"] == 1
     assert data["duplicates"] == 0
     assert data["errors"] == 0
+    assert data["filtered"] == 2  # e1 + e3 dropeados por la regla ignore
 
     # Verify only the non-spam record landed in inbox.
     rows = (
@@ -127,7 +128,9 @@ def test_ingest_batch_keep_rule_does_not_drop(
         json={"records": [_ingest_record(sid, "e1", {"from": "vip@x.com"})]},
     )
     assert resp.status_code == 200
-    assert resp.json()["inserted"] == 1
+    body = resp.json()
+    assert body["inserted"] == 1
+    assert body["filtered"] == 0
 
 
 def test_ingest_batch_disabled_rule_is_skipped(
@@ -144,7 +147,9 @@ def test_ingest_batch_disabled_rule_is_skipped(
         json={"records": [_ingest_record(sid, "e1", {"from": "spam@x.com"})]},
     )
     assert resp.status_code == 200
-    assert resp.json()["inserted"] == 1
+    body = resp.json()
+    assert body["inserted"] == 1
+    assert body["filtered"] == 0
 
 
 def test_ingest_batch_source_type_null_rule_applies_to_any_source(
@@ -162,7 +167,9 @@ def test_ingest_batch_source_type_null_rule_applies_to_any_source(
         json={"records": [_ingest_record(sid, "e1", {"from": "spam@x.com"})]},
     )
     assert resp.status_code == 200
-    assert resp.json()["inserted"] == 0
+    body = resp.json()
+    assert body["inserted"] == 0
+    assert body["filtered"] == 1
 
 
 # ---------- /gateway/plugins/.../ingest ---------- #
@@ -209,6 +216,7 @@ def test_gateway_ingest_drops_records_matching_ignore_rule(client: Any, conn: An
     assert data["inserted"] == 1
     assert data["duplicates"] == 0
     assert data["errors"] == 0
+    assert data["filtered"] == 1  # e1 dropeado por la regla ignore
 
     rows = (
         conn.execute(

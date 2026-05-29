@@ -213,4 +213,5 @@ async def plugin_ingest(
         "inserted": inserted,
         "duplicates": duplicates,
         "errors": errors,
+        "filtered": filtered,
     }

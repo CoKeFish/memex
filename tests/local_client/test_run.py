@@ -95,8 +95,9 @@ def test_execute_plugin_calls_state_ingest_and_cursor(plugin_dir_factory: Any) -
         router.post("/gateway/plugins/p2/state").respond(
             json={"source_id": 77, "cursor": None, "created": True}
         )
+        # 2 records posteados → la API inserta 1 y dropea 1 por filtro.
         ingest_route = router.post("/gateway/plugins/p2/ingest").respond(
-            json={"source_id": 77, "inserted": 2, "duplicates": 0, "errors": 0}
+            json={"source_id": 77, "inserted": 1, "duplicates": 0, "errors": 0, "filtered": 1}
         )
         router.put("/gateway/plugins/p2/cursor").respond(
             json={"source_id": 77, "cursor": {"last": "e2"}, "created": False}
@@ -112,7 +113,8 @@ def test_execute_plugin_calls_state_ingest_and_cursor(plugin_dir_factory: Any) -
             chunk_sleep_ms=0,
         )
         assert stats.posted == 2
-        assert stats.inserted == 2
+        assert stats.inserted == 1
+        assert stats.filtered == 1
         assert ingest_route.called
 
     # El source_id resuelto se cachea en el registry local.
@@ -125,6 +127,7 @@ def test_execute_plugin_calls_state_ingest_and_cursor(plugin_dir_factory: Any) -
     assert len(runs) == 1
     assert runs[0].status == "ok"
     assert runs[0].posted == 2
+    assert runs[0].filtered == 1
 
 
 def test_execute_plugin_marks_error_on_build_source_failure(plugin_dir_factory: Any) -> None:

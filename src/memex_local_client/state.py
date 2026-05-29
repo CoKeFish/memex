@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS runs (
     inserted       INTEGER NOT NULL DEFAULT 0,
     duplicates     INTEGER NOT NULL DEFAULT 0,
     errors         INTEGER NOT NULL DEFAULT 0,
+    filtered       INTEGER NOT NULL DEFAULT 0,
     error_msg      TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_by_plugin ON runs(plugin_name, id DESC);
@@ -91,6 +92,7 @@ class RunRow:
     inserted: int
     duplicates: int
     errors: int
+    filtered: int
     error_msg: str | None
 
 
@@ -107,6 +109,17 @@ class State:
 
     def _init_schema(self) -> None:
         self._conn.executescript(SCHEMA)
+        self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        """Migraciones inline aditivas para DBs creadas antes de un cambio de schema.
+
+        `CREATE TABLE IF NOT EXISTS` no altera tablas ya existentes, así que las
+        columnas nuevas se agregan acá de forma idempotente (no-op si ya están).
+        """
+        run_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(runs)")}
+        if "filtered" not in run_cols:
+            self._conn.execute("ALTER TABLE runs ADD COLUMN filtered INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self._conn.close()
@@ -210,16 +223,27 @@ class State:
         inserted: int = 0,
         duplicates: int = 0,
         errors: int = 0,
+        filtered: int = 0,
         error_msg: str | None = None,
     ) -> None:
         self._conn.execute(
             """
             UPDATE runs
             SET finished_at = ?, status = ?, posted = ?, inserted = ?,
-                duplicates = ?, errors = ?, error_msg = ?
+                duplicates = ?, errors = ?, filtered = ?, error_msg = ?
             WHERE id = ?
             """,
-            (_now(), status, posted, inserted, duplicates, errors, error_msg, run_id),
+            (
+                _now(),
+                status,
+                posted,
+                inserted,
+                duplicates,
+                errors,
+                filtered,
+                error_msg,
+                run_id,
+            ),
         )
 
     def recent_runs(self, plugin_name: str | None = None, limit: int = 20) -> list[RunRow]:
@@ -258,6 +282,7 @@ def _row_to_run(r: sqlite3.Row) -> RunRow:
         inserted=r["inserted"],
         duplicates=r["duplicates"],
         errors=r["errors"],
+        filtered=r["filtered"],
         error_msg=r["error_msg"],
     )
 
