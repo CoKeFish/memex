@@ -89,3 +89,20 @@ def test_skipped_media_does_not_gate_module_workset(seed_source: dict[str, Any])
     with connection() as c:
         rows = load_module_workset(c, 1, source_id=None, modules=[FinanceModule()], limit=100)
     assert len(rows) == 1  # 'skipped' es terminal → no bloquea
+
+
+def test_outlook_source_enters_module_workset() -> None:
+    """Regresión: los correos de Outlook (type='outlook') entran al work-set como email, igual
+    que imap. Antes 'outlook' no tenía SourceKind registrado y se salteaban en silencio."""
+    with connection() as c:
+        sid = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (1, 'outlook-test', 'outlook') RETURNING id"
+            )
+        ).scalar()
+    assert sid is not None
+    iid = _seed_classified(int(sid), "ol1")
+    with connection() as c:
+        rows = load_module_workset(c, 1, source_id=None, modules=[FinanceModule()], limit=100)
+    assert any(r.inbox_id == iid for r in rows)

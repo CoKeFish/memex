@@ -23,7 +23,7 @@ from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
 from memex.logging import get_logger
 from memex.modules.contract import InterestModule
 from memex.processing.windows import WorkRow
-from memex.sources import kind_for_type, known_types
+from memex.sources import kind_for_type, kind_types
 
 _log = get_logger("memex.modules.workset")
 
@@ -41,8 +41,10 @@ def _coerce_payload(raw: Any) -> dict[str, Any]:
 
 
 def _types_for_module(module: InterestModule) -> list[str]:
-    """Tipos de source (sources.type) cuyas categorías el módulo consume."""
-    return [t for t in known_types() if kind_for_type(t) in module.consumes_kinds]
+    """Tipos de source (sources.type) cuyas categorías el módulo consume. Enumera por
+    `kind_types()` (todos los tipos con categoría), no por `known_types()` (solo pulleables),
+    para incluir fuentes push-only como outlook."""
+    return [t for t in kind_types() if kind_for_type(t) in module.consumes_kinds]
 
 
 def load_module_workset(

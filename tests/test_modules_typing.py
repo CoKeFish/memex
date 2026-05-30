@@ -66,3 +66,17 @@ def test_orchestrator_does_not_import_finance_concrete() -> None:
 def test_kind_map_matches_source_class(source_cls: Any) -> None:
     """`kind_for_type(type)` debe coincidir con el ClassVar `kind` de cada Source."""
     assert kind_for_type(source_cls.type) == source_cls.kind
+
+
+def test_outlook_is_email_kind() -> None:
+    """Outlook es correo (igual que imap/gmail), aunque se ingiera por push (cliente local)
+    y no tenga factory de pull. Antes no estaba registrado y sus mensajes se salteaban."""
+    assert kind_for_type("outlook") == ImapSource.kind  # ambos EMAIL
+
+
+def test_kind_types_is_superset_of_known_types() -> None:
+    """`kind_types()` (tipos con categoría) ⊇ `known_types()` (pulleables) e incluye outlook."""
+    from memex.sources import kind_types, known_types
+
+    assert set(known_types()) <= set(kind_types())
+    assert "outlook" in kind_types()

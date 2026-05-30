@@ -63,12 +63,15 @@ _LAZY_FACTORIES: dict[str, Callable[[], SourceFactory]] = {
     "x": _x_loader,
 }
 
-# Categoría conceptual (`Source.kind`) de cada tipo, SIN importar la clase concreta (que
-# arrastra deps pesadas como imap_tools/telethon). Es la misma info que el ClassVar `kind`
-# de cada Source; un test de disciplina verifica que no diverjan. Downstream
-# (módulos de extracción) la usa para pre-filtrar por `consumes_kinds` sin tocar el LLM.
+# Categoría conceptual (`SourceKind`) de cada tipo de source. Downstream (módulos de
+# extracción) la usa para pre-filtrar por `consumes_kinds` sin tocar el LLM. Para los tipos
+# que memex SABE pullear (los de `_LAZY_FACTORIES`) coincide con el ClassVar `kind` de su
+# Source —un test de disciplina lo verifica—; pero también incluye tipos que solo se ingieren
+# por PUSH (el cliente local), como `outlook`, que no tienen factory de pull pero SÍ categoría:
+# un correo es email venga de donde venga.
 _KIND_BY_TYPE: dict[str, SourceKind] = {
     "imap": SourceKind.EMAIL,
+    "outlook": SourceKind.EMAIL,
     "telegram": SourceKind.CHAT,
     "instagram": SourceKind.SOCIAL,
     "facebook": SourceKind.SOCIAL,
@@ -98,5 +101,13 @@ def kind_for_type(source_type: str) -> SourceKind:
 
 
 def known_types() -> list[str]:
-    """List source types currently resolvable. Useful for introspection."""
+    """List source types currently resolvable (pulleables: tienen factory). Útil para
+    introspección de la INGESTA. Para enumerar por categoría usar `kind_types()`."""
     return list(_LAZY_FACTORIES.keys())
+
+
+def kind_types() -> list[str]:
+    """Source types con una `SourceKind` registrada — superset de `known_types()`: incluye
+    tipos push-only (sin factory de pull) como `outlook`. El work-set de extracción enumera
+    por acá, no por `known_types()`, para no saltearse esos mensajes."""
+    return list(_KIND_BY_TYPE.keys())
