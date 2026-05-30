@@ -135,8 +135,9 @@ def parse_items(content: str) -> list[dict[str, Any]]:
     return [item for item in raw if isinstance(item, dict)]
 
 
-def _normalize(text: str) -> str:
-    """casefold + colapso de whitespace, para el chequeo substring de `evidence`."""
+def normalize(text: str) -> str:
+    """casefold + colapso de whitespace. Lo usa el chequeo substring de `evidence` y el
+    dedup determinista de `calendar` (comparación de títulos/lugares) — única fuente."""
     return " ".join(text.casefold().split())
 
 
@@ -170,8 +171,8 @@ def validate_item(
         return None
 
     if rendered_by_id is not None and item.evidence.strip():
-        needle = _normalize(item.evidence)
-        haystack = _normalize(" ".join(rendered_by_id.get(i, "") for i in item.source_inbox_ids))
+        needle = normalize(item.evidence)
+        haystack = normalize(" ".join(rendered_by_id.get(i, "") for i in item.source_inbox_ids))
         if needle not in haystack:
             _log.warning(
                 "extract.evidence_miss",

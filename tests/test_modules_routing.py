@@ -135,3 +135,23 @@ def test_parse_routing_not_list_returns_none() -> None:
 
 def test_parse_routing_filters_non_strings() -> None:
     assert parse_routing('{"modules": ["finance", 3, null, "  "]}') == ["finance"]
+
+
+# ----- módulos concretos: 2 candidatos (finance + calendar) ---------------------- #
+
+
+def test_finance_and_calendar_are_both_candidates_for_email() -> None:
+    """Con finance + calendar (ambos {EMAIL,CHAT}) hay ≥2 candidatos → el orquestador rutea
+    por LLM (deja de hacer short-circuit). Acá se valida el pre-filtro + topo-sort puros."""
+    from memex.modules.calendar.module import CalendarModule
+    from memex.modules.finance.module import FinanceModule
+
+    mods: list[InterestModule] = [FinanceModule(), CalendarModule()]
+    for kind in (SourceKind.EMAIL, SourceKind.CHAT):
+        assert {m.slug for m in candidates_for_kind(kind, mods)} == {"finance", "calendar"}
+    assert candidates_for_kind(SourceKind.SOCIAL, mods) == []
+
+    active = {m.slug: m for m in mods}
+    result = resolve_order(["finance", "calendar"], active)
+    assert set(result.order) == {"finance", "calendar"}
+    assert result.dropped == ()

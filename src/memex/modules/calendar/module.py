@@ -1,0 +1,170 @@
+"""`CalendarModule` — extractor de FECHAS/EVENTOS + dominio consolidado (ADR-015 §4, §11).
+
+Es el segundo módulo (después de finance) y ejercita lo que finance no tocó:
+- capacidad `provide_domain`: es single-writer de `mod_calendar_events` (el handle de lectura
+  vive en `memex.modules.calendar.domain`);
+- dedup determinista FASE 1 dentro de `persist`: tras insertar los eventos del lote, compara
+  (nuevos entre sí + nuevos contra existentes del user en la ventana de fechas) con la pura
+  `mark_duplicates` y registra los pares candidatos en `mod_calendar_dedup_candidates`. Todo en
+  `ctx.conn` (la tx que abre el orquestador) → eventos + pares + cursor son atómicos. NUNCA
+  fusiona ni borra: los eventos coexisten. La FASE 2 (LLM por par ambiguo) se difiere.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+from typing import ClassVar
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+
+from memex.core.source import HealthResult, SourceKind
+from memex.logging import get_logger
+from memex.modules.calendar.dedup import DedupRow, mark_duplicates
+from memex.modules.calendar.prompt import CALENDAR_SYSTEM_PROMPT
+from memex.modules.calendar.schema import CalendarEventItem
+from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, ModuleContext
+
+_log = get_logger("memex.modules.calendar")
+
+#: Margen de fechas alrededor del lote para traer existentes comparables en el dedup.
+_DEDUP_DATE_MARGIN = timedelta(days=1)
+
+
+def _insert_events(
+    conn: Connection, user_id: int, events: Sequence[CalendarEventItem]
+) -> list[DedupRow]:
+    """Inserta los eventos y devuelve un `DedupRow` por cada uno (con su `id` recién asignado)."""
+    rows: list[DedupRow] = []
+    for e in events:
+        event_id = conn.execute(
+            text(
+                """
+                INSERT INTO mod_calendar_events
+                  (user_id, source_inbox_ids, title, starts_on, ends_on,
+                   start_time, end_time, location, description, evidence)
+                VALUES
+                  (:uid, :ids, :title, :starts_on, :ends_on,
+                   :start_time, :end_time, :location, :description, :evidence)
+                RETURNING id
+                """
+            ),
+            {
+                "uid": user_id,
+                "ids": list(e.source_inbox_ids),
+                "title": e.title,
+                "starts_on": e.starts_on,
+                "ends_on": e.ends_on,
+                "start_time": e.start_time,
+                "end_time": e.end_time,
+                "location": e.location,
+                "description": e.description,
+                "evidence": e.evidence,
+            },
+        ).scalar_one()
+        rows.append(
+            DedupRow(
+                event_id=int(event_id),
+                title=e.title,
+                location=e.location,
+                starts_on=e.starts_on,
+                ends_on=e.ends_on,
+                start_time=e.start_time,
+                end_time=e.end_time,
+            )
+        )
+    return rows
+
+
+def _existing_rows(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> list[DedupRow]:
+    """Eventos ya persistidos del user comparables con el lote (ventana de fechas ± margen),
+    excluyendo los recién insertados."""
+    new_ids = [r.event_id for r in new_rows]
+    starts = [r.starts_on for r in new_rows]
+    lo = min(starts) - _DEDUP_DATE_MARGIN
+    hi = max(starts) + _DEDUP_DATE_MARGIN
+    rows = (
+        conn.execute(
+            text(
+                """
+                SELECT id, title, location, starts_on, ends_on, start_time, end_time
+                FROM mod_calendar_events
+                WHERE user_id = :uid
+                  AND (starts_on BETWEEN :lo AND :hi
+                       OR (ends_on IS NOT NULL AND ends_on BETWEEN :lo AND :hi))
+                  AND NOT (id = ANY(:new_ids))
+                """
+            ),
+            {"uid": user_id, "lo": lo, "hi": hi, "new_ids": new_ids},
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        DedupRow(
+            event_id=int(r["id"]),
+            title=str(r["title"]),
+            location=str(r["location"]),
+            starts_on=r["starts_on"],
+            ends_on=r["ends_on"],
+            start_time=r["start_time"],
+            end_time=r["end_time"],
+        )
+        for r in rows
+    ]
+
+
+def _mark_dedup(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> int:
+    """Corre el dedup determinista y registra los pares candidatos. Devuelve cuántos marcó."""
+    existing = _existing_rows(conn, user_id, new_rows)
+    pairs = mark_duplicates(new_rows, existing)
+    if not pairs:
+        return 0
+    conn.execute(
+        text(
+            """
+            INSERT INTO mod_calendar_dedup_candidates
+              (user_id, event_a_id, event_b_id, reason, score)
+            VALUES (:uid, :a, :b, :reason, :score)
+            ON CONFLICT (event_a_id, event_b_id) DO NOTHING
+            """
+        ),
+        [
+            {"uid": user_id, "a": p.a_id, "b": p.b_id, "reason": p.reason, "score": p.score}
+            for p in pairs
+        ],
+    )
+    _log.info("calendar.dedup.marked", pairs=len(pairs))
+    return len(pairs)
+
+
+class CalendarModule:
+    """Extrae eventos a `mod_calendar_events` y marca duplicados candidatos (sin fusionar)."""
+
+    slug: ClassVar[str] = "calendar"
+    interest: ClassVar[str] = (
+        "Fechas y eventos de la persona: citas, reuniones, clases, exámenes, entregas, vuelos, "
+        "turnos médicos, vencimientos, cumpleaños, viajes — cualquier cosa con una fecha "
+        "concreta. NO publicidad ni fechas de promociones."
+    )
+    extraction_schema: ClassVar[type[ExtractionItem]] = CalendarEventItem
+    extraction_prompt: ClassVar[str] = CALENDAR_SYSTEM_PROMPT
+    capabilities: ClassVar[frozenset[str]] = frozenset({CAP_EXTRACT, CAP_PROVIDE_DOMAIN})
+    consumes_kinds: ClassVar[frozenset[SourceKind]] = frozenset({SourceKind.EMAIL, SourceKind.CHAT})
+    depends_on: ClassVar[tuple[str, ...]] = ()
+
+    async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
+        """Inserta los eventos validados y marca pares candidatos de duplicado, todo en
+        `ctx.conn` (atómico con el cursor de extracción). Devuelve cuántos eventos insertó."""
+        events = [i for i in items if isinstance(i, CalendarEventItem)]
+        if not events:
+            return 0
+        new_rows = _insert_events(ctx.conn, ctx.user_id, events)
+        _mark_dedup(ctx.conn, ctx.user_id, new_rows)
+        return len(events)
+
+    async def health_check(self) -> HealthResult:
+        return HealthResult(
+            status="healthy", detail="calendar module ready", checked_at=datetime.now(UTC)
+        )

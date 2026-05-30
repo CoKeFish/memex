@@ -1,0 +1,217 @@
+"""Tests del módulo calendar: schema, registry, Protocol, dedup determinista y dominio.
+
+Los del schema/registry/dedup son puros; `events_in_range` y `contribute` tocan la DB de test.
+"""
+
+from __future__ import annotations
+
+from datetime import date, time, timedelta
+
+import pytest
+from pydantic import ValidationError
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+
+from memex.core.source import SourceKind
+from memex.db import connection
+from memex.modules import known_modules, resolve
+from memex.modules.calendar.dedup import DedupRow, mark_duplicates
+from memex.modules.calendar.domain import CalendarDomain, CalendarDomainReader, CalendarEvent
+from memex.modules.calendar.module import CalendarModule
+from memex.modules.calendar.schema import CalendarEventItem
+from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, InterestModule
+
+# ----- schema -------------------------------------------------------------------- #
+
+
+def test_calendar_event_valid_with_coercion() -> None:
+    e = CalendarEventItem(
+        source_inbox_ids=[3],  # list → tuple
+        title="Examen de Análisis",
+        starts_on="2026-06-03",  # str → date
+        start_time="15:30",  # str → time
+        location="Aula 7",
+        evidence="el examen es el 3/6 a las 15:30 en el aula 7",
+    )
+    assert e.starts_on == date(2026, 6, 3)
+    assert e.start_time == time(15, 30)
+    assert e.source_inbox_ids == (3,)
+    assert e.ends_on is None
+    assert e.end_time is None
+    assert e.description == ""
+
+
+def test_calendar_event_starts_on_required() -> None:
+    with pytest.raises(ValidationError):
+        CalendarEventItem(source_inbox_ids=(1,), title="x")  # type: ignore[call-arg]  # falta starts_on
+
+
+def test_calendar_event_forbids_extra() -> None:
+    with pytest.raises(ValidationError):
+        CalendarEventItem(
+            source_inbox_ids=(1,),
+            title="x",
+            starts_on=date(2026, 6, 3),
+            categoria="evento",  # type: ignore[call-arg]  # extra prohibido
+        )
+
+
+def test_calendar_event_is_extraction_item() -> None:
+    assert issubclass(CalendarEventItem, ExtractionItem)
+
+
+# ----- registry / Protocol ------------------------------------------------------- #
+
+
+def test_known_modules_includes_calendar() -> None:
+    assert "calendar" in known_modules()
+
+
+def test_resolve_calendar_builds_module() -> None:
+    module = resolve("calendar")()
+    assert isinstance(module, CalendarModule)
+
+
+def test_calendar_satisfies_interest_module() -> None:
+    assert isinstance(CalendarModule(), InterestModule)
+
+
+def test_calendar_capabilities_and_kinds() -> None:
+    assert CAP_EXTRACT in CalendarModule.capabilities
+    assert CAP_PROVIDE_DOMAIN in CalendarModule.capabilities  # lo nuevo vs finance
+    assert CalendarModule.consumes_kinds == frozenset({SourceKind.EMAIL, SourceKind.CHAT})
+    assert CalendarModule.depends_on == ()
+
+
+# ----- dedup determinista (puro) ------------------------------------------------- #
+
+
+def _row(
+    event_id: int,
+    title: str,
+    *,
+    starts_on: date = date(2026, 6, 3),
+    ends_on: date | None = None,
+    start_time: time | None = None,
+    end_time: time | None = None,
+    location: str = "",
+) -> DedupRow:
+    return DedupRow(
+        event_id=event_id,
+        title=title,
+        location=location,
+        starts_on=starts_on,
+        ends_on=ends_on,
+        start_time=start_time,
+        end_time=end_time,
+    )
+
+
+def test_dedup_same_time_similar_title_marks_pair() -> None:
+    a = _row(1, "Reunión de equipo", start_time=time(10, 0))
+    b = _row(2, "Reunion de equipo", start_time=time(10, 0))  # sin tilde
+    pairs = mark_duplicates([a, b], [])
+    assert len(pairs) == 1
+    assert (pairs[0].a_id, pairs[0].b_id) == (1, 2)
+    assert pairs[0].reason == "time+title"
+
+
+def test_dedup_same_time_different_text_no_pair() -> None:
+    """Mismo horario NO alcanza: sin similitud de título ni lugar, no es candidato."""
+    a = _row(1, "Dentista", start_time=time(10, 0), location="Centro")
+    b = _row(2, "Cena con Ana", start_time=time(10, 0), location="Palermo")
+    assert mark_duplicates([a, b], []) == []
+
+
+def test_dedup_same_time_similar_location_marks_pair() -> None:
+    a = _row(1, "Charla A", start_time=time(18, 0), location="Auditorio Central")
+    b = _row(2, "Evento B", start_time=time(18, 0), location="Auditorio Central")
+    pairs = mark_duplicates([a, b], [])
+    assert len(pairs) == 1
+    assert pairs[0].reason == "time+location"
+
+
+def test_dedup_disjoint_times_same_title_no_pair() -> None:
+    a = _row(1, "Clase de Cálculo", start_time=time(9, 0))
+    b = _row(2, "Clase de Cálculo", start_time=time(18, 0))
+    assert mark_duplicates([a, b], []) == []
+
+
+def test_dedup_within_tolerance_marks_pair() -> None:
+    # Gap 18:40 → 19:00 = 20 min, dentro de la tolerancia de 30 min.
+    a = _row(1, "Llamada con cliente", start_time=time(18, 0), end_time=time(18, 40))
+    b = _row(2, "Llamada con cliente", start_time=time(19, 0))
+    pairs = mark_duplicates([a, b], [])
+    assert len(pairs) == 1
+    assert pairs[0].reason == "time+title"
+
+
+def test_dedup_all_day_same_day_similar_title_marks_pair() -> None:
+    a = _row(1, "Feriado nacional")  # sin hora → todo el día
+    b = _row(2, "Feriado nacional")
+    pairs = mark_duplicates([a, b], [])
+    assert len(pairs) == 1
+
+
+def test_dedup_all_day_different_day_no_pair() -> None:
+    a = _row(1, "Feriado nacional", starts_on=date(2026, 6, 3))
+    b = _row(2, "Feriado nacional", starts_on=date(2026, 6, 20))
+    assert mark_duplicates([a, b], []) == []
+
+
+def test_dedup_new_vs_existing_marks_pair() -> None:
+    new = _row(10, "Vuelo a Córdoba", start_time=time(8, 0))
+    existing = _row(3, "Vuelo a Cordoba", start_time=time(8, 0))
+    pairs = mark_duplicates([new], [existing])
+    assert len(pairs) == 1
+    assert (pairs[0].a_id, pairs[0].b_id) == (3, 10)  # canónico a<b
+
+
+def test_dedup_not_transitive() -> None:
+    """A~B y B~C pero A≁C → solo (A,B) y (B,C), nunca (A,C) ni un grupo de 3."""
+    a = _row(1, "Clase de Cálculo", start_time=time(9, 0), end_time=time(9, 30))
+    b = _row(2, "Clase de Cálculo", start_time=time(9, 25), end_time=time(10, 5))
+    c = _row(3, "Clase de Cálculo", start_time=time(10, 0), end_time=time(10, 30))
+    pairs = mark_duplicates([a, b, c], [], overlap_tolerance=timedelta(0))
+    got = {(p.a_id, p.b_id) for p in pairs}
+    assert got == {(1, 2), (2, 3)}
+
+
+# ----- dominio: events_in_range / contribute ------------------------------------- #
+
+
+def _seed_event(user_id: int, title: str, starts_on: date) -> int:
+    with connection() as c:
+        eid = c.execute(
+            text(
+                "INSERT INTO mod_calendar_events (user_id, source_inbox_ids, title, starts_on) "
+                "VALUES (:u, ARRAY[]::bigint[], :t, :d) RETURNING id"
+            ),
+            {"u": user_id, "t": title, "d": starts_on},
+        ).scalar_one()
+    return int(eid)
+
+
+def test_events_in_range_filters_window_and_user(seed_user2: int) -> None:
+    _seed_event(1, "antes", date(2026, 6, 1))
+    _seed_event(1, "dentro", date(2026, 6, 15))
+    _seed_event(1, "después", date(2026, 6, 30))
+    _seed_event(seed_user2, "otro user", date(2026, 6, 15))  # no debe aparecer
+
+    with connection() as c:
+        reader = CalendarDomainReader(c, 1)
+        events = reader.events_in_range(date(2026, 6, 10), date(2026, 6, 20))
+
+    assert [e.title for e in events] == ["dentro"]
+    assert isinstance(events[0], CalendarEvent)
+
+
+def test_reader_satisfies_domain_protocol(conn: Connection) -> None:
+    reader = CalendarDomainReader(conn, 1)
+    assert isinstance(reader, CalendarDomain)
+
+
+def test_contribute_not_implemented(conn: Connection) -> None:
+    reader = CalendarDomainReader(conn, 1)
+    with pytest.raises(NotImplementedError, match="contribute"):
+        reader.contribute([])
