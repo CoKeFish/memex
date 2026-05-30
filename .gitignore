@@ -15,6 +15,10 @@ exports/
 dumps/
 raw/
 processed/
+
+# Spikes / experimentos throwaway (scripts de diseño, outputs de LLM, scratch).
+# No es código de producción ni se versiona; vive acá para correr con el venv.
+experiments/
 *.csv
 *.tsv
 *.parquet
