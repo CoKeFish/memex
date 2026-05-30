@@ -4,9 +4,10 @@ Aísla al vendor: `source.py` / `parser.py` consumen dicts ya normalizados, nunc
 URLs ni shapes de Apify. Si mañana cambiamos de provider (HikerAPI, EnsembleData)
 solo cambia este módulo — el contrato `Source` no se entera.
 
-Usa httpx **síncrono** (ya es dependencia del proyecto) — NO el SDK `apify-client`.
-El patrón de retry/backoff está espejado de `MemexServerClient._request`: reintenta
-5xx + errores de red con backoff exponencial; 4xx levanta `ApifyError` inmediato.
+Usa httpx **asíncrono** (`AsyncClient`) — NO el SDK `apify-client`. El caller sync
+(`social_fetch`, generador del contrato `Source`) lo maneja vía el puente
+`run_sync` en `_common.py`, igual que el polling de Telegram. Correr varias cuentas
+en paralelo (gather + semáforo) es el motivo del async: menos wall-clock.
 
 Flujo **run async + poll** (NO `run-sync-get-dataset-items`): los actores de scraping
 pueden tardar más que el límite duro de `run-sync` y, sobre todo, `run-sync` no
@@ -19,7 +20,7 @@ nunca internals de memex (db/api/inbox/checkpoint).
 
 from __future__ import annotations
 
-import time
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,18 +60,19 @@ class ApifyRunResult:
 
 
 class ApifyClient:
-    """Cliente HTTP mínimo para la API de Apify.
+    """Cliente HTTP async mínimo para la API de Apify.
 
     El token va en el header `Authorization: Bearer` (nunca en la URL, para que no
     aparezca en logs de proxy/acceso). Construir con `client` inyectado para tests
-    (respx), o dejar que cree el suyo.
+    (respx), o dejar que cree el suyo. Una instancia se comparte entre las corutinas
+    de scraping concurrente (httpx.AsyncClient es seguro para requests concurrentes).
     """
 
     def __init__(
         self,
         token: str,
         *,
-        client: httpx.Client | None = None,
+        client: httpx.AsyncClient | None = None,
         base_url: str = _APIFY_BASE_URL,
         timeout: float = 30.0,
         max_retries: int = 3,
@@ -86,28 +88,28 @@ class ApifyClient:
         self._log = get_logger("memex.ingestors.social.apify_client")
 
         headers = {"Authorization": f"Bearer {token}"}
-        self._client = client or httpx.Client(
+        self._client = client or httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
             timeout=httpx.Timeout(timeout),
         )
         self._owns_client = client is None
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
         if self._owns_client:
-            self._client.close()
+            await self._client.aclose()
 
-    def __enter__(self) -> ApifyClient:
+    async def __aenter__(self) -> ApifyClient:
         return self
 
-    def __exit__(self, *args: object) -> None:
-        self.close()
+    async def __aexit__(self, *args: object) -> None:
+        await self.aclose()
 
-    def whoami(self) -> dict[str, Any]:
+    async def whoami(self) -> dict[str, Any]:
         """GET /v2/users/me — valida el token sin scrapear ni gastar. Para health_check."""
-        return self._data(self._request("GET", "/v2/users/me"))
+        return self._data(await self._request("GET", "/v2/users/me"))
 
-    def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
+    async def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
         """Corre un actor de principio a fin y devuelve los items del dataset.
 
         `actor_id` viene en formato `username/actor`; Apify lo espera con `~` en la
@@ -119,7 +121,9 @@ class ApifyClient:
         # reintentar lanzaría un SEGUNDO run pago. Mejor fallar la cuenta (la captura
         # `social_fetch`) que duplicar el gasto.
         data = self._data(
-            self._request("POST", f"/v2/acts/{path_actor}/runs", json=run_input, idempotent=False)
+            await self._request(
+                "POST", f"/v2/acts/{path_actor}/runs", json=run_input, idempotent=False
+            )
         )
 
         run_id = str(data.get("id") or "")
@@ -129,9 +133,9 @@ class ApifyClient:
 
         waited = 0.0
         while status in _RUNNING_STATUSES and waited < self.max_wait_s:
-            time.sleep(self.poll_interval_s)
+            await asyncio.sleep(self.poll_interval_s)
             waited += self.poll_interval_s
-            data = self._data(self._request("GET", f"/v2/actor-runs/{run_id}"))
+            data = self._data(await self._request("GET", f"/v2/actor-runs/{run_id}"))
             status = str(data.get("status") or "")
             dataset_id = str(data.get("defaultDatasetId") or dataset_id)
             if data.get("usageTotalUsd") is not None:
@@ -142,7 +146,7 @@ class ApifyClient:
         if not dataset_id:
             raise ApifyError(0, f"run {run_id!r} has no defaultDatasetId")
 
-        items_resp = self._request(
+        items_resp = await self._request(
             "GET",
             f"/v2/datasets/{dataset_id}/items",
             params={"clean": "true", "format": "json"},
@@ -168,7 +172,7 @@ class ApifyClient:
             return body
         return {}
 
-    def _request(
+    async def _request(
         self,
         method: str,
         path: str,
@@ -185,7 +189,7 @@ class ApifyClient:
         last_exc: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
-                resp = self._client.request(method, path, json=json, params=params)
+                resp = await self._client.request(method, path, json=json, params=params)
             except (httpx.TransportError, httpx.TimeoutException) as e:
                 last_exc = e
                 self._log.warning(
@@ -223,7 +227,7 @@ class ApifyClient:
                     return resp
 
             if attempt < self.max_retries:
-                time.sleep(self.backoff_base * (2**attempt))
+                await asyncio.sleep(self.backoff_base * (2**attempt))
 
         assert last_exc is not None
         raise last_exc

@@ -2,8 +2,10 @@
 
 Centraliza lo que las tres comparten para evitar copias divergentes:
 
-- `social_fetch`: el collect loop (correr el actor por cuenta + parsear + filtro de
-  novedad + orden oldest-first), parametrizado por `parse_item` y `build_run_input`.
+- `social_fetch`: generador sync del contrato `Source` que puentea (vía `run_sync`)
+  al trabajo async `_social_fetch_async`: corre el actor por cuenta EN PARALELO
+  (gather + semáforo), parsea, filtra por novedad y ordena oldest-first.
+- `run_sync`: puente async→sync (espejo de `telegram.client.run_sync`).
 - `advance_social_checkpoint`: avanza el `SocialCursor` desde el `external_id`.
 - `is_new_record`: filtro "since" client-side (los scrapers no tienen cursor nativo).
 - `split_social_external_id`: parsea `{platform}:{account}:{post_id}` defensivamente.
@@ -19,7 +21,7 @@ end}`. La plataforma va como campo bindeado del logger, no en el nombre del even
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -33,6 +35,9 @@ ParseItem = Callable[[dict[str, Any], str], SourceRecord | None]
 BuildRunInput = Callable[[str, int], dict[str, Any]]
 
 _PLATFORMS = ("instagram", "facebook", "x")
+# Cuentas scrapeadas en paralelo por run. Tope para no martillar Apify ni gatillar
+# rate-limits; promovible a campo de SocialConfig si hiciera falta afinarlo.
+_MAX_CONCURRENCY = 4
 
 
 def split_social_external_id(external_id: str) -> tuple[str, str, str] | None:
@@ -103,37 +108,65 @@ def social_fetch(
 ) -> Iterator[SourceRecord]:
     """Corre el actor por cada cuenta de la allowlist y yieldea records nuevos.
 
-    Generador sync sobre httpx (no necesita el puente sync-over-async de Telegram).
-    Por cuenta: corre el actor, parsea, filtra por cursor, ordena oldest-first
-    (para que el runner avance el cursor a `chunk[-1]` = el más nuevo) y yieldea.
-    Un error de cuenta se loggea y se saltea — no tumba el run completo.
+    Generador sync (parte del contrato `Source`) que puentea, vía `run_sync`, al
+    trabajo async: las cuentas se scrapean EN PARALELO (gather + semáforo) y los
+    records salen ya aplanados en orden de cuenta, oldest-first dentro de cada una
+    (para que el runner avance el cursor a `chunk[-1]` = el más nuevo). Un error de
+    cuenta se loggea y se saltea — no tumba el run completo.
+    """
+    yield from run_sync(
+        _social_fetch_async(
+            cfg,
+            checkpoint,
+            parse_item=parse_item,
+            build_run_input=build_run_input,
+            log=log,
+        )
+    )
+
+
+async def _social_fetch_async(
+    cfg: SocialConfig,
+    checkpoint: SocialCursor,
+    *,
+    parse_item: ParseItem,
+    build_run_input: BuildRunInput,
+    log: Any,
+) -> list[SourceRecord]:
+    """Trabajo async de `social_fetch`: scrapeo concurrente de la allowlist.
+
+    Un único `ApifyClient` (AsyncClient) se comparte entre las corutinas; el
+    semáforo limita cuántas cuentas corren a la vez. `gather` preserva el orden de
+    `cfg.accounts`, así que el aplanado final es determinístico.
     """
     if not cfg.accounts:
         log.info("social.fetch.skip", reason="no_accounts")
-        return
+        return []
 
     log.info("social.fetch.start", accounts_count=len(cfg.accounts))
-    total_cost = 0.0
-    cost_known = False
+    sem = asyncio.Semaphore(_MAX_CONCURRENCY)
 
-    with ApifyClient(
+    async with ApifyClient(
         cfg.apify_token.get_secret_value(),
         timeout=float(cfg.run_timeout_s),
         max_wait_s=float(cfg.run_timeout_s),
     ) as apify:
-        for allowed in cfg.accounts:
-            account = allowed.account
+
+        async def _one(account: str) -> tuple[list[SourceRecord], float | None]:
             acct_cursor = checkpoint.accounts.get(account)
             acct_log = log.bind(account=account)
-            try:
-                result = apify.run_actor(cfg.actor_id, build_run_input(account, cfg.results_limit))
-            except ApifyError as e:
-                acct_log.warning(
-                    "social.fetch.account_error",
-                    status_code=e.status_code,
-                    exc_msg=str(e),
-                )
-                continue
+            async with sem:
+                try:
+                    result = await apify.run_actor(
+                        cfg.actor_id, build_run_input(account, cfg.results_limit)
+                    )
+                except ApifyError as e:
+                    acct_log.warning(
+                        "social.fetch.account_error",
+                        status_code=e.status_code,
+                        exc_msg=str(e),
+                    )
+                    return [], None
 
             kept: list[SourceRecord] = []
             for raw in result.items:
@@ -158,9 +191,6 @@ def social_fetch(
             # flusheado es el más nuevo. Los actores devuelven newest-first.
             kept.sort(key=lambda r: (r.occurred_at, r.external_id))
 
-            if result.usage_usd is not None:
-                total_cost += result.usage_usd
-                cost_known = True
             acct_log.info(
                 "social.fetch.account_done",
                 scraped=len(result.items),
@@ -168,34 +198,60 @@ def social_fetch(
                 apify_run_id=result.run_id,
                 apify_cost_usd=result.usage_usd,
             )
-            yield from kept
+            return kept, result.usage_usd
+
+        results: list[tuple[list[SourceRecord], float | None]] = await asyncio.gather(
+            *(_one(allowed.account) for allowed in cfg.accounts)
+        )
+
+    records: list[SourceRecord] = []
+    total_cost = 0.0
+    cost_known = False
+    for kept, usage_usd in results:
+        records.extend(kept)
+        if usage_usd is not None:
+            total_cost += usage_usd
+            cost_known = True
 
     log.info(
         "social.fetch.end",
         accounts_count=len(cfg.accounts),
         apify_cost_usd=round(total_cost, 6) if cost_known else None,
     )
+    return records
 
 
 async def social_health_probe(cfg: SocialConfig) -> HealthResult:
     """Valida el token de Apify vía `GET /v2/users/me`. Nunca lanza, nunca gasta.
 
-    Corre el httpx bloqueante en un threadpool, igual que `ImapSource.health_check`.
-    El `detail` nunca incluye el token.
+    Async-nativo (el `ApifyClient` ya es async). El `detail` nunca incluye el token.
     """
-
-    def _probe() -> tuple[Literal["healthy", "unhealthy"], str]:
-        try:
-            with ApifyClient(
-                cfg.apify_token.get_secret_value(), timeout=float(cfg.run_timeout_s)
-            ) as client:
-                me = client.whoami()
-            username = me.get("username") or me.get("id") or "?"
-            return ("healthy", f"apify token ok, user={username}")
-        except ApifyError as e:
-            return ("unhealthy", f"apify: {e.status_code}")
-        except Exception as e:
-            return ("unhealthy", f"{type(e).__name__}: {e}")
-
-    status, detail = await asyncio.to_thread(_probe)
+    status: Literal["healthy", "unhealthy"]
+    try:
+        async with ApifyClient(
+            cfg.apify_token.get_secret_value(), timeout=float(cfg.run_timeout_s)
+        ) as client:
+            me = await client.whoami()
+        username = me.get("username") or me.get("id") or "?"
+        status, detail = "healthy", f"apify token ok, user={username}"
+    except ApifyError as e:
+        status, detail = "unhealthy", f"apify: {e.status_code}"
+    except Exception as e:
+        status, detail = "unhealthy", f"{type(e).__name__}: {e}"
     return HealthResult(status=status, detail=detail, checked_at=datetime.now(UTC))
+
+
+def run_sync[T](coro: Coroutine[Any, Any, T] | Awaitable[T]) -> T:
+    """Ejecuta una corrida async desde un caller sync (espejo de `telegram.run_sync`).
+
+    Crea un event loop nuevo por invocación vía `asyncio.run`. NO usar desde dentro
+    de un loop ya activo — solo desde el runner/CLI sync de polling, que es el caso.
+    """
+    if asyncio.iscoroutine(coro):
+        result: T = asyncio.run(coro)
+        return result
+
+    async def _wrap() -> T:
+        return await coro
+
+    return asyncio.run(_wrap())

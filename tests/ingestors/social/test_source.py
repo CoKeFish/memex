@@ -5,6 +5,7 @@ Mockea `ApifyClient` (monkeypatch en `_common`) para no pegarle a Apify real.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
@@ -51,16 +52,39 @@ def _fake_apify_returning(items: list[dict[str, Any]], *, usage: float | None = 
         def __init__(self, token: str, **kwargs: Any) -> None:
             self.token = token
 
-        def __enter__(self) -> _FakeApify:
+        async def __aenter__(self) -> _FakeApify:
             return self
 
-        def __exit__(self, *a: object) -> None:
+        async def __aexit__(self, *a: object) -> None:
             return None
 
-        def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
+        async def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
             return ApifyRunResult(items=items, usage_usd=usage, run_id="R1")
 
     return _FakeApify
+
+
+def _fake_apify_concurrency(tracker: dict[str, int]) -> type:
+    """ApifyClient falso que registra cuántos `run_actor` corren a la vez."""
+
+    class _Fake:
+        def __init__(self, token: str, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Fake:
+            return self
+
+        async def __aexit__(self, *a: object) -> None:
+            return None
+
+        async def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
+            tracker["cur"] += 1
+            tracker["max"] = max(tracker["max"], tracker["cur"])
+            await asyncio.sleep(0.01)
+            tracker["cur"] -= 1
+            return ApifyRunResult(items=[], usage_usd=0.0, run_id="R")
+
+    return _Fake
 
 
 # ---- contract ---- #
@@ -177,6 +201,17 @@ def test_social_fetch_skips_items_that_raise_in_parser(monkeypatch: pytest.Monke
     ]
 
 
+def test_fetch_scrapes_accounts_concurrently(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Las cuentas se scrapean en paralelo (gather + semáforo), no una por una."""
+    tracker = {"cur": 0, "max": 0}
+    monkeypatch.setattr(
+        "memex.ingestors.social._common.ApifyClient", _fake_apify_concurrency(tracker)
+    )
+    accounts = [AllowedAccount(account=a) for a in ("a", "b", "c")]
+    list(InstagramSource(_cfg(accounts=accounts)).fetch(SocialCursor()))
+    assert tracker["max"] >= 2
+
+
 # ---- advance_checkpoint ---- #
 
 
@@ -248,13 +283,13 @@ async def test_health_check_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, *a: Any, **k: Any) -> None:
             pass
 
-        def __enter__(self) -> _OK:
+        async def __aenter__(self) -> _OK:
             return self
 
-        def __exit__(self, *a: object) -> None:
+        async def __aexit__(self, *a: object) -> None:
             return None
 
-        def whoami(self) -> dict[str, Any]:
+        async def whoami(self) -> dict[str, Any]:
             return {"username": "tester"}
 
     monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _OK)
@@ -270,10 +305,10 @@ async def test_health_check_unhealthy_on_error(monkeypatch: pytest.MonkeyPatch) 
         def __init__(self, *a: Any, **k: Any) -> None:
             pass
 
-        def __enter__(self) -> _Bad:
+        async def __aenter__(self) -> _Bad:
             raise ConnectionError("apify unreachable")
 
-        def __exit__(self, *a: object) -> None:
+        async def __aexit__(self, *a: object) -> None:
             return None
 
     monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _Bad)
