@@ -35,6 +35,9 @@ services:
       MEMEX_TG_API_ID: ${MEMEX_TG_API_ID:-}
       MEMEX_TG_API_HASH: ${MEMEX_TG_API_HASH:-}
       MEMEX_TG_PHONE: ${MEMEX_TG_PHONE:-}
+      # LLM (memex.llm) — sin prefijo MEMEX_; inyectada por Doppler. El consumidor
+      # (classifier/summarizer) aún no existe, pero queda disponible desde ya.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     ports:
       - "8787:8787"
     volumes:
