@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from memex.core.source import SourceFactory
+from memex.core.source import SourceFactory, SourceKind
 
 
 def _imap_loader() -> SourceFactory:
@@ -63,6 +63,18 @@ _LAZY_FACTORIES: dict[str, Callable[[], SourceFactory]] = {
     "x": _x_loader,
 }
 
+# Categoría conceptual (`Source.kind`) de cada tipo, SIN importar la clase concreta (que
+# arrastra deps pesadas como imap_tools/telethon). Es la misma info que el ClassVar `kind`
+# de cada Source; un test de disciplina verifica que no diverjan. Downstream
+# (módulos de extracción) la usa para pre-filtrar por `consumes_kinds` sin tocar el LLM.
+_KIND_BY_TYPE: dict[str, SourceKind] = {
+    "imap": SourceKind.EMAIL,
+    "telegram": SourceKind.CHAT,
+    "instagram": SourceKind.SOCIAL,
+    "facebook": SourceKind.SOCIAL,
+    "x": SourceKind.SOCIAL,
+}
+
 
 def resolve(source_type: str) -> SourceFactory:
     """Return the factory for `source_type`, loading the module lazily.
@@ -72,6 +84,17 @@ def resolve(source_type: str) -> SourceFactory:
     if source_type not in _LAZY_FACTORIES:
         raise KeyError(f"no Source implementation registered for type={source_type!r}")
     return _LAZY_FACTORIES[source_type]()
+
+
+def kind_for_type(source_type: str) -> SourceKind:
+    """Return the conceptual `SourceKind` (email/chat/social) for a source type.
+
+    Mirrors `resolve` but for the category instead of the factory. Raises `KeyError`
+    if the type has no registered kind.
+    """
+    if source_type not in _KIND_BY_TYPE:
+        raise KeyError(f"no SourceKind registered for source type={source_type!r}")
+    return _KIND_BY_TYPE[source_type]
 
 
 def known_types() -> list[str]:
