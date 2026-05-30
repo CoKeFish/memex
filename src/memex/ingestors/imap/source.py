@@ -159,6 +159,8 @@ class ImapSource:
             size_bytes=size_bytes,
             max_body_bytes=self.cfg.max_body_bytes,
             fetch_body=self.cfg.fetch_body,
+            extract_media=self.cfg.extract_media,
+            max_attachment_bytes=self.cfg.max_attachment_bytes,
         )
 
 

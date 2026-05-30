@@ -123,7 +123,7 @@ def _build_messages(window: Window) -> tuple[str, dict[int, str]]:
     rendered_by_id: dict[int, str] = {}
     items: list[dict[str, object]] = []
     for row in window.rows:
-        rendered = render_payload(row.payload)
+        rendered = render_payload(row.payload, row.ocr_text)
         rendered_by_id[row.inbox_id] = rendered
         items.append({"id": row.inbox_id, "ts": row.occurred_at.isoformat(), "text": rendered})
     return json.dumps(items, ensure_ascii=False), rendered_by_id

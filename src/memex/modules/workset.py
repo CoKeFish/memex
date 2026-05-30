@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
 from memex.logging import get_logger
 from memex.modules.contract import InterestModule
 from memex.processing.windows import WorkRow
@@ -54,7 +55,7 @@ def load_module_workset(
 ) -> list[WorkRow]:
     """Mensajes clasificados pendientes para AL MENOS UN módulo activo (ver módulo docstring)."""
     clauses: list[str] = []
-    params: dict[str, Any] = {"uid": user_id, "limit": limit}
+    params: dict[str, Any] = {"uid": user_id, "limit": limit, "ocrmax": MAX_OCR_ATTEMPTS}
     for idx, module in enumerate(modules):
         types = _types_for_module(module)
         if not types:
@@ -80,12 +81,23 @@ def load_module_workset(
         conn.execute(
             text(
                 f"""
-                SELECT i.id, i.source_id, i.occurred_at, i.payload, c.tier, s.type AS source_type
+                SELECT i.id, i.source_id, i.occurred_at, i.payload, c.tier, s.type AS source_type,
+                       COALESCE(ma.ocr_text, '') AS ocr_text
                 FROM classifications c
                 JOIN inbox i   ON i.id = c.inbox_id
                 JOIN sources s ON s.id = i.source_id
+                LEFT JOIN (
+                    SELECT inbox_id, string_agg(ocr_text, E'\n' ORDER BY id) AS ocr_text
+                    FROM media_assets
+                    WHERE ocr_status = 'ok' AND ocr_text IS NOT NULL AND ocr_text <> ''
+                    GROUP BY inbox_id
+                ) ma ON ma.inbox_id = i.id
                 WHERE c.user_id = :uid
                   AND c.tier IN ('batch', 'individual')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM media_assets m
+                      WHERE m.inbox_id = i.id AND {MEDIA_NOT_TERMINAL_SQL}
+                  )
                   {source_filter}
                   AND ({pending_or})
                 ORDER BY i.source_id, i.occurred_at
@@ -106,6 +118,7 @@ def load_module_workset(
             payload=_coerce_payload(r["payload"]),
             tier=str(r["tier"]),
             source_type=str(r["source_type"]),
+            ocr_text=str(r["ocr_text"]),
         )
         for r in rows
     ]

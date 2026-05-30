@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import email.utils
+import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 from email.header import decode_header, make_header
@@ -10,7 +12,8 @@ from io import StringIO
 from typing import Literal
 
 from memex.core.payloads import Address, Attachment, EmailPayload
-from memex.core.source import SourceRecord
+from memex.core.source import MediaBlob, SourceRecord
+from memex.logging import get_logger
 
 RAW_HEADERS_WHITELIST = (
     "X-Mailer",
@@ -19,6 +22,26 @@ RAW_HEADERS_WHITELIST = (
 )
 
 BodySource = Literal["text", "html_stripped"]
+
+#: Content-types de adjuntos que extraemos para OCR. Imágenes + PDF. El PDF se ALMACENA pero el
+#: worker lo marca `skipped` (los endpoints chat/visión no aceptan application/pdf; rasterizar
+#: queda en backlog). `image/jpg` es no-estándar pero algunos clientes lo emiten.
+MEDIA_CONTENT_TYPES = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+        "image/tiff",
+        "application/pdf",
+    }
+)
+#: Tope de bytes por adjunto (default 10 MiB). Arriba de esto se saltea + loguea.
+DEFAULT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
+_log = get_logger("memex.ingestors.imap.parser")
 
 
 def parse_email_message(
@@ -33,6 +56,8 @@ def parse_email_message(
     size_bytes: int,
     max_body_bytes: int = 524288,
     fetch_body: bool = True,
+    extract_media: bool = False,
+    max_attachment_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES,
 ) -> SourceRecord:
     """Convert a stdlib email.message.Message + IMAP metadata into a SourceRecord.
 
@@ -46,6 +71,10 @@ def parse_email_message(
     field names become static type errors here, not silent JSONB misses at
     classification time. The model is serialized to dict at the SourceRecord
     boundary; the storage layer stays schema-agnostic.
+
+    When `extract_media` is on, image/PDF attachments are decoded to bytes and carried
+    on `SourceRecord.media` (base64) for the ingest boundary to upload to MinIO. Default
+    off → unchanged behavior. Attachment METADATA always stays in `payload.attachments`.
     """
     msg_id = _strip_brackets(msg.get("Message-ID"))
     in_reply_to = _strip_brackets(msg.get("In-Reply-To"))
@@ -70,6 +99,7 @@ def parse_email_message(
         body_text, body_source, body_truncated = _extract_body(msg, max_body_bytes)
 
     attachments = _extract_attachment_meta(msg)
+    media = _extract_media(msg, max_bytes=max_attachment_bytes) if extract_media else []
 
     raw_headers: dict[str, str] = {}
     for h in RAW_HEADERS_WHITELIST:
@@ -113,6 +143,7 @@ def parse_email_message(
         occurred_at=occurred_at,
         payload=payload_model.model_dump(mode="json", by_alias=True),
         dedupe_keys=dedupe_keys,
+        media=media,
     )
 
 
@@ -314,6 +345,44 @@ def _extract_attachment_meta(msg: Message) -> list[Attachment]:
                 content_type=part.get_content_type(),
                 size=size,
                 content_id=_strip_brackets(part.get("Content-ID")),
+            )
+        )
+    return result
+
+
+def _extract_media(msg: Message, *, max_bytes: int) -> list[MediaBlob]:
+    """Extrae los BYTES de adjuntos imagen/PDF (para subir a MinIO + OCR).
+
+    Re-camina `msg.walk()` (independiente de `_extract_attachment_meta`, que solo saca metadata).
+    Solo content-types en `MEDIA_CONTENT_TYPES`. Saltea (y loguea) los que pasan `max_bytes`.
+    sha256 + base64 con stdlib → función pura, testeable con `.eml`.
+    """
+    result: list[MediaBlob] = []
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        ctype = part.get_content_type()
+        if ctype not in MEDIA_CONTENT_TYPES:
+            continue
+        payload = part.get_payload(decode=True)
+        if not isinstance(payload, bytes) or not payload:
+            continue
+        if len(payload) > max_bytes:
+            _log.warning(
+                "imap.media.too_large",
+                content_type=ctype,
+                size=len(payload),
+                max_bytes=max_bytes,
+            )
+            continue
+        filename = part.get_filename()
+        result.append(
+            MediaBlob(
+                sha256=hashlib.sha256(payload).hexdigest(),
+                content_type=ctype,
+                filename=_decode_header(filename) if filename else None,
+                size=len(payload),
+                data_b64=base64.b64encode(payload).decode("ascii"),
             )
         )
     return result

@@ -18,6 +18,27 @@ services:
       retries: 5
     restart: unless-stopped
 
+  minio:
+    image: minio/minio:latest
+    container_name: memex-minio
+    command: server /data --console-address ":9001"
+    environment:
+      # root user/password = credenciales S3 (access/secret key). Inyectadas por
+      # Doppler en prod; defaults locales de dev acá.
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-memexminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-memexminio-dev-secret}
+    ports:
+      - "9000:9000"  # API S3
+      - "9001:9001"  # consola web
+    volumes:
+      - memex_miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -38,6 +59,17 @@ services:
       # LLM (memex.llm) — sin prefijo MEMEX_; inyectada por Doppler. El consumidor
       # (classifier/summarizer) aún no existe, pero queda disponible desde ya.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Almacenamiento de imágenes (memex.storage). El endpoint apunta al servicio
+      # minio del compose; las credenciales sin prefijo MEMEX_ (root user/password).
+      MEMEX_MINIO_ENDPOINT: http://minio:9000
+      MEMEX_MINIO_BUCKET: ${MEMEX_MINIO_BUCKET:-memex-media}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-memexminio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-memexminio-dev-secret}
+      # OCR (memex.ocr) — proveedor de visión OpenAI-compatible. Sin prefijo MEMEX_
+      # para la key (canónico, Doppler); base_url/model son config del despliegue.
+      OCR_API_KEY: ${OCR_API_KEY:-}
+      MEMEX_OCR_BASE_URL: ${MEMEX_OCR_BASE_URL:-}
+      MEMEX_OCR_MODEL: ${MEMEX_OCR_MODEL:-}
     ports:
       - "8787:8787"
     volumes:
@@ -45,8 +77,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   memex_pgdata:
   memex_telegram_sessions:
+  memex_miniodata:

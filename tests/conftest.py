@@ -60,7 +60,7 @@ def _reset_tables() -> None:
             text(
                 """
                 TRUNCATE TABLE
-                    inbox_dedupe_keys, inbox, source_checkpoints,
+                    media_assets, inbox_dedupe_keys, inbox, source_checkpoints,
                     filter_rules, sources, users
                 RESTART IDENTITY CASCADE
                 """

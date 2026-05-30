@@ -4,12 +4,27 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class MediaItem(BaseModel):
+    """Bytes de un adjunto imagen/PDF que cruzan el wire (base64) para subir a MinIO.
+
+    Espeja `memex.core.source.MediaBlob`. Default-vacío en `IngestRequest.media` → requests sin
+    adjuntos quedan idénticos al contrato previo (backward-compatible).
+    """
+
+    sha256: str
+    content_type: str
+    filename: str | None = None
+    size: int
+    data_b64: str
+
+
 class IngestRequest(BaseModel):
     source_id: int
     external_id: str
     occurred_at: datetime
     payload: dict[str, Any]
     dedupe_keys: list[str] = Field(default_factory=list)
+    media: list[MediaItem] = Field(default_factory=list)
 
 
 class IngestResponse(BaseModel):

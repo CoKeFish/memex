@@ -281,3 +281,50 @@ def test_inbox_belongs_to_at_most_one_summary(seed_source: dict[str, Any]) -> No
             text("INSERT INTO summary_inbox_links (summary_id, inbox_id) VALUES (:s, :i)"),
             {"s": other, "i": iid},
         )
+
+
+def _seed_media_pending(inbox_id: int, *, sha: str = "s1", status: str = "pending") -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                """
+                INSERT INTO media_assets
+                  (user_id, inbox_id, sha256, object_key, bucket, content_type, size_bytes,
+                   filename, ocr_status)
+                VALUES (1, :i, :sha, :k, 'b', 'image/png', 10, 'f', :st)
+                """
+            ),
+            {"i": inbox_id, "sha": sha, "k": f"media/1/{sha}", "st": status},
+        )
+
+
+def test_pending_ocr_gates_summarization(seed_source: dict[str, Any]) -> None:
+    """R3: un mensaje con OCR pendiente NO se resume hasta que su media esté en estado terminal."""
+    sid = seed_source["id"]
+    iid = _seed(sid, "m1", "individual", {"body_text": "cuerpo con texto"})
+    _seed_media_pending(iid)
+
+    fake = FakeLLM()
+    stats = asyncio.run(run_summarization(1, client=fake))
+    assert stats.summaries == 0  # gateado por OCR pendiente
+    assert fake.calls == 0  # ni siquiera entra al work-set
+    assert _count("summaries") == 0
+
+    # OCR completa (ok) → el mensaje entra al work-set en la próxima corrida.
+    with connection() as c:
+        c.execute(
+            text("UPDATE media_assets SET ocr_status='ok', ocr_text='TOTAL 99' WHERE inbox_id=:i"),
+            {"i": iid},
+        )
+    stats2 = asyncio.run(run_summarization(1, client=FakeLLM()))
+    assert stats2.summaries == 1
+    assert _count("summaries") == 1
+
+
+def test_skipped_ocr_does_not_gate(seed_source: dict[str, Any]) -> None:
+    """Un media 'skipped' (PDF) es terminal → NO bloquea el resumen."""
+    sid = seed_source["id"]
+    iid = _seed(sid, "m1", "individual", {"body_text": "cuerpo"})
+    _seed_media_pending(iid, status="skipped")
+    stats = asyncio.run(run_summarization(1, client=FakeLLM()))
+    assert stats.summaries == 1

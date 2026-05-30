@@ -1,9 +1,14 @@
+import base64
+import binascii
+import hashlib
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import Connection, text
 
 from memex.api.auth import current_user_id
+from memex.api.object_store import get_object_store
 from memex.api.schemas import (
     IngestBatchRequest,
     IngestBatchResponse,
@@ -12,9 +17,11 @@ from memex.api.schemas import (
 )
 from memex.core import filters
 from memex.core.inbox import insert_record
-from memex.core.source import SourceRecord
+from memex.core.media import insert_media_asset
+from memex.core.source import MediaBlob, SourceRecord
 from memex.db import connection
 from memex.logging import get_logger
+from memex.storage import object_key_for
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
@@ -30,7 +37,82 @@ def _to_source_record(req: IngestRequest) -> SourceRecord:
         occurred_at=req.occurred_at,
         payload=req.payload,
         dedupe_keys=req.dedupe_keys,
+        media=[
+            MediaBlob(
+                sha256=m.sha256,
+                content_type=m.content_type,
+                filename=m.filename,
+                size=m.size,
+                data_b64=m.data_b64,
+            )
+            for m in req.media
+        ],
     )
+
+
+@dataclass(frozen=True)
+class _DecodedMedia:
+    """Un blob ya decodificado y validado server-side: sha256 y size RECOMPUTADOS de los bytes."""
+
+    content_type: str
+    filename: str | None
+    data: bytes
+    sha256: str
+
+
+def _decode_media(media: list[MediaBlob]) -> list[_DecodedMedia]:
+    """Decodifica base64 y RECOMPUTA sha256/size de los bytes (no confía en el cliente).
+
+    Levanta `ValueError` si algún base64 es inválido — el caller lo trata como record fallido
+    ANTES de insertar el inbox (atomicidad: nunca un inbox huérfano sin su media). Recomputar el
+    sha256 garantiza content-addressing real (un cliente que mienta no puede pisar el blob de otro
+    mensaje ni romper el dedup).
+    """
+    out: list[_DecodedMedia] = []
+    for blob in media:
+        try:
+            data = base64.b64decode(blob.data_b64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise ValueError(f"invalid base64 in media (filename={blob.filename!r}): {e}") from e
+        out.append(
+            _DecodedMedia(
+                content_type=blob.content_type,
+                filename=blob.filename,
+                data=data,
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
+        )
+    return out
+
+
+def _persist_media(
+    conn: Connection, user_id: int, inbox_id: int, media: list[_DecodedMedia]
+) -> None:
+    """Sube cada blob (ya decodificado) a MinIO content-addressed y registra la referencia.
+
+    Se llama SOLO tras un insert de inbox exitoso (necesita el `inbox_id`). El `put` va ANTES del
+    insert de media: si MinIO falla, propaga → la tx del batch hace rollback (ni inbox ni media) y
+    el runner re-fetchea (idempotente). PDF se almacena pero queda `skipped` (no se OCR-ea en este
+    slice). El object storage se construye lazy (solo si hay media).
+    """
+    if not media:
+        return
+    store = get_object_store()
+    for m in media:
+        key = object_key_for(user_id, m.sha256, m.content_type)
+        store.put(key, m.data, content_type=m.content_type)
+        insert_media_asset(
+            conn,
+            user_id=user_id,
+            inbox_id=inbox_id,
+            sha256=m.sha256,
+            object_key=key,
+            bucket=store.bucket,
+            content_type=m.content_type,
+            size_bytes=len(m.data),
+            filename=m.filename,
+            ocr_status="skipped" if m.content_type == "application/pdf" else "pending",
+        )
 
 
 def _resolve_source_type(conn: Connection, source_id: int) -> str | None:
@@ -91,12 +173,15 @@ async def ingest_one(
                     filtered=sum(drops.values()),
                 )
                 return {"inserted": False, "id": None, "reason": "filtered"}
+            decoded_media = _decode_media(kept[0].media)  # valida base64 ANTES de insertar
             result = insert_record(
                 conn,
                 user_id=user_id,
                 source_id=body.source_id,
                 record=kept[0],
             )
+            if result.inserted and result.id is not None:
+                _persist_media(conn, user_id, result.id, decoded_media)
     except ValueError as e:
         _log.warning(
             "ingest.committed",
@@ -160,6 +245,9 @@ async def ingest_batch(body: IngestBatchRequest, user_id: UserID) -> dict[str, i
             filtered += sum(drops.values())
             for record in kept:
                 try:
+                    # Decodificar/validar la media ANTES del insert: un base64 inválido falla el
+                    # record completo (errors++) sin dejar un inbox huérfano ni doble-contar.
+                    decoded_media = _decode_media(record.media)
                     result = insert_record(
                         conn,
                         user_id=user_id,
@@ -168,6 +256,8 @@ async def ingest_batch(body: IngestBatchRequest, user_id: UserID) -> dict[str, i
                     )
                     if result.inserted:
                         inserted += 1
+                        if result.id is not None:
+                            _persist_media(conn, user_id, result.id, decoded_media)
                     else:
                         duplicates += 1
                 except ValueError:

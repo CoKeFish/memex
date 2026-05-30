@@ -68,6 +68,11 @@ class ImapConfig(BaseModel):
     max_body_bytes: int = 524288
     use_ssl: bool = True
 
+    # Extracción de imágenes/PDF para OCR (off por default → sin cambio de comportamiento).
+    # Se habilita por-source en sources.config (`extract_media: true`).
+    extract_media: bool = False
+    max_attachment_bytes: int = 10 * 1024 * 1024
+
     # Carry env-var *names* (not values) for logging and debugging.
     username_env: str = ""
     password_env: str = ""
@@ -85,7 +90,9 @@ class ImapConfig(BaseModel):
             f"oauth_token_path={self.oauth_token_path!r}, "
             f"folders={self.folders!r}, since_days={self.since_days}, "
             f"batch_size={self.batch_size}, fetch_body={self.fetch_body}, "
-            f"max_body_bytes={self.max_body_bytes}, use_ssl={self.use_ssl})"
+            f"max_body_bytes={self.max_body_bytes}, use_ssl={self.use_ssl}, "
+            f"extract_media={self.extract_media}, "
+            f"max_attachment_bytes={self.max_attachment_bytes})"
         )
 
     @classmethod
@@ -133,6 +140,8 @@ class ImapConfig(BaseModel):
             "fetch_body": bool(cfg.get("fetch_body", True)),
             "max_body_bytes": int(cfg.get("max_body_bytes", 524288)),
             "use_ssl": bool(cfg.get("use_ssl", True)),
+            "extract_media": bool(cfg.get("extract_media", False)),
+            "max_attachment_bytes": int(cfg.get("max_attachment_bytes", 10 * 1024 * 1024)),
             "username_env": str(username_env),
         }
 

@@ -1,61 +1,50 @@
-"""DeepSeekClient — el ÚNICO lugar que habla HTTP con DeepSeek.
+"""OpenAIVisionClient — el ÚNICO lugar que habla HTTP con el proveedor de visión.
 
-Aísla al vendor detrás del Protocol `LLMClient`: los callers consumen `LLMResult`,
-nunca URLs ni shapes de DeepSeek. Cambiar de proveedor = otra clase que implementa
-`LLMClient`; este módulo no se entera.
+Aísla al vendor detrás del Protocol `OCRClient`: los callers consumen `OcrResult`, nunca URLs
+ni shapes del proveedor. Cambiar de proveedor de OCR = otra clase que implementa `OCRClient`.
 
-Usa httpx **asíncrono** (`AsyncClient`) — NO el SDK `openai`/`deepseek`. El
-patrón de retry/backoff está espejado de `ApifyClient._request` pero con
-`asyncio.sleep`: reintenta 5xx + errores de red con backoff exponencial; 4xx
-levanta `DeepSeekError` inmediato.
+Usa httpx **asíncrono** (`AsyncClient`) contra un endpoint OpenAI-compatible
+(`POST {base_url}/chat/completions`) mandando la imagen como bloque `image_url` con un data-URI
+base64. El patrón de retry/backoff es el mismo de `DeepSeekClient` (5xx/red reintenta, 4xx
+inmediato). Parsea con los helpers compartidos `memex.llm._openai` (mismo dialecto).
 
-A diferencia del run-start pago no-idempotente de Apify, el POST a
-`/chat/completions` **sí** se reintenta en 5xx/red: es la práctica estándar para
-LLMs (un 5xx normalmente no produjo —ni facturó— una completion).
-
-ADR-001-style: solo importa httpx, pydantic-resueltos y `memex.logging`; nunca
-internals de memex (db/api/inbox).
+ADR-001-style: solo importa httpx, pydantic-resueltos, `memex.llm` (primitivos) y
+`memex.logging`; nunca internals de memex (db/api/inbox).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
-from collections.abc import Sequence
 from typing import Any
 
 import httpx
 
 from memex.llm._openai import parse_choice, parse_usage
-from memex.llm.client import (
-    ChatMessage,
-    LLMError,
-    LLMResult,
-    ResponseFormat,
-)
-from memex.llm.config import LLMConfig
-from memex.llm.pricing import compute_cost
 from memex.logging import get_logger
+from memex.ocr.client import OcrError, OcrResult
+from memex.ocr.config import OcrConfig
+from memex.ocr.pricing import compute_ocr_cost
+from memex.ocr.prompt import OCR_SYSTEM_PROMPT, OCR_USER_INSTRUCTION
 
 _CHAT_PATH = "/chat/completions"
 _BODY_PREVIEW_MAX = 500
+#: Tope de tokens de salida — una transcripción puede ser larga (recibos densos, tablas). Si se
+#: agota, el proveedor devuelve finish_reason='length' y el worker marca el asset como truncado.
+_MAX_TOKENS = 8192
 
 
-class DeepSeekError(LLMError):
-    """Raised cuando DeepSeek devuelve un error (4xx, o 5xx/red tras agotar retries)."""
+class OpenAIVisionClient:
+    """Cliente HTTP async mínimo para un proveedor de OCR por visión (OpenAI-compatible).
 
-
-class DeepSeekClient:
-    """Cliente HTTP async mínimo para la API de DeepSeek (compatible OpenAI).
-
-    Implementa el Protocol `LLMClient`. El token va en `Authorization: Bearer`
-    (nunca en la URL). Construir con `client` inyectado para tests (respx), o dejar
-    que cree el suyo.
+    Implementa el Protocol `OCRClient`. El token va en `Authorization: Bearer` (nunca en la URL).
+    Construir con `client` inyectado para tests (respx), o dejar que cree el suyo.
     """
 
-    def __init__(self, config: LLMConfig, *, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(self, config: OcrConfig, *, client: httpx.AsyncClient | None = None) -> None:
         self._config = config
-        self._log = get_logger("memex.llm.deepseek")
+        self._log = get_logger("memex.ocr.openai_vision")
 
         headers = {
             "Authorization": f"Bearer {config.api_key.get_secret_value()}",
@@ -72,32 +61,37 @@ class DeepSeekClient:
         if self._owns_client:
             await self._client.aclose()
 
-    async def __aenter__(self) -> DeepSeekClient:
+    async def __aenter__(self) -> OpenAIVisionClient:
         return self
 
     async def __aexit__(self, *args: object) -> None:
         await self.aclose()
 
-    async def complete(
+    async def ocr_image(
         self,
-        messages: Sequence[ChatMessage],
         *,
+        image_bytes: bytes,
+        content_type: str,
         model: str | None = None,
-        response_format: ResponseFormat = "text",
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-    ) -> LLMResult:
+    ) -> OcrResult:
         model_name = model or self._config.default_model
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        data_uri = f"data:{content_type};base64,{b64}"
         body: dict[str, Any] = {
             "model": model_name,
-            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "messages": [
+                {"role": "system", "content": OCR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": OCR_USER_INSTRUCTION},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                },
+            ],
+            "temperature": 0.0,
+            "max_tokens": _MAX_TOKENS,
         }
-        if response_format == "json_object":
-            body["response_format"] = {"type": "json_object"}
-        if temperature is not None:
-            body["temperature"] = temperature
-        if max_tokens is not None:
-            body["max_tokens"] = max_tokens
 
         started = time.monotonic()
         resp = await self._request("POST", _CHAT_PATH, json=body)
@@ -106,22 +100,21 @@ class DeepSeekClient:
         data = resp.json()
         content, finish_reason = parse_choice(data)
         usage = parse_usage(data.get("usage") if isinstance(data, dict) else None)
-        cost = compute_cost(model_name, usage)
+        cost = compute_ocr_cost(model_name, usage)
 
         self._log.info(
-            "llm.deepseek.complete",
+            "ocr.vision.complete",
             model=model_name,
-            response_format=response_format,
+            content_type=content_type,
             prompt_tokens=usage.prompt_tokens,
             completion_tokens=usage.completion_tokens,
-            cache_hit_tokens=usage.cache_hit_tokens,
-            reasoning_tokens=usage.reasoning_tokens,
             cost_usd=str(cost),
             latency_ms=latency_ms,
             finish_reason=finish_reason,
+            chars=len(content),
         )
-        return LLMResult(
-            content=content,
+        return OcrResult(
+            text=content,
             model=model_name,
             usage=usage,
             cost_usd=cost,
@@ -138,20 +131,20 @@ class DeepSeekClient:
             except (httpx.TransportError, httpx.TimeoutException) as e:
                 last_exc = e
                 self._log.warning(
-                    "llm.deepseek.request.network_error", path=path, exc=str(e), attempt=attempt
+                    "ocr.vision.request.network_error", path=path, exc=str(e), attempt=attempt
                 )
             else:
                 if 500 <= resp.status_code < 600:
-                    last_exc = DeepSeekError(
+                    last_exc = OcrError(
                         resp.status_code,
                         f"server error {resp.status_code}",
                         body=resp.text[:_BODY_PREVIEW_MAX] or None,
                     )
                     self._log.warning(
-                        "llm.deepseek.request.5xx", status=resp.status_code, attempt=attempt
+                        "ocr.vision.request.5xx", status=resp.status_code, attempt=attempt
                     )
                 elif 400 <= resp.status_code < 500:
-                    raise DeepSeekError(
+                    raise OcrError(
                         resp.status_code,
                         f"client error {resp.status_code}",
                         body=resp.text[:_BODY_PREVIEW_MAX] or None,
@@ -162,6 +155,6 @@ class DeepSeekClient:
             if attempt < self._config.max_retries:
                 await asyncio.sleep(self._config.backoff_base * (2**attempt))
 
-        if isinstance(last_exc, DeepSeekError):
+        if isinstance(last_exc, OcrError):
             raise last_exc
-        raise DeepSeekError(0, f"network error on {method} {path}") from last_exc
+        raise OcrError(0, f"network error on {method} {path}") from last_exc

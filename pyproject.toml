@@ -14,6 +14,7 @@ dependencies = [
     "structlog>=24.4",
     "httpx>=0.28.1",
     "imap-tools>=1.7",
+    "boto3>=1.35",
     "python-dotenv>=1.0",
     "google-auth-oauthlib>=1.2",
     "google-auth>=2.35",
@@ -47,6 +48,7 @@ memex-classify = "memex.classifier.cli:main"
 memex-summarize = "memex.summarizer.cli:main"
 memex-extract = "memex.modules.cli:main"
 memex-process = "memex.modules.cli:main_process"
+memex-ocr = "memex.ocr.cli:main"
 
 [tool.ruff]
 target-version = "py312"
@@ -70,6 +72,13 @@ plugins = ["pydantic.mypy"]
 # Aceptamos `Any` en los puntos de contacto (parser, client, cli) y mantenemos
 # las garantías de tipos en nuestros propios payloads/cursors.
 module = "telethon.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# boto3/botocore tampoco traen py.typed — mismos términos que telethon: los
+# aceptamos como `Any` SOLO en memex/storage (el único punto de contacto), con
+# nuestras firmas tipadas hacia afuera.
+module = ["boto3.*", "botocore.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

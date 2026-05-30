@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from pydantic import BaseModel
@@ -22,13 +22,17 @@ class RunStats:
 
 
 def _record_to_request(record: SourceRecord, source_id: int) -> dict[str, Any]:
-    return {
+    req: dict[str, Any] = {
         "source_id": source_id,
         "external_id": record.external_id,
         "occurred_at": record.occurred_at.isoformat(),
         "payload": record.payload,
         "dedupe_keys": list(record.dedupe_keys),
     }
+    # `media` viaja solo si el ingestor extrajo bytes (default vacío → request idéntico al previo).
+    if record.media:
+        req["media"] = [asdict(m) for m in record.media]
+    return req
 
 
 def run_ingestor(

@@ -23,3 +23,27 @@ def test_empty_payload_renders_empty() -> None:
 
 def test_all_empty_fields_render_empty() -> None:
     assert render_payload({"from": {"name": "", "email": ""}, "body_text": "", "text": ""}) == ""
+
+
+def test_ocr_text_appended_to_body() -> None:
+    r = render_payload(
+        {"subject": "Recibo", "body_text": "Adjunto recibo", "from": {"name": "Tienda"}},
+        "TOTAL: $1234\nFecha: 2026-05-30",
+    )
+    assert r.startswith("Tienda:")
+    assert "Adjunto recibo" in r
+    assert "TOTAL: $1234" in r
+    assert "Fecha: 2026-05-30" in r
+
+
+def test_ocr_text_alone_renders() -> None:
+    # Mensaje sin body (imagen pura): el texto OCR es el único contenido.
+    r = render_payload({"from": {"name": "Tienda"}}, "Solo texto en la imagen")
+    assert "Solo texto en la imagen" in r
+
+
+def test_empty_ocr_text_is_noop() -> None:
+    # Regresión: ocr_text vacío = comportamiento previo idéntico.
+    base = render_payload({"subject": "Hola", "body_text": "x", "from": {"name": "Ana"}})
+    with_empty = render_payload({"subject": "Hola", "body_text": "x", "from": {"name": "Ana"}}, "")
+    assert base == with_empty

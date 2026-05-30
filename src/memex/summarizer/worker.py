@@ -26,6 +26,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
 from memex.core.observability import record_llm_call
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig
@@ -83,7 +84,7 @@ def _load_workset(
 
     `limit` corta a nivel de MENSAJE (no de ventana): ver nota en `_DEFAULT_LIMIT`.
     """
-    params: dict[str, Any] = {"uid": user_id, "limit": limit}
+    params: dict[str, Any] = {"uid": user_id, "limit": limit, "ocrmax": MAX_OCR_ATTEMPTS}
     filters = ""
     if source_id is not None:
         filters += " AND i.source_id = :sid"
@@ -97,13 +98,24 @@ def _load_workset(
             conn.execute(
                 text(
                     f"""
-                    SELECT i.id, i.source_id, i.occurred_at, i.payload, c.tier
+                    SELECT i.id, i.source_id, i.occurred_at, i.payload, c.tier,
+                           COALESCE(ma.ocr_text, '') AS ocr_text
                     FROM classifications c
                     JOIN inbox i ON i.id = c.inbox_id
                     LEFT JOIN summary_inbox_links sl ON sl.inbox_id = i.id
+                    LEFT JOIN (
+                        SELECT inbox_id, string_agg(ocr_text, E'\n' ORDER BY id) AS ocr_text
+                        FROM media_assets
+                        WHERE ocr_status = 'ok' AND ocr_text IS NOT NULL AND ocr_text <> ''
+                        GROUP BY inbox_id
+                    ) ma ON ma.inbox_id = i.id
                     WHERE c.user_id = :uid
                       AND c.tier IN ('batch', 'individual')
                       AND sl.summary_id IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM media_assets m
+                          WHERE m.inbox_id = i.id AND {MEDIA_NOT_TERMINAL_SQL}
+                      )
                       {filters}
                     ORDER BY i.source_id, i.occurred_at
                     LIMIT :limit
@@ -122,6 +134,7 @@ def _load_workset(
             occurred_at=r["occurred_at"],
             payload=_coerce_payload(r["payload"]),
             tier=str(r["tier"]),
+            ocr_text=str(r["ocr_text"]),
         )
         for r in rows
     ]
@@ -188,7 +201,7 @@ async def _process_window(
     user_id: int, client: LLMClient, window: Window, stats: SummarizeStats
 ) -> None:
     """Procesa UNA ventana. Lanza si el LLM falla o si persistir choca (lo maneja el caller)."""
-    rendered = [render_payload(row.payload) for row in window.rows]
+    rendered = [render_payload(row.payload, row.ocr_text) for row in window.rows]
     if not any(part.strip() for part in rendered):
         stats.skipped += 1
         _log.warning(

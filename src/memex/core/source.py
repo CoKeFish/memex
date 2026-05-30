@@ -47,7 +47,7 @@ from __future__ import annotations
 
 from builtins import type as _type
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, ClassVar, Literal, Protocol, TypeVar, runtime_checkable
@@ -109,6 +109,23 @@ class SourceConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class MediaBlob:
+    """Bytes de un adjunto (imagen/PDF) que el ingestor extrajo, para subir a object storage.
+
+    Viaja en `SourceRecord.media`, SEPARADO del `payload`: nunca se persiste en `inbox.payload`
+    (sería un blob enorme en JSONB). El borde de ingest (server-side) lo sube a MinIO
+    content-addressed y registra solo la REFERENCIA en `media_assets`; acá viaja como base64
+    porque el wire entre ingestor y memex es JSON (ADR-001: el ingestor no toca MinIO ni la DB).
+    """
+
+    sha256: str
+    content_type: str
+    filename: str | None
+    size: int
+    data_b64: str
+
+
+@dataclass(frozen=True)
 class SourceRecord:
     """The wire envelope that crosses from ingestor to memex.
 
@@ -120,12 +137,18 @@ class SourceRecord:
     construction site become static type errors instead of runtime KeyErrors
     downstream, and filter rules / classifiers can introspect the schema to
     know what keys exist.
+
+    `media` carries raw attachment bytes (images/PDF) OUT of the ingestor without
+    touching MinIO/DB (ADR-001). It defaults to empty: a Source that does not
+    extract media is unchanged. The bytes are uploaded + dropped at the ingest
+    boundary; they never reach `inbox.payload`.
     """
 
     external_id: str
     occurred_at: datetime
     payload: dict[str, Any]
     dedupe_keys: list[str]
+    media: list[MediaBlob] = field(default_factory=list)
 
 
 @runtime_checkable

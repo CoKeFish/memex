@@ -36,6 +36,10 @@ class WorkRow:
     payload: dict[str, Any]
     tier: str
     source_type: str = ""
+    #: Texto OCR de las imágenes del mensaje (concatenado, solo `media_assets` en `ok`). Lo
+    #: pueblan los loaders del work-set vía JOIN; el render lo inyecta junto al body. Default
+    #: "" → mensajes sin imágenes (o con OCR pendiente) renderizan igual que antes.
+    ocr_text: str = ""
 
 
 @dataclass(frozen=True)
