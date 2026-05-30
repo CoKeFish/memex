@@ -44,6 +44,7 @@ memex-filters = "memex.cli.filters:main"
 memex-telegram = "memex.ingestors.telegram.cli:main"
 memex-social = "memex.ingestors.social.cli:main"
 memex-classify = "memex.classifier.cli:main"
+memex-summarize = "memex.summarizer.cli:main"
 
 [tool.ruff]
 target-version = "py312"
