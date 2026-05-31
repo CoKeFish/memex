@@ -167,6 +167,22 @@ async def test_5xx_retries_then_succeeds() -> None:
 
 
 @pytest.mark.asyncio
+async def test_429_retries_then_succeeds() -> None:
+    with respx.mock(base_url=BASE_URL) as router:
+        router.post(CHAT).mock(
+            side_effect=[
+                httpx.Response(429, text="rate limited"),
+                httpx.Response(429, text="rate limited"),
+                httpx.Response(200, json=_ok(content="ok")),
+            ]
+        )
+        async with _client() as c:
+            r = await c.complete([ChatMessage("user", "x")])
+        assert r.content == "ok"
+        assert router.calls.call_count == 3  # 429 es retryable (rate-limit), no 4xx inmediato
+
+
+@pytest.mark.asyncio
 async def test_network_error_retries_then_raises() -> None:
     with respx.mock(base_url=BASE_URL) as router:
         route = router.post(CHAT).mock(side_effect=httpx.ConnectError("boom"))

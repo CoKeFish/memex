@@ -60,6 +60,7 @@ class FakeExtractLLM:
 
     - `bogus_id`: cita un id fuera del lote (alucinación) en vez de los reales.
     - `empty`: devuelve content vacío (en CUALQUIER llamada).
+    - `truncated`: emite `finish_reason="length"` (cortada por max_tokens), con content válido.
     - `fail_on_call`: lanza LLMError en la N-ésima llamada.
     - `route_choose`: slugs que el router elige (None = todos los del chunk).
     """
@@ -69,12 +70,14 @@ class FakeExtractLLM:
         *,
         bogus_id: int | None = None,
         empty: bool = False,
+        truncated: bool = False,
         fail_on_call: int | None = None,
         route_choose: list[str] | None = None,
     ) -> None:
         self.calls = 0
         self._bogus = bogus_id
         self._empty = empty
+        self._truncated = truncated
         self._fail_on = fail_on_call
         self._route_choose = route_choose
 
@@ -108,7 +111,7 @@ class FakeExtractLLM:
             usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             cost_usd=Decimal("0"),
             latency_ms=1,
-            finish_reason="stop",
+            finish_reason="length" if self._truncated else "stop",
         )
 
     @staticmethod
@@ -438,4 +441,44 @@ def test_grouped_empty_content_retryable(seed_source: dict[str, Any]) -> None:
 
     assert stats.errors == 1
     assert _count("mod_finance_expenses") == 0
+    assert _count("module_extractions") == 0  # sin cursor → reintentable
+
+
+# ----- truncado (finish_reason != stop) → reintentable, sin pérdida silenciosa --------- #
+
+
+def test_truncated_extract_retryable(seed_source: dict[str, Any]) -> None:
+    """Respuesta truncada (finish_reason='length') → error, NO se cursorea (reintentable). El bug
+    era: parse_items da [] sobre el JSON cortado y se cursoreaba '0 items' (pérdida silenciosa)."""
+    _enable()
+    _seed(seed_source["id"], "m1", "individual", {"body_text": "pagué $4500"})
+
+    stats = asyncio.run(run_extraction(1, client=FakeExtractLLM(truncated=True)))
+
+    assert stats.errors == 1
+    assert stats.items == 0
+    assert _count("mod_finance_expenses") == 0
+    assert _count("module_extractions") == 0  # sin cursor → reintentable
+
+    # Segunda corrida con respuesta completa → se extrae (prueba que NO se perdió el mensaje).
+    second = asyncio.run(run_extraction(1, client=FakeExtractLLM()))
+    assert second.items == 1
+    assert _count("mod_finance_expenses") == 1
+
+
+def test_truncated_grouped_retryable(seed_source: dict[str, Any]) -> None:
+    """Truncado en la llamada agrupada → ningún módulo del grupo se cursorea (reintentable)."""
+    _enable("finance")
+    _enable("calendar")
+    _seed(seed_source["id"], "m1", "batch", {"body_text": "pagué $4500"})
+
+    stats = asyncio.run(
+        run_extraction(
+            1, batching_policy="grouped", group_size=2, client=FakeExtractLLM(truncated=True)
+        )
+    )
+
+    assert stats.errors == 1
+    assert _count("mod_finance_expenses") == 0
+    assert _count("mod_calendar_events") == 0
     assert _count("module_extractions") == 0  # sin cursor → reintentable

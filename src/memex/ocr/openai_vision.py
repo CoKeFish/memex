@@ -5,7 +5,7 @@ ni shapes del proveedor. Cambiar de proveedor de OCR = otra clase que implementa
 
 Usa httpx **asíncrono** (`AsyncClient`) contra un endpoint OpenAI-compatible
 (`POST {base_url}/chat/completions`) mandando la imagen como bloque `image_url` con un data-URI
-base64. El patrón de retry/backoff es el mismo de `DeepSeekClient` (5xx/red reintenta, 4xx
+base64. El patrón de retry/backoff es el mismo de `DeepSeekClient` (429/5xx/red reintenta, otro 4xx
 inmediato). Parsea con los helpers compartidos `memex.llm._openai` (mismo dialecto).
 
 ADR-001-style: solo importa httpx, pydantic-resueltos, `memex.llm` (primitivos) y
@@ -123,7 +123,7 @@ class OpenAIVisionClient:
         )
 
     async def _request(self, method: str, path: str, *, json: Any) -> httpx.Response:
-        """HTTP con retry de 5xx/red (backoff exponencial); 4xx → error inmediato."""
+        """HTTP con retry de 429/5xx/red (backoff exponencial); otro 4xx → error inmediato."""
         last_exc: Exception | None = None
         for attempt in range(self._config.max_retries + 1):
             try:
@@ -134,14 +134,14 @@ class OpenAIVisionClient:
                     "ocr.vision.request.network_error", path=path, exc=str(e), attempt=attempt
                 )
             else:
-                if 500 <= resp.status_code < 600:
+                if resp.status_code == 429 or 500 <= resp.status_code < 600:
                     last_exc = OcrError(
                         resp.status_code,
-                        f"server error {resp.status_code}",
+                        f"server/rate error {resp.status_code}",
                         body=resp.text[:_BODY_PREVIEW_MAX] or None,
                     )
                     self._log.warning(
-                        "ocr.vision.request.5xx", status=resp.status_code, attempt=attempt
+                        "ocr.vision.request.retryable", status=resp.status_code, attempt=attempt
                     )
                 elif 400 <= resp.status_code < 500:
                     raise OcrError(

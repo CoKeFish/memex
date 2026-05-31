@@ -6,8 +6,8 @@ nunca URLs ni shapes de DeepSeek. Cambiar de proveedor = otra clase que implemen
 
 Usa httpx **asíncrono** (`AsyncClient`) — NO el SDK `openai`/`deepseek`. El
 patrón de retry/backoff está espejado de `ApifyClient._request` pero con
-`asyncio.sleep`: reintenta 5xx + errores de red con backoff exponencial; 4xx
-levanta `DeepSeekError` inmediato.
+`asyncio.sleep`: reintenta 429 (rate-limit) + 5xx + errores de red con backoff
+exponencial; otro 4xx levanta `DeepSeekError` inmediato.
 
 A diferencia del run-start pago no-idempotente de Apify, el POST a
 `/chat/completions` **sí** se reintenta en 5xx/red: es la práctica estándar para
@@ -130,7 +130,7 @@ class DeepSeekClient:
         )
 
     async def _request(self, method: str, path: str, *, json: Any) -> httpx.Response:
-        """HTTP con retry de 5xx/red (backoff exponencial); 4xx → error inmediato."""
+        """HTTP con retry de 429/5xx/red (backoff exponencial); otro 4xx → error inmediato."""
         last_exc: Exception | None = None
         for attempt in range(self._config.max_retries + 1):
             try:
@@ -141,14 +141,14 @@ class DeepSeekClient:
                     "llm.deepseek.request.network_error", path=path, exc=str(e), attempt=attempt
                 )
             else:
-                if 500 <= resp.status_code < 600:
+                if resp.status_code == 429 or 500 <= resp.status_code < 600:
                     last_exc = DeepSeekError(
                         resp.status_code,
-                        f"server error {resp.status_code}",
+                        f"server/rate error {resp.status_code}",
                         body=resp.text[:_BODY_PREVIEW_MAX] or None,
                     )
                     self._log.warning(
-                        "llm.deepseek.request.5xx", status=resp.status_code, attempt=attempt
+                        "llm.deepseek.request.retryable", status=resp.status_code, attempt=attempt
                     )
                 elif 400 <= resp.status_code < 500:
                     raise DeepSeekError(

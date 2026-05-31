@@ -74,6 +74,10 @@ _ROUTE_CHUNK_DEFAULT = 0
 _GROUP_SIZE_DEFAULT = 3
 #: Tope de tokens de salida de una extracción agrupada (se escala por nº de módulos, con este cap).
 _GROUPED_MAX_TOKENS_CAP = 8192
+#: finish_reasons de respuesta COMPLETA. Otro valor (p. ej. "length" por max_tokens) = truncada →
+#: el JSON queda inválido y `parse_items` da []; se trata como error reintentable (sin cursor), no
+#: como "0 items extraídos". Espejo del summarizer (`summarizer/worker.py`).
+_OK_FINISH = frozenset({"stop"})
 
 
 @dataclass
@@ -331,6 +335,30 @@ async def _extract_module(
         _log.warning("extract.module.empty_content", slug=module.slug, n=len(rows))
         return  # sin cursor → reintentable
 
+    if result.finish_reason is not None and result.finish_reason not in _OK_FINISH:
+        # Truncada (p. ej. "length"): el JSON queda cortado → parse_items daría [] y cursorearíamos
+        # como "0 items" (pérdida silenciosa). Tratar como error reintentable: sin cursor.
+        stats.errors += 1
+        _record_cost(
+            user_id,
+            module.slug,
+            status="error",
+            model=result.model,
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            cost_usd=result.cost_usd,
+            latency_ms=result.latency_ms,
+            n=len(rows),
+            error_message=f"truncated ({result.finish_reason})",
+        )
+        _log.warning(
+            "extract.module.truncated",
+            slug=module.slug,
+            finish_reason=result.finish_reason,
+            n=len(rows),
+        )
+        return  # sin cursor → reintentable
+
     raw_items = parse_items(result.content)
     lote = frozenset(inbox_ids)
     valid: list[ExtractionItem] = []
@@ -433,6 +461,26 @@ async def _extract_group(
             metadata={"policy": policy, "group_size": group_size, "slugs": slugs, "n": len(rows)},
         )
         _log.warning("extract.group.empty_content", slugs=slugs, n=len(rows))
+        return  # sin cursor → reintentable
+
+    if result.finish_reason is not None and result.finish_reason not in _OK_FINISH:
+        # Truncada: JSON agrupado cortado → no cursorear ningún módulo del grupo (reintentable).
+        stats.errors += 1
+        record_llm_call(
+            user_id=user_id,
+            purpose="extract_grouped",
+            model=result.model,
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            cost_usd=result.cost_usd,
+            latency_ms=result.latency_ms,
+            status="error",
+            error_message=f"truncated ({result.finish_reason})",
+            metadata={"policy": policy, "group_size": group_size, "slugs": slugs, "n": len(rows)},
+        )
+        _log.warning(
+            "extract.group.truncated", slugs=slugs, finish_reason=result.finish_reason, n=len(rows)
+        )
         return  # sin cursor → reintentable
 
     by_slug = parse_grouped_items(result.content, slugs)
