@@ -11,7 +11,8 @@ import { RelativeTime } from "@/components/common/time"
 import { formatDate } from "@/lib/format"
 import { originLabel, originText, type Tone } from "@/lib/status"
 import { renderPayload } from "@/lib/render-payload"
-import { getInbox, getReviewItems } from "@/data"
+import { getInbox, getMessageJourney, getReviewItems } from "@/data"
+import { ReprocessButton, reprocessStepsFor } from "@/components/features/message/reprocess-button"
 import type {
   CalendarConflict,
   CalendarDedupCandidate,
@@ -181,10 +182,11 @@ function DeadLetterDetail({ item, dl, onResolve }: { item: ReviewItem; dl: WorkI
           El 402/saldo no llega aquí (aborta la corrida). Esto son fallos recuperables que cruzaron el umbral de 3 intentos.
         </p>
       </div>
-      <div className="mt-auto flex gap-2 border-t border-border p-3">
+      <div className="mt-auto flex flex-wrap gap-2 border-t border-border p-3">
         <Button size="sm" onClick={() => onResolve(item, "Mensaje reencolado")}>
           <RotateCcw className="size-3.5" /> Reencolar
         </Button>
+        <ReprocessButton inboxId={dl.inboxId} steps={reprocessStepsFor(getMessageJourney(dl.inboxId))} />
         <Button size="sm" variant="outline" onClick={() => onResolve(item, "Marcado como descartado")}>
           <Trash2 className="size-3.5" /> Descartar
         </Button>

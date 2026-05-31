@@ -10,7 +10,7 @@ import { Panel, PanelHeader } from "@/components/common/panel"
 import { RelativeTime } from "@/components/common/time"
 import { JourneyTimeline } from "@/components/features/message/journey-timeline"
 import { RelatedData } from "@/components/features/message/related-data"
-import { ReprocessButton, type ReprocessStep } from "@/components/features/message/reprocess-button"
+import { ReprocessButton, reprocessStepsFor } from "@/components/features/message/reprocess-button"
 import { LogRow } from "@/components/features/logs/log-row"
 import { getMessageJourney, SOURCE_BY_ID } from "@/data"
 import { renderPayload } from "@/lib/render-payload"
@@ -54,18 +54,7 @@ export function MessageDetailPage() {
   const rendered = renderPayload(row.payload, row.ocrText ?? "")
   const st = statusOf(row)
 
-  const reprocessSteps: ReprocessStep[] = [
-    { key: "clasificar", label: "Re-clasificar", cursor: "classifications", cost: "US$0 (reglas)" },
-    ...(steps.some((s) => s.kind === "resumen")
-      ? [{ key: "resumir", label: "Re-resumir", cursor: "summary_inbox_links", cost: "~US$0.002" }]
-      : []),
-    ...(steps.some((s) => s.kind === "modulo")
-      ? [{ key: "extraer", label: "Re-extraer (módulos)", cursor: "module_extractions", cost: "~US$0.004" }]
-      : []),
-    ...(journey.media.length > 0
-      ? [{ key: "ocr", label: "Re-OCR de adjuntos", cursor: "media_assets.ocr_status", cost: "~US$0.015/img" }]
-      : []),
-  ]
+  const reprocessSteps = reprocessStepsFor(journey)
 
   return (
     <div className="space-y-5">

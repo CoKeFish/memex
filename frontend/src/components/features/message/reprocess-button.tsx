@@ -13,12 +13,23 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog"
 import { CapBadge } from "@/components/common/cap-badge"
+import type { MessageJourney } from "@/types/domain"
 
 export interface ReprocessStep {
   key: string
   label: string
   cursor: string
   cost: string
+}
+
+/** Etapas reprocesables de un mensaje, derivadas de su journey (qué pasos pasó + media). */
+export function reprocessStepsFor(j: MessageJourney | null): ReprocessStep[] {
+  const out: ReprocessStep[] = [{ key: "clasificar", label: "Re-clasificar", cursor: "classifications", cost: "US$0 (reglas)" }]
+  if (!j) return out
+  if (j.steps.some((s) => s.kind === "resumen")) out.push({ key: "resumir", label: "Re-resumir", cursor: "summary_inbox_links", cost: "~US$0.002" })
+  if (j.steps.some((s) => s.kind === "modulo")) out.push({ key: "extraer", label: "Re-extraer (módulos)", cursor: "module_extractions", cost: "~US$0.004" })
+  if (j.media.length > 0) out.push({ key: "ocr", label: "Re-OCR de adjuntos", cursor: "media_assets.ocr_status", cost: "~US$0.015/img" })
+  return out
 }
 
 export function ReprocessButton({ inboxId, steps }: { inboxId: number; steps: ReprocessStep[] }) {
