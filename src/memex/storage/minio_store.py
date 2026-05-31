@@ -81,6 +81,7 @@ class MinioObjectStore:
 
     def __init__(self, config: StorageConfig, *, client: Any | None = None) -> None:
         self._bucket = config.bucket
+        self._region = config.region
         self._log = get_logger("memex.storage.minio")
         self._client: Any = client or boto3.client(
             "s3",
@@ -99,7 +100,7 @@ class MinioObjectStore:
             self._client.head_bucket(Bucket=self._bucket)
         except ClientError as e:
             if _is_not_found(e):
-                self._client.create_bucket(Bucket=self._bucket)
+                self._create_bucket()
                 self._log.info("storage.bucket.created", bucket=self._bucket)
             elif _is_forbidden(e):
                 raise StorageAccessError(
@@ -113,6 +114,18 @@ class MinioObjectStore:
                 ) from e
             else:
                 raise StorageError(f"head_bucket {self._bucket!r} failed: {e}") from e
+
+    def _create_bucket(self) -> None:
+        # S3 real liga create_bucket a la región: us-east-1 es el default y NO admite
+        # CreateBucketConfiguration (pasarlo es error); cualquier otra región lo EXIGE.
+        # MinIO ignora la región, así que ambos caminos le dan igual.
+        kwargs: dict[str, Any] = {"Bucket": self._bucket}
+        if self._region and self._region != "us-east-1":
+            kwargs["CreateBucketConfiguration"] = {"LocationConstraint": self._region}
+        try:
+            self._client.create_bucket(**kwargs)
+        except ClientError as e:
+            raise StorageError(f"create_bucket {self._bucket!r} failed: {e}") from e
 
     def put(self, key: str, data: bytes, *, content_type: str) -> None:
         try:

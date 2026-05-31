@@ -38,13 +38,17 @@ class FakeS3:
         self.objects: dict[tuple[str, str], bytes] = {}
         self.buckets: set[str] = set()
         self.put_calls = 0
+        self.create_bucket_config: dict[str, Any] | None = None
 
     def head_bucket(self, *, Bucket: str) -> None:
         if Bucket not in self.buckets:
             raise ClientError({"Error": {"Code": "404"}}, "HeadBucket")
 
-    def create_bucket(self, *, Bucket: str) -> None:
+    def create_bucket(
+        self, *, Bucket: str, CreateBucketConfiguration: dict[str, Any] | None = None
+    ) -> None:
         self.buckets.add(Bucket)
+        self.create_bucket_config = CreateBucketConfiguration
 
     def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str) -> None:
         self.put_calls += 1
@@ -60,12 +64,13 @@ class FakeS3:
             raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
 
 
-def _store(client: object) -> MinioObjectStore:
+def _store(client: object, *, region: str = "us-east-1") -> MinioObjectStore:
     cfg = StorageConfig(
         endpoint_url="http://localhost:9000",
         access_key=SecretStr("a"),
         secret_key=SecretStr("b"),
         bucket="test-bucket",
+        region=region,
     )
     return MinioObjectStore(cfg, client=client)
 
@@ -195,6 +200,43 @@ def test_unmapped_error_still_raises_generic_storage_error() -> None:
     with pytest.raises(StorageError) as excinfo:
         _store(fake).exists("k")
     assert type(excinfo.value) is StorageError  # genérico, no las subclases 403/301
+
+
+# --- create_bucket: LocationConstraint por región + errores envueltos ------------------------
+
+
+class _CreateFailsS3:
+    """head_bucket dice 404 (→ intenta crear) y create_bucket falla con ClientError."""
+
+    def head_bucket(self, *, Bucket: str) -> None:
+        raise _client_error("HeadBucket", code="404", status=404)
+
+    def create_bucket(
+        self, *, Bucket: str, CreateBucketConfiguration: dict[str, Any] | None = None
+    ) -> None:
+        raise _client_error("CreateBucket", code="BucketAlreadyOwnedByYou", status=409)
+
+
+def test_create_bucket_sends_location_constraint_for_non_default_region() -> None:
+    # region != us-east-1: S3 real EXIGE CreateBucketConfiguration/LocationConstraint.
+    fake = FakeS3()
+    _store(fake, region="eu-west-1").ensure_bucket()
+    assert fake.buckets == {"test-bucket"}
+    assert fake.create_bucket_config == {"LocationConstraint": "eu-west-1"}
+
+
+def test_create_bucket_omits_location_constraint_for_us_east_1() -> None:
+    # us-east-1 es el default y NO admite LocationConstraint (pasarlo es error en S3 real).
+    fake = FakeS3()
+    _store(fake, region="us-east-1").ensure_bucket()
+    assert fake.buckets == {"test-bucket"}
+    assert fake.create_bucket_config is None
+
+
+def test_create_bucket_error_is_wrapped_in_storage_error() -> None:
+    # Un fallo de create_bucket no debe filtrar el ClientError crudo (contrato: solo StorageError).
+    with pytest.raises(StorageError):
+        _store(_CreateFailsS3()).ensure_bucket()
 
 
 def test_exists_forbidden_by_symbolic_code_only() -> None:
