@@ -19,6 +19,26 @@ class StorageError(Exception):
     """Base de todos los errores de la capa de almacenamiento — los callers la atrapan genérica."""
 
 
+class StorageAccessError(StorageError):
+    """El backend respondió 403: el recurso existe pero la credencial/policy no da acceso.
+
+    Distinto de "no existe" (404): NO se crea el bucket ni se reporta `exists()=False`
+    —el objeto/bucket podría estar ahí, sólo que sin permiso—. Revisar las credenciales
+    `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` o la policy del bucket. (En S3 un 403 también
+    puede tapar un "no existe" cuando faltan permisos de listado; igual no podríamos
+    crearlo, así que tratarlo como error de acceso es lo seguro.)
+    """
+
+
+class StorageRegionError(StorageError):
+    """El backend respondió 301: el bucket existe pero en otra región que la configurada.
+
+    El cliente apunta a una región y el bucket vive en otra (redirect permanente). Ajustar
+    `MEMEX_MINIO_REGION` (o el endpoint) a la región real; cuando el backend la reporta en
+    el header `x-amz-bucket-region`, la región se incluye en el mensaje del error.
+    """
+
+
 #: content-type → extensión de archivo para el object-key (solo cosmético/debug; el sha256 es
 #: lo que identifica el contenido).
 _CONTENT_TYPE_EXT: dict[str, str] = {

@@ -14,15 +14,23 @@ Uso típico:
     store.put(key, blob, content_type="image/png")
 """
 
-from memex.storage.client import ObjectStore, StorageError, object_key_for
+from memex.storage.client import (
+    ObjectStore,
+    StorageAccessError,
+    StorageError,
+    StorageRegionError,
+    object_key_for,
+)
 from memex.storage.config import StorageConfig, StorageConfigError
 from memex.storage.minio_store import MinioObjectStore
 
 __all__ = [
     "MinioObjectStore",
     "ObjectStore",
+    "StorageAccessError",
     "StorageConfig",
     "StorageConfigError",
     "StorageError",
+    "StorageRegionError",
     "object_key_for",
 ]

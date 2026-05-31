@@ -16,17 +16,60 @@ import boto3
 from botocore.exceptions import ClientError
 
 from memex.logging import get_logger
-from memex.storage.client import ObjectStore, StorageError
+from memex.storage.client import (
+    ObjectStore,
+    StorageAccessError,
+    StorageError,
+    StorageRegionError,
+)
 from memex.storage.config import StorageConfig
 
-# Códigos S3/MinIO que significan "no existe" (variantes según operación/backend).
+# Clasificación de errores de S3/MinIO. En operaciones HEAD (head_bucket/head_object) no hay body
+# XML, así que botocore deja `Error.Code` como el status HTTP en string ("404"/"403"/"301") y el
+# status numérico en `ResponseMetadata.HTTPStatusCode`. Miramos ambos: el status HTTP es la señal
+# robusta para HEAD; los códigos simbólicos cubren operaciones con body y variantes de MinIO.
 _NOT_FOUND_CODES = frozenset({"404", "NoSuchKey", "NoSuchBucket", "NotFound"})
+_FORBIDDEN_CODES = frozenset({"403", "AccessDenied", "Forbidden"})
+_REDIRECT_CODES = frozenset({"301", "PermanentRedirect", "MovedPermanently"})
 
 
 def _error_code(exc: ClientError) -> str:
     response: dict[str, Any] = getattr(exc, "response", {}) or {}
     error: dict[str, Any] = response.get("Error", {}) or {}
     return str(error.get("Code", ""))
+
+
+def _http_status(exc: ClientError) -> int | None:
+    response: dict[str, Any] = getattr(exc, "response", {}) or {}
+    meta: dict[str, Any] = response.get("ResponseMetadata", {}) or {}
+    status = meta.get("HTTPStatusCode")
+    return status if isinstance(status, int) else None
+
+
+def _bucket_region(exc: ClientError) -> str | None:
+    """Región real del bucket en un redirect 301 (header `x-amz-bucket-region`, en minúsculas)."""
+    response: dict[str, Any] = getattr(exc, "response", {}) or {}
+    meta: dict[str, Any] = response.get("ResponseMetadata", {}) or {}
+    headers: dict[str, Any] = meta.get("HTTPHeaders", {}) or {}
+    region = headers.get("x-amz-bucket-region")
+    return str(region) if region else None
+
+
+def _region_detail(exc: ClientError) -> str:
+    region = _bucket_region(exc)
+    return f" (el bucket está en la región {region!r})" if region else ""
+
+
+def _is_not_found(exc: ClientError) -> bool:
+    return _http_status(exc) == 404 or _error_code(exc) in _NOT_FOUND_CODES
+
+
+def _is_forbidden(exc: ClientError) -> bool:
+    return _http_status(exc) == 403 or _error_code(exc) in _FORBIDDEN_CODES
+
+
+def _is_redirect(exc: ClientError) -> bool:
+    return _http_status(exc) == 301 or _error_code(exc) in _REDIRECT_CODES
 
 
 class MinioObjectStore:
@@ -55,9 +98,19 @@ class MinioObjectStore:
         try:
             self._client.head_bucket(Bucket=self._bucket)
         except ClientError as e:
-            if _error_code(e) in _NOT_FOUND_CODES:
+            if _is_not_found(e):
                 self._client.create_bucket(Bucket=self._bucket)
                 self._log.info("storage.bucket.created", bucket=self._bucket)
+            elif _is_forbidden(e):
+                raise StorageAccessError(
+                    f"head_bucket {self._bucket!r} denegado (403): el bucket existe pero la "
+                    f"credencial/policy no tiene acceso: {e}"
+                ) from e
+            elif _is_redirect(e):
+                raise StorageRegionError(
+                    f"head_bucket {self._bucket!r} redirigido (301): el bucket vive en otra "
+                    f"región que la configurada{_region_detail(e)}: {e}"
+                ) from e
             else:
                 raise StorageError(f"head_bucket {self._bucket!r} failed: {e}") from e
 
@@ -81,8 +134,18 @@ class MinioObjectStore:
         try:
             self._client.head_object(Bucket=self._bucket, Key=key)
         except ClientError as e:
-            if _error_code(e) in _NOT_FOUND_CODES:
+            if _is_not_found(e):
                 return False
+            if _is_forbidden(e):
+                raise StorageAccessError(
+                    f"head_object {key!r} denegado (403): el objeto podría existir pero la "
+                    f"credencial/policy no tiene acceso: {e}"
+                ) from e
+            if _is_redirect(e):
+                raise StorageRegionError(
+                    f"head_object {key!r} redirigido (301): el bucket {self._bucket!r} vive en "
+                    f"otra región que la configurada{_region_detail(e)}: {e}"
+                ) from e
             raise StorageError(f"head_object {key!r} failed: {e}") from e
         return True
 
