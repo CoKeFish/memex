@@ -32,6 +32,14 @@ class OcrError(Exception):
         self.body = body
 
 
+class OcrQuotaError(OcrError):
+    """Saldo/cuota del proveedor de visión agotada (HTTP 402) — NO reintentable.
+
+    Espeja `LLMQuotaError`: el cliente la levanta ante un 402 y `run_ocr` la DEJA propagar para
+    ABORTAR la corrida (no la trata como un asset best-effort, así no consume intentos en vano).
+    """
+
+
 @dataclass(frozen=True)
 class OcrResult:
     """Resultado de OCR-ear una imagen: texto transcripto + usage + costo + latencia."""

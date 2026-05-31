@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 
 from memex.db import connection
-from memex.llm import LLMError
+from memex.llm import LLMError, LLMQuotaError
 from memex.logging import get_logger, setup_logging
 from memex.modules import known_modules
 from memex.modules.orchestrator import run_extraction
@@ -28,6 +28,7 @@ from memex.modules.process import run_combined
 from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
 
 _LLM_ERR_MSG = "\nERROR LLM. ¿Corriste con `doppler run -- ...` (DEEPSEEK_API_KEY)?\n"
+_QUOTA_ERR_MSG = "\nSALDO AGOTADO (HTTP 402): corrida abortada. Recargá saldo del proveedor LLM.\n"
 
 
 def _positive_int(value: str) -> int:
@@ -184,6 +185,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_modules(args)
         log.error("extract.cli.unknown_command", cmd=args.cmd)
         return 1
+    except LLMQuotaError as e:
+        log.error("extract.cli.quota_abort", status_code=e.status_code, msg=str(e))
+        print(_QUOTA_ERR_MSG, file=sys.stderr)
+        return 1
     except LLMError as e:
         log.error("extract.cli.llm_error", status_code=e.status_code, msg=str(e))
         print(_LLM_ERR_MSG, file=sys.stderr)
@@ -238,6 +243,10 @@ def main_process(argv: list[str] | None = None) -> int:
         if args.cmd == "run":
             return _cmd_process_run(args)
         log.error("process.cli.unknown_command", cmd=args.cmd)
+        return 1
+    except LLMQuotaError as e:
+        log.error("process.cli.quota_abort", status_code=e.status_code, msg=str(e))
+        print(_QUOTA_ERR_MSG, file=sys.stderr)
         return 1
     except LLMError as e:
         log.error("process.cli.llm_error", status_code=e.status_code, msg=str(e))

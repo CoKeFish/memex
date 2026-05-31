@@ -11,12 +11,13 @@ import asyncio
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from sqlalchemy import text
 
 from memex.core.media import MAX_OCR_ATTEMPTS
 from memex.db import connection
 from memex.llm import LLMUsage
-from memex.ocr.client import OcrError, OcrResult
+from memex.ocr.client import OcrError, OcrQuotaError, OcrResult
 from memex.ocr.worker import run_ocr
 
 
@@ -24,11 +25,17 @@ class FakeOCR:
     """Satisface OCRClient. Cuenta llamadas; configurable: texto, fallo, finish_reason."""
 
     def __init__(
-        self, text: str = "TEXTO OCR", *, fail: bool = False, finish_reason: str = "stop"
+        self,
+        text: str = "TEXTO OCR",
+        *,
+        fail: bool = False,
+        quota: bool = False,
+        finish_reason: str = "stop",
     ) -> None:
         self.calls = 0
         self._text = text
         self._fail = fail
+        self._quota = quota
         self._finish = finish_reason
 
     async def ocr_image(
@@ -37,6 +44,8 @@ class FakeOCR:
         self.calls += 1
         if self._fail:
             raise OcrError(500, "boom")
+        if self._quota:
+            raise OcrQuotaError(402, "insufficient balance")
         return OcrResult(
             text=self._text,
             model=model or "fake-vision",
@@ -181,6 +190,22 @@ def test_dedup_same_sha_single_vision_call() -> None:
     assert stats.ok == 2 and stats.deduped == 1
     assert _media_row(m1)["ocr_text"] == "texto compartido"
     assert _media_row(m2)["ocr_text"] == "texto compartido"
+
+
+def test_quota_error_aborts_run() -> None:
+    """402/saldo agotado aborta la corrida (se propaga). Los assets NO se marcan error (no es su
+    culpa → no consumen intentos): quedan pending para la próxima corrida con saldo."""
+    sid = _new_source()
+    m1 = _seed_media(_seed_inbox(sid, "m1"), sha256="q-a")
+    m2 = _seed_media(_seed_inbox(sid, "m2"), sha256="q-b")
+
+    fake = FakeOCR(quota=True)
+    with pytest.raises(OcrQuotaError):
+        asyncio.run(run_ocr(1, client=fake, store=FakeStore()))
+
+    assert fake.calls == 1  # abortó en el 1ro, no siguió al 2do
+    assert _media_row(m1)["ocr_status"] == "pending"
+    assert _media_row(m2)["ocr_status"] == "pending"
 
 
 def test_idempotent_second_run_noop() -> None:

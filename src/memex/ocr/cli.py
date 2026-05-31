@@ -21,7 +21,7 @@ import sys
 from dotenv import load_dotenv
 
 from memex.logging import get_logger, setup_logging
-from memex.ocr.client import OcrError
+from memex.ocr.client import OcrError, OcrQuotaError
 from memex.ocr.worker import run_ocr
 from memex.storage import MinioObjectStore, StorageConfig, StorageError
 
@@ -75,6 +75,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "ensure-bucket":
             return _cmd_ensure_bucket()
         log.error("ocr.cli.unknown_command", cmd=args.cmd)
+        return 1
+    except OcrQuotaError as e:
+        log.error("ocr.cli.quota_abort", status_code=e.status_code, msg=str(e))
+        print(
+            "\nSALDO AGOTADO (HTTP 402): corrida abortada. Recargá saldo del proveedor.\n",
+            file=sys.stderr,
+        )
         return 1
     except OcrError as e:
         log.error("ocr.cli.ocr_error", status_code=e.status_code, msg=str(e))

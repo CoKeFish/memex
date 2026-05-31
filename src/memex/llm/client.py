@@ -76,6 +76,16 @@ class LLMError(Exception):
         self.body = body
 
 
+class LLMQuotaError(LLMError):
+    """Saldo/cuota del proveedor agotada (HTTP 402) — NO reintentable.
+
+    Distinta del resto de los 4xx: no tiene sentido reintentar ni seguir la corrida sin saldo.
+    El cliente la levanta inmediato ante un 402 y los workers la DEJAN propagar (a diferencia de
+    los errores best-effort por ventana/asset) para ABORTAR el run. Los CLIs la atrapan —ya sea
+    como `LLMQuotaError` específica o como `LLMError` base— y salen con un mensaje accionable.
+    """
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     """Interfaz de chat-completion agnóstica del proveedor.

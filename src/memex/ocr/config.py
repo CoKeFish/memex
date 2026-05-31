@@ -53,7 +53,10 @@ class OcrConfig(BaseModel):
     api_key: SecretStr
     base_url: str = _DEFAULT_BASE_URL
     default_model: str = _DEFAULT_MODEL
+    #: timeout_s aplica a read/write/pool (una transcripción densa puede tardar). connect_timeout_s
+    #: es aparte y corto: un connect colgado falla rápido y se reintenta. Espeja LLMConfig.
     timeout_s: float = 120.0
+    connect_timeout_s: float = 10.0
     max_retries: int = 3
     backoff_base: float = 0.5
 

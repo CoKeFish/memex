@@ -16,7 +16,7 @@ import sys
 
 from dotenv import load_dotenv
 
-from memex.llm import LLMError
+from memex.llm import LLMError, LLMQuotaError
 from memex.logging import get_logger, setup_logging
 from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
 from memex.summarizer.worker import run_summarization
@@ -95,6 +95,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "run":
             return _cmd_run(args)
         log.error("summarizer.cli.unknown_command", cmd=args.cmd)
+        return 1
+    except LLMQuotaError as e:
+        log.error("summarizer.cli.quota_abort", status_code=e.status_code, msg=str(e))
+        print(
+            "\nSALDO AGOTADO (HTTP 402): corrida abortada. Recargá saldo del proveedor LLM.\n",
+            file=sys.stderr,
+        )
         return 1
     except LLMError as e:
         log.error("summarizer.cli.llm_error", status_code=e.status_code, msg=str(e))

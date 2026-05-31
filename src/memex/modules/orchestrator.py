@@ -28,7 +28,7 @@ from sqlalchemy.engine import Connection
 
 from memex.core.observability import record_llm_call
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig
+from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
 from memex.logging import get_logger
 from memex.modules import resolve
 from memex.modules.contract import (
@@ -682,6 +682,11 @@ async def run_extraction(
                     batching_policy=batching_policy,
                     group_size=group_size,
                 )
+            except LLMQuotaError:
+                # Saldo agotado: abortar la corrida (no es best-effort por ventana). El cliente se
+                # cierra en el finally y el CLI sale con un mensaje accionable.
+                _log.error("extract.run.aborted_no_quota", source_id=window.source_id)
+                raise
             except Exception as e:  # best-effort: una ventana fallida no frena las demás
                 stats.errors += 1
                 _log.error(

@@ -14,10 +14,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from sqlalchemy import text
 
 from memex.db import connection
-from memex.llm import ChatMessage, LLMError, LLMResult, LLMUsage, ResponseFormat
+from memex.llm import ChatMessage, LLMError, LLMQuotaError, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.calendar.module import CalendarModule
 from memex.modules.finance.module import FinanceModule
 from memex.modules.grouping import GROUPED_SYSTEM_PROMPT
@@ -62,6 +63,7 @@ class FakeExtractLLM:
     - `empty`: devuelve content vacío (en CUALQUIER llamada).
     - `truncated`: emite `finish_reason="length"` (cortada por max_tokens), con content válido.
     - `fail_on_call`: lanza LLMError en la N-ésima llamada.
+    - `quota_on_call`: lanza LLMQuotaError (402) en la N-ésima llamada (saldo agotado → aborta).
     - `route_choose`: slugs que el router elige (None = todos los del chunk).
     """
 
@@ -72,6 +74,7 @@ class FakeExtractLLM:
         empty: bool = False,
         truncated: bool = False,
         fail_on_call: int | None = None,
+        quota_on_call: int | None = None,
         route_choose: list[str] | None = None,
     ) -> None:
         self.calls = 0
@@ -79,6 +82,7 @@ class FakeExtractLLM:
         self._empty = empty
         self._truncated = truncated
         self._fail_on = fail_on_call
+        self._quota_on = quota_on_call
         self._route_choose = route_choose
 
     async def complete(
@@ -93,6 +97,8 @@ class FakeExtractLLM:
         self.calls += 1
         if self._fail_on is not None and self.calls == self._fail_on:
             raise LLMError(500, "boom")
+        if self._quota_on is not None and self.calls == self._quota_on:
+            raise LLMQuotaError(402, "insufficient balance")
 
         if self._empty:
             content = ""
@@ -342,6 +348,22 @@ def test_error_mid_run_is_best_effort(seed_source: dict[str, Any]) -> None:
     second = asyncio.run(run_extraction(1, client=FakeExtractLLM()))
     assert second.items == 1
     assert _count("mod_finance_expenses") == 2
+
+
+def test_quota_error_aborts_run(seed_source: dict[str, Any]) -> None:
+    """402/saldo agotado NO es best-effort: aborta la corrida (se propaga) y las ventanas
+    restantes no se procesan. Lo ya persistido queda (no hay rollback global)."""
+    sid = seed_source["id"]
+    _enable()
+    _seed(sid, "i1", "individual", {"body_text": "pagué $4500"}, minute=0)
+    _seed(sid, "i2", "individual", {"body_text": "pagué $1200"}, minute=1)
+
+    fake = FakeExtractLLM(quota_on_call=2)  # la 1ra ventana extrae; la 2da se queda sin saldo
+    with pytest.raises(LLMQuotaError):
+        asyncio.run(run_extraction(1, client=fake))
+
+    assert fake.calls == 2  # abortó en la 2da, no siguió de largo
+    assert _count("mod_finance_expenses") == 1  # la 1ra ventana sí persistió
 
 
 # ----- Etapa A: split de ruteo en chunks ----------------------------------------- #

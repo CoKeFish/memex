@@ -15,7 +15,7 @@ Uso típico (async):
 El worker `run_ocr` (etapa `memex-ocr`) vive en `memex.ocr.worker` y se importa directo.
 """
 
-from memex.ocr.client import OCRClient, OcrError, OcrResult
+from memex.ocr.client import OCRClient, OcrError, OcrQuotaError, OcrResult
 from memex.ocr.config import OcrConfig, OcrConfigError
 from memex.ocr.openai_vision import OpenAIVisionClient
 from memex.ocr.pricing import MODEL_PRICING, OcrPricing, compute_ocr_cost
@@ -27,6 +27,7 @@ __all__ = [
     "OcrConfigError",
     "OcrError",
     "OcrPricing",
+    "OcrQuotaError",
     "OcrResult",
     "OpenAIVisionClient",
     "compute_ocr_cost",

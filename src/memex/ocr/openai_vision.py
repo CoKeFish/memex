@@ -5,8 +5,9 @@ ni shapes del proveedor. Cambiar de proveedor de OCR = otra clase que implementa
 
 Usa httpx **asíncrono** (`AsyncClient`) contra un endpoint OpenAI-compatible
 (`POST {base_url}/chat/completions`) mandando la imagen como bloque `image_url` con un data-URI
-base64. El patrón de retry/backoff es el mismo de `DeepSeekClient` (429/5xx/red reintenta, otro 4xx
-inmediato). Parsea con los helpers compartidos `memex.llm._openai` (mismo dialecto).
+base64. El patrón de retry/backoff es el mismo de `DeepSeekClient` (429/5xx/red reintenta; 402/saldo
+agotado → `OcrQuotaError` que aborta la corrida; otro 4xx inmediato). Parsea con los helpers
+compartidos `memex.llm._openai` (mismo dialecto).
 
 ADR-001-style: solo importa httpx, pydantic-resueltos, `memex.llm` (primitivos) y
 `memex.logging`; nunca internals de memex (db/api/inbox).
@@ -23,7 +24,7 @@ import httpx
 
 from memex.llm._openai import parse_choice, parse_usage
 from memex.logging import get_logger
-from memex.ocr.client import OcrError, OcrResult
+from memex.ocr.client import OcrError, OcrQuotaError, OcrResult
 from memex.ocr.config import OcrConfig
 from memex.ocr.pricing import compute_ocr_cost
 from memex.ocr.prompt import OCR_SYSTEM_PROMPT, OCR_USER_INSTRUCTION
@@ -53,7 +54,7 @@ class OpenAIVisionClient:
         self._client = client or httpx.AsyncClient(
             base_url=config.base_url.rstrip("/"),
             headers=headers,
-            timeout=httpx.Timeout(config.timeout_s),
+            timeout=httpx.Timeout(config.timeout_s, connect=config.connect_timeout_s),
         )
         self._owns_client = client is None
 
@@ -123,7 +124,7 @@ class OpenAIVisionClient:
         )
 
     async def _request(self, method: str, path: str, *, json: Any) -> httpx.Response:
-        """HTTP con retry de 429/5xx/red (backoff exponencial); otro 4xx → error inmediato."""
+        """HTTP con retry de 429/5xx/red; 402 → OcrQuotaError (aborta); otro 4xx inmediato."""
         last_exc: Exception | None = None
         for attempt in range(self._config.max_retries + 1):
             try:
@@ -142,6 +143,11 @@ class OpenAIVisionClient:
                     )
                     self._log.warning(
                         "ocr.vision.request.retryable", status=resp.status_code, attempt=attempt
+                    )
+                elif resp.status_code == 402:
+                    # Saldo agotado: no tiene sentido reintentar ni seguir la corrida sin saldo.
+                    raise OcrQuotaError(
+                        402, "insufficient balance", body=resp.text[:_BODY_PREVIEW_MAX] or None
                     )
                 elif 400 <= resp.status_code < 500:
                     raise OcrError(

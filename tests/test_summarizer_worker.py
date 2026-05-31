@@ -18,7 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from memex.db import connection
-from memex.llm import ChatMessage, LLMError, LLMResult, LLMUsage, ResponseFormat
+from memex.llm import ChatMessage, LLMError, LLMQuotaError, LLMResult, LLMUsage, ResponseFormat
 from memex.summarizer.worker import run_summarization
 
 
@@ -26,12 +26,17 @@ class FakeLLM:
     """Satisface el Protocol LLMClient. Configurable: content, finish_reason, fallo en N-ésima."""
 
     def __init__(
-        self, content: str = "RESUMEN", finish_reason: str = "stop", fail_on_call: int | None = None
+        self,
+        content: str = "RESUMEN",
+        finish_reason: str = "stop",
+        fail_on_call: int | None = None,
+        quota_on_call: int | None = None,
     ) -> None:
         self.calls = 0
         self._content = content
         self._finish = finish_reason
         self._fail_on = fail_on_call
+        self._quota_on = quota_on_call
 
     async def complete(
         self,
@@ -45,6 +50,8 @@ class FakeLLM:
         self.calls += 1
         if self._fail_on is not None and self.calls == self._fail_on:
             raise LLMError(500, "boom en la llamada")
+        if self._quota_on is not None and self.calls == self._quota_on:
+            raise LLMQuotaError(402, "insufficient balance")
         return LLMResult(
             content=self._content,
             model="fake",
@@ -177,6 +184,21 @@ def test_tier_filter(seed_source: dict[str, Any]) -> None:
     assert stats.summaries == 1
     assert stats.by_tier.get("individual") == 1
     assert "batch" not in stats.by_tier
+
+
+def test_quota_error_aborts_run(seed_source: dict[str, Any]) -> None:
+    """402/saldo agotado aborta la corrida (se propaga, no es best-effort por ventana); lo ya
+    resumido queda persistido."""
+    sid = seed_source["id"]
+    _seed(sid, "i1", "individual", {"subject": "uno"}, minute=0)
+    _seed(sid, "i2", "individual", {"subject": "dos"}, minute=1)
+
+    fake = FakeLLM(quota_on_call=2)
+    with pytest.raises(LLMQuotaError):
+        asyncio.run(run_summarization(1, client=fake))
+
+    assert fake.calls == 2  # abortó en la 2da, no siguió de largo
+    assert _count("summaries") == 1  # la 1ra ventana sí persistió
 
 
 def test_multi_source_separate_summaries(seed_source: dict[str, Any]) -> None:

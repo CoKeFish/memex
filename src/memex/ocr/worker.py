@@ -25,7 +25,7 @@ from memex.core.media import MAX_OCR_ATTEMPTS
 from memex.core.observability import record_llm_call
 from memex.db import connection
 from memex.logging import get_logger
-from memex.ocr.client import OCRClient
+from memex.ocr.client import OCRClient, OcrQuotaError
 from memex.ocr.config import OcrConfig
 from memex.ocr.openai_vision import OpenAIVisionClient
 from memex.storage import MinioObjectStore, ObjectStore, StorageConfig
@@ -256,6 +256,11 @@ async def run_ocr(
         for asset in assets:
             try:
                 await _process_asset(user_id, active_client, active_store, asset, model, stats)
+            except OcrQuotaError:
+                # Saldo agotado: abortar la corrida. NO se marca el asset como error (no es su
+                # culpa, no debe consumir intentos); el cliente se cierra en el finally.
+                _log.error("ocr.run.aborted_no_quota", asset_id=asset.id, inbox_id=asset.inbox_id)
+                raise
             except Exception as e:  # best-effort: un asset fallido no frena los demás
                 stats.errors += 1
                 _mark_error(asset.id, str(e))

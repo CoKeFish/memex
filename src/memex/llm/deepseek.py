@@ -7,7 +7,8 @@ nunca URLs ni shapes de DeepSeek. Cambiar de proveedor = otra clase que implemen
 Usa httpx **asíncrono** (`AsyncClient`) — NO el SDK `openai`/`deepseek`. El
 patrón de retry/backoff está espejado de `ApifyClient._request` pero con
 `asyncio.sleep`: reintenta 429 (rate-limit) + 5xx + errores de red con backoff
-exponencial; otro 4xx levanta `DeepSeekError` inmediato.
+exponencial; 402 (saldo agotado) levanta `LLMQuotaError` para ABORTAR la corrida;
+otro 4xx levanta `DeepSeekError` inmediato.
 
 A diferencia del run-start pago no-idempotente de Apify, el POST a
 `/chat/completions` **sí** se reintenta en 5xx/red: es la práctica estándar para
@@ -30,6 +31,7 @@ from memex.llm._openai import parse_choice, parse_usage
 from memex.llm.client import (
     ChatMessage,
     LLMError,
+    LLMQuotaError,
     LLMResult,
     ResponseFormat,
 )
@@ -64,7 +66,7 @@ class DeepSeekClient:
         self._client = client or httpx.AsyncClient(
             base_url=config.base_url.rstrip("/"),
             headers=headers,
-            timeout=httpx.Timeout(config.timeout_s),
+            timeout=httpx.Timeout(config.timeout_s, connect=config.connect_timeout_s),
         )
         self._owns_client = client is None
 
@@ -130,7 +132,7 @@ class DeepSeekClient:
         )
 
     async def _request(self, method: str, path: str, *, json: Any) -> httpx.Response:
-        """HTTP con retry de 429/5xx/red (backoff exponencial); otro 4xx → error inmediato."""
+        """HTTP con retry de 429/5xx/red; 402 → LLMQuotaError (aborta); otro 4xx inmediato."""
         last_exc: Exception | None = None
         for attempt in range(self._config.max_retries + 1):
             try:
@@ -149,6 +151,11 @@ class DeepSeekClient:
                     )
                     self._log.warning(
                         "llm.deepseek.request.retryable", status=resp.status_code, attempt=attempt
+                    )
+                elif resp.status_code == 402:
+                    # Saldo agotado: no tiene sentido reintentar ni seguir la corrida sin saldo.
+                    raise LLMQuotaError(
+                        402, "insufficient balance", body=resp.text[:_BODY_PREVIEW_MAX] or None
                     )
                 elif 400 <= resp.status_code < 500:
                     raise DeepSeekError(

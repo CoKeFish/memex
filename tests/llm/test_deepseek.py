@@ -11,7 +11,7 @@ import pytest
 import respx
 from pydantic import SecretStr
 
-from memex.llm.client import ChatMessage, LLMClient, LLMError
+from memex.llm.client import ChatMessage, LLMClient, LLMError, LLMQuotaError
 from memex.llm.config import LLMConfig
 from memex.llm.deepseek import DeepSeekClient, DeepSeekError
 
@@ -191,6 +191,28 @@ async def test_network_error_retries_then_raises() -> None:
                 await c.complete([ChatMessage("user", "x")])
         # max_retries=3 → 4 intentos antes de rendirse
         assert route.call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_402_raises_quota_error_no_retry() -> None:
+    with respx.mock(base_url=BASE_URL) as router:
+        router.post(CHAT).respond(402, text="Insufficient Balance")
+        async with _client() as c:
+            with pytest.raises(LLMQuotaError) as exc:
+                await c.complete([ChatMessage("user", "x")])
+        assert exc.value.status_code == 402
+        assert router.calls.call_count == 1  # 402 = saldo agotado, no se reintenta
+
+
+@pytest.mark.asyncio
+async def test_timeout_separates_connect_from_read() -> None:
+    async with _client() as c:
+        assert c._client.timeout.connect == 10.0  # connect corto, falla rápido
+        assert c._client.timeout.read == 60.0  # read = budget de la completion
+
+
+def test_quota_error_subclasses_llm_error() -> None:
+    assert issubclass(LLMQuotaError, LLMError)
 
 
 def test_deepseek_client_satisfies_llmclient_protocol() -> None:

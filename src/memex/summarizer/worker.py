@@ -29,7 +29,7 @@ from sqlalchemy import text
 from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
 from memex.core.observability import record_llm_call
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig
+from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
 from memex.logging import get_logger
 from memex.summarizer.prompt import SYSTEM_PROMPT, build_user_content
 from memex.summarizer.render import render_payload
@@ -300,6 +300,11 @@ async def run_summarization(
         for window in windows:
             try:
                 await _process_window(user_id, active, window, stats)
+            except LLMQuotaError:
+                # Saldo agotado: abortar la corrida (no es best-effort por ventana). El cliente se
+                # cierra en el finally y el CLI sale con un mensaje accionable.
+                _log.error("summarizer.run.aborted_no_quota", source_id=window.source_id)
+                raise
             except Exception as e:  # best-effort: una ventana fallida no frena las demás
                 stats.errors += 1
                 _log.error(

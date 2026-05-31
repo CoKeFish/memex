@@ -14,7 +14,7 @@ import pytest
 import respx
 from pydantic import SecretStr
 
-from memex.ocr.client import OCRClient, OcrError, OcrResult
+from memex.ocr.client import OCRClient, OcrError, OcrQuotaError, OcrResult
 from memex.ocr.config import OcrConfig
 from memex.ocr.openai_vision import OpenAIVisionClient
 
@@ -136,3 +136,25 @@ async def test_network_error_retries_then_raises() -> None:
             with pytest.raises(OcrError):
                 await c.ocr_image(image_bytes=b"x", content_type="image/png")
         assert route.call_count == 4  # max_retries=3 → 4 intentos
+
+
+@pytest.mark.asyncio
+async def test_402_raises_quota_error_no_retry() -> None:
+    with respx.mock(base_url=BASE_URL) as router:
+        router.post(CHAT).respond(402, text="Insufficient Balance")
+        async with _client() as c:
+            with pytest.raises(OcrQuotaError) as exc:
+                await c.ocr_image(image_bytes=b"x", content_type="image/png")
+        assert exc.value.status_code == 402
+        assert router.calls.call_count == 1  # 402 = saldo agotado, no se reintenta
+
+
+@pytest.mark.asyncio
+async def test_timeout_separates_connect_from_read() -> None:
+    async with _client() as c:
+        assert c._client.timeout.connect == 10.0  # connect corto
+        assert c._client.timeout.read == 120.0  # read = budget de la transcripción
+
+
+def test_quota_error_subclasses_ocr_error() -> None:
+    assert issubclass(OcrQuotaError, OcrError)
