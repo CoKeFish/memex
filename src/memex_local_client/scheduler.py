@@ -12,7 +12,6 @@ tumba el loop salvo SIGINT/SIGTERM.
 
 from __future__ import annotations
 
-import re
 import signal
 import threading
 import time
@@ -22,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from memex.core.schedule import backoff_seconds, parse_duration
 from memex.logging import get_logger
 from memex_local_client.discovery import discover_plugins
 from memex_local_client.protocol import LocalPlugin
@@ -30,22 +30,9 @@ from memex_local_client.state import State
 
 _log = get_logger("memex_local_client.scheduler")
 
-# ISO 8601 PnDTnHnMnS, subconjunto: PT5M, PT1H, PT24H, P1D, P1DT2H30M, etc.
-_DURATION_RE = re.compile(
-    r"^P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?$"
-)
-
-
-def parse_duration(s: str) -> float:
-    """Convierte una duración ISO 8601 simple a segundos."""
-    m = _DURATION_RE.match(s.strip())
-    if not m or not any(m.group(g) for g in ("days", "hours", "minutes", "seconds")):
-        raise ValueError(f"invalid duration: {s!r}")
-    days = int(m.group("days") or 0)
-    hours = int(m.group("hours") or 0)
-    minutes = int(m.group("minutes") or 0)
-    seconds = int(m.group("seconds") or 0)
-    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+# `parse_duration` y `backoff_seconds` viven ahora en `memex.core.schedule` (compartidos con el
+# daemon server-side `memex.scheduler`). Se re-exportan acá para no romper imports existentes.
+__all__ = ["Scheduler", "parse_duration"]
 
 
 @dataclass
@@ -81,11 +68,6 @@ def _build_runtimes(
             continue
         runtimes[name] = _PluginRuntime(plugin=plugin, interval_s=interval, next_run_at=now)
     return runtimes
-
-
-def _backoff_seconds(failures: int) -> float:
-    """Backoff exponencial con techo de 1h."""
-    return float(min(60 * (2 ** min(failures, 6)), 3600))
 
 
 class Scheduler:
@@ -159,7 +141,7 @@ class Scheduler:
                 rt.next_run_at = now + rt.interval_s
             except Exception as e:
                 rt.failure_count += 1
-                backoff = _backoff_seconds(rt.failure_count)
+                backoff = backoff_seconds(rt.failure_count)
                 rt.next_run_at = now + backoff
                 log.warning(
                     "memex_local_client.scheduler.plugin_unhealthy",

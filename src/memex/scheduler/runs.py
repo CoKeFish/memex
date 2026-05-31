@@ -1,0 +1,46 @@
+"""Persistencia de `worker_runs`: una fila por corrida de cada job del scheduler.
+
+Espeja `mod_calendar_sync_runs._start_run/_finish_run` (sync.py) pero genérico para cualquier
+job. Cada helper abre su PROPIA `connection()` (auto-commit): la fila 'running' commitea de
+inmediato, así un daemon que muere a media corrida deja una fila huérfana VISIBLE (diagnóstico),
+no un hueco. `stats` se serializa con `dataclasses.asdict` → JSONB.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+from typing import Any
+
+from sqlalchemy import text
+
+from memex.db import connection
+
+
+def start_run(user_id: int, job: str) -> int:
+    """Inserta la fila 'running' de una corrida y devuelve su id."""
+    with connection() as conn:
+        return int(
+            conn.execute(
+                text(
+                    "INSERT INTO worker_runs (user_id, job, status) "
+                    "VALUES (:uid, :job, 'running') RETURNING id"
+                ),
+                {"uid": user_id, "job": job},
+            ).scalar_one()
+        )
+
+
+def finish_run(run_id: int, *, status: str, stats: Any = None, error: str | None = None) -> None:
+    """Cierra la fila: status final ('ok'/'error'), stats (dataclass → JSON) y error opcional."""
+    payload = "{}"
+    if stats is not None and dataclasses.is_dataclass(stats) and not isinstance(stats, type):
+        payload = json.dumps(dataclasses.asdict(stats))
+    with connection() as conn:
+        conn.execute(
+            text(
+                "UPDATE worker_runs SET status = :s, stats = CAST(:stats AS JSONB), "
+                "error = :err, finished_at = NOW() WHERE id = :id"
+            ),
+            {"id": run_id, "s": status, "stats": payload, "err": error[:2000] if error else None},
+        )
