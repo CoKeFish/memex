@@ -1,33 +1,25 @@
-# mypy: disable-error-code="no-any-return, no-untyped-call"
 """Google OAuth2 provider for Gmail IMAP (XOAUTH2 SASL).
 
-Initial authorization uses google-auth-oauthlib's Desktop App flow (opens a
-browser, captures the redirect, exchanges the code for tokens). After that,
-runs use the persisted refresh_token to mint fresh access tokens
-automatically.
+Thin adapter sobre el helper NEUTRAL `memex.google_oauth` (compartido con el módulo de
+calendario): el glue genérico de google-auth (flow Desktop App, refresh, persistencia 0600) vive
+allá; este archivo solo lo liga al Protocol `OAuthProvider` del ingestor y al scope de Gmail, y
+traduce `GoogleOAuthError` → `OAuthError` (la base que atrapan los callers de IMAP).
 
-Token file is JSON (the format google-auth's `Credentials.to_json()`
-produces). It contains the refresh_token, so its filesystem permissions
-matter: the writer attempts to chmod 0600 on POSIX systems (Windows ignores).
+Decisión 6 (2026-05-30): la autorización pide el conjunto COMPLETO de scopes de memex en un solo
+consentimiento (Gmail full + Calendar), así que el token consolidado sirve también acá; Gmail es
+un subset del token, por eso el refresh con `GMAIL_IMAP_SCOPES` funciona.
 """
 
 from __future__ import annotations
 
-import contextlib
 from pathlib import Path
 from typing import ClassVar
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
-
+from memex import google_oauth
 from memex.ingestors.imap.oauth import OAuthError
 
-# Gmail IMAP requires the full mail scope ("https://mail.google.com/").
-# The narrower "gmail.readonly" scope only works for the REST Gmail API, not
-# for IMAP XOAUTH2 authentication. memex's IMAP ingestor only issues read
-# commands; the broader scope is a Google constraint, not a memex choice.
-GMAIL_IMAP_SCOPES = ["https://mail.google.com/"]
+# Gmail IMAP requiere el scope full mail (subset del token consolidado de la decisión 6).
+GMAIL_IMAP_SCOPES = [google_oauth.GMAIL_SCOPE]
 
 
 class GoogleOAuthProvider:
@@ -43,17 +35,15 @@ class GoogleOAuthProvider:
     ) -> None:
         """Run the interactive OAuth flow and persist tokens to `token_path`.
 
-        Opens the user's default browser to Google's consent page. Captures the
-        redirect locally on a randomly-chosen port. Stores the resulting tokens
-        to `token_path` in google-auth's JSON format.
+        Pide el set COMPLETO de scopes de memex (decisión 6) en una sola pantalla de
+        consentimiento, así un único token sirve para IMAP y para el módulo de calendario.
         """
-        cs_path = Path(client_secret_path)
-        if not cs_path.exists():
-            raise OAuthError(f"client_secret file not found: {cs_path}")
-
-        flow = InstalledAppFlow.from_client_secrets_file(str(cs_path), GMAIL_IMAP_SCOPES)
-        creds = flow.run_local_server(port=0, open_browser=True)
-        _save_credentials(creds, token_path)
+        try:
+            google_oauth.authorize_interactive(
+                client_secret_path=client_secret_path, token_path=token_path
+            )
+        except google_oauth.GoogleOAuthError as e:
+            raise OAuthError(str(e)) from e
 
     def get_access_token(
         self,
@@ -61,52 +51,7 @@ class GoogleOAuthProvider:
         token_path: str | Path,
     ) -> str:
         """Load credentials, refresh if needed, return the access_token string."""
-        creds = _load_and_refresh(token_path)
-        if not creds.token:
-            raise OAuthError("no access_token after refresh")
-        return creds.token
-
-
-def _load_and_refresh(token_path: str | Path) -> Credentials:
-    """Load credentials from disk and refresh them if needed.
-
-    Persists the refreshed token back to disk so subsequent runs reuse the
-    same access_token until it expires again.
-    """
-    path = Path(token_path)
-    if not path.exists():
-        raise OAuthError(
-            f"OAuth token file not found at {path}. Run "
-            f"`python -m memex.ingestors.imap.cli authorize --source-id N` first."
-        )
-
-    try:
-        creds = Credentials.from_authorized_user_file(str(path), GMAIL_IMAP_SCOPES)
-    except Exception as e:
-        raise OAuthError(f"failed to load token file {path}: {e}") from e
-
-    if creds.valid:
-        return creds
-
-    if not (creds.expired and creds.refresh_token):
-        raise OAuthError(
-            f"OAuth credentials at {path} are invalid and cannot be refreshed "
-            "(missing refresh_token or unexpired but invalid). Re-run authorize."
-        )
-
-    try:
-        creds.refresh(Request())
-    except Exception as e:
-        raise OAuthError(f"token refresh failed for {path}: {e}") from e
-
-    _save_credentials(creds, path)
-    return creds
-
-
-def _save_credentials(creds: Credentials, token_path: str | Path) -> None:
-    path = Path(token_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(creds.to_json(), encoding="utf-8")
-    with contextlib.suppress(OSError):
-        # Best-effort tighten on POSIX; Windows raises and we ignore.
-        path.chmod(0o600)
+        try:
+            return google_oauth.get_access_token(token_path=token_path, scopes=GMAIL_IMAP_SCOPES)
+        except google_oauth.GoogleOAuthError as e:
+            raise OAuthError(str(e)) from e

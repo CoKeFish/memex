@@ -115,27 +115,58 @@ def _existing_rows(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> 
     ]
 
 
+def _mark_processed(conn: Connection, new_event_ids: list[int], in_pair: set[int]) -> None:
+    """Tras el dedup FASE 1, marca `processed_at` + `processing_outcome` de los eventos tocados.
+
+    Los que quedaron en un par candidato (nuevos o existentes) → `'pending'` (esperan la FASE 2
+    LLM del slice 2 que confirma/rechaza). Los nuevos SIN par → `'unique'`. Aplica por igual a
+    eventos de extracción LLM y de proveedor (requisito: marcar el estado de CADA evento)."""
+    pending = sorted(in_pair)
+    unique = [i for i in new_event_ids if i not in in_pair]
+    if pending:
+        conn.execute(
+            text(
+                "UPDATE mod_calendar_events SET processed_at = NOW(), "
+                "processing_outcome = 'pending' WHERE id = ANY(:ids)"
+            ),
+            {"ids": pending},
+        )
+    if unique:
+        conn.execute(
+            text(
+                "UPDATE mod_calendar_events SET processed_at = NOW(), "
+                "processing_outcome = 'unique' WHERE id = ANY(:ids)"
+            ),
+            {"ids": unique},
+        )
+
+
 def _mark_dedup(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> int:
-    """Corre el dedup determinista y registra los pares candidatos. Devuelve cuántos marcó."""
+    """Corre el dedup determinista FASE 1, registra los pares candidatos y marca el estado de
+    procesamiento de los eventos nuevos. Devuelve cuántos pares marcó."""
     existing = _existing_rows(conn, user_id, new_rows)
     pairs = mark_duplicates(new_rows, existing)
-    if not pairs:
-        return 0
-    conn.execute(
-        text(
-            """
-            INSERT INTO mod_calendar_dedup_candidates
-              (user_id, event_a_id, event_b_id, reason, score)
-            VALUES (:uid, :a, :b, :reason, :score)
-            ON CONFLICT (event_a_id, event_b_id) DO NOTHING
-            """
-        ),
-        [
-            {"uid": user_id, "a": p.a_id, "b": p.b_id, "reason": p.reason, "score": p.score}
-            for p in pairs
-        ],
-    )
-    _log.info("calendar.dedup.marked", pairs=len(pairs))
+    in_pair: set[int] = set()
+    for p in pairs:
+        in_pair.update((p.a_id, p.b_id))
+    if pairs:
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_calendar_dedup_candidates
+                  (user_id, event_a_id, event_b_id, reason, score)
+                VALUES (:uid, :a, :b, :reason, :score)
+                ON CONFLICT (event_a_id, event_b_id) DO NOTHING
+                """
+            ),
+            [
+                {"uid": user_id, "a": p.a_id, "b": p.b_id, "reason": p.reason, "score": p.score}
+                for p in pairs
+            ],
+        )
+    _mark_processed(conn, [r.event_id for r in new_rows], in_pair)
+    if pairs:
+        _log.info("calendar.dedup.marked", pairs=len(pairs))
     return len(pairs)
 
 

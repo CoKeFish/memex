@@ -16,7 +16,12 @@ from memex.core.source import SourceKind
 from memex.db import connection
 from memex.modules import known_modules, resolve
 from memex.modules.calendar.dedup import DedupRow, mark_duplicates
-from memex.modules.calendar.domain import CalendarDomain, CalendarDomainReader, CalendarEvent
+from memex.modules.calendar.domain import (
+    CalendarDomain,
+    CalendarDomainReader,
+    CalendarEvent,
+    ContributedEvent,
+)
 from memex.modules.calendar.module import CalendarModule
 from memex.modules.calendar.schema import CalendarEventItem
 from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, InterestModule
@@ -181,11 +186,12 @@ def test_dedup_not_transitive() -> None:
 
 
 def _seed_event(user_id: int, title: str, starts_on: date) -> int:
+    # events_in_range lee la vista CONSOLIDADA (no los crudos), así que sembramos ahí.
     with connection() as c:
         eid = c.execute(
             text(
-                "INSERT INTO mod_calendar_events (user_id, source_inbox_ids, title, starts_on) "
-                "VALUES (:u, ARRAY[]::bigint[], :t, :d) RETURNING id"
+                "INSERT INTO mod_calendar_consolidated (user_id, title, starts_on) "
+                "VALUES (:u, :t, :d) RETURNING id"
             ),
             {"u": user_id, "t": title, "d": starts_on},
         ).scalar_one()
@@ -211,7 +217,34 @@ def test_reader_satisfies_domain_protocol(conn: Connection) -> None:
     assert isinstance(reader, CalendarDomain)
 
 
-def test_contribute_not_implemented(conn: Connection) -> None:
+def test_contribute_inserts_module_events_with_priority(conn: Connection) -> None:
     reader = CalendarDomainReader(conn, 1)
-    with pytest.raises(NotImplementedError, match="contribute"):
-        reader.contribute([])
+    n = reader.contribute(
+        [
+            ContributedEvent(
+                title="Clase de Cálculo",
+                starts_on=date(2026, 6, 3),
+                start_time=time(9, 0),
+                priority_rank=1000,
+                protected=True,
+            )
+        ],
+        contributed_by="classes",
+    )
+    assert n == 1
+    row = conn.execute(
+        text(
+            "SELECT origin, priority_rank, protected, contributed_by "
+            "FROM mod_calendar_events WHERE user_id = 1"
+        )
+    ).first()
+    assert row is not None
+    assert row[0] == "module"
+    assert row[1] == 1000
+    assert row[2] is True
+    assert row[3] == "classes"
+
+
+def test_contribute_empty_is_noop(conn: Connection) -> None:
+    reader = CalendarDomainReader(conn, 1)
+    assert reader.contribute([], contributed_by="classes") == 0

@@ -89,6 +89,18 @@ def _temporal_overlap(
     return True  # todo-el-día o multi-día: alcanza el solape de fechas
 
 
+def temporal_overlap(
+    a: DedupRow,
+    b: DedupRow,
+    *,
+    tolerance: timedelta = DEFAULT_OVERLAP_TOLERANCE,
+    default_duration: timedelta = DEFAULT_EVENT_DURATION,
+) -> bool:
+    """Wrapper PÚBLICO de `_temporal_overlap` (lo reusa `conflicts.py` para detectar choques de
+    horario entre eventos consolidados, sin la similitud de texto del dedup)."""
+    return _temporal_overlap(a, b, tolerance=tolerance, default_duration=default_duration)
+
+
 def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, normalize(a), normalize(b)).ratio()
 

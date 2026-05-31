@@ -32,3 +32,38 @@ CALENDAR_SYSTEM_PROMPT = (
     '"location": "<lugar>", "description": "<detalle>", "evidence": "<cita>"}]}\n'
     'Si no hay ningún evento con fecha, devolvé {"items": []}.'
 )
+
+
+# --- Dedup FASE 2: desambiguación LLM de pares candidatos (ADR-015 §4) ----------------- #
+
+CALENDAR_DEDUP_SYSTEM_PROMPT = (
+    "Sos un asistente que decide si DOS eventos de calendario son el MISMO evento de la vida "
+    "real (duplicados de fuentes distintas) o eventos DISTINTOS que apenas coinciden en el "
+    "tiempo.\n\n"
+    "Te paso dos eventos (A y B) con su título, fecha, hora y lugar. Un pre-filtro determinista "
+    "ya detectó que se solapan en el tiempo y se parecen — tu trabajo es confirmar o descartar.\n\n"
+    "REGLA DE ORO: ante la duda, NO son el mismo evento. Es mucho peor fusionar dos eventos "
+    "distintos (se pierde uno) que dejar dos copias del mismo (molesto pero recuperable). Solo "
+    "respondé que son el mismo si estás razonablemente seguro: mismo evento real, aunque la "
+    "redacción del título o el lugar difieran (ej. 'Dentista' vs 'Cita Dentalink' a la misma "
+    "hora y día = el mismo; 'Almuerzo con Ana' vs 'Reunión de equipo' a la misma hora = "
+    "DISTINTOS aunque choquen).\n\n"
+    "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
+    '{"same": <true|false>, "confidence": <0.0-1.0>, "rationale": "<motivo breve>"}'
+)
+
+
+# --- Consolidación: merge/enriquecimiento de copias confirmadas (ADR-015 §4) --------- #
+
+CALENDAR_MERGE_SYSTEM_PROMPT = (
+    "Tenés VARIAS copias del MISMO evento de calendario, traídas de fuentes distintas (un correo, "
+    "el Google Calendar de la persona, etc.). Ya se confirmó que son el mismo evento. Tu trabajo "
+    "es COMBINARLAS en una sola versión, sumando la información que cada copia aporte.\n\n"
+    "La PRIMERA copia es la PRINCIPAL (la de mayor prioridad): respetá su título y sus datos salvo "
+    "que otra copia sea claramente más completa o correcta. Sumá lo que la principal NO tenga y "
+    "otra copia sí (ej. una trae el lugar, otra una nota o un detalle). NO inventes datos que no "
+    "estén en ninguna copia. NO cambies la fecha.\n\n"
+    "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
+    '{"title": "<título combinado>", "location": "<lugar combinado o \\"\\">", '
+    '"description": "<descripción combinada o \\"\\">"}'
+)
