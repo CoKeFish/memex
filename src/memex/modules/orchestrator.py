@@ -26,6 +26,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from memex.core.deadletter import STAGE_EXTRACT, record_failures
 from memex.core.observability import record_llm_call
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
@@ -709,6 +710,8 @@ async def run_extraction(
                     n=len(window.rows),
                     error_message=str(e)[:500],
                 )
+                # Dead-letter: suma fallo a cada mensaje; al 3er fallo → 'pendiente de revisión'.
+                record_failures(user_id, STAGE_EXTRACT, [r.inbox_id for r in window.rows], str(e))
             stats.windows += 1
     finally:
         if owns_client and isinstance(llm, DeepSeekClient):

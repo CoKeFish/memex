@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
+from memex.core.deadletter import MAX_WORK_ATTEMPTS, STAGE_EXTRACT, list_review, requeue
 from memex.db import connection
 from memex.llm import ChatMessage, LLMError, LLMQuotaError, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.calendar.module import CalendarModule
@@ -364,6 +365,43 @@ def test_quota_error_aborts_run(seed_source: dict[str, Any]) -> None:
 
     assert fake.calls == 2  # abortó en la 2da, no siguió de largo
     assert _count("mod_finance_expenses") == 1  # la 1ra ventana sí persistió
+
+
+# ----- dead-letter (gap c): veneno → 'pendiente de revisión' tras N fallos ------------- #
+
+
+def test_poison_window_dead_lettered_after_max_attempts(seed_source: dict[str, Any]) -> None:
+    """Una ventana que falla SIEMPRE: tras MAX_WORK_ATTEMPTS fallos el mensaje pasa a 'review' y el
+    workset lo excluye. `requeue` lo devuelve y con un fake sano se extrae."""
+    _enable()
+    iid = _seed(seed_source["id"], "i1", "individual", {"body_text": "pagué $4500"})
+
+    for _ in range(MAX_WORK_ATTEMPTS):  # cada corrida: 1 ventana, falla en la 1ra llamada
+        stats = asyncio.run(run_extraction(1, client=FakeExtractLLM(fail_on_call=1)))
+        assert stats.errors == 1
+
+    # en 'review' → excluido del workset → no hay más trabajo
+    after = asyncio.run(run_extraction(1, client=FakeExtractLLM(fail_on_call=1)))
+    assert after.windows == 0
+    assert iid in [it["inbox_id"] for it in list_review(1, STAGE_EXTRACT)]
+
+    # requeue → vuelve al workset; con un fake sano se extrae
+    assert requeue(1, STAGE_EXTRACT, iid) is True
+    recovered = asyncio.run(run_extraction(1, client=FakeExtractLLM()))
+    assert recovered.items == 1
+    assert _count("mod_finance_expenses") == 1
+
+
+def test_quota_abort_does_not_dead_letter(seed_source: dict[str, Any]) -> None:
+    """El 402/saldo aborta la corrida pero NO cuenta como fallo de dead-letter: el mensaje no se
+    manda a revisión (un saldo recargado debe poder reintentarlo)."""
+    _enable()
+    _seed(seed_source["id"], "i1", "individual", {"body_text": "pagué $4500"})
+
+    with pytest.raises(LLMQuotaError):
+        asyncio.run(run_extraction(1, client=FakeExtractLLM(quota_on_call=1)))
+
+    assert list_review(1, STAGE_EXTRACT) == []
 
 
 # ----- Etapa A: split de ruteo en chunks ----------------------------------------- #

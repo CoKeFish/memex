@@ -16,6 +16,7 @@ import sys
 
 from dotenv import load_dotenv
 
+from memex.core.deadletter import STAGE_SUMMARIZE, list_review, requeue
 from memex.llm import LLMError, LLMQuotaError
 from memex.logging import get_logger, setup_logging
 from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
@@ -61,6 +62,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=MAX_GAP_SECONDS / 3600,
         help=f"Gap horario que parte una ventana batch (default {MAX_GAP_SECONDS / 3600:g}).",
     )
+
+    rev_p = sub.add_parser("review", help="Lista mensajes en revisión (dead-letter).")
+    rev_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+
+    rq_p = sub.add_parser("requeue", help="Saca un mensaje de revisión para reintentarlo.")
+    rq_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    rq_p.add_argument("--inbox", type=int, required=True, help="inbox_id a reencolar.")
     return parser
 
 
@@ -82,6 +90,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_review(args: argparse.Namespace) -> int:
+    items = list_review(args.user, STAGE_SUMMARIZE)
+    if not items:
+        print("\nsummarize: sin mensajes en revisión.\n")
+        return 0
+    print(f"\nsummarize — pendientes de revisión (user {args.user}): {len(items)}")
+    for it in items:
+        err = str(it["last_error"] or "")[:80]
+        print(f"  inbox {it['inbox_id']}  intentos={it['attempts']}  {err}")
+    print("\nReencolá con: memex-summarize requeue --inbox <id>\n")
+    return 0
+
+
+def _cmd_requeue(args: argparse.Namespace) -> int:
+    if requeue(args.user, STAGE_SUMMARIZE, args.inbox):
+        print(f"\ninbox {args.inbox} reencolado (vuelve al work-set).\n")
+        return 0
+    print(f"\ninbox {args.inbox} no estaba en revisión.\n", file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -94,6 +123,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "run":
             return _cmd_run(args)
+        if args.cmd == "review":
+            return _cmd_review(args)
+        if args.cmd == "requeue":
+            return _cmd_requeue(args)
         log.error("summarizer.cli.unknown_command", cmd=args.cmd)
         return 1
     except LLMQuotaError as e:

@@ -26,6 +26,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from memex.core.deadletter import STAGE_SUMMARIZE, not_in_review_sql, record_failures
 from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
 from memex.core.observability import record_llm_call
 from memex.db import connection
@@ -90,7 +91,12 @@ def _load_workset(
 
     `limit` corta a nivel de MENSAJE (no de ventana): ver nota en `_DEFAULT_LIMIT`.
     """
-    params: dict[str, Any] = {"uid": user_id, "limit": limit, "ocrmax": MAX_OCR_ATTEMPTS}
+    params: dict[str, Any] = {
+        "uid": user_id,
+        "limit": limit,
+        "ocrmax": MAX_OCR_ATTEMPTS,
+        "dl_stage": STAGE_SUMMARIZE,
+    }
     filters = ""
     if source_id is not None:
         filters += " AND i.source_id = :sid"
@@ -122,6 +128,7 @@ def _load_workset(
                           SELECT 1 FROM media_assets m
                           WHERE m.inbox_id = i.id AND {MEDIA_NOT_TERMINAL_SQL}
                       )
+                      AND {not_in_review_sql("i.id")}
                       {filters}
                     ORDER BY i.source_id, i.occurred_at
                     LIMIT :limit
@@ -326,6 +333,8 @@ async def run_summarization(
                     latency_ms=0,
                     error_message=str(e)[:500],
                 )
+                # Dead-letter: suma fallo a cada mensaje; al 3er fallo → 'pendiente de revisión'.
+                record_failures(user_id, STAGE_SUMMARIZE, [r.inbox_id for r in window.rows], str(e))
     finally:
         if owns_client and isinstance(active, DeepSeekClient):
             await active.aclose()

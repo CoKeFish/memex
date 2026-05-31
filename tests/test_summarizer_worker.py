@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from memex.core.deadletter import MAX_WORK_ATTEMPTS, STAGE_SUMMARIZE, list_review
 from memex.db import connection
 from memex.llm import ChatMessage, LLMError, LLMQuotaError, LLMResult, LLMUsage, ResponseFormat
 from memex.summarizer.worker import run_summarization
@@ -199,6 +200,20 @@ def test_quota_error_aborts_run(seed_source: dict[str, Any]) -> None:
 
     assert fake.calls == 2  # abortó en la 2da, no siguió de largo
     assert _count("summaries") == 1  # la 1ra ventana sí persistió
+
+
+def test_poison_window_dead_lettered_after_max_attempts(seed_source: dict[str, Any]) -> None:
+    """Una ventana que falla SIEMPRE: tras MAX_WORK_ATTEMPTS fallos el mensaje pasa a 'review' y el
+    workset lo excluye (deja de reintentarse) — sin descartarse en silencio (gap c)."""
+    iid = _seed(seed_source["id"], "i1", "individual", {"subject": "uno"})
+
+    for _ in range(MAX_WORK_ATTEMPTS):
+        stats = asyncio.run(run_summarization(1, client=FakeLLM(fail_on_call=1)))
+        assert stats.errors == 1
+
+    after = asyncio.run(run_summarization(1, client=FakeLLM(fail_on_call=1)))
+    assert after.errors == 0 and after.summaries == 0  # en review → ya no se procesa
+    assert iid in [it["inbox_id"] for it in list_review(1, STAGE_SUMMARIZE)]
 
 
 def test_multi_source_separate_summaries(seed_source: dict[str, Any]) -> None:

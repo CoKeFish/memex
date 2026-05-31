@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from memex.core.deadletter import STAGE_EXTRACT, not_in_review_sql
 from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
 from memex.logging import get_logger
 from memex.modules.contract import InterestModule
@@ -57,7 +58,12 @@ def load_module_workset(
 ) -> list[WorkRow]:
     """Mensajes clasificados pendientes para AL MENOS UN módulo activo (ver módulo docstring)."""
     clauses: list[str] = []
-    params: dict[str, Any] = {"uid": user_id, "limit": limit, "ocrmax": MAX_OCR_ATTEMPTS}
+    params: dict[str, Any] = {
+        "uid": user_id,
+        "limit": limit,
+        "ocrmax": MAX_OCR_ATTEMPTS,
+        "dl_stage": STAGE_EXTRACT,
+    }
     for idx, module in enumerate(modules):
         types = _types_for_module(module)
         if not types:
@@ -100,6 +106,7 @@ def load_module_workset(
                       SELECT 1 FROM media_assets m
                       WHERE m.inbox_id = i.id AND {MEDIA_NOT_TERMINAL_SQL}
                   )
+                  AND {not_in_review_sql("i.id")}
                   {source_filter}
                   AND ({pending_or})
                 ORDER BY i.source_id, i.occurred_at

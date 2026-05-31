@@ -19,6 +19,7 @@ import sys
 from dotenv import load_dotenv
 from sqlalchemy import text
 
+from memex.core.deadletter import STAGE_EXTRACT, list_review, requeue
 from memex.db import connection
 from memex.llm import LLMError, LLMQuotaError
 from memex.logging import get_logger, setup_logging
@@ -108,6 +109,13 @@ def _build_extract_parser() -> argparse.ArgumentParser:
 
     mod_p = sub.add_parser("modules", help="Lista módulos registrados y su estado.")
     mod_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+
+    rev_p = sub.add_parser("review", help="Lista mensajes en revisión (dead-letter).")
+    rev_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+
+    rq_p = sub.add_parser("requeue", help="Saca un mensaje de revisión para reintentarlo.")
+    rq_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    rq_p.add_argument("--inbox", type=int, required=True, help="inbox_id a reencolar.")
     return parser
 
 
@@ -152,6 +160,27 @@ def _cmd_enable(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_extract_review(args: argparse.Namespace) -> int:
+    items = list_review(args.user, STAGE_EXTRACT)
+    if not items:
+        print("\nextract: sin mensajes en revisión.\n")
+        return 0
+    print(f"\nextract — pendientes de revisión (user {args.user}): {len(items)}")
+    for it in items:
+        err = str(it["last_error"] or "")[:80]
+        print(f"  inbox {it['inbox_id']}  intentos={it['attempts']}  {err}")
+    print("\nReencolá con: memex-extract requeue --inbox <id>\n")
+    return 0
+
+
+def _cmd_extract_requeue(args: argparse.Namespace) -> int:
+    if requeue(args.user, STAGE_EXTRACT, args.inbox):
+        print(f"\ninbox {args.inbox} reencolado (vuelve al work-set).\n")
+        return 0
+    print(f"\ninbox {args.inbox} no estaba en revisión.\n", file=sys.stderr)
+    return 1
+
+
 def _cmd_modules(args: argparse.Namespace) -> int:
     with connection() as conn:
         enabled = set(
@@ -183,6 +212,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_enable(args)
         if args.cmd == "modules":
             return _cmd_modules(args)
+        if args.cmd == "review":
+            return _cmd_extract_review(args)
+        if args.cmd == "requeue":
+            return _cmd_extract_requeue(args)
         log.error("extract.cli.unknown_command", cmd=args.cmd)
         return 1
     except LLMQuotaError as e:
