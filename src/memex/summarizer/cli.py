@@ -18,7 +18,24 @@ from dotenv import load_dotenv
 
 from memex.llm import LLMError
 from memex.logging import get_logger, setup_logging
+from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
 from memex.summarizer.worker import run_summarization
+
+
+def _positive_int(value: str) -> int:
+    """argparse `type` para enteros >= 1 (exit-2 estándar si no)."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("debe ser un entero >= 1")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    """argparse `type` para floats > 0 (exit-2 estándar si no)."""
+    parsed = float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("debe ser un número > 0")
+    return parsed
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -32,12 +49,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "--tier", choices=["batch", "individual"], default=None, help="Limitar a un tier."
     )
     run_p.add_argument("--limit", type=int, default=200, help="Máximo de mensajes (default 200).")
+    run_p.add_argument(
+        "--max-window-size",
+        type=_positive_int,
+        default=MAX_WINDOW_SIZE,
+        help=f"Tope de mensajes por ventana batch (default {MAX_WINDOW_SIZE}).",
+    )
+    run_p.add_argument(
+        "--max-gap-hours",
+        type=_positive_float,
+        default=MAX_GAP_SECONDS / 3600,
+        help=f"Gap horario que parte una ventana batch (default {MAX_GAP_SECONDS / 3600:g}).",
+    )
     return parser
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
     stats = asyncio.run(
-        run_summarization(args.user, source_id=args.source, tier=args.tier, limit=args.limit)
+        run_summarization(
+            args.user,
+            source_id=args.source,
+            tier=args.tier,
+            limit=args.limit,
+            max_window_size=args.max_window_size,
+            max_gap_seconds=round(args.max_gap_hours * 3600),
+        )
     )
     tiers = ", ".join(f"{tier}={count}" for tier, count in sorted(stats.by_tier.items())) or "—"
     print(

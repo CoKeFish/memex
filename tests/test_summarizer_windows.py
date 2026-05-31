@@ -62,3 +62,29 @@ def test_gap_exactly_at_threshold_stays_one_window() -> None:
 def test_gap_just_over_threshold_splits() -> None:
     ws = plan_windows([_row(1, 5, 0), _row(2, 5, MAX_GAP_SECONDS // 60 + 1)])
     assert len(ws) == 2
+
+
+# ----- perillas ajustables (max_window_size / max_gap_seconds) ------------------- #
+
+
+def test_custom_max_window_size_splits() -> None:
+    ws = plan_windows([_row(i, 5, i) for i in range(3)], max_window_size=2)
+    assert len(ws) == 2
+    assert [len(w.rows) for w in ws] == [2, 1]
+
+
+def test_custom_max_window_size_one_per_message() -> None:
+    ws = plan_windows([_row(i, 5, i) for i in range(3)], max_window_size=1)
+    assert len(ws) == 3
+
+
+def test_custom_smaller_gap_splits() -> None:
+    # gap de 2 min normalmente NO parte, pero con max_gap_seconds=60 sí
+    ws = plan_windows([_row(1, 5, 0), _row(2, 5, 2)], max_gap_seconds=60)
+    assert len(ws) == 2
+
+
+def test_custom_wider_gap_keeps_one_window() -> None:
+    # gap de 7h normalmente parte, pero con un max_gap_seconds amplio queda 1 ventana
+    ws = plan_windows([_row(1, 5, 0), _row(2, 5, 7 * 60)], max_gap_seconds=8 * 3600)
+    assert len(ws) == 1

@@ -33,7 +33,13 @@ from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig
 from memex.logging import get_logger
 from memex.summarizer.prompt import SYSTEM_PROMPT, build_user_content
 from memex.summarizer.render import render_payload
-from memex.summarizer.windows import Window, WorkRow, plan_windows
+from memex.summarizer.windows import (
+    MAX_GAP_SECONDS,
+    MAX_WINDOW_SIZE,
+    Window,
+    WorkRow,
+    plan_windows,
+)
 
 _log = get_logger("memex.summarizer.worker")
 
@@ -269,14 +275,21 @@ async def run_summarization(
     source_id: int | None = None,
     tier: str | None = None,
     limit: int = _DEFAULT_LIMIT,
+    max_window_size: int = MAX_WINDOW_SIZE,
+    max_gap_seconds: int = MAX_GAP_SECONDS,
     client: LLMClient | None = None,
 ) -> SummarizeStats:
     """Resume el work-set no-resumido del user. `client` inyectable (tests con fake).
 
+    `max_window_size`/`max_gap_seconds` son las perillas de ventaneo (ver `plan_windows`).
     Best-effort por ventana: una ventana que falla se loguea + registra y NO frena las demás.
     """
     stats = SummarizeStats()
-    windows = plan_windows(_load_workset(user_id, source_id, tier, limit))
+    windows = plan_windows(
+        _load_workset(user_id, source_id, tier, limit),
+        max_window_size=max_window_size,
+        max_gap_seconds=max_gap_seconds,
+    )
     if not windows:
         _log.info("summarizer.run.empty", user_id=user_id, source_id=source_id, tier=tier)
         return stats

@@ -51,9 +51,18 @@ class Window:
     rows: tuple[WorkRow, ...]
 
 
-def plan_windows(rows: Sequence[WorkRow]) -> list[Window]:
+def plan_windows(
+    rows: Sequence[WorkRow],
+    *,
+    max_window_size: int = MAX_WINDOW_SIZE,
+    max_gap_seconds: int = MAX_GAP_SECONDS,
+) -> list[Window]:
     """Agrupa el work-set en ventanas. `individual` → 1 por mensaje; `batch` → por
-    source + gap (>MAX_GAP_SECONDS) + tope (MAX_WINDOW_SIZE)."""
+    source + gap (>`max_gap_seconds`) + tope (`max_window_size`).
+
+    `max_window_size`/`max_gap_seconds` son las perillas de costo/granularidad (defaults =
+    `MAX_WINDOW_SIZE`/`MAX_GAP_SECONDS`); se exponen como flags de CLI para experimentar. El tope
+    de tamaño es un MÁXIMO: el gap puede partir una ventana antes (ventanas conversacionales)."""
     windows: list[Window] = [
         Window("individual", r.source_id, (r,)) for r in rows if r.tier == "individual"
     ]
@@ -74,8 +83,8 @@ def plan_windows(rows: Sequence[WorkRow]) -> list[Window]:
             gap = (row.occurred_at - prev.occurred_at).total_seconds()
             if (
                 row.source_id != prev.source_id
-                or gap > MAX_GAP_SECONDS
-                or len(current) >= MAX_WINDOW_SIZE
+                or gap > max_gap_seconds
+                or len(current) >= max_window_size
             ):
                 flush()
                 current = []

@@ -1,7 +1,8 @@
 """Orquestador de extracción contra la DB (sembrada), con un LLM falso (sin red).
 
 Cubre: camino feliz, short-circuit del ruteo (1 módulo → sin LLM de ruteo), idempotencia,
-descarte por atribución, pre-filtro consumes_kinds, módulo deshabilitado y best-effort.
+descarte por atribución, pre-filtro consumes_kinds, módulo deshabilitado, best-effort, split de
+ruteo en chunks (Etapa A) y extracción agrupada grouped/all (Etapa B).
 """
 
 from __future__ import annotations
@@ -17,15 +18,50 @@ from sqlalchemy import text
 
 from memex.db import connection
 from memex.llm import ChatMessage, LLMError, LLMResult, LLMUsage, ResponseFormat
+from memex.modules.calendar.module import CalendarModule
+from memex.modules.finance.module import FinanceModule
+from memex.modules.grouping import GROUPED_SYSTEM_PROMPT
 from memex.modules.orchestrator import run_extraction
+from memex.modules.routing import ROUTING_SYSTEM_PROMPT
+
+#: Marcador que precede al JSON de mensajes en TODOS los prompts (ruteo, agrupado, per_module).
+_MESSAGES_MARKER = "Mensajes (JSON):\n"
+#: system prompt de extracción per-module → slug (para que el fake emita el schema correcto).
+_PROMPT_TO_SLUG = {
+    FinanceModule.extraction_prompt: "finance",
+    CalendarModule.extraction_prompt: "calendar",
+}
+
+
+def _item(slug: str, msg: dict[str, Any], bogus: int | None) -> dict[str, Any]:
+    """Un item válido para el schema de `slug`, atribuido a `msg` (o a `bogus` si se fuerza)."""
+    sid = bogus if bogus is not None else msg["id"]
+    if slug == "calendar":
+        return {
+            "source_inbox_ids": [sid],
+            "title": "Evento de prueba",
+            "starts_on": "2026-06-01",
+            "evidence": msg["text"],
+        }
+    return {
+        "source_inbox_ids": [sid],
+        "amount": "100.00",
+        "currency": "ARS",
+        "merchant": "Test",
+        "occurred_on": None,
+        "description": "gasto de prueba",
+        "evidence": msg["text"],
+    }
 
 
 class FakeExtractLLM:
-    """Satisface LLMClient. Lee los `id` del prompt y emite un gasto por mensaje (atribuible).
+    """Satisface LLMClient. Ramifica por el system prompt: ruteo → `{"modules":[...]}`; agrupado →
+    `{"<slug>":[items]}`; per_module → `{"items":[...]}` con el schema del módulo.
 
-    - `bogus_id`: en vez de los ids reales, cita uno fuera del lote (alucinación).
-    - `empty`: devuelve content vacío.
+    - `bogus_id`: cita un id fuera del lote (alucinación) en vez de los reales.
+    - `empty`: devuelve content vacío (en CUALQUIER llamada).
     - `fail_on_call`: lanza LLMError en la N-ésima llamada.
+    - `route_choose`: slugs que el router elige (None = todos los del chunk).
     """
 
     def __init__(
@@ -34,11 +70,13 @@ class FakeExtractLLM:
         bogus_id: int | None = None,
         empty: bool = False,
         fail_on_call: int | None = None,
+        route_choose: list[str] | None = None,
     ) -> None:
         self.calls = 0
         self._bogus = bogus_id
         self._empty = empty
         self._fail_on = fail_on_call
+        self._route_choose = route_choose
 
     async def complete(
         self,
@@ -53,7 +91,17 @@ class FakeExtractLLM:
         if self._fail_on is not None and self.calls == self._fail_on:
             raise LLMError(500, "boom")
 
-        content = "" if self._empty else self._build(messages[-1].content)
+        if self._empty:
+            content = ""
+        else:
+            system = messages[0].content
+            user = messages[-1].content
+            if system == ROUTING_SYSTEM_PROMPT:
+                content = self._route(user)
+            elif system == GROUPED_SYSTEM_PROMPT:
+                content = self._grouped(user)
+            else:
+                content = self._per_module(system, user)
         return LLMResult(
             content=content,
             model="fake",
@@ -63,23 +111,37 @@ class FakeExtractLLM:
             finish_reason="stop",
         )
 
-    def _build(self, user_content: str) -> str:
-        arr = json.loads(user_content[user_content.index("[") :])
-        items = []
-        for msg in arr:
-            sid = self._bogus if self._bogus is not None else msg["id"]
-            items.append(
-                {
-                    "source_inbox_ids": [sid],
-                    "amount": "100.00",
-                    "currency": "ARS",
-                    "merchant": "Test",
-                    "occurred_on": None,
-                    "description": "gasto de prueba",
-                    "evidence": msg["text"],
-                }
-            )
-        return json.dumps({"items": items})
+    @staticmethod
+    def _messages(user: str) -> list[dict[str, Any]]:
+        parsed: list[dict[str, Any]] = json.loads(user.split(_MESSAGES_MARKER, 1)[1])
+        return parsed
+
+    def _route(self, user: str) -> str:
+        catalog = user.split(_MESSAGES_MARKER, 1)[0]
+        offered = [
+            line[2 : line.index(":")] for line in catalog.splitlines() if line.startswith("- ")
+        ]
+        chosen = (
+            offered
+            if self._route_choose is None
+            else [s for s in offered if s in self._route_choose]
+        )
+        return json.dumps({"modules": chosen})
+
+    def _grouped(self, user: str) -> str:
+        head, _, tail = user.partition(_MESSAGES_MARKER)
+        slugs = [
+            line[len("### Módulo: ") :].strip()
+            for line in head.splitlines()
+            if line.startswith("### Módulo: ")
+        ]
+        msgs: list[dict[str, Any]] = json.loads(tail)
+        out = {slug: [_item(slug, m, self._bogus) for m in msgs] for slug in slugs}
+        return json.dumps(out)
+
+    def _per_module(self, system: str, user: str) -> str:
+        slug = _PROMPT_TO_SLUG.get(system, "finance")
+        return json.dumps({"items": [_item(slug, m, self._bogus) for m in self._messages(user)]})
 
 
 # ----- helpers ------------------------------------------------------------------- #
@@ -277,3 +339,103 @@ def test_error_mid_run_is_best_effort(seed_source: dict[str, Any]) -> None:
     second = asyncio.run(run_extraction(1, client=FakeExtractLLM()))
     assert second.items == 1
     assert _count("mod_finance_expenses") == 2
+
+
+# ----- Etapa A: split de ruteo en chunks ----------------------------------------- #
+
+
+def test_route_chunking_one_call_per_chunk(seed_source: dict[str, Any]) -> None:
+    """Con route_chunk_size=1 y 2 candidatos → una llamada de ruteo por chunk (2), unión = ambos."""
+    sid = seed_source["id"]
+    _enable("finance")
+    _enable("calendar")
+    _seed(sid, "m1", "batch", {"body_text": "pagué $4500"}, minute=0)
+    _seed(sid, "m2", "batch", {"body_text": "pagué $1200"}, minute=1)
+
+    fake = FakeExtractLLM()
+    stats = asyncio.run(run_extraction(1, route_chunk_size=1, client=fake))
+
+    assert _count_purpose("module_route") == 2  # un chunk por módulo
+    assert stats.items == 4  # finance 2 + calendar 2 (per_module por defecto)
+    assert _count("mod_finance_expenses") == 2
+    assert _count("mod_calendar_events") == 2
+
+
+def test_no_chunking_single_route_call(seed_source: dict[str, Any]) -> None:
+    """Default (sin chunk) con 2 candidatos → una sola llamada de ruteo."""
+    _enable("finance")
+    _enable("calendar")
+    _seed(seed_source["id"], "m1", "batch", {"body_text": "pagué $4500"})
+
+    asyncio.run(run_extraction(1, client=FakeExtractLLM()))
+
+    assert _count_purpose("module_route") == 1
+
+
+# ----- Etapa B: extracción agrupada (grouped / all) ------------------------------ #
+
+
+def test_grouped_single_extraction_call(seed_source: dict[str, Any]) -> None:
+    """grouped: finance+calendar en UNA llamada (`extract_grouped`), persistencia y cursor por
+    módulo en su propia tx."""
+    sid = seed_source["id"]
+    _enable("finance")
+    _enable("calendar")
+    _seed(sid, "m1", "batch", {"body_text": "pagué $4500"}, minute=0)
+    _seed(sid, "m2", "batch", {"body_text": "pagué $1200"}, minute=1)
+
+    stats = asyncio.run(
+        run_extraction(1, batching_policy="grouped", group_size=2, client=FakeExtractLLM())
+    )
+
+    assert _count_purpose("extract_grouped") == 1
+    assert _count_purpose("extract_finance") == 0
+    assert _count_purpose("extract_calendar") == 0
+    assert _count("mod_finance_expenses") == 2
+    assert _count("mod_calendar_events") == 2
+    assert _count("module_extractions") == 4  # 2 mensajes x 2 módulos
+    assert set(stats.by_module) == {"finance", "calendar"}
+
+
+def test_all_policy_single_group(seed_source: dict[str, Any]) -> None:
+    _enable("finance")
+    _enable("calendar")
+    _seed(seed_source["id"], "m1", "batch", {"body_text": "pagué $4500"})
+
+    asyncio.run(run_extraction(1, batching_policy="all", client=FakeExtractLLM()))
+
+    assert _count_purpose("extract_grouped") == 1
+    assert _count("mod_finance_expenses") == 1
+    assert _count("mod_calendar_events") == 1
+
+
+def test_grouped_idempotent(seed_source: dict[str, Any]) -> None:
+    _enable("finance")
+    _enable("calendar")
+    _seed(seed_source["id"], "m1", "batch", {"body_text": "pagué $4500"})
+
+    asyncio.run(run_extraction(1, batching_policy="grouped", group_size=2, client=FakeExtractLLM()))
+    second = asyncio.run(
+        run_extraction(1, batching_policy="grouped", group_size=2, client=FakeExtractLLM())
+    )
+
+    assert second.items == 0
+    assert _count("mod_finance_expenses") == 1
+    assert _count("mod_calendar_events") == 1
+
+
+def test_grouped_empty_content_retryable(seed_source: dict[str, Any]) -> None:
+    """Content vacío en la llamada agrupada → error, sin cursor (reintentable)."""
+    _enable("finance")
+    _enable("calendar")
+    _seed(seed_source["id"], "m1", "batch", {"body_text": "pagué $4500"})
+
+    stats = asyncio.run(
+        run_extraction(
+            1, batching_policy="grouped", group_size=2, client=FakeExtractLLM(empty=True)
+        )
+    )
+
+    assert stats.errors == 1
+    assert _count("mod_finance_expenses") == 0
+    assert _count("module_extractions") == 0  # sin cursor → reintentable

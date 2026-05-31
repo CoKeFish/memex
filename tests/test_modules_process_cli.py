@@ -9,12 +9,15 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from sqlalchemy import text
 
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
-from memex.modules.cli import main
-from memex.modules.process import run_combined
+from memex.modules.cli import main, main_process
+from memex.modules.orchestrator import ExtractStats
+from memex.modules.process import CombinedStats, run_combined
+from memex.summarizer.worker import SummarizeStats
 
 
 class FakeCombinedLLM:
@@ -141,3 +144,92 @@ def test_cli_enable_then_modules(capsys: Any) -> None:
 
 def test_cli_enable_unknown_module() -> None:
     assert main(["enable", "--module", "ghost", "--user", "1"]) == 1
+
+
+# ----- plumbing de las perillas por flags (sin DB/LLM, run_* stubeado) ------------ #
+
+
+def test_extract_cli_threads_tuning(monkeypatch: Any) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run(user: int, **kwargs: object) -> ExtractStats:
+        captured["user"] = user
+        captured.update(kwargs)
+        return ExtractStats()
+
+    monkeypatch.setattr("memex.modules.cli.run_extraction", fake_run)
+    rc = main(
+        [
+            "run",
+            "--user",
+            "2",
+            "--max-window-size",
+            "5",
+            "--max-gap-hours",
+            "2",
+            "--route-chunk-size",
+            "3",
+            "--batching-policy",
+            "grouped",
+            "--group-size",
+            "4",
+        ]
+    )
+    assert rc == 0
+    assert captured == {
+        "user": 2,
+        "source_id": None,
+        "limit": 200,
+        "max_window_size": 5,
+        "max_gap_seconds": 7200,
+        "route_chunk_size": 3,
+        "batching_policy": "grouped",
+        "group_size": 4,
+    }
+
+
+def test_extract_cli_defaults(monkeypatch: Any) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run(user: int, **kwargs: object) -> ExtractStats:
+        captured.update(kwargs)
+        return ExtractStats()
+
+    monkeypatch.setattr("memex.modules.cli.run_extraction", fake_run)
+    assert main(["run"]) == 0
+    assert captured["max_window_size"] == 40
+    assert captured["max_gap_seconds"] == 21600  # 6 h por defecto
+    assert captured["route_chunk_size"] == 0  # sin split
+    assert captured["batching_policy"] == "per_module"
+    assert captured["group_size"] == 3
+
+
+def test_process_cli_threads_tuning(monkeypatch: Any) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run(user: int, **kwargs: object) -> CombinedStats:
+        captured.update(kwargs)
+        return CombinedStats(summarize=SummarizeStats(), extract=ExtractStats())
+
+    monkeypatch.setattr("memex.modules.cli.run_combined", fake_run)
+    rc = main_process(
+        ["run", "--max-window-size", "7", "--max-gap-hours", "1", "--batching-policy", "all"]
+    )
+    assert rc == 0
+    assert captured["max_window_size"] == 7
+    assert captured["max_gap_seconds"] == 3600
+    assert captured["batching_policy"] == "all"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "--max-window-size", "0"],
+        ["run", "--max-gap-hours", "0"],
+        ["run", "--route-chunk-size", "-1"],
+        ["run", "--batching-policy", "bogus"],
+    ],
+)
+def test_extract_cli_rejects_bad_args(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        main(argv)
