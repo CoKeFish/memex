@@ -476,3 +476,38 @@ export interface CalendarSyncRun {
   startedAt: string
   finishedAt: string | null
 }
+
+// ---- Controles de ingesta / procesamiento -------------------------------------
+
+export interface ModuleSetting {
+  slug: string
+  label: string
+  enabled: boolean
+  batchingPolicy: "per_module" | "grouped" | "all"
+  groupSize: number
+  processed: number
+  total: number
+}
+
+export interface SchedulerJob {
+  job: WorkerJob
+  enabled: boolean
+  cron: string
+  lastRun: string | null
+  nextRun: string | null
+}
+
+/** Preview de un fetch (dry-run): cuántos correos nuevos vs ya existentes (idempotencia). */
+export interface FetchPreview {
+  scanned: number
+  nuevos: number
+  duplicados: number
+  filtrados: number
+}
+
+export interface RunPreview {
+  job: WorkerJob
+  pending: number
+  estimate: { label: string; value: string }[]
+  command: string
+}

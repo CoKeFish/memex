@@ -10,6 +10,8 @@ import { LogsPage } from "@/pages/logs"
 import { AccountPage } from "@/pages/account"
 import { FinancePage } from "@/pages/finance"
 import { CalendarPage } from "@/pages/calendar"
+import { IngestPage } from "@/pages/ingest"
+import { ProcessingPage } from "@/pages/processing"
 import { StubView } from "@/pages/stub"
 
 export default function App() {
@@ -26,24 +28,7 @@ export default function App() {
         <Route path="metricas" element={<MetricsPage />} />
         <Route path="logs" element={<LogsPage />} />
         <Route path="cuenta" element={<AccountPage />} />
-        <Route
-          path="carga"
-          element={
-            <StubView
-              eyebrow="Categoría · carga manual"
-              title="Carga manual y acciones"
-              description="Alta manual de eventos, requeue, ingesta puntual y correcciones sobre los datos."
-              features={[
-                "Alta manual de evento (alta prioridad, protegido)",
-                "Ingesta puntual ad-hoc con dry-run obligatorio",
-                "Editar/corregir un gasto extraído",
-                "Marcar importante / promover tier (batch → individual)",
-                "Aprobar / rechazar propuestas de reglas",
-                "Confirmación + Undo transversal",
-              ]}
-            />
-          }
-        />
+        <Route path="carga" element={<IngestPage />} />
         <Route
           path="ocr"
           element={
@@ -77,24 +62,7 @@ export default function App() {
             />
           }
         />
-        <Route
-          path="procesamiento"
-          element={
-            <StubView
-              eyebrow="Categoría · procesamiento"
-              title="Controles de procesamiento y reproceso"
-              description="Perillas de batch tuning, administración de módulos, triggers y reproceso/backfill."
-              features={[
-                "Panel de perillas de batch tuning con estimación de costo",
-                "Administración de módulos: habilitar + política de batching",
-                "Gestor de cuentas de proveedor de calendar + write-back",
-                "Barra de comando de corrida con dry-run + scheduler",
-                "Editor de filter_rules con simulación pre-ingest",
-                "Reprocesar: re-extraer / re-clasificar / backfill",
-              ]}
-            />
-          }
-        />
+        <Route path="procesamiento" element={<ProcessingPage />} />
         <Route
           path="*"
           element={<StubView eyebrow="404" title="Vista no encontrada" description="La ruta no existe." features={[]} />}
