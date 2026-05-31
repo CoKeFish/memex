@@ -23,7 +23,7 @@ export function Brand() {
       <BrandMark className="size-8 text-muted-foreground" />
       <div className="leading-tight">
         <div className="font-semibold tracking-tight">memex</div>
-        <div className="eyebrow">consola</div>
+        <div className="eyebrow">consola · debug</div>
       </div>
     </div>
   )

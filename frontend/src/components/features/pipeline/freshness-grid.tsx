@@ -1,7 +1,6 @@
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { FreshnessDot, RelativeTime } from "@/components/common/time"
-import { sourceHealth, workerLatest } from "@/lib/selectors"
-import { JOB_LABEL } from "@/mocks/catalog"
+import { JOB_LABEL, sourceHealth, workerLatest } from "@/data"
 
 interface Cell {
   key: string

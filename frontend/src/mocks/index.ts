@@ -128,7 +128,7 @@ function buildPayload(source: Source, i: number): InboxPayload {
       sender: { user_id: rng.int(1, 9999), display_name: rng.pick(TG_SENDERS) },
       date: iso(rng.skewed(0, 30 * DAY)),
       text: rng.pick(TG_TEXTS),
-      media_kind: rng.bool(0.15) ? "photo" : "none",
+      media_kind: rng.weighted(["photo", "sticker", "document", "none"] as const, [26, 8, 6, 60]),
     }
   }
   const a = rng.pick(SOCIAL_ACCOUNTS)

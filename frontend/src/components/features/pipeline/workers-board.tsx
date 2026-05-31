@@ -6,8 +6,7 @@ import { StatusBadge } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
 import { formatDurationMs } from "@/lib/format"
 import { workerLabel, workerTone } from "@/lib/status"
-import { workerLatest } from "@/lib/selectors"
-import { JOB_LABEL } from "@/mocks/catalog"
+import { JOB_LABEL, workerLatest } from "@/data"
 import type { WorkerRun } from "@/types/domain"
 
 function flattenStats(stats: WorkerRun["stats"]): { k: string; v: number }[] {

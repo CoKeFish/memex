@@ -5,7 +5,7 @@ import { Sparkline } from "@/components/common/stat"
 import { FreshnessDot, RelativeTime } from "@/components/common/time"
 import { formatInt, formatPct } from "@/lib/format"
 import { ingestionLabel, ingestionTone } from "@/lib/status"
-import { sourceHealth } from "@/lib/selectors"
+import { sourceHealth } from "@/data"
 import type { SourceType } from "@/types/domain"
 
 const TYPE_LABEL: Record<SourceType, string> = {

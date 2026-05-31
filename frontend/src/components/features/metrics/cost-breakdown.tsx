@@ -2,7 +2,7 @@ import { TriangleAlert } from "lucide-react"
 import { EmptyState, Stateful, TableSkeleton } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { formatCompact, formatInt, formatUsd, formatUsdFine, formatPct } from "@/lib/format"
-import { costByModel, costByPurpose } from "@/lib/selectors"
+import { costByModel, costByPurpose } from "@/data"
 import { useTimeRange } from "@/state/time-range"
 
 function PurposeBars() {

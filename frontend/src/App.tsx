@@ -4,7 +4,12 @@ import { OverviewPage } from "@/pages/overview"
 import { PipelinePage } from "@/pages/pipeline"
 import { ReviewPage } from "@/pages/review"
 import { DataPage } from "@/pages/data"
+import { MessageDetailPage } from "@/pages/message-detail"
 import { MetricsPage } from "@/pages/metrics"
+import { LogsPage } from "@/pages/logs"
+import { AccountPage } from "@/pages/account"
+import { FinancePage } from "@/pages/finance"
+import { CalendarPage } from "@/pages/calendar"
 import { StubView } from "@/pages/stub"
 
 export default function App() {
@@ -15,7 +20,12 @@ export default function App() {
         <Route path="pipeline" element={<PipelinePage />} />
         <Route path="revision" element={<ReviewPage />} />
         <Route path="datos" element={<DataPage />} />
+        <Route path="datos/:id" element={<MessageDetailPage />} />
+        <Route path="calendario" element={<CalendarPage />} />
+        <Route path="finanzas" element={<FinancePage />} />
         <Route path="metricas" element={<MetricsPage />} />
+        <Route path="logs" element={<LogsPage />} />
+        <Route path="cuenta" element={<AccountPage />} />
         <Route
           path="carga"
           element={

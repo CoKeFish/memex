@@ -32,7 +32,7 @@ export function TopBar({ onOpenCmdk }: { onOpenCmdk: () => void }) {
       </Sheet>
 
       <div className="min-w-0 flex-1">
-        <div className="eyebrow hidden sm:block">memex · consola</div>
+        <div className="eyebrow hidden sm:block">memex · consola de debug</div>
         <h1 className="truncate text-sm font-semibold leading-tight">{navTitle(loc.pathname)}</h1>
       </div>
 

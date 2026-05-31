@@ -71,6 +71,13 @@ export const originLabel: Record<CalendarOrigin, string> = {
   module: "Módulo",
 }
 
+/** Color (CSS var) por origen — para chips/eventos de calendario. */
+export const originChart: Record<CalendarOrigin, string> = {
+  extraction: "var(--origin-inbox)",
+  provider: "var(--origin-provider)",
+  module: "var(--origin-module)",
+}
+
 // Semáforo de frescura → tono.
 export const freshnessTone: Record<"fresh" | "warn" | "stale", Tone> = {
   fresh: "ok",

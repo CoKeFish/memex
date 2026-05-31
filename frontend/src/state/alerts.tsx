@@ -1,5 +1,5 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react"
-import { reviewItems, seedAlerts } from "@/mocks"
+import { getReviewItems, getSeedAlerts } from "@/data"
 import type { AlertEvent } from "@/types/domain"
 
 interface AlertsCtx {
@@ -14,13 +14,13 @@ interface AlertsCtx {
 const Ctx = createContext<AlertsCtx | null>(null)
 
 export function AlertsProvider({ children }: { children: ReactNode }) {
-  const [alerts, setAlerts] = useState<AlertEvent[]>(() => seedAlerts.map((a) => ({ ...a })))
+  const [alerts, setAlerts] = useState<AlertEvent[]>(() => getSeedAlerts().map((a) => ({ ...a })))
 
   const value = useMemo<AlertsCtx>(
     () => ({
       alerts,
       unread: alerts.filter((a) => !a.read).length,
-      reviewCount: reviewItems.length,
+      reviewCount: getReviewItems().length,
       markRead: (id) => setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, read: true } : a))),
       markAllRead: () => setAlerts((prev) => prev.map((a) => ({ ...a, read: true }))),
       addAlert: (a) => setAlerts((prev) => [a, ...prev]),

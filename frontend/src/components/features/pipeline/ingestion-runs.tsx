@@ -5,8 +5,7 @@ import { StatusBadge } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
 import { formatInt } from "@/lib/format"
 import { ingestionLabel, ingestionTone } from "@/lib/status"
-import { ingestionTotals, ingestionWithInvariant } from "@/lib/selectors"
-import { SOURCE_BY_ID } from "@/mocks/catalog"
+import { ingestionTotals, ingestionWithInvariant, SOURCE_BY_ID } from "@/data"
 import { useTimeRange } from "@/state/time-range"
 
 export function IngestionRuns() {

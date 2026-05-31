@@ -3,7 +3,7 @@ import { CardsSkeleton, Stateful } from "@/components/common/data-state"
 import { EmptyState } from "@/components/common/data-state"
 import { Delta } from "@/components/common/stat"
 import { formatCompact, formatInt, formatUsd, formatUsdFine } from "@/lib/format"
-import { costDaily, costKpis } from "@/lib/selectors"
+import { costDaily, costKpis } from "@/data"
 import { useTimeRange } from "@/state/time-range"
 
 export function CostKpis() {

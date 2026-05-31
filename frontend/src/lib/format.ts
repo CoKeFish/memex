@@ -40,6 +40,34 @@ export function formatPct(n: number, digits = 1): string {
   return `${(n * 100).toFixed(digits)}%`
 }
 
+/** Monto en cualquier moneda (USD/MXN/ARS…). */
+export function formatMoney(amount: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat("es-MX", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 2,
+    }).format(amount)
+  } catch {
+    return `${amount.toFixed(2)} ${currency}`
+  }
+}
+
+const monthFmt = new Intl.DateTimeFormat("es-MX", { month: "short", year: "2-digit" })
+const monthLongFmt = new Intl.DateTimeFormat("es-MX", { month: "long", year: "numeric" })
+
+/** "ene 26" a partir de "2026-01-..". */
+export function monthLabel(d: Date | string): string {
+  return monthFmt.format(typeof d === "string" ? new Date(d) : d)
+}
+export function monthLongLabel(d: Date | string): string {
+  return monthLongFmt.format(typeof d === "string" ? new Date(d) : d)
+}
+/** Clave de mes "2026-01". */
+export function monthKey(d: Date | string): string {
+  return (typeof d === "string" ? new Date(d) : d).toISOString().slice(0, 7)
+}
+
 /** Conteos grandes de tokens: 1.2k / 3.4M. */
 export function formatCompact(n: number): string {
   if (Math.abs(n) >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`

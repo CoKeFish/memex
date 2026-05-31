@@ -11,7 +11,7 @@ import { RelativeTime } from "@/components/common/time"
 import { formatDate } from "@/lib/format"
 import { originLabel, originText, type Tone } from "@/lib/status"
 import { renderPayload } from "@/lib/render-payload"
-import { inbox, reviewItems } from "@/mocks"
+import { getInbox, getReviewItems } from "@/data"
 import type {
   CalendarConflict,
   CalendarDedupCandidate,
@@ -20,6 +20,9 @@ import type {
   ReviewKind,
   WorkItemFailure,
 } from "@/types/domain"
+
+const inbox = getInbox()
+const reviewSeed = getReviewItems()
 
 const KIND_META: Record<ReviewKind, { label: string; icon: typeof Bug; tone: Tone }> = {
   "dead-letter": { label: "Dead-letter", icon: Bug, tone: "error" },
@@ -33,9 +36,9 @@ function timeLabel(start: string | null, end: string | null): string {
 }
 
 export function ReviewQueue() {
-  const [items, setItems] = useState<ReviewItem[]>(reviewItems)
+  const [items, setItems] = useState<ReviewItem[]>(reviewSeed)
   const [tab, setTab] = useState<"all" | ReviewKind>("all")
-  const [selectedId, setSelectedId] = useState<string | null>(reviewItems[0]?.id ?? null)
+  const [selectedId, setSelectedId] = useState<string | null>(reviewSeed[0]?.id ?? null)
 
   const counts = useMemo(() => {
     const c = { all: items.length, "dead-letter": 0, conflict: 0, dedup: 0 } as Record<string, number>

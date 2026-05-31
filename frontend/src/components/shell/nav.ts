@@ -5,10 +5,14 @@ import {
   DollarSign,
   Image,
   LayoutDashboard,
+  CalendarDays,
   ListChecks,
   PlusCircle,
+  ScrollText,
   ShieldCheck,
   SlidersHorizontal,
+  UserCog,
+  Wallet,
 } from "lucide-react"
 
 export interface NavItem {
@@ -26,11 +30,15 @@ export const NAV: NavItem[] = [
   { path: "/pipeline", label: "Pipeline", icon: Activity },
   { path: "/revision", label: "Revisión", icon: ListChecks, reviewBadge: true },
   { path: "/datos", label: "Datos", icon: Database },
+  { path: "/calendario", label: "Calendario", icon: CalendarDays },
+  { path: "/finanzas", label: "Finanzas", icon: Wallet },
   { path: "/metricas", label: "Métricas y costo", icon: DollarSign },
+  { path: "/logs", label: "Logs", icon: ScrollText },
   { path: "/carga", label: "Carga manual", icon: PlusCircle, stub: true },
   { path: "/ocr", label: "Multimedia / OCR", icon: Image, stub: true },
   { path: "/calidad", label: "Calidad y precisión", icon: ShieldCheck, stub: true },
   { path: "/procesamiento", label: "Procesamiento", icon: SlidersHorizontal, stub: true },
+  { path: "/cuenta", label: "Cuenta", icon: UserCog },
 ]
 
 export function navTitle(pathname: string): string {

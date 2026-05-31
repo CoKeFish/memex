@@ -223,3 +223,256 @@ export interface AlertEvent {
   read: boolean
   deepLink: string
 }
+
+// ---- Cuenta y acceso ----------------------------------------------------------
+
+export interface AccountIdentity {
+  userId: number
+  email: string
+  displayName: string
+  createdAt: string
+}
+
+export interface ApiEndpoint {
+  method: string
+  path: string
+  auth: boolean
+  note?: string
+}
+
+export interface ApiAccess {
+  authEnforced: boolean
+  tokenMasked: string
+  resolvesToUserId: number
+  endpoints: ApiEndpoint[]
+  missing: string[]
+}
+
+export interface CliAccess {
+  gatewayUrl: string
+  tokenMasked: string
+  surface: string[]
+  namespacing: string
+}
+
+export interface ProviderAccount {
+  id: number
+  provider: string
+  accountLabel: string
+  calendarId: string
+  lastSyncAt: string | null
+  syncTokenMasked: string | null
+  tokenPathEnv: string
+  enabled: boolean
+  writeBack: boolean
+  tokenState: "delta" | "full-resync" | "never"
+}
+
+export interface ImapOAuth {
+  sourceName: string
+  provider: string
+  tokenPathEnv: string
+}
+
+export interface Account {
+  identity: AccountIdentity
+  api: ApiAccess
+  cli: CliAccess
+  providers: ProviderAccount[]
+  imap: ImapOAuth[]
+}
+
+// ---- Logs ---------------------------------------------------------------------
+
+export type LogLevel = "info" | "warning" | "error"
+
+export interface LogEvent {
+  id: string
+  ts: string
+  level: LogLevel
+  event: string
+  module: string
+  requestId: string | null
+  userId: number | null
+  runId: string | null
+  sourceId: number | null
+  inboxId: number | null
+  fields: Record<string, unknown>
+}
+
+export type ObsKind = "ingestion" | "worker" | "llm" | "failure" | "calendar"
+
+export interface ObsTimelineEntry {
+  id: string
+  ts: string
+  kind: ObsKind
+  title: string
+  detail: string
+  tone: "ok" | "error" | "running" | "review" | "neutral"
+  requestId: string | null
+}
+
+// ---- Camino de decisión por mensaje -------------------------------------------
+
+export type OcrStatus = "pending" | "ok" | "error" | "skipped"
+
+/** media_assets (migración 0009): la DB guarda solo la REFERENCIA (object_key), nunca el blob. */
+export interface MediaAsset {
+  id: number
+  sha256: string
+  objectKey: string
+  bucket: string
+  contentType: string
+  sizeBytes: number
+  filename: string | null
+  ocrStatus: OcrStatus
+  ocrModel: string | null
+  /** Lo que "vio" el modelo multimodal (texto OCR). */
+  ocrText: string
+  ocrError: string | null
+  ocrAttempts: number
+  /** finish_reason != stop → transcripción cortada. */
+  truncated: boolean
+  /** Misma imagen ya OCR-eada en otro mensaje (dedup por sha256) → 0 llamadas de visión. */
+  dedupHit: boolean
+}
+
+export type JourneyStepKind =
+  | "ingesta"
+  | "clasificacion"
+  | "ruteo"
+  | "modulo"
+  | "resumen"
+  | "ocr"
+  | "deadletter"
+
+/** Intercambio con el LLM en un paso: input resumido + lo que DEVOLVIÓ + métricas. */
+export interface LlmExchange {
+  purpose: LlmPurpose
+  model: string
+  promptTokens: number
+  completionTokens: number
+  costUsd: number
+  latencyMs: number
+  status: LlmStatus
+  inputSummary: string
+  output: string
+}
+
+export interface JourneyStep {
+  kind: JourneyStepKind
+  title: string
+  at: string
+  summary: string
+  details: { label: string; value: string }[]
+  evidence?: { quote: string; sourceText: string }
+  llm?: LlmExchange
+  media?: MediaAsset[]
+  tone: "ok" | "error" | "running" | "filtered" | "review" | "pending" | "neutral"
+}
+
+export interface RelatedRecord {
+  table: string
+  relation: string
+  cardinality: string
+  exposedByApi: boolean
+  keys: { label: string; value: string }[]
+}
+
+export interface MessageJourney {
+  row: InboxRow
+  steps: JourneyStep[]
+  logs: LogEvent[]
+  related: RelatedRecord[]
+  media: MediaAsset[]
+}
+
+// ---- Módulo finance (vista de dominio) ----------------------------------------
+
+export type ExpenseCategory =
+  | "comida"
+  | "transporte"
+  | "software"
+  | "servicios"
+  | "educacion"
+  | "salud"
+  | "entretenimiento"
+  | "otros"
+
+export interface FinanceExpense {
+  id: number
+  amount: number
+  currency: string
+  merchant: string
+  /** Categoría DERIVADA (no es columna real de mod_finance_expenses todavía). */
+  category: ExpenseCategory
+  occurredOn: string // fecha (date)
+  description: string
+  evidence: string
+  sourceInboxIds: number[]
+  createdAt: string
+}
+
+// ---- Módulo calendar (vista de dominio) ---------------------------------------
+
+export type CalendarOutcome = "unique" | "duplicate" | "shadowed" | "conflict" | "echo"
+
+/** Evento crudo (mod_calendar_events) que compone un consolidado vía event_links. */
+export interface CalendarRawMember {
+  id: number
+  origin: CalendarOrigin
+  provider: string | null
+  sourceInboxIds: number[]
+  evidence: string
+  processingOutcome: CalendarOutcome
+  /** Si este crudo es el "ganador" (winner_event_id) del consolidado. */
+  isWinner: boolean
+}
+
+export interface ConsolidatedEvent {
+  id: number
+  title: string
+  startsOn: string
+  endsOn: string | null
+  startTime: string | null
+  endTime: string | null
+  location: string
+  description: string
+  /** mod_calendar_event_links: cuántos eventos crudos lo componen. */
+  memberCount: number
+  origins: CalendarOrigin[]
+  protected: boolean
+  priorityRank: number
+  /** Los eventos crudos que lo componen (event_links). */
+  members: CalendarRawMember[]
+}
+
+export interface DedupDecision {
+  id: number
+  a: CalendarEventLite
+  b: CalendarEventLite
+  reason: string
+  score: number | null
+  status: "candidate" | "confirmed" | "rejected"
+  /** Quién decidió: la FASE 2 LLM, una decisión manual, o aún sin decidir. */
+  decidedBy: "llm" | "manual" | null
+  confidence: number | null
+  rationale: string | null
+  decidedAt: string | null
+}
+
+export interface CalendarSyncRun {
+  id: number
+  account: string
+  direction: "ingress" | "egress"
+  pulled: number
+  created: number
+  modified: number
+  deleted: number
+  unchanged: number
+  dedupPairs: number
+  errors: number
+  status: "ok" | "error"
+  startedAt: string
+  finishedAt: string | null
+}
