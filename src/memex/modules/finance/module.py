@@ -46,10 +46,10 @@ class FinanceModule:
             text(
                 """
                 INSERT INTO mod_finance_expenses
-                  (user_id, source_inbox_ids, amount, currency, merchant,
+                  (user_id, source_inbox_ids, amount, currency, category, merchant,
                    occurred_on, description, evidence)
                 VALUES
-                  (:uid, :ids, :amount, :currency, :merchant,
+                  (:uid, :ids, :amount, :currency, :category, :merchant,
                    :occurred_on, :description, :evidence)
                 """
             ),
@@ -59,6 +59,7 @@ class FinanceModule:
                     "ids": list(e.source_inbox_ids),
                     "amount": e.amount,
                     "currency": e.currency,
+                    "category": e.category,
                     "merchant": e.merchant,
                     "occurred_on": e.occurred_on,
                     "description": e.description,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from datetime import date
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,6 +19,7 @@ class ImapConfigError(SourceConfigError):
 
 
 AuthMethod = Literal["basic", "oauth2"]
+FetchMode = Literal["incremental", "range", "last"]
 
 
 class ImapConfig(BaseModel):
@@ -67,6 +69,16 @@ class ImapConfig(BaseModel):
     fetch_body: bool = True
     max_body_bytes: int = 524288
     use_ssl: bool = True
+
+    # Ventana de fetch — override transitorio por corrida (lo inyecta el endpoint de fetch a
+    # demanda; NO se persiste en sources.config). Default = incremental por checkpoint.
+    #   - "incremental": UIDs > last_uid (o SINCE since_days la primera vez). Avanza el checkpoint.
+    #   - "range": SINCE fetch_since [BEFORE fetch_until]. Backfill; NO toca el checkpoint.
+    #   - "last": los `fetch_limit` mensajes más recientes. Backfill; NO toca el checkpoint.
+    fetch_mode: FetchMode = "incremental"
+    fetch_since: date | None = None
+    fetch_until: date | None = None
+    fetch_limit: int | None = None
 
     # Extracción de imágenes/PDF para OCR (off por default → sin cambio de comportamiento).
     # Se habilita por-source en sources.config (`extract_media: true`).
@@ -129,6 +141,13 @@ class ImapConfig(BaseModel):
             raise ImapConfigError("'folders' must be a non-empty list")
         folders = [str(f) for f in folders_raw]
 
+        fetch_mode_raw = cfg.get("fetch_mode", "incremental")
+        if fetch_mode_raw not in ("incremental", "range", "last"):
+            raise ImapConfigError(
+                f"'fetch_mode' must be 'incremental', 'range' or 'last', got {fetch_mode_raw!r}"
+            )
+        fetch_limit_raw = cfg.get("fetch_limit")
+
         common_kwargs: dict[str, Any] = {
             "server": server,
             "port": port,
@@ -143,6 +162,10 @@ class ImapConfig(BaseModel):
             "extract_media": bool(cfg.get("extract_media", False)),
             "max_attachment_bytes": int(cfg.get("max_attachment_bytes", 10 * 1024 * 1024)),
             "username_env": str(username_env),
+            "fetch_mode": cast("FetchMode", fetch_mode_raw),
+            "fetch_since": _parse_date(cfg.get("fetch_since")),
+            "fetch_until": _parse_date(cfg.get("fetch_until")),
+            "fetch_limit": int(fetch_limit_raw) if fetch_limit_raw is not None else None,
         }
 
         if auth_method == "basic":
@@ -196,6 +219,18 @@ class ImapConfig(BaseModel):
 # Field used to silence "unused import" — keeps Field re-exported for callers
 # that want to reuse the same Pydantic primitives.
 _ = Field
+
+
+def _parse_date(value: Any) -> date | None:
+    """Acepta None/'' → None, un `date`, o ISO 'YYYY-MM-DD'. Levanta ImapConfigError si inválido."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError as e:
+        raise ImapConfigError(f"invalid date {value!r} (expected YYYY-MM-DD): {e}") from e
 
 
 def _require_env(env_map: Mapping[str, str], var: str) -> str:

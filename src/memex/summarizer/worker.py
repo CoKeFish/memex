@@ -28,7 +28,16 @@ from sqlalchemy import text
 
 from memex.core.deadletter import STAGE_SUMMARIZE, not_in_review_sql, record_failures
 from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
-from memex.core.observability import CostBySource, record_llm_call
+from memex.core.observability import (
+    NO_COST as _NO_COST,
+)
+from memex.core.observability import (
+    CostBySource,
+    record_llm_call,
+)
+from memex.core.observability import (
+    cost_fields as _cost_fields,
+)
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
 from memex.logging import get_logger
@@ -365,3 +374,129 @@ async def run_summarization(
         **stats.cost.log_fields(),
     )
     return stats
+
+
+# --- procesamiento por mensaje (dashboard: resumir UN inbox o su ventana) ----------- #
+
+#: Tope alto para que la ventana de un mensaje reciente entre en el scan (occurred_at ASC).
+_WINDOW_SCAN_LIMIT = 10_000
+
+
+class InboxNotClassifiedError(Exception):
+    """El mensaje existe pero no tiene clasificación (precondición de resumir)."""
+
+
+def _load_one_workrow(user_id: int, inbox_id: int) -> WorkRow:
+    """Arma la WorkRow de un inbox puntual (inbox + tier + ocr). Lanza si no existe/clasifica."""
+    with connection() as conn:
+        row = (
+            conn.execute(
+                text(
+                    """
+                    SELECT i.source_id, i.occurred_at, i.payload, c.tier,
+                           COALESCE((
+                               SELECT string_agg(ocr_text, E'\n' ORDER BY id)
+                               FROM media_assets
+                               WHERE inbox_id = i.id AND ocr_status = 'ok'
+                                 AND ocr_text IS NOT NULL AND ocr_text <> ''
+                           ), '') AS ocr_text
+                    FROM inbox i
+                    LEFT JOIN classifications c ON c.inbox_id = i.id
+                    WHERE i.id = :id AND i.user_id = :uid
+                    """
+                ),
+                {"id": inbox_id, "uid": user_id},
+            )
+            .mappings()
+            .first()
+        )
+    if row is None:
+        raise LookupError(f"inbox {inbox_id} not found")
+    if row["tier"] is None:
+        raise InboxNotClassifiedError(f"inbox {inbox_id} not classified")
+    return WorkRow(
+        inbox_id=inbox_id,
+        source_id=int(row["source_id"]),
+        occurred_at=row["occurred_at"],
+        payload=_coerce_payload(row["payload"]),
+        tier=str(row["tier"]),
+        ocr_text=str(row["ocr_text"]),
+    )
+
+
+def _existing_summary(user_id: int, inbox_id: int) -> dict[str, Any] | None:
+    with connection() as conn:
+        row = (
+            conn.execute(
+                text(
+                    """
+                    SELECT s.id, s.tier, s.content, s.created_at
+                    FROM summaries s
+                    JOIN summary_inbox_links sl ON sl.summary_id = s.id
+                    WHERE sl.inbox_id = :id AND s.user_id = :uid
+                    """
+                ),
+                {"id": inbox_id, "uid": user_id},
+            )
+            .mappings()
+            .first()
+        )
+    return dict(row) if row else None
+
+
+async def summarize_inbox(
+    user_id: int,
+    inbox_id: int,
+    *,
+    scope: str = "individual",
+    force: bool = False,
+    client: LLMClient | None = None,
+) -> dict[str, Any]:
+    """Resume UN mensaje (individual) o su ventana (scope='window'). Reusa `_process_window`.
+
+    Idempotente: si ya está resumido y no es `force`, devuelve el existente. `force` lo borra
+    (cascade a sus links) y re-corre. Lanza `LookupError` / `InboxNotClassifiedError`.
+    """
+    row = _load_one_workrow(user_id, inbox_id)
+
+    if not force:
+        existing = _existing_summary(user_id, inbox_id)
+        if existing is not None:
+            return {"status": "already", "messages": 1, **_NO_COST, **existing}
+
+    # Construir el cliente (valida DEEPSEEK_API_KEY) ANTES de borrar nada: si falta la key, `force`
+    # no debe destruir el resumen previo sin poder recrearlo.
+    owns_client = client is None
+    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    stats = SummarizeStats()
+    messages = 0
+    try:
+        if force:
+            with connection() as conn:
+                conn.execute(
+                    text(
+                        "DELETE FROM summaries WHERE id IN "
+                        "(SELECT summary_id FROM summary_inbox_links WHERE inbox_id = :id)"
+                    ),
+                    {"id": inbox_id},
+                )
+        window: Window | None = None
+        if scope == "window" and row.tier in ("batch", "individual"):
+            workset = _load_workset(user_id, row.source_id, None, _WINDOW_SCAN_LIMIT)
+            windows = plan_windows(workset)
+            window = next((w for w in windows if any(r.inbox_id == inbox_id for r in w.rows)), None)
+        if window is None:
+            window = Window("individual", row.source_id, (row,))
+        messages = len(window.rows)
+        await _process_window(user_id, llm, window, stats)
+    finally:
+        if owns_client and isinstance(llm, DeepSeekClient):
+            await llm.aclose()
+
+    out = _existing_summary(user_id, inbox_id)
+    return {
+        "status": "ok" if out else "skipped",
+        "messages": messages,
+        **_cost_fields(stats.cost.total),
+        **(out or {}),
+    }

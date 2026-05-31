@@ -231,6 +231,12 @@ def record_llm_call(
     """
     ctx = structlog.contextvars.get_contextvars()
     request_id = ctx.get("request_id") if isinstance(ctx.get("request_id"), str) else None
+    # Permite atribuir el costo a un inbox puntual sin tocar los workers (el endpoint de
+    # procesamiento por-mensaje bindea `inbox_id` a los contextvars): si el caller no lo pasó,
+    # se toma del contexto. Las corridas por lotes no lo bindean → queda en None (por source).
+    if inbox_id is None:
+        ctx_iid = ctx.get("inbox_id")
+        inbox_id = ctx_iid if isinstance(ctx_iid, int) else None
 
     with connection() as conn:
         row_id = conn.execute(
@@ -287,6 +293,20 @@ class CostAccum:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: Decimal = field(default_factory=lambda: Decimal(0))
+
+
+#: Campos de costo "cero" para respuestas sin corrida LLM (p. ej. "ya estaba resumido").
+NO_COST: dict[str, Any] = {"calls": 0, "cost_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0}
+
+
+def cost_fields(accum: CostAccum) -> dict[str, Any]:
+    """Campos planos de costo de un acumulador, listos para una respuesta JSON."""
+    return {
+        "calls": accum.calls,
+        "cost_usd": float(accum.cost_usd),
+        "prompt_tokens": accum.prompt_tokens,
+        "completion_tokens": accum.completion_tokens,
+    }
 
 
 @dataclass

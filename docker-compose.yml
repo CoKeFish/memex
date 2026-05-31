@@ -70,10 +70,18 @@ services:
       OCR_API_KEY: ${OCR_API_KEY:-}
       MEMEX_OCR_BASE_URL: ${MEMEX_OCR_BASE_URL:-}
       MEMEX_OCR_MODEL: ${MEMEX_OCR_MODEL:-}
+      # IMAP Gmail (OAuth2). El email viene del .env; los paths apuntan a los archivos
+      # montados desde ./secrets (client_secret.json + token.json del flujo authorize).
+      MEMEX_IMAP_GMAIL_USER: ${MEMEX_IMAP_GMAIL_USER:-}
+      MEMEX_IMAP_GMAIL_CLIENT_SECRET_JSON: /secrets/google_client_secret.json
+      MEMEX_IMAP_GMAIL_TOKEN_JSON: /secrets/gmail_token.json
     ports:
       - "8787:8787"
     volumes:
       - memex_telegram_sessions:/var/lib/memex/telegram
+      # OAuth de IMAP/calendar (client_secret + tokens). Gitignored. Montado RW para que el
+      # refresh del access_token pueda persistir el token actualizado.
+      - ./secrets:/secrets
     depends_on:
       postgres:
         condition: service_healthy

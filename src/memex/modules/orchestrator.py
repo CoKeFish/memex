@@ -22,12 +22,22 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.core.deadletter import STAGE_EXTRACT, record_failures
-from memex.core.observability import CostBySource, record_llm_call
+from memex.core.observability import (
+    NO_COST as _NO_COST,
+)
+from memex.core.observability import (
+    CostBySource,
+    record_llm_call,
+)
+from memex.core.observability import (
+    cost_fields as _cost_fields,
+)
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
 from memex.logging import get_logger
@@ -776,3 +786,194 @@ async def run_extraction(
         **stats.cost.log_fields(),
     )
     return stats
+
+
+# --- extracción por mensaje (dashboard: extraer UN inbox o su ventana) -------------- #
+
+#: Tope alto para que la ventana de un mensaje reciente entre en el scan (occurred_at ASC).
+_WINDOW_SCAN_LIMIT = 10_000
+
+
+class InboxNotClassifiedError(Exception):
+    """El mensaje existe pero no tiene clasificación (precondición de extraer)."""
+
+
+def _load_one_workrow(user_id: int, inbox_id: int) -> WorkRow:
+    """WorkRow de un inbox puntual con `source_type` (para kind/consumes_kinds) + tier + ocr."""
+    with connection() as conn:
+        row = (
+            conn.execute(
+                text(
+                    """
+                    SELECT i.source_id, i.occurred_at, i.payload, c.tier, s.type AS source_type,
+                           COALESCE((
+                               SELECT string_agg(ocr_text, E'\n' ORDER BY id)
+                               FROM media_assets
+                               WHERE inbox_id = i.id AND ocr_status = 'ok'
+                                 AND ocr_text IS NOT NULL AND ocr_text <> ''
+                           ), '') AS ocr_text
+                    FROM inbox i
+                    JOIN sources s ON s.id = i.source_id
+                    LEFT JOIN classifications c ON c.inbox_id = i.id
+                    WHERE i.id = :id AND i.user_id = :uid
+                    """
+                ),
+                {"id": inbox_id, "uid": user_id},
+            )
+            .mappings()
+            .first()
+        )
+    if row is None:
+        raise LookupError(f"inbox {inbox_id} not found")
+    if row["tier"] is None:
+        raise InboxNotClassifiedError(f"inbox {inbox_id} not classified")
+    return WorkRow(
+        inbox_id=inbox_id,
+        source_id=int(row["source_id"]),
+        occurred_at=row["occurred_at"],
+        payload=_coerce_payload(row["payload"]),
+        tier=str(row["tier"]),
+        source_type=str(row["source_type"]),
+        ocr_text=str(row["ocr_text"]),
+    )
+
+
+def read_extractions(user_id: int, inbox_id: int) -> dict[str, Any]:
+    """Estado de extracción de un inbox: módulos ya corridos (cursor) + filas finance/calendar.
+
+    `done`=True aunque NO haya filas: el cursor en `module_extractions` marca "ya procesado, 0 datos
+    relevantes" — clave para que la UI distinga "sin extraer" de "extraído sin resultados"."""
+    with connection() as conn:
+        modules = (
+            conn.execute(
+                text(
+                    "SELECT DISTINCT module_slug FROM module_extractions "
+                    "WHERE inbox_id = :id ORDER BY module_slug"
+                ),
+                {"id": inbox_id},
+            )
+            .scalars()
+            .all()
+        )
+        finance = (
+            conn.execute(
+                text(
+                    """
+                    SELECT amount, currency, category, merchant, occurred_on, evidence
+                    FROM mod_finance_expenses
+                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "id": inbox_id},
+            )
+            .mappings()
+            .all()
+        )
+        calendar = (
+            conn.execute(
+                text(
+                    """
+                    SELECT title, starts_on, ends_on, start_time, end_time, location, evidence
+                    FROM mod_calendar_events
+                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "id": inbox_id},
+            )
+            .mappings()
+            .all()
+        )
+    return {
+        "done": len(modules) > 0,
+        "modules": [str(m) for m in modules],
+        "finance": [dict(r) for r in finance],
+        "calendar": [dict(r) for r in calendar],
+    }
+
+
+def _coerce_payload(raw: Any) -> dict[str, Any]:
+    return raw if isinstance(raw, dict) else {}
+
+
+async def extract_inbox(
+    user_id: int,
+    inbox_id: int,
+    *,
+    scope: str = "individual",
+    force: bool = False,
+    client: LLMClient | None = None,
+) -> dict[str, Any]:
+    """Extrae (módulos) sobre UN mensaje o su ventana. Reusa `_process_window` (que saltea lo ya
+    hecho por módulo). `force` borra cursor + filas previas. Lanza Lookup/NotClassified."""
+    with connection() as conn:
+        active = _active_modules(conn, user_id)
+    if not active:
+        return {
+            "status": "no_modules",
+            "items": 0,
+            "discarded": 0,
+            "by_module": {},
+            **_NO_COST,
+            "done": False,
+            "modules": [],
+            "finance": [],
+            "calendar": [],
+        }
+    active_by_slug = {m.slug: m for m in active}
+
+    row = _load_one_workrow(user_id, inbox_id)
+
+    # Construir el cliente (valida DEEPSEEK_API_KEY) ANTES de borrar nada en `force`.
+    owns_client = client is None
+    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    stats = ExtractStats()
+    try:
+        if force:
+            with connection() as conn:
+                conn.execute(
+                    text("DELETE FROM module_extractions WHERE inbox_id = :id"), {"id": inbox_id}
+                )
+                conn.execute(
+                    text(
+                        "DELETE FROM mod_finance_expenses "
+                        "WHERE user_id = :uid AND :id = ANY(source_inbox_ids)"
+                    ),
+                    {"uid": user_id, "id": inbox_id},
+                )
+                conn.execute(
+                    text(
+                        "DELETE FROM mod_calendar_events "
+                        "WHERE user_id = :uid AND :id = ANY(source_inbox_ids)"
+                    ),
+                    {"uid": user_id, "id": inbox_id},
+                )
+
+        window: Window | None = None
+        if scope == "window" and row.tier in ("batch", "individual"):
+            with connection() as conn:
+                workset = load_module_workset(
+                    conn, user_id, source_id=row.source_id, modules=active, limit=_WINDOW_SCAN_LIMIT
+                )
+            windows = plan_windows(workset)
+            window = next((w for w in windows if any(r.inbox_id == inbox_id for r in w.rows)), None)
+        if window is None:
+            window = Window(
+                row.tier if row.tier in ("batch", "individual") else "individual",
+                row.source_id,
+                (row,),
+            )
+        await _process_window(user_id, llm, window, active, active_by_slug, stats)
+    finally:
+        if owns_client and isinstance(llm, DeepSeekClient):
+            await llm.aclose()
+
+    return {
+        "status": "ok",
+        "items": stats.items,
+        "discarded": stats.discarded,
+        "by_module": dict(stats.by_module),
+        **_cost_fields(stats.cost.total),
+        **read_extractions(user_id, inbox_id),
+    }

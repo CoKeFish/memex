@@ -54,6 +54,47 @@ export interface SocialPayload {
 
 export type InboxPayload = EmailPayload | TelegramPayload | SocialPayload
 
+export interface InboxClassification {
+  tier: string
+  metadata?: Record<string, unknown> | null
+}
+
+export interface InboxSummary {
+  id?: number | null
+  tier: string
+  content: string
+  createdAt?: string | null
+}
+
+export interface InboxExtraction {
+  /** True aunque finance/calendar estén vacíos: el cursor marca "procesado, sin datos". */
+  done: boolean
+  modules: string[]
+  finance: Record<string, unknown>[]
+  calendar: Record<string, unknown>[]
+}
+
+export interface InboxLlmCall {
+  purpose: string
+  model: string
+  promptTokens: number
+  completionTokens: number
+  costUsd: number
+  latencyMs: number
+  status: string
+  createdAt?: string | null
+  /** Decisión de la fase: ruteo {slugs_in, chosen}; extracción {items, discarded}. */
+  metadata?: Record<string, unknown> | null
+}
+
+export interface InboxLlmUsage {
+  calls: number
+  costUsd: number
+  promptTokens: number
+  completionTokens: number
+  items: InboxLlmCall[]
+}
+
 export interface InboxRow {
   id: number
   sourceId: number
@@ -66,6 +107,11 @@ export interface InboxRow {
   attempts: number
   /** Texto OCR de imágenes adjuntas (etapa memex-ocr), inyectado al render. */
   ocrText?: string
+  /** Resultados de fases (solo en el detalle, GET /inbox/{id}). */
+  classification?: InboxClassification | null
+  summary?: InboxSummary | null
+  extraction?: InboxExtraction | null
+  llm?: InboxLlmUsage | null
 }
 
 export type Tier = "blacklist" | "batch" | "individual"

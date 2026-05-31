@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
-from datetime import datetime
+from datetime import date, datetime
 from types import TracebackType
 from typing import Any
 
@@ -111,6 +111,53 @@ class ImapClient(AbstractContextManager["ImapClient"]):
         self._log.info(
             "imap_fetch_end",
             folder=folder,
+            yielded=yielded,
+            ms_elapsed=int((time.monotonic() - started) * 1000),
+        )
+
+    def fetch_range(
+        self,
+        folder: str,
+        *,
+        since_date: date | None,
+        until_date: date | None,
+        limit: int = 200,
+    ) -> Iterator[Any]:
+        """Yield messages in a date window (`SINCE since_date [BEFORE until_date]`).
+
+        Backfill ad-hoc, agnóstico al checkpoint. `BEFORE` es exclusivo en IMAP. Trae los más
+        recientes primero (`reverse=True`), tope `limit`. Si no se da ninguna fecha → `ALL`.
+        """
+        mb = self._require_mailbox()
+        mb.folder.set(folder)
+        parts: list[str] = []
+        if since_date is not None:
+            parts.append(f"SINCE {since_date.strftime('%d-%b-%Y')}")
+        if until_date is not None:
+            parts.append(f"BEFORE {until_date.strftime('%d-%b-%Y')}")
+        criteria = " ".join(parts) if parts else "ALL"
+        self._log.info("imap_fetch_range_start", folder=folder, criteria=criteria, limit=limit)
+        yield from self._fetch_recent(folder, criteria=criteria, limit=limit)
+
+    def fetch_last(self, folder: str, *, limit: int) -> Iterator[Any]:
+        """Yield the `limit` most-recent messages in `folder` (ad-hoc, sin tocar el checkpoint)."""
+        self._log.info("imap_fetch_last_start", folder=folder, limit=limit)
+        yield from self._fetch_recent(folder, criteria="ALL", limit=limit)
+
+    def _fetch_recent(self, folder: str, *, criteria: str, limit: int) -> Iterator[Any]:
+        mb = self._require_mailbox()
+        mb.folder.set(folder)
+        yielded = 0
+        started = time.monotonic()
+        for message in mb.fetch(
+            criteria=criteria, mark_seen=False, limit=limit, reverse=True, bulk=True
+        ):
+            yield message
+            yielded += 1
+        self._log.info(
+            "imap_fetch_recent_end",
+            folder=folder,
+            criteria=criteria,
             yielded=yielded,
             ms_elapsed=int((time.monotonic() - started) * 1000),
         )

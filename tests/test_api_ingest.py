@@ -28,6 +28,18 @@ def test_ingest_dry_run_writes_nothing(client: Any, seed_source: dict[str, Any])
     assert count == 0
 
 
+def test_ingest_dry_run_detects_duplicate(client: Any, seed_source: dict[str, Any]) -> None:
+    sid = seed_source["id"]
+    body = _body(sid, "dup1")
+    assert client.post("/ingest", json=body).json()["inserted"] is True
+    # Mismo external_id ya existe → el dry-run lo anticipa sin escribir.
+    r = client.post("/ingest", headers={"X-Dry-Run": "1"}, json=body)
+    assert r.status_code == 200
+    out = r.json()
+    assert out["would_insert"] is False
+    assert out["reason"] == "duplicate"
+
+
 def test_ingest_real_then_duplicate(client: Any, seed_source: dict[str, Any]) -> None:
     body = _body(seed_source["id"], "d1")
     r1 = client.post("/ingest", json=body)

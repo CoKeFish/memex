@@ -75,36 +75,45 @@ class ImapSource:
 
     def fetch(self, checkpoint: ImapCursor) -> Iterable[SourceRecord]:
         since_date = datetime.now(UTC) - timedelta(days=self.cfg.since_days)
+        mode = self.cfg.fetch_mode
 
         with ImapClient(self.cfg) as client:
             for folder in self.cfg.folders:
-                folder_log = self._log.bind(folder=folder)
+                folder_log = self._log.bind(folder=folder, fetch_mode=mode)
                 current_uidvalidity = client.folder_uidvalidity(folder)
-                folder_state = checkpoint.folders.get(folder)
 
-                if folder_state is not None and folder_state.uidvalidity != current_uidvalidity:
-                    folder_log.warning(
-                        "uidvalidity_changed",
-                        old=folder_state.uidvalidity,
-                        new=current_uidvalidity,
+                if mode == "range":
+                    messages = client.fetch_range(
+                        folder,
+                        since_date=self.cfg.fetch_since,
+                        until_date=self.cfg.fetch_until,
+                        limit=self.cfg.fetch_limit or 200,
                     )
-                    last_uid = 0
-                else:
-                    last_uid = folder_state.last_uid if folder_state else 0
-
-                folder_log.info(
-                    "folder_fetch_start",
-                    last_uid=last_uid,
-                    uidvalidity=current_uidvalidity,
-                )
+                elif mode == "last":
+                    messages = client.fetch_last(folder, limit=self.cfg.fetch_limit or 50)
+                else:  # incremental por checkpoint
+                    folder_state = checkpoint.folders.get(folder)
+                    if folder_state is not None and folder_state.uidvalidity != current_uidvalidity:
+                        folder_log.warning(
+                            "uidvalidity_changed",
+                            old=folder_state.uidvalidity,
+                            new=current_uidvalidity,
+                        )
+                        last_uid = 0
+                    else:
+                        last_uid = folder_state.last_uid if folder_state else 0
+                    folder_log.info(
+                        "folder_fetch_start", last_uid=last_uid, uidvalidity=current_uidvalidity
+                    )
+                    messages = client.fetch_since_uid(
+                        folder,
+                        last_uid,
+                        since_date=since_date,
+                        batch_size=self.cfg.batch_size,
+                    )
 
                 count = 0
-                for mailmsg in client.fetch_since_uid(
-                    folder,
-                    last_uid,
-                    since_date=since_date,
-                    batch_size=self.cfg.batch_size,
-                ):
+                for mailmsg in messages:
                     yield self._mailmsg_to_record(mailmsg, folder, current_uidvalidity)
                     count += 1
 
