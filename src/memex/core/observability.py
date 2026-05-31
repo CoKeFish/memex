@@ -204,14 +204,30 @@ def record_llm_call(
     latency_ms: int,
     status: str,
     inbox_id: int | None = None,
+    source_id: int | None = None,
     error_message: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> int:
     """Persist a single LLM call to `llm_calls` and log `llm.call`.
 
-    Not used yet — fixed signature so the future summarizer can plug in
-    without refactor. `request_id` is read from structlog contextvars for
-    correlation with the HTTP request log line (if any).
+    Single writer of `llm_calls`. `source_id` is a first-class column (migration
+    0014) so cost can be cut per source; calendar decisions span sources and pass
+    `source_id=None` (identified by `purpose LIKE 'calendar%'`). `request_id` is read
+    from structlog contextvars for correlation with the HTTP request log line.
+
+    Per-source cost aggregation query (LEFT JOIN + label so null-source calendar rows
+    are visible, not lost):
+
+        SELECT COALESCE(
+                 s.name,
+                 CASE WHEN lc.purpose LIKE 'calendar%' THEN '(calendar)'
+                      ELSE '(sin source)' END
+               ) AS source,
+               COUNT(*), SUM(lc.prompt_tokens + lc.completion_tokens) AS tokens,
+               SUM(lc.cost_usd) AS cost
+        FROM llm_calls lc
+        LEFT JOIN sources s ON s.id = lc.source_id
+        GROUP BY 1 ORDER BY cost DESC;
     """
     ctx = structlog.contextvars.get_contextvars()
     request_id = ctx.get("request_id") if isinstance(ctx.get("request_id"), str) else None
@@ -221,11 +237,11 @@ def record_llm_call(
             text(
                 """
                 INSERT INTO llm_calls
-                  (user_id, request_id, inbox_id, purpose, model,
+                  (user_id, request_id, inbox_id, source_id, purpose, model,
                    prompt_tokens, completion_tokens, cost_usd, latency_ms,
                    status, error_message, metadata)
                 VALUES
-                  (:user_id, :request_id, :inbox_id, :purpose, :model,
+                  (:user_id, :request_id, :inbox_id, :source_id, :purpose, :model,
                    :prompt_tokens, :completion_tokens, :cost_usd, :latency_ms,
                    :status, :error_message, CAST(:metadata AS JSONB))
                 RETURNING id
@@ -235,6 +251,7 @@ def record_llm_call(
                 "user_id": user_id,
                 "request_id": request_id,
                 "inbox_id": inbox_id,
+                "source_id": source_id,
                 "purpose": purpose,
                 "model": model,
                 "prompt_tokens": prompt_tokens,
@@ -257,5 +274,56 @@ def record_llm_call(
         latency_ms=latency_ms,
         status=status,
         inbox_id=inbox_id,
+        source_id=source_id,
     )
     return int(row_id)
+
+
+@dataclass
+class CostAccum:
+    """Acumulador de costo (llamadas + tokens + USD) de un bucket."""
+
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: Decimal = field(default_factory=lambda: Decimal(0))
+
+
+@dataclass
+class CostBySource:
+    """Acumulador de costo por source, en memoria, para el resumen del `*.run.end`.
+
+    `by_source[None]` es el bucket sin source (p. ej. calendar): se renderiza como
+    "sin_source" en `log_fields` para que el costo sin atribución se VEA, no se pierda.
+    """
+
+    total: CostAccum = field(default_factory=CostAccum)
+    by_source: dict[int | None, CostAccum] = field(default_factory=dict)
+
+    def record(
+        self,
+        source_id: int | None,
+        *,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_usd: Decimal,
+    ) -> None:
+        """Suma una llamada al total y al bucket de su source (None = sin source)."""
+        for bucket in (self.total, self.by_source.setdefault(source_id, CostAccum())):
+            bucket.calls += 1
+            bucket.prompt_tokens += prompt_tokens
+            bucket.completion_tokens += completion_tokens
+            bucket.cost_usd += cost_usd
+
+    def log_fields(self) -> dict[str, Any]:
+        """Campos planos para el `*.run.end`; el bucket None se renderiza 'sin_source'."""
+        return {
+            "llm_calls": self.total.calls,
+            "llm_prompt_tokens": self.total.prompt_tokens,
+            "llm_completion_tokens": self.total.completion_tokens,
+            "llm_cost_usd": str(self.total.cost_usd),
+            "llm_cost_by_source": {
+                ("sin_source" if sid is None else str(sid)): str(acc.cost_usd)
+                for sid, acc in self.by_source.items()
+            },
+        }

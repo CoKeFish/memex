@@ -13,13 +13,13 @@ Cada llamada se registra en `llm_calls` (`purpose="calendar_dedup"`). Cliente LL
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, time
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from memex.core.observability import record_llm_call
+from memex.core.observability import CostAccum, record_llm_call
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.logging import get_logger
@@ -61,6 +61,9 @@ class DedupPhase2Stats:
     confirmed: int = 0
     rejected: int = 0
     errors: int = 0
+    #: Costo LLM acumulado. Calendar cruza varios sources → todo va sin source; el total
+    #: bajo `calendar.dedup2.end` ya atribuye el costo a calendar (visible, no perdido).
+    cost: CostAccum = field(default_factory=CostAccum)
 
 
 def _fmt_event(label: str, e: PairEventView) -> str:
@@ -242,12 +245,19 @@ async def run_dedup_phase2(
                 cost_usd=result.cost_usd,
                 latency_ms=result.latency_ms,
                 status="ok",
+                # La decisión cruza varios sources (par A/B de fuentes distintas) → sin
+                # source; se identifica por purpose="calendar_dedup".
+                source_id=None,
                 metadata={
                     "pair_id": cand.pair_id,
                     "same": decision.same,
                     "confidence": decision.confidence,
                 },
             )
+            stats.cost.calls += 1
+            stats.cost.prompt_tokens += result.usage.prompt_tokens
+            stats.cost.completion_tokens += result.usage.completion_tokens
+            stats.cost.cost_usd += result.cost_usd
             if decision.same:
                 stats.confirmed += 1
             else:
@@ -263,5 +273,8 @@ async def run_dedup_phase2(
         confirmed=stats.confirmed,
         rejected=stats.rejected,
         errors=stats.errors,
+        # Costo total de calendar (todo sin source); el evento calendar.* lo atribuye a calendar.
+        llm_calls=stats.cost.calls,
+        llm_cost_usd=str(stats.cost.cost_usd),
     )
     return stats

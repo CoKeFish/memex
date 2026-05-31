@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -36,7 +37,7 @@ from memex.llm.client import (
     ResponseFormat,
 )
 from memex.llm.config import LLMConfig
-from memex.llm.pricing import compute_cost
+from memex.llm.pricing import ModelPricing, compute_cost, load_pricing
 from memex.logging import get_logger
 
 _CHAT_PATH = "/chat/completions"
@@ -55,9 +56,18 @@ class DeepSeekClient:
     que cree el suyo.
     """
 
-    def __init__(self, config: LLMConfig, *, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        config: LLMConfig,
+        *,
+        client: httpx.AsyncClient | None = None,
+        pricing: Mapping[str, ModelPricing] | None = None,
+    ) -> None:
         self._config = config
         self._log = get_logger("memex.llm.deepseek")
+        # Resolver la tabla de pricing UNA vez (defaults + overrides de MEMEX_LLM_PRICING).
+        # Inyectable para tests; por default lee el entorno.
+        self._pricing = pricing if pricing is not None else load_pricing()
 
         headers = {
             "Authorization": f"Bearer {config.api_key.get_secret_value()}",
@@ -108,7 +118,9 @@ class DeepSeekClient:
         data = resp.json()
         content, finish_reason = parse_choice(data)
         usage = parse_usage(data.get("usage") if isinstance(data, dict) else None)
-        cost = compute_cost(model_name, usage)
+        # `at` = momento de la completion (UTC) para evaluar la ventana off-peak.
+        at = datetime.now(UTC)
+        cost = compute_cost(model_name, usage, pricing=self._pricing, at=at)
 
         self._log.info(
             "llm.deepseek.complete",

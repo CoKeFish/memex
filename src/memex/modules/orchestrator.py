@@ -27,7 +27,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.core.deadletter import STAGE_EXTRACT, record_failures
-from memex.core.observability import record_llm_call
+from memex.core.observability import CostBySource, record_llm_call
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
 from memex.logging import get_logger
@@ -91,6 +91,8 @@ class ExtractStats:
     discarded: int = 0  # items descartados (schema inválido / atribución alucinada)
     errors: int = 0
     by_module: dict[str, int] = field(default_factory=dict)
+    #: Costo LLM acumulado de la corrida (total + por source); se emite en `extract.run.end`.
+    cost: CostBySource = field(default_factory=CostBySource)
 
 
 # --- helpers de DB ----------------------------------------------------------------- #
@@ -189,6 +191,7 @@ async def _route_chunk(
         cost_usd=result.cost_usd,
         latency_ms=result.latency_ms,
         status="ok",
+        source_id=window.source_id,  # atribución first-class por source
         metadata={
             "slugs_in": sorted(chunk_slugs),
             "chosen": parsed if parsed is not None else "parse_fallback",
@@ -196,6 +199,12 @@ async def _route_chunk(
             "chunk": chunk_idx,
             "chunks": n_chunks,
         },
+    )
+    stats.cost.record(
+        window.source_id,
+        prompt_tokens=result.usage.prompt_tokens,
+        completion_tokens=result.usage.completion_tokens,
+        cost_usd=result.cost_usd,
     )
     if parsed is None:
         _log.warning("route.parse_fallback", source_id=window.source_id, chunk=chunk_idx)
@@ -260,6 +269,7 @@ async def _route(
 def _record_cost(
     user_id: int,
     slug: str,
+    stats: ExtractStats,
     *,
     status: str,
     model: str,
@@ -268,6 +278,7 @@ def _record_cost(
     cost_usd: Decimal,
     latency_ms: int,
     n: int,
+    source_id: int | None,
     items: int = 0,
     discarded: int = 0,
     error_message: str | None = None,
@@ -281,6 +292,7 @@ def _record_cost(
         cost_usd=cost_usd,
         latency_ms=latency_ms,
         status=status,
+        source_id=source_id,  # atribución first-class por source
         error_message=error_message,
         metadata={
             "slug": slug,
@@ -289,6 +301,12 @@ def _record_cost(
             "items": items,
             "discarded": discarded,
         },
+    )
+    stats.cost.record(
+        source_id,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=cost_usd,
     )
 
 
@@ -324,6 +342,7 @@ async def _extract_module(
         _record_cost(
             user_id,
             module.slug,
+            stats,
             status="error",
             model=result.model,
             prompt_tokens=result.usage.prompt_tokens,
@@ -331,6 +350,7 @@ async def _extract_module(
             cost_usd=result.cost_usd,
             latency_ms=result.latency_ms,
             n=len(rows),
+            source_id=window.source_id,
             error_message="empty content",
         )
         _log.warning("extract.module.empty_content", slug=module.slug, n=len(rows))
@@ -343,6 +363,7 @@ async def _extract_module(
         _record_cost(
             user_id,
             module.slug,
+            stats,
             status="error",
             model=result.model,
             prompt_tokens=result.usage.prompt_tokens,
@@ -350,6 +371,7 @@ async def _extract_module(
             cost_usd=result.cost_usd,
             latency_ms=result.latency_ms,
             n=len(rows),
+            source_id=window.source_id,
             error_message=f"truncated ({result.finish_reason})",
         )
         _log.warning(
@@ -387,6 +409,7 @@ async def _extract_module(
     _record_cost(
         user_id,
         module.slug,
+        stats,
         status="ok",
         model=result.model,
         prompt_tokens=result.usage.prompt_tokens,
@@ -394,6 +417,7 @@ async def _extract_module(
         cost_usd=result.cost_usd,
         latency_ms=result.latency_ms,
         n=len(rows),
+        source_id=window.source_id,
         items=persisted,
         discarded=discarded,
     )
@@ -458,8 +482,15 @@ async def _extract_group(
             cost_usd=result.cost_usd,
             latency_ms=result.latency_ms,
             status="error",
+            source_id=window.source_id,  # atribución first-class por source
             error_message="empty content",
             metadata={"policy": policy, "group_size": group_size, "slugs": slugs, "n": len(rows)},
+        )
+        stats.cost.record(
+            window.source_id,
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            cost_usd=result.cost_usd,
         )
         _log.warning("extract.group.empty_content", slugs=slugs, n=len(rows))
         return  # sin cursor → reintentable
@@ -476,8 +507,15 @@ async def _extract_group(
             cost_usd=result.cost_usd,
             latency_ms=result.latency_ms,
             status="error",
+            source_id=window.source_id,  # atribución first-class por source
             error_message=f"truncated ({result.finish_reason})",
             metadata={"policy": policy, "group_size": group_size, "slugs": slugs, "n": len(rows)},
+        )
+        stats.cost.record(
+            window.source_id,
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            cost_usd=result.cost_usd,
         )
         _log.warning(
             "extract.group.truncated", slugs=slugs, finish_reason=result.finish_reason, n=len(rows)
@@ -525,6 +563,7 @@ async def _extract_group(
         cost_usd=result.cost_usd,
         latency_ms=result.latency_ms,
         status="ok",
+        source_id=window.source_id,  # atribución first-class por source
         metadata={
             "policy": policy,
             "group_size": group_size,
@@ -533,6 +572,12 @@ async def _extract_group(
             "discarded_by_slug": discarded_by_slug,
             "n": len(rows),
         },
+    )
+    stats.cost.record(
+        window.source_id,
+        prompt_tokens=result.usage.prompt_tokens,
+        completion_tokens=result.usage.completion_tokens,
+        cost_usd=result.cost_usd,
     )
     _log.info(
         "extract.group.done",
@@ -701,6 +746,7 @@ async def run_extraction(
                 _record_cost(
                     user_id,
                     "unknown",
+                    stats,
                     status="error",
                     model="unknown",
                     prompt_tokens=0,
@@ -708,6 +754,7 @@ async def run_extraction(
                     cost_usd=Decimal("0"),
                     latency_ms=0,
                     n=len(window.rows),
+                    source_id=window.source_id,
                     error_message=str(e)[:500],
                 )
                 # Dead-letter: suma fallo a cada mensaje; al 3er fallo → 'pendiente de revisión'.
@@ -726,5 +773,6 @@ async def run_extraction(
         discarded=stats.discarded,
         errors=stats.errors,
         **{f"module_{slug}": n for slug, n in stats.by_module.items()},
+        **stats.cost.log_fields(),
     )
     return stats

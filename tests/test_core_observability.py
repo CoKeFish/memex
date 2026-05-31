@@ -6,7 +6,11 @@ from typing import Any
 import structlog
 from sqlalchemy import text
 
-from memex.core.observability import ingestion_run, record_llm_call
+from memex.core.observability import (
+    CostBySource,
+    ingestion_run,
+    record_llm_call,
+)
 from memex.db import connection
 from memex.ingestors.runner import RunStats
 from memex.logging import clear_request_context
@@ -184,3 +188,73 @@ def test_record_llm_call_picks_up_request_id_from_contextvars(
             {"id": row_id},
         ).scalar()
     assert rid == "req-llm-1"
+
+
+def test_record_llm_call_persists_source_id(seed_source: dict[str, Any]) -> None:
+    uid = int(seed_source["user_id"])
+    sid = int(seed_source["id"])
+
+    row_id = record_llm_call(
+        user_id=uid,
+        purpose="summarize_batch",
+        model="deepseek-chat",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_usd=Decimal("0.000010"),
+        latency_ms=100,
+        status="ok",
+        source_id=sid,
+    )
+
+    with connection() as c:
+        got = c.execute(
+            text("SELECT source_id FROM llm_calls WHERE id = :id"), {"id": row_id}
+        ).scalar()
+    assert got == sid
+
+
+def test_record_llm_call_source_id_defaults_null(seed_source: dict[str, Any]) -> None:
+    uid = int(seed_source["user_id"])
+
+    row_id = record_llm_call(
+        user_id=uid,
+        purpose="calendar_dedup",
+        model="deepseek-chat",
+        prompt_tokens=10,
+        completion_tokens=5,
+        cost_usd=Decimal("0.000010"),
+        latency_ms=100,
+        status="ok",
+    )
+
+    with connection() as c:
+        got = c.execute(
+            text("SELECT source_id FROM llm_calls WHERE id = :id"), {"id": row_id}
+        ).scalar()
+    assert got is None
+
+
+def test_cost_by_source_record_and_log_fields() -> None:
+    cost = CostBySource()
+    cost.record(7, prompt_tokens=100, completion_tokens=50, cost_usd=Decimal("0.10"))
+    cost.record(7, prompt_tokens=10, completion_tokens=5, cost_usd=Decimal("0.01"))
+    cost.record(None, prompt_tokens=20, completion_tokens=10, cost_usd=Decimal("0.02"))
+
+    # Totales agregados.
+    assert cost.total.calls == 3
+    assert cost.total.prompt_tokens == 130
+    assert cost.total.completion_tokens == 65
+    assert cost.total.cost_usd == Decimal("0.13")
+
+    # Buckets por source.
+    assert cost.by_source[7].calls == 2
+    assert cost.by_source[7].cost_usd == Decimal("0.11")
+    assert cost.by_source[None].cost_usd == Decimal("0.02")
+
+    fields = cost.log_fields()
+    assert fields["llm_calls"] == 3
+    assert fields["llm_prompt_tokens"] == 130
+    assert fields["llm_completion_tokens"] == 65
+    assert fields["llm_cost_usd"] == "0.13"
+    # El bucket None se renderiza "sin_source"; el resto por id-string.
+    assert fields["llm_cost_by_source"] == {"7": "0.11", "sin_source": "0.02"}

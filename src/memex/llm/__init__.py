@@ -36,7 +36,14 @@ from memex.llm.client import (
 )
 from memex.llm.config import LLMConfig, LLMConfigError
 from memex.llm.deepseek import DeepSeekClient, DeepSeekError
-from memex.llm.pricing import MODEL_PRICING, ModelPricing, compute_cost
+from memex.llm.pricing import (
+    MODEL_PRICING,
+    ModelPricing,
+    PricingConfigError,
+    compute_cost,
+    is_off_peak,
+    load_pricing,
+)
 
 __all__ = [
     "MODEL_PRICING",
@@ -51,7 +58,10 @@ __all__ = [
     "LLMResult",
     "LLMUsage",
     "ModelPricing",
+    "PricingConfigError",
     "ResponseFormat",
     "Role",
     "compute_cost",
+    "is_off_peak",
+    "load_pricing",
 ]

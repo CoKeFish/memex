@@ -28,7 +28,7 @@ from sqlalchemy import text
 
 from memex.core.deadletter import STAGE_SUMMARIZE, not_in_review_sql, record_failures
 from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
-from memex.core.observability import record_llm_call
+from memex.core.observability import CostBySource, record_llm_call
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
 from memex.logging import get_logger
@@ -64,6 +64,8 @@ class SummarizeStats:
     skipped: int = 0
     errors: int = 0
     by_tier: dict[str, int] = field(default_factory=dict)
+    #: Costo LLM acumulado de la corrida (total + por source); se emite en `summarizer.run.end`.
+    cost: CostBySource = field(default_factory=CostBySource)
 
     def bump_tier(self, tier: str, messages: int) -> None:
         self.by_tier[tier] = self.by_tier.get(tier, 0) + 1
@@ -187,6 +189,7 @@ def _persist_summary(
 def _record_cost(
     user_id: int,
     window: Window,
+    stats: SummarizeStats,
     *,
     status: str,
     model: str,
@@ -205,8 +208,16 @@ def _record_cost(
         cost_usd=cost_usd,
         latency_ms=latency_ms,
         status=status,
+        source_id=window.source_id,  # atribución first-class por source
         error_message=error_message,
-        metadata={"source_id": window.source_id, "n": len(window.rows)},
+        metadata={"n": len(window.rows)},
+    )
+    # Acumular en memoria para el resumen por corrida (total + por source).
+    stats.cost.record(
+        window.source_id,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=cost_usd,
     )
 
 
@@ -237,6 +248,7 @@ async def _process_window(
         _record_cost(
             user_id,
             window,
+            stats,
             status="error",
             model=result.model,
             prompt_tokens=result.usage.prompt_tokens,
@@ -266,6 +278,7 @@ async def _process_window(
     _record_cost(
         user_id,
         window,
+        stats,
         status="ok",
         model=result.model,
         prompt_tokens=result.usage.prompt_tokens,
@@ -325,6 +338,7 @@ async def run_summarization(
                 _record_cost(
                     user_id,
                     window,
+                    stats,
                     status="error",
                     model="unknown",
                     prompt_tokens=0,
@@ -348,5 +362,6 @@ async def run_summarization(
         skipped=stats.skipped,
         errors=stats.errors,
         **{f"tier_{tier_name}": count for tier_name, count in stats.by_tier.items()},
+        **stats.cost.log_fields(),
     )
     return stats

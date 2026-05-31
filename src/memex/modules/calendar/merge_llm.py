@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from memex.core.observability import record_llm_call
+from memex.core.observability import CostAccum, record_llm_call
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.logging import get_logger
@@ -57,6 +57,9 @@ class MergeStats:
     merged: int = 0  # enriquecidos por el LLM (membresía nueva/cambiada)
     skipped: int = 0  # sin cambios desde el último merge (estables)
     errors: int = 0
+    #: Costo LLM acumulado. Calendar es source-less; el total bajo `calendar.merge.end`
+    #: atribuye el costo a calendar (visible, no perdido).
+    cost: CostAccum = field(default_factory=CostAccum)
 
 
 def _member_signature(winner_first: list[MergeMember]) -> str:
@@ -244,8 +247,15 @@ async def run_merge(
                 cost_usd=result.cost_usd,
                 latency_ms=result.latency_ms,
                 status="ok",
+                # El consolidado combina copias de varios sources → sin source; se
+                # identifica por purpose="calendar_merge".
+                source_id=None,
                 metadata={"cons_id": group.cons_id, "members": len(group.members)},
             )
+            stats.cost.calls += 1
+            stats.cost.prompt_tokens += result.usage.prompt_tokens
+            stats.cost.completion_tokens += result.usage.completion_tokens
+            stats.cost.cost_usd += result.cost_usd
             stats.merged += 1
     finally:
         if owns_client and isinstance(llm, DeepSeekClient):
@@ -258,5 +268,8 @@ async def run_merge(
         merged=stats.merged,
         skipped=stats.skipped,
         errors=stats.errors,
+        # Costo total de calendar (todo sin source); el evento calendar.* lo atribuye a calendar.
+        llm_calls=stats.cost.calls,
+        llm_cost_usd=str(stats.cost.cost_usd),
     )
     return stats
