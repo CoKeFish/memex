@@ -14,5 +14,37 @@ class Settings(BaseSettings):
     api_token: str = ""
     log_level: str = "INFO"
 
+    # --- Vault de credenciales (ver credentials-vault-architecture / ADR auth+vault) ---
+    # Llave maestra ÚNICA del servidor, global, configurada una sola vez (Doppler:
+    # MEMEX_SECRET_KEY). Envuelve un DEK por-usuario que cifra los secretos de los ingestors.
+    # NO es por-usuario; agregar usuarios no la toca. Recomendado: `openssl rand -base64 48`.
+    # Vacía → el vault no opera (el fallback env-var-by-name sigue), pero el API igual arranca.
+    secret_key: str = ""
+
+    # --- Sesiones / login del dashboard ---
+    session_ttl_seconds: int = 60 * 60 * 24 * 14  # 14 días
+    cookie_name: str = "memex_session"
+    # `Lax` (no `Strict`): el callback de OAuth es una navegación top-level GET que viene de Google
+    # (cross-site); con `Strict` el browser NO mandaría la cookie de sesión y el callback no podría
+    # validar al usuario. `Lax` la manda en navegaciones top-level GET y sigue bloqueándola en POST
+    # cross-site → CSRF en las mutaciones (POST) mitigado.
+    cookie_samesite: str = "lax"
+    # `Secure` exige HTTPS. En dev (Vite proxy sobre http) va False; en prod poner
+    # MEMEX_COOKIE_SECURE=true para que la cookie de sesión solo viaje por TLS.
+    cookie_secure: bool = False
+
+    # --- Parámetros Argon2id (hash de contraseña de login) ---
+    argon2_time_cost: int = 3
+    argon2_memory_cost: int = 65536  # 64 MiB
+    argon2_parallelism: int = 4
+
+    # --- OAuth web (botón "Conectar con Google") ---
+    # Base pública desde donde el browser llega al API, para armar el redirect_uri exacto que se
+    # registra en Google (ej. dev/túnel SSH: http://localhost:8787 ; VPS: https://<dominio>).
+    oauth_redirect_base_url: str = ""
+    # Ruta al client_secret.json del cliente OAuth tipo "Aplicación web" (identidad de la app, una
+    # sola, no per-usuario). Vacía → endpoints OAuth dan 503; el resto del dashboard sigue.
+    google_oauth_client_secret_json: str = ""
+
 
 settings = Settings()

@@ -46,7 +46,7 @@ implementations that ignore the cursor.
 from __future__ import annotations
 
 from builtins import type as _type
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -216,13 +216,24 @@ class Source(SourceContract, Protocol[CursorT]):
 class SourceFactory(Protocol):
     """Callable that builds a `Source` from a raw config dict.
 
-    Each ingestor module exports a `make_source(cfg)` function matching this
-    Protocol. The registry (`memex.sources.resolve`) returns one of these for
+    Each ingestor module exports a `make_source(cfg, env=None)` function matching
+    this Protocol. The registry (`memex.sources.resolve`) returns one of these for
     a given source type string.
+
+    `env` is an OPTIONAL resolved environment map. Server-side callers (fetch /
+    streaming) pass `memex.sources.resolver.build_resolved_env(...)`, which merges
+    `os.environ` with the account's decrypted vault secrets exposed under the SAME
+    env-var name the config references. The factory forwards it to
+    `Config.from_source_config(cfg, env)`. When `env is None` the ingestor resolves
+    from `os.environ` (the env-var-by-name fallback). The ingestor never learns
+    whether a secret came from the vault or from the process env — preserving the
+    ADR-001 isolation (decryption happens outside `memex.ingestors`).
 
     Returns `Source[Any]` because the factory is invoked behind a string-keyed
     registry — the caller (the runner) recovers the cursor type at runtime
     via `source.checkpoint_schema`.
     """
 
-    def __call__(self, cfg: dict[str, Any]) -> Source[Any]: ...
+    def __call__(
+        self, cfg: dict[str, Any], env: Mapping[str, str] | None = None
+    ) -> Source[Any]: ...

@@ -62,6 +62,9 @@ class ImapConfig(BaseModel):
     oauth_provider: str = ""
     oauth_client_secret_path: str = ""
     oauth_token_path: str = ""
+    # Token OAuth INLINE (self-contained: incl. client_id/secret/refresh_token). Lo inyecta el seam
+    # desde el vault (flujo web del dashboard). Si está presente, gana sobre el path en disco.
+    oauth_token_json: str = ""
 
     # Tunables.
     since_days: int = 7
@@ -90,6 +93,7 @@ class ImapConfig(BaseModel):
     password_env: str = ""
     oauth_client_secret_path_env: str = ""
     oauth_token_path_env: str = ""
+    oauth_token_env: str = ""
 
     def __repr__(self) -> str:
         return (
@@ -197,12 +201,25 @@ class ImapConfig(BaseModel):
                 f"Known: {oauth_registry.known_providers()}"
             )
 
+        # Token INLINE (vault, flujo web): self-contained → no necesita client_secret en disco.
+        # Gana sobre el path legacy. El seam lo inyecta bajo el env var de `oauth_token_env`.
+        token_env_inline = cfg.get("oauth_token_env")
+        if token_env_inline:
+            oauth_token_json = _require_env(env_map, str(token_env_inline))
+            return cls(
+                **common_kwargs,
+                oauth_provider=provider_str,
+                oauth_token_json=oauth_token_json,
+                oauth_token_env=str(token_env_inline),
+            )
+
+        # Legacy file-based (flujo CLI `authorize`): client_secret.json + token.json en disco.
         cs_env = cfg.get("oauth_client_secret_path_env")
         token_env = cfg.get("oauth_token_path_env")
         if not cs_env or not token_env:
             raise ImapConfigError(
-                "auth='oauth2' requires 'oauth_client_secret_path_env' and "
-                "'oauth_token_path_env' in sources.config."
+                "auth='oauth2' requires 'oauth_token_env' (vault) OR both file envs "
+                "('oauth_client_secret_path_env' + 'oauth_token_path_env')."
             )
         client_secret_path = _require_env(env_map, str(cs_env))
         token_path = _require_env(env_map, str(token_env))

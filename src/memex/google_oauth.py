@@ -20,11 +20,18 @@ POSIX; Windows lo ignora), nunca en la DB (ADR-015 §7). Las libs de google-auth
 from __future__ import annotations
 
 import contextlib
+import json
+import os
 from pathlib import Path
 
+import httpx
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
+from google_auth_oauthlib.flow import Flow, InstalledAppFlow  # type: ignore[import-untyped]
+
+# Google puede devolver scopes ADICIONALES ya concedidos antes (include_granted_scopes); sin esto
+# oauthlib trata el "scope cambió" como error. Relajarlo es lo estándar/recomendado para ese caso.
+os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
 #: Gmail IMAP requiere el scope full mail ("https://mail.google.com/"); el ".readonly" solo sirve
 #: para la REST API de Gmail, no para XOAUTH2 — es una restricción de Google, no una elección.
@@ -109,3 +116,102 @@ def save_credentials(creds: Credentials, token_path: str | Path) -> None:
     with contextlib.suppress(OSError):
         # Best-effort tighten en POSIX; Windows lanza y lo ignoramos.
         path.chmod(0o600)
+
+
+# ----- Flujo WEB (Authorization Code) para el botón del dashboard ----------- #
+# A diferencia del Desktop/CLI de arriba, NO toca disco: el token se devuelve como JSON y lo guarda
+# el caller en el vault; el access_token se refresca en memoria al usarlo.
+
+
+def build_web_flow(
+    *,
+    client_secret_path: str | Path,
+    redirect_uri: str,
+    state: str | None = None,
+    scopes: list[str] | None = None,
+    code_verifier: str | None = None,
+) -> Flow:
+    """Arma un `Flow` web desde el client_secret.json. Si se pasa `code_verifier` (PKCE) lo fija en
+    vez de autogenerar (para que el callback intercambie con el MISMO verifier)."""
+    cs_path = Path(client_secret_path)
+    if not cs_path.exists():
+        raise GoogleOAuthError(f"client_secret file not found: {cs_path}")
+    extra: dict[str, object] = {}
+    if code_verifier is not None:
+        extra["code_verifier"] = code_verifier
+        extra["autogenerate_code_verifier"] = False
+    flow = Flow.from_client_secrets_file(
+        str(cs_path), scopes=scopes or GOOGLE_OAUTH_SCOPES, state=state, **extra
+    )
+    flow.redirect_uri = redirect_uri
+    return flow
+
+
+def start_authorization(
+    *, client_secret_path: str | Path, redirect_uri: str, state: str
+) -> tuple[str, str]:
+    """Devuelve `(authorization_url, code_verifier)`. El `code_verifier` (PKCE) lo guarda el caller
+    server-side y lo vuelve a pasar en `complete_exchange` (NUNCA va en la URL). offline +
+    prompt=consent garantizan refresh_token."""
+    flow = build_web_flow(
+        client_secret_path=client_secret_path, redirect_uri=redirect_uri, state=state
+    )
+    url, _state = flow.authorization_url(
+        access_type="offline", include_granted_scopes="true", prompt="consent"
+    )
+    return str(url), str(flow.code_verifier)
+
+
+def complete_exchange(
+    *, client_secret_path: str | Path, redirect_uri: str, state: str, code: str, code_verifier: str
+) -> str:
+    """Intercambia el `code` (con el MISMO `code_verifier` del start) → JSON de credenciales."""
+    flow = build_web_flow(
+        client_secret_path=client_secret_path,
+        redirect_uri=redirect_uri,
+        state=state,
+        code_verifier=code_verifier,
+    )
+    try:
+        flow.fetch_token(code=code)
+    except Exception as e:
+        raise GoogleOAuthError(f"token exchange failed: {e}") from e
+    return str(flow.credentials.to_json())
+
+
+def access_token_from_json(token_json: str, scopes: list[str] | None = None) -> str:
+    """Carga credenciales del JSON (vault), refresca en memoria si hace falta, devuelve el token."""
+    try:
+        info = json.loads(token_json)
+        creds = Credentials.from_authorized_user_info(info, scopes or GOOGLE_OAUTH_SCOPES)
+    except Exception as e:
+        raise GoogleOAuthError(f"invalid token json: {e}") from e
+    if not creds.valid:
+        if not (creds.expired and creds.refresh_token):
+            raise GoogleOAuthError(
+                "OAuth token inválido y sin refresh_token; re-conectá con Google."
+            )
+        try:
+            creds.refresh(Request())
+        except Exception as e:
+            raise GoogleOAuthError(f"token refresh failed: {e}") from e
+    if not creds.token:
+        raise GoogleOAuthError("no access_token after refresh")
+    return str(creds.token)
+
+
+def gmail_address(access_token: str) -> str:
+    """Email de la cuenta vía Gmail profile API (usa el scope Gmail que ya tenemos; sin openid)."""
+    try:
+        resp = httpx.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        email = resp.json().get("emailAddress")
+    except Exception as e:
+        raise GoogleOAuthError(f"failed to fetch Gmail address: {e}") from e
+    if not email:
+        raise GoogleOAuthError("Gmail profile had no emailAddress")
+    return str(email)

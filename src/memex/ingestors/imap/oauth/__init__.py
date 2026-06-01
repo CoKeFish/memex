@@ -49,6 +49,13 @@ class OAuthProvider(Protocol):
         """Load tokens from disk, refresh if needed, return a fresh access_token string."""
         ...
 
+    def get_access_token_from_json(self, *, token_json: str) -> str:
+        """Como `get_access_token` pero desde un JSON del vault (self-contained). No toca disco.
+
+        Lo usa el flujo web del dashboard, que guarda el token cifrado en el vault.
+        """
+        ...
+
 
 def _google_loader() -> OAuthProvider:
     from memex.ingestors.imap.oauth.google import GoogleOAuthProvider

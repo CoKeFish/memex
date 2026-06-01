@@ -55,3 +55,10 @@ class GoogleOAuthProvider:
             return google_oauth.get_access_token(token_path=token_path, scopes=GMAIL_IMAP_SCOPES)
         except google_oauth.GoogleOAuthError as e:
             raise OAuthError(str(e)) from e
+
+    def get_access_token_from_json(self, *, token_json: str) -> str:
+        """Carga el token del JSON (vault), refresca en memoria, devuelve el access_token."""
+        try:
+            return google_oauth.access_token_from_json(token_json, scopes=GMAIL_IMAP_SCOPES)
+        except google_oauth.GoogleOAuthError as e:
+            raise OAuthError(str(e)) from e

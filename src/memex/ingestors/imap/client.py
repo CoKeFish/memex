@@ -41,7 +41,13 @@ class ImapClient(AbstractContextManager["ImapClient"]):
             self._mailbox = mb.login(self.cfg.username, self.cfg.password)
         elif self.cfg.auth_method == "oauth2":
             provider = oauth.resolve(self.cfg.oauth_provider)
-            access_token = provider.get_access_token(token_path=self.cfg.oauth_token_path)
+            if self.cfg.oauth_token_json:
+                # Token inline del vault (flujo web): self-contained, refresh en memoria, sin disco.
+                access_token = provider.get_access_token_from_json(
+                    token_json=self.cfg.oauth_token_json
+                )
+            else:
+                access_token = provider.get_access_token(token_path=self.cfg.oauth_token_path)
             self._mailbox = mb.xoauth2(self.cfg.username, access_token)
         else:
             raise RuntimeError(f"unsupported auth_method: {self.cfg.auth_method!r}")

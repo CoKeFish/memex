@@ -5,6 +5,8 @@ from fastapi import FastAPI
 
 from memex.api.middleware import RequestContextMiddleware
 from memex.api.routers import (
+    accounts,
+    auth,
     feedback,
     filters,
     gateway,
@@ -12,6 +14,7 @@ from memex.api.routers import (
     inbox,
     ingest,
     media,
+    oauth,
     sources,
 )
 from memex.api.streaming import build_streaming_runner
@@ -50,6 +53,9 @@ app = FastAPI(
 app.add_middleware(RequestContextMiddleware)
 
 app.include_router(health.router)
+app.include_router(auth.router)
+app.include_router(accounts.router)
+app.include_router(oauth.router)
 app.include_router(ingest.router)
 app.include_router(inbox.router)
 app.include_router(sources.router)

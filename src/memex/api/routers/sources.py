@@ -9,7 +9,13 @@ from starlette.concurrency import run_in_threadpool
 from memex import sources as source_registry
 from memex.api.auth import current_user_id
 from memex.api.inprocess_sink import DryRunSink, InProcessSink
-from memex.api.schemas import CheckpointBody, FetchResponse, SourceCreate, SourceRow
+from memex.api.schemas import (
+    CheckpointBody,
+    FetchResponse,
+    SourceCreate,
+    SourcePatch,
+    SourceRow,
+)
 from memex.core import checkpoint
 from memex.core.observability import ingestion_run
 from memex.core.sink import MemexSink
@@ -17,6 +23,7 @@ from memex.core.source import SourceConfigError
 from memex.db import connection
 from memex.ingestors.runner import RunStats, run_ingestor
 from memex.logging import get_logger
+from memex.sources.resolver import build_resolved_env
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
@@ -41,8 +48,10 @@ async def list_sources(user_id: UserID) -> list[dict[str, Any]]:
             conn.execute(
                 text(
                     """
-                    SELECT id, user_id, name, type, enabled, config, created_at
-                    FROM sources WHERE user_id = :uid ORDER BY id
+                    SELECT s.id, s.user_id, s.name, s.type, s.enabled, s.config, s.created_at,
+                           s.account_id, a.alias AS account_alias
+                    FROM sources s LEFT JOIN accounts a ON a.id = s.account_id
+                    WHERE s.user_id = :uid ORDER BY s.id
                     """
                 ),
                 {"uid": user_id},
@@ -153,6 +162,49 @@ async def ensure_source(body: SourceCreate, user_id: UserID) -> dict[str, Any]:
     return dict(row)
 
 
+@router.patch("/{source_id}", response_model=SourceRow)
+async def patch_source(source_id: int, body: SourcePatch, user_id: UserID) -> dict[str, Any]:
+    """Edición parcial: vincular/desvincular a una cuenta (`account_id`) y/o togglear `enabled`."""
+    fields = body.model_dump(exclude_unset=True)
+    sets: list[str] = []
+    params: dict[str, Any] = {"sid": source_id}
+    with connection() as conn:
+        _assert_owns_source(conn, user_id, source_id)
+        if "account_id" in fields:
+            target = fields["account_id"]
+            if target is not None:
+                owner = conn.execute(
+                    text("SELECT user_id FROM accounts WHERE id = :aid"), {"aid": target}
+                ).scalar()
+                if owner != user_id:
+                    raise HTTPException(status_code=404, detail="account not found")
+            sets.append("account_id = :account_id")
+            params["account_id"] = target
+        if "enabled" in fields:
+            sets.append("enabled = :enabled")
+            params["enabled"] = fields["enabled"]
+        if sets:
+            conn.execute(text(f"UPDATE sources SET {', '.join(sets)} WHERE id = :sid"), params)
+        row = (
+            conn.execute(
+                text(
+                    """
+                    SELECT s.id, s.user_id, s.name, s.type, s.enabled, s.config, s.created_at,
+                           s.account_id, a.alias AS account_alias
+                    FROM sources s LEFT JOIN accounts a ON a.id = s.account_id
+                    WHERE s.id = :sid
+                    """
+                ),
+                {"sid": source_id},
+            )
+            .mappings()
+            .first()
+        )
+    assert row is not None
+    _log.info("sources.patched", user_id=user_id, source_id=source_id, fields=list(fields.keys()))
+    return dict(row)
+
+
 @router.get("/{source_id}/checkpoint")
 async def get_checkpoint(source_id: int, user_id: UserID) -> dict[str, Any]:
     with connection() as conn:
@@ -215,14 +267,36 @@ async def fetch_source(
         _assert_owns_source(conn, user_id, source_id)
         row = (
             conn.execute(
-                text("SELECT type, config FROM sources WHERE id = :sid"),
+                text("SELECT type, config, account_id FROM sources WHERE id = :sid"),
                 {"sid": source_id},
             )
             .mappings()
             .first()
         )
-    assert row is not None
-    source_type = str(row["type"])
+        assert row is not None
+        source_type = str(row["type"])
+
+        # Override transitorio de la ventana de fetch (no se persiste en sources.config).
+        cfg = dict(row["config"] or {})
+        if mode != "incremental":
+            cfg["fetch_mode"] = mode
+            if since:
+                cfg["fetch_since"] = since
+            if until:
+                cfg["fetch_until"] = until
+            if limit is not None:
+                cfg["fetch_limit"] = limit
+
+        # Inyecta los secretos del vault de la cuenta (si hay) bajo el nombre de su env var.
+        # Usa la master key del servidor → funciona sin sesión. Fallback a os.environ si no hay.
+        resolved_env = build_resolved_env(
+            conn,
+            user_id=user_id,
+            source_type=source_type,
+            cfg=cfg,
+            account_id=row["account_id"],
+        )
+
     try:
         factory = source_registry.resolve(source_type)
     except KeyError as e:
@@ -230,19 +304,8 @@ async def fetch_source(
             status_code=422,
             detail=f"source type {source_type!r} no se puede traer desde el server (sin ingestor)",
         ) from e
-
-    # Override transitorio de la ventana de fetch (no se persiste en sources.config).
-    cfg = dict(row["config"] or {})
-    if mode != "incremental":
-        cfg["fetch_mode"] = mode
-        if since:
-            cfg["fetch_since"] = since
-        if until:
-            cfg["fetch_until"] = until
-        if limit is not None:
-            cfg["fetch_limit"] = limit
     try:
-        source = factory(cfg)
+        source = factory(cfg, env=resolved_env)
     except SourceConfigError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 

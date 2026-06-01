@@ -41,7 +41,7 @@ async function handle<T>(res: Response): Promise<T> {
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
-  return handle<T>(await fetch(`${BASE}${path}`, { headers: buildHeaders() }))
+  return handle<T>(await fetch(`${BASE}${path}`, { credentials: "include", headers: buildHeaders() }))
 }
 
 /**
@@ -50,7 +50,7 @@ export async function apiGet<T>(path: string): Promise<T> {
  * envuelve el blob en un object URL.
  */
 export async function apiGetBlob(path: string): Promise<Blob> {
-  const res = await fetch(`${BASE}${path}`, { headers: buildHeaders() })
+  const res = await fetch(`${BASE}${path}`, { credentials: "include", headers: buildHeaders() })
   if (!res.ok) {
     let detail = res.statusText
     try {
@@ -74,6 +74,7 @@ export async function apiPost<T>(
   return handle<T>(
     await fetch(`${BASE}${path}`, {
       method: "POST",
+      credentials: "include",
       headers: buildHeaders(extra),
       body: body === undefined ? undefined : JSON.stringify(body),
     }),
@@ -84,6 +85,7 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   return handle<T>(
     await fetch(`${BASE}${path}`, {
       method: "PATCH",
+      credentials: "include",
       headers: buildHeaders(),
       body: body === undefined ? undefined : JSON.stringify(body),
     }),
@@ -91,5 +93,11 @@ export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
 }
 
 export async function apiDelete<T>(path: string): Promise<T> {
-  return handle<T>(await fetch(`${BASE}${path}`, { method: "DELETE", headers: buildHeaders() }))
+  return handle<T>(
+    await fetch(`${BASE}${path}`, {
+      method: "DELETE",
+      credentials: "include",
+      headers: buildHeaders(),
+    }),
+  )
 }

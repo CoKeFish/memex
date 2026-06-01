@@ -22,6 +22,8 @@ dependencies = [
     "telethon>=1.38,<2",
     "pymupdf>=1.24",
     "pyzipper>=0.4.0",
+    "cryptography>=44",
+    "argon2-cffi>=23",
 ]
 
 [dependency-groups]

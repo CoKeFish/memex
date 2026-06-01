@@ -26,7 +26,7 @@ polling y streaming para evitar dos copias divergentes.
 from __future__ import annotations
 
 from builtins import type as _type
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, ClassVar
 
 from pydantic import BaseModel
@@ -114,11 +114,12 @@ class TelegramSource:
         return advance_telegram_checkpoint(checkpoint, last)
 
 
-def make_source(cfg: dict[str, Any]) -> Source[Any]:
+def make_source(cfg: dict[str, Any], env: Mapping[str, str] | None = None) -> Source[Any]:
     """SourceFactory para Telegram — valida config dict y retorna `TelegramSource`.
 
     Matchea el Protocol `SourceFactory`; lo que el registry devuelve cuando
-    `resolve("telegram")` es invocado.
+    `resolve("telegram")` es invocado. `env` (secretos resueltos del vault, o None
+    para el fallback os.environ) se pasa a `TelegramConfig.from_source_config`.
     """
-    tg_cfg = TelegramConfig.from_source_config(cfg)
+    tg_cfg = TelegramConfig.from_source_config(cfg, env)
     return TelegramSource(tg_cfg)

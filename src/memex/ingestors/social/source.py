@@ -17,7 +17,7 @@ Cumplen el contrato `Source[CursorT]`:
 from __future__ import annotations
 
 from builtins import type as _type
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, ClassVar
 
 from pydantic import BaseModel
@@ -149,16 +149,16 @@ class XSource:
         return advance_social_checkpoint(checkpoint, last)
 
 
-def make_instagram_source(cfg: dict[str, Any]) -> Source[Any]:
+def make_instagram_source(cfg: dict[str, Any], env: Mapping[str, str] | None = None) -> Source[Any]:
     """SourceFactory para Instagram — valida config dict y retorna `InstagramSource`."""
-    return InstagramSource(SocialConfig.from_source_config(cfg, platform="instagram"))
+    return InstagramSource(SocialConfig.from_source_config(cfg, env, platform="instagram"))
 
 
-def make_facebook_source(cfg: dict[str, Any]) -> Source[Any]:
+def make_facebook_source(cfg: dict[str, Any], env: Mapping[str, str] | None = None) -> Source[Any]:
     """SourceFactory para Facebook — valida config dict y retorna `FacebookSource`."""
-    return FacebookSource(SocialConfig.from_source_config(cfg, platform="facebook"))
+    return FacebookSource(SocialConfig.from_source_config(cfg, env, platform="facebook"))
 
 
-def make_x_source(cfg: dict[str, Any]) -> Source[Any]:
+def make_x_source(cfg: dict[str, Any], env: Mapping[str, str] | None = None) -> Source[Any]:
     """SourceFactory para X — valida config dict y retorna `XSource`."""
-    return XSource(SocialConfig.from_source_config(cfg, platform="x"))
+    return XSource(SocialConfig.from_source_config(cfg, env, platform="x"))

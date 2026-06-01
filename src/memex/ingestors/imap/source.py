@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from builtins import type as _type
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Literal, Protocol
 
@@ -173,11 +173,12 @@ class ImapSource:
         )
 
 
-def make_source(cfg: dict[str, Any]) -> Source[Any]:
+def make_source(cfg: dict[str, Any], env: Mapping[str, str] | None = None) -> Source[Any]:
     """SourceFactory for IMAP — validates config dict and returns an ImapSource.
 
     Matches the `SourceFactory` Protocol; this is what the registry returns when
-    `resolve("imap")` is called.
+    `resolve("imap")` is called. `env` (resolved secrets from the vault, or None
+    for the os.environ fallback) is forwarded to `ImapConfig.from_source_config`.
     """
-    imap_cfg = ImapConfig.from_source_config(cfg)
+    imap_cfg = ImapConfig.from_source_config(cfg, env)
     return ImapSource(imap_cfg)

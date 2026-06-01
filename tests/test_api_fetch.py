@@ -53,7 +53,7 @@ def patch_source(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     def install(eids: list[str]) -> None:
         stub = _StubSource([_record(e) for e in eids])
-        monkeypatch.setattr("memex.sources.resolve", lambda _t: lambda _cfg: stub)
+        monkeypatch.setattr("memex.sources.resolve", lambda _t: lambda _cfg, env=None: stub)
 
     return install
 

@@ -41,3 +41,8 @@ class MicrosoftOAuthProvider:
         token_path: str | Path,
     ) -> str:
         raise NotImplementedError("MicrosoftOAuthProvider.get_access_token no implementado.")
+
+    def get_access_token_from_json(self, *, token_json: str) -> str:
+        raise NotImplementedError(
+            "MicrosoftOAuthProvider.get_access_token_from_json no implementado."
+        )

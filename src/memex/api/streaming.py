@@ -35,6 +35,7 @@ from memex.db import connection
 from memex.ingestors.telegram.config import TelegramConfig
 from memex.ingestors.telegram.streaming import TelegramStreamingSource
 from memex.logging import get_logger
+from memex.sources.resolver import build_resolved_env
 
 _log = get_logger("memex.api.streaming")
 
@@ -65,7 +66,10 @@ def _collect_telegram_streaming_sources() -> list[RegisteredStreamingSource]:
     with connection() as conn:
         rows = (
             conn.execute(
-                text("SELECT id, user_id, config FROM sources WHERE type = 'telegram' AND enabled")
+                text(
+                    "SELECT id, user_id, config, account_id "
+                    "FROM sources WHERE type = 'telegram' AND enabled"
+                )
             )
             .mappings()
             .all()
@@ -76,8 +80,17 @@ def _collect_telegram_streaming_sources() -> list[RegisteredStreamingSource]:
         source_id = int(row["id"])
         user_id = int(row["user_id"])
         cfg_dict = row["config"] or {}
+        # Inyecta los secretos del vault de la cuenta (master key del servidor → corre sin sesión).
+        with connection() as conn:
+            resolved_env = build_resolved_env(
+                conn,
+                user_id=user_id,
+                source_type="telegram",
+                cfg=cfg_dict,
+                account_id=row["account_id"],
+            )
         try:
-            tg_cfg = TelegramConfig.from_source_config(cfg_dict)
+            tg_cfg = TelegramConfig.from_source_config(cfg_dict, resolved_env)
         except SourceConfigError as e:
             _log.error(
                 "streaming.bootstrap.config_invalid",

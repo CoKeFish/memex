@@ -331,6 +331,9 @@ class SourceRow(BaseModel):
     enabled: bool
     config: dict[str, Any]
     created_at: datetime
+    # Cuenta vinculada (0018). Optional/default para back-compat de SELECTs que no la traen.
+    account_id: int | None = None
+    account_alias: str | None = None
 
 
 class CheckpointBody(BaseModel):
@@ -352,3 +355,91 @@ class FetchResponse(BaseModel):
     filtered: int
     dry_run: bool
     ms_elapsed: int
+
+
+class SourcePatch(BaseModel):
+    """Edición parcial de una source. Usar `model_fields_set` para saber qué se setea."""
+
+    account_id: int | None = None
+    enabled: bool | None = None
+
+
+# ----- Auth / login (0018) -------------------------------------------------- #
+
+
+class SignupRequest(BaseModel):
+    email: str
+    password: str = Field(min_length=8)
+    display_name: str | None = None
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
+class MeResponse(BaseModel):
+    user_id: int
+    email: str
+    display_name: str | None = None
+    auth_enforced: bool
+
+
+# ----- Cuentas + credenciales (0018) --------------------------------------- #
+
+
+class CredentialStatus(BaseModel):
+    """Estado de un secreto SIN exponer el valor (solo máscara)."""
+
+    secret_name: str
+    configured: bool
+    last4: str
+
+
+class AccountCreate(BaseModel):
+    alias: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    kind: Literal["email", "chat", "social"]
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AccountPatch(BaseModel):
+    alias: str | None = None
+    enabled: bool | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class AccountRow(BaseModel):
+    id: int
+    user_id: int
+    alias: str
+    provider: str
+    kind: str
+    metadata: dict[str, Any]
+    enabled: bool
+    health_status: str
+    last_health_check_at: datetime | None = None
+    created_at: datetime
+    secrets: list[CredentialStatus] = Field(default_factory=list)
+
+
+class CredentialSet(BaseModel):
+    """Entrada de una credencial. `value` es plaintext: se cifra ya y NUNCA se devuelve/loguea."""
+
+    secret_name: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+
+
+class HealthCheckResponse(BaseModel):
+    status: str
+    detail: str
+    checked_at: datetime
+
+
+class OAuthStartResponse(BaseModel):
+    authorization_url: str

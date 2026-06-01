@@ -1,3 +1,4 @@
+import { AccountsManager } from "@/components/features/account/accounts-manager"
 import { PageHeader } from "@/components/common/page-header"
 import {
   ApiAccessPanel,
@@ -18,6 +19,7 @@ export function AccountPage() {
         description="Quién sos en el sistema, cómo se autentican el API y el CLI, y qué cuentas externas están conectadas. Todos los secretos van enmascarados (la DB nunca guarda el token, solo el nombre de su env var)."
       />
       <div className="grid gap-5 lg:grid-cols-2">
+        <AccountsManager />
         <IdentityPanel identity={a.identity} />
         <CliAccessPanel cli={a.cli} />
         <ApiAccessPanel api={a.api} />
