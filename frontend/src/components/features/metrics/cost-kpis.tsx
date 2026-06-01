@@ -1,36 +1,43 @@
 import { KpiCard } from "@/components/common/kpi-card"
-import { CardsSkeleton, Stateful } from "@/components/common/data-state"
-import { EmptyState } from "@/components/common/data-state"
 import { Delta } from "@/components/common/stat"
-import { formatCompact, formatInt, formatUsd, formatUsdFine } from "@/lib/format"
-import { costDaily, costKpis } from "@/data"
-import { useTimeRange } from "@/state/time-range"
+import { formatCompact, formatInt, formatPct, formatUsd, formatUsdFine } from "@/lib/format"
+import type { DailyCost, LlmKpis } from "@/data"
 
-export function CostKpis() {
-  const { range } = useTimeRange()
-  const k = costKpis(range)
-  const daily = costDaily(range)
+/** Variación vs el periodo anterior (solo si hay base previa > 0). */
+function deltaPct(k: LlmKpis): number | null {
+  if (k.prevCostUsd === null || k.prevCostUsd <= 0) return null
+  return (k.costUsd - k.prevCostUsd) / k.prevCostUsd
+}
+
+export function CostKpis({ kpis, daily }: { kpis: LlmKpis; daily: DailyCost[] }) {
   const totals = daily.map((d) => d.total)
-
   return (
-    <Stateful
-      skeleton={<CardsSkeleton count={4} />}
-      empty={<EmptyState title="Sin llamadas LLM en el rango" hint="Ningún worker corrió todavía en esta ventana." />}
-      errorDetail="HTTP 500 — GET /metrics/llm-cost falló"
-    >
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <KpiCard
-          eyebrow="Costo LLM · rango"
-          value={formatUsd(k.cost)}
-          delta={<Delta value={k.deltaPct} />}
-          sparkData={totals}
-          accent
-          footer={`exacto ${formatUsdFine(k.cost)}`}
-        />
-        <KpiCard eyebrow="Llamadas" value={formatInt(k.calls)} footer="suma sobre llm_calls" />
-        <KpiCard eyebrow="Tokens" value={formatCompact(k.tokens)} footer="prompt + completion" />
-        <KpiCard eyebrow="Costo / llamada" value={formatUsd(k.avgCost)} footer="promedio del rango" />
-      </div>
-    </Stateful>
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+      <KpiCard
+        eyebrow="Costo LLM · rango"
+        value={formatUsd(kpis.costUsd)}
+        delta={<Delta value={deltaPct(kpis)} />}
+        sparkData={totals}
+        accent
+        footer={`exacto ${formatUsdFine(kpis.costUsd)}`}
+      />
+      <KpiCard eyebrow="Llamadas" value={formatInt(kpis.calls)} footer="filas en llm_calls" />
+      <KpiCard
+        eyebrow="Tokens"
+        value={formatCompact(kpis.promptTokens + kpis.completionTokens)}
+        footer="prompt + completion"
+      />
+      <KpiCard
+        eyebrow="Cache-hit"
+        value={formatPct(kpis.cacheHitRatio, 0)}
+        footer={`${formatCompact(kpis.cacheHitTokens)} tok desde cache`}
+      />
+      <KpiCard eyebrow="Costo / llamada" value={formatUsd(kpis.avgCostUsd)} footer="promedio del rango" />
+      <KpiCard
+        eyebrow="Errores"
+        value={formatInt(kpis.errors)}
+        footer={kpis.calls ? `${formatPct(kpis.errors / kpis.calls, 0)} de las llamadas` : "—"}
+      />
+    </div>
   )
 }

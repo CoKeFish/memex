@@ -10,13 +10,16 @@ export * from "./email"
 // ---- Filtros (filter_rules, datos reales) -------------------------------------
 export * from "./filters"
 
+// ---- Métricas de costo LLM (datos reales contra la API) -----------------------
+export * from "./metrics"
+// Catálogo de módulos (etiquetas/colores) — el corte por módulo lo agrega el backend.
+export { MODULES, moduleChart, moduleLabel } from "@/lib/metrics"
+
 // ---- Selectores de agregación (mock) ------------------------------------------
+// Nota: los selectores de costo LLM (costKpis/costDaily/costBy*/callsInRange) se RETIRARON del
+// facade: la vista /metricas ahora consume `./metrics` (API real). Siguen viviendo en lib/selectors
+// para los mocks, pero ya no se reexportan acá.
 export {
-  callsInRange,
-  costByModel,
-  costByPurpose,
-  costDaily,
-  costKpis,
   inboxErrorCount,
   inboxPendingCount,
   ingestionTotals,

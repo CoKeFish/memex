@@ -13,6 +13,7 @@ from memex.api.routers import (
     inbox,
     ingest,
     media,
+    metrics,
     sources,
 )
 from memex.api.streaming import build_streaming_runner
@@ -59,3 +60,4 @@ app.include_router(media.router)
 app.include_router(filters.router)
 app.include_router(feedback.router)
 app.include_router(finance.router)
+app.include_router(metrics.router)
