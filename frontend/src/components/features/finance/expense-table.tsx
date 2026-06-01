@@ -8,8 +8,8 @@ import { Button } from "@/components/ui/button"
 import { EmptyState, Stateful, TableSkeleton } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { formatDate, formatMoney } from "@/lib/format"
-import { CATEGORIES, CATEGORY_CHART, CATEGORY_LABEL, getFinanceExpenses } from "@/data"
-import type { ExpenseCategory } from "@/types/domain"
+import { CATEGORIES, CATEGORY_CHART, CATEGORY_LABEL } from "@/data"
+import type { ExpenseCategory, FinanceExpense } from "@/types/domain"
 
 const PAGE = 14
 
@@ -22,8 +22,8 @@ function CategoryChip({ category }: { category: ExpenseCategory }) {
   )
 }
 
-export function ExpenseTable({ currency }: { currency: string }) {
-  const all = useMemo(() => getFinanceExpenses().filter((e) => e.currency === currency), [currency])
+export function ExpenseTable({ expenses, currency }: { expenses: FinanceExpense[]; currency: string }) {
+  const all = useMemo(() => expenses.filter((e) => e.currency === currency), [expenses, currency])
   const [category, setCategory] = useState("all")
   const [query, setQuery] = useState("")
   const [sort, setSort] = useState<{ key: "occurredOn" | "amount"; dir: "asc" | "desc" }>({ key: "occurredOn", dir: "desc" })

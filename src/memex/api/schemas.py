@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -315,6 +315,137 @@ class StatsBySource(BaseModel):
 
 class InboxStats(BaseModel):
     sources: dict[int, StatsBySource]
+
+
+class FinanceExpenseRow(BaseModel):
+    """Un gasto extraído (fila de `mod_finance_expenses`).
+
+    Espeja `memex.modules.finance.schema.ExpenseItem` más las columnas de la tabla. `amount` cruza
+    como `float` (la DB es NUMERIC(14,2)) siguiendo la convención del repo para dinero en respuestas
+    (cf. `cost_usd`). `occurred_on` puede ser NULL cuando el LLM no pudo fechar el cargo.
+    """
+
+    id: int
+    amount: float
+    currency: str
+    category: str
+    merchant: str
+    occurred_on: date | None
+    description: str
+    evidence: str
+    source_inbox_ids: list[int]
+    created_at: datetime
+
+
+class FinanceExpenseList(BaseModel):
+    items: list[FinanceExpenseRow]
+    next_cursor: int | None = None
+
+
+# ---- Métricas de costo LLM (tabla `llm_calls`) --------------------------------------------------
+# La vista /metricas agrega server-side (GROUP BY) sobre llm_calls: cortes por fuente, por módulo
+# (de `purpose`), por modelo, matriz fuente x módulo y serie diaria. `untabulated` se deriva
+# de los datos (tokens>0 con cost_usd=0 → modelo sin precio tabulado, gasto silencioso a señalar).
+
+
+class LlmKpis(BaseModel):
+    """KPIs del rango: costo, llamadas, tokens, eficiencia de cache y errores."""
+
+    cost_usd: float
+    calls: int
+    prompt_tokens: int
+    completion_tokens: int
+    cache_hit_tokens: int
+    cache_hit_ratio: float  # cache_hit_tokens / prompt_tokens (0..1); 0 si no hay prompt tokens
+    avg_cost_usd: float
+    avg_latency_ms: float
+    errors: int
+    # Costo del periodo anterior de igual longitud (para la variación %); None si no hay `since`.
+    prev_cost_usd: float | None = None
+
+
+class LlmBySource(BaseModel):
+    """Costo por fuente. `source_id` None = bucket sin source; el label distingue (calendar)."""
+
+    source_id: int | None
+    source_name: str
+    calls: int
+    tokens: int
+    cost_usd: float
+
+
+class LlmByModule(BaseModel):
+    """Costo por módulo/etapa (derivado de `purpose`)."""
+
+    module: str
+    calls: int
+    tokens: int
+    cost_usd: float
+
+
+class LlmByModel(BaseModel):
+    """Costo por modelo. `untabulated` = tokens>0 pero cost_usd=0 (precio no tabulado)."""
+
+    model: str
+    calls: int
+    prompt_tokens: int
+    completion_tokens: int
+    cost_usd: float
+    untabulated: bool
+
+
+class LlmSourceModuleCell(BaseModel):
+    """Una celda de la matriz fuente x módulo."""
+
+    source_id: int | None
+    source_name: str
+    module: str
+    calls: int
+    cost_usd: float
+
+
+class LlmDailyPoint(BaseModel):
+    """Costo de un día, desglosado por módulo (sparse: el front rellena ceros)."""
+
+    day: str  # 'YYYY-MM-DD' en la TZ del bucket
+    total: float
+    by_module: dict[str, float]
+
+
+class LlmRollup(BaseModel):
+    kpis: LlmKpis
+    by_source: list[LlmBySource]
+    by_module: list[LlmByModule]
+    by_model: list[LlmByModel]
+    by_source_module: list[LlmSourceModuleCell]
+    daily: list[LlmDailyPoint]
+    # Keys de módulo presentes en el rango → series estables del área apilada en el front.
+    modules: list[str]
+
+
+class LlmCallRow(BaseModel):
+    """Una llamada cruda para la auditoría (módulo derivado de `purpose`)."""
+
+    id: int
+    created_at: datetime
+    purpose: str
+    module: str
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    cache_hit_tokens: int
+    cost_usd: float
+    latency_ms: int
+    status: str
+    error_message: str | None = None
+    inbox_id: int | None = None
+    source_id: int | None = None
+    source_name: str | None = None
+
+
+class LlmCallList(BaseModel):
+    items: list[LlmCallRow]
+    total: int
 
 
 class SourceCreate(BaseModel):

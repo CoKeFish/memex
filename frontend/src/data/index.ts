@@ -10,13 +10,16 @@ export * from "./email"
 // ---- Filtros (filter_rules, datos reales) -------------------------------------
 export * from "./filters"
 
+// ---- Métricas de costo LLM (datos reales contra la API) -----------------------
+export * from "./metrics"
+// Catálogo de módulos (etiquetas/colores) — el corte por módulo lo agrega el backend.
+export { MODULES, moduleChart, moduleLabel } from "@/lib/metrics"
+
 // ---- Selectores de agregación (mock) ------------------------------------------
+// Nota: los selectores de costo LLM (costKpis/costDaily/costBy*/callsInRange) se RETIRARON del
+// facade: la vista /metricas ahora consume `./metrics` (API real). Siguen viviendo en lib/selectors
+// para los mocks, pero ya no se reexportan acá.
 export {
-  callsInRange,
-  costByModel,
-  costByPurpose,
-  costDaily,
-  costKpis,
   inboxErrorCount,
   inboxPendingCount,
   ingestionTotals,
@@ -27,7 +30,9 @@ export {
   workerLatest,
 } from "@/lib/selectors"
 
-// ---- Finance (mock) -----------------------------------------------------------
+// ---- Finance (datos reales contra la API) -------------------------------------
+export * from "./finance"
+// Agregaciones puras (operan sobre los gastos que trae ./finance) + catálogo de categorías.
 export {
   CATEGORIES,
   CATEGORY_CHART,
@@ -56,7 +61,6 @@ import {
 } from "@/mocks/calendar"
 import { SOURCES } from "@/mocks/catalog"
 import { moduleSettings, schedulerEnabled, schedulerJobs } from "@/mocks/control"
-import { financeExpenses } from "@/mocks/finance"
 import { logEvents } from "@/mocks/logs"
 import { inbox, reviewItems, seedAlerts } from "@/mocks"
 import type {
@@ -66,7 +70,6 @@ import type {
   CalendarSyncRun,
   ConsolidatedEvent,
   DedupDecision,
-  FinanceExpense,
   InboxRow,
   LogEvent,
   ModuleSetting,
@@ -114,10 +117,6 @@ export function getCalendarSyncRuns(): CalendarSyncRun[] {
 
 export function getDedupDecisions(): DedupDecision[] {
   return dedupDecisions
-}
-
-export function getFinanceExpenses(): FinanceExpense[] {
-  return financeExpenses
 }
 
 // Controles de procesamiento (mock) — la página de procesamiento aún no migró a la API.

@@ -205,6 +205,7 @@ def record_llm_call(
     status: str,
     inbox_id: int | None = None,
     source_id: int | None = None,
+    cache_hit_tokens: int = 0,
     error_message: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> int:
@@ -244,12 +245,12 @@ def record_llm_call(
                 """
                 INSERT INTO llm_calls
                   (user_id, request_id, inbox_id, source_id, purpose, model,
-                   prompt_tokens, completion_tokens, cost_usd, latency_ms,
-                   status, error_message, metadata)
+                   prompt_tokens, completion_tokens, cache_hit_tokens, cost_usd,
+                   latency_ms, status, error_message, metadata)
                 VALUES
                   (:user_id, :request_id, :inbox_id, :source_id, :purpose, :model,
-                   :prompt_tokens, :completion_tokens, :cost_usd, :latency_ms,
-                   :status, :error_message, CAST(:metadata AS JSONB))
+                   :prompt_tokens, :completion_tokens, :cache_hit_tokens, :cost_usd,
+                   :latency_ms, :status, :error_message, CAST(:metadata AS JSONB))
                 RETURNING id
                 """
             ),
@@ -262,6 +263,7 @@ def record_llm_call(
                 "model": model,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
+                "cache_hit_tokens": cache_hit_tokens,
                 "cost_usd": str(cost_usd),
                 "latency_ms": latency_ms,
                 "status": status,
@@ -276,6 +278,7 @@ def record_llm_call(
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        cache_hit_tokens=cache_hit_tokens,
         cost_usd=str(cost_usd),
         latency_ms=latency_ms,
         status=status,
