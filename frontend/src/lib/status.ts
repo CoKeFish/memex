@@ -59,7 +59,7 @@ export const tierTone: Record<Tier, Tone> = {
 }
 
 export const tierLabel: Record<Tier, string> = {
-  blacklist: "Blacklist",
+  blacklist: "Lista negra",
   batch: "Lote",
   individual: "Individual",
 }
@@ -77,7 +77,7 @@ export function inboxStatus(row: {
   if (row.processError) return { tone: "error", label: "Error al procesar" }
   const tier = row.classification?.tier
   if (!tier) return { tone: "pending", label: "Sin clasificar" }
-  if (tier === "blacklist") return { tone: "filtered", label: "Ignorado (blacklist)" }
+  if (tier === "blacklist") return { tone: "filtered", label: "Ignorado (lista negra)" }
   if (row.summarized || row.extracted) return { tone: "ok", label: "Procesado" }
   return { tone: "review", label: "Clasificado · sin procesar" }
 }

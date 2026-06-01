@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react"
-import { useNavigate } from "react-router-dom"
+import { useNavigate, useSearchParams } from "react-router-dom"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { Inbox, Loader2, Search } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -25,9 +25,11 @@ type FeedItem =
 
 export function InboxFeed() {
   const navigate = useNavigate()
+  const [params] = useSearchParams()
   const { now } = useAutoRefresh()
   const [q, setQ] = useState("")
-  const [sourceId, setSourceId] = useState("all")
+  // Preselección por ?source= (atajo "Ver en datos" desde /carga); por defecto, todas.
+  const [sourceId, setSourceId] = useState(() => params.get("source") ?? "all")
 
   const { data: sources } = useAsync<Source[]>(() => fetchSources(), [])
   const { data: stats } = useAsync<{ sources: SourceStats }>(() => fetchInboxStats(), [])

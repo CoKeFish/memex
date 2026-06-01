@@ -62,9 +62,27 @@ export async function fetchSources(): Promise<Source[]> {
   return rows.map(toSource)
 }
 
-/** Solo fuentes de correo (imap) — las únicas que el server puede traer a demanda. */
+/** Solo fuentes de correo (imap). */
 export async function fetchEmailSources(): Promise<Source[]> {
   return (await fetchSources()).filter((s) => s.type === "imap")
+}
+
+/** Tipos de fuente que memex puede TRAER a demanda (tienen ingestor/factory). Espeja
+ * `_LAZY_FACTORIES` del backend (memex/sources). `outlook` NO está: es push-only (entra por el
+ * cliente local, no se puede pull-ear desde el dashboard). */
+export const PULLABLE_SOURCE_TYPES = new Set(["imap", "telegram", "instagram", "facebook", "x"])
+
+/** Fuentes que se pueden traer a demanda (cualquier tipo con ingestor), no solo correo. */
+export async function fetchPullableSources(): Promise<Source[]> {
+  return (await fetchSources()).filter((s) => PULLABLE_SOURCE_TYPES.has(s.type))
+}
+
+/** Checkpoint actual de una fuente (GET /sources/{id}/checkpoint). El cursor es libre por
+ * ingestor; para imap suele traer {uidvalidity, last_uid}. null si la fuente aún no trajo nada. */
+export async function fetchSourceCheckpoint(
+  sourceId: number,
+): Promise<{ cursor: Record<string, unknown> | null }> {
+  return apiGet<{ cursor: Record<string, unknown> | null }>(`/sources/${sourceId}/checkpoint`)
 }
 
 export interface FetchResult {

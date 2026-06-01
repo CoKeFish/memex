@@ -17,6 +17,9 @@ export interface SourceMeta {
   icon: LucideIcon
   /** clase de color (token de dominio) para el icono/acento de la fuente. */
   tone: string
+  /** Alias de la cuenta (p. ej. el email) para distinguir varias cuentas del mismo proveedor.
+   * "" cuando no se puede derivar. */
+  account: string
 }
 
 function titleize(s: string): string {
@@ -24,8 +27,25 @@ function titleize(s: string): string {
   return clean ? clean[0].toUpperCase() + clean.slice(1) : "Fuente"
 }
 
-/** Traduce una Source al par {etiqueta amigable, icono, acento} — nunca el nombre interno crudo. */
-export function sourceMeta(source?: Source): SourceMeta {
+/** Tokens de ruido en el nombre de la fuente que NO aportan al alias (protocolo, auth, genéricos). */
+const ALIAS_NOISE = new Set([
+  "imap", "imaps", "smtp", "pop", "pop3", "oauth", "oauth2", "basic", "auth", "ssl", "tls",
+  "mail", "email", "correo", "account", "cuenta",
+])
+
+/** Deriva un alias de cuenta legible a partir del NOMBRE de la fuente (nunca el email ni el slug
+ * crudo): quita ruido (imap/oauth/…) y el propio proveedor para no duplicar. El alias "real"
+ * editable por el usuario vivirá en la vista Cuenta (pendiente, ver backlog). */
+function accountAlias(source: Source | undefined, providerLabel: string): string {
+  const tokens = String(source?.name ?? "").split(/[\s_\-./]+/).filter(Boolean)
+  const noise = new Set([...ALIAS_NOISE, providerLabel.toLowerCase()])
+  const kept = tokens.filter((t) => !noise.has(t.toLowerCase()))
+  if (kept.length === 0) return ""
+  const alias = titleize(kept.join(" "))
+  return alias.toLowerCase() === providerLabel.toLowerCase() ? "" : alias
+}
+
+function baseSourceMeta(source?: Source): Omit<SourceMeta, "account"> {
   const cfg = rec(source?.config)
   const host = `${str(cfg.host)} ${str(cfg.server)}`.toLowerCase()
   const type = String(source?.type ?? "")
@@ -45,6 +65,20 @@ export function sourceMeta(source?: Source): SourceMeta {
   }
   if (type === "calendar") return { label: "Calendario", icon: CalendarDays, tone: "text-chart-3" }
   return { label: titleize(source?.name ?? type), icon: Webhook, tone: "text-muted-foreground" }
+}
+
+/** Traduce una Source a {etiqueta amigable de proveedor, icono, acento, alias de cuenta} — nunca
+ * el nombre interno crudo. */
+export function sourceMeta(source?: Source): SourceMeta {
+  const base = baseSourceMeta(source)
+  return { ...base, account: accountAlias(source, base.label) }
+}
+
+/** Etiqueta completa para selectores: "Gmail · roy@gmail.com" (proveedor · alias). Si no hay
+ * alias, solo el proveedor. */
+export function sourceFullLabel(source?: Source): string {
+  const { label, account } = sourceMeta(source)
+  return account ? `${label} · ${account}` : label
 }
 
 /** Limpia un cuerpo crudo de correo para un snippet amigable: sin URLs, sin separadores ASCII,

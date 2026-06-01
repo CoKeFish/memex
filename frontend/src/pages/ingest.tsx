@@ -9,21 +9,18 @@ export function IngestPage() {
       <PageHeader
         eyebrow="vista · carga"
         title="Carga / ingesta"
-        description="Traer correos a demanda (incremental por checkpoint hoy; por rango/cantidad cuando el ingestor lo soporte) e ingesta puntual. El dry-run muestra la idempotencia: los correos ya guardados se ignoran, no se duplican."
+        description="Traer datos a demanda (correo, Telegram, redes): incremental para todas; por rango o cantidad solo para correo. Más ingesta puntual. El dry-run muestra cuántos serían nuevos: lo ya guardado se ignora, no se duplica."
       />
-      <div className="grid gap-5 xl:grid-cols-2">
-        <FetchControl />
-        <AdHocIngest />
-      </div>
+      <FetchControl />
       <Panel>
-        <PanelHeader eyebrow="idempotencia" title="¿Cómo sabe si ya tiene el correo?" />
+        <PanelHeader eyebrow="duplicados" title="¿Cómo evita guardar el mismo correo dos veces?" />
         <PanelBody>
           <ul className="space-y-2 text-sm">
             {[
-              ["existe", "Al insertar: UNIQUE(source_id, external_id) + ON CONFLICT DO NOTHING → si el external_id (UID) ya está, no se inserta; cuenta como duplicate en ingestion_runs."],
-              ["existe", "Checkpoint por fuente (uidvalidity / last_uid) → el fetch incremental ni siquiera vuelve a bajar lo viejo."],
-              ["existe", "Downstream idempotente: classify/summarize/extract cursorean por AUSENCIA de fila (LEFT JOIN) + UNIQUE(inbox_id) / UNIQUE(module_slug, inbox_id) → no re-procesan lo ya hecho."],
-              ["gap", "No hay dedup por Message-ID: el MISMO correo llegando por dos cuentas/UIDs distintos entraría dos veces (distinto external_id)."],
+              ["existe", "Si un correo ya fue guardado, se ignora y no se vuelve a insertar (cuenta como duplicado)."],
+              ["existe", "Cada fuente recuerda hasta dónde trajo, así el modo incremental ni siquiera vuelve a descargar lo viejo."],
+              ["existe", "Las etapas siguientes (clasificar, resumir, extraer) tampoco repiten trabajo: saltan lo que ya procesaron."],
+              ["gap", "Límite conocido: el mismo correo que llega por dos cuentas distintas entra dos veces (no se detecta que es el mismo)."],
             ].map(([level, text], i) => (
               <li key={i} className="flex items-start gap-2.5">
                 <Led tone={level === "gap" ? "review" : "ok"} className="mt-1.5" />
@@ -33,6 +30,7 @@ export function IngestPage() {
           </ul>
         </PanelBody>
       </Panel>
+      <AdHocIngest />
     </div>
   )
 }
