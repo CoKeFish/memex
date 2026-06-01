@@ -150,6 +150,8 @@ interface InboxApiRow {
   process_error: string | null
   attempts: number
   classification?: { tier: string; metadata?: Record<string, unknown> | null } | null
+  summarized?: boolean
+  extracted?: boolean
   summary?: { id?: number | null; tier: string; content: string; created_at?: string | null } | null
   extraction?: InboxExtraction | null
   llm?: {
@@ -249,6 +251,8 @@ function toInboxRow(r: InboxApiRow): InboxRow {
     attempts: r.attempts,
     ocrText: ocrText || undefined,
     classification: r.classification ?? null,
+    summarized: r.summarized ?? false,
+    extracted: r.extracted ?? false,
     summary: r.summary
       ? { id: r.summary.id ?? null, tier: r.summary.tier, content: r.summary.content, createdAt: r.summary.created_at ?? null }
       : null,

@@ -187,45 +187,40 @@ function RealDetail({ row, onProcessed }: { row: InboxRow; onProcessed: () => vo
           </pre>
         ) : (
           <div className={cn("mt-3 grid gap-3", hasAttachments && "lg:grid-cols-[4fr_3fr]")}>
-            {/* Cuerpo: nombre + asunto siempre visibles. Colapsado = preview que rellena la columna
-                con degradado; expandido = texto completo sin degradado. */}
+            {/* Cuerpo: nombre + asunto + el toggle "cuerpo del correo" SIEMPRE arriba (así se colapsa
+                sin scrollear todo el texto). Colapsado = preview que rellena la columna con
+                degradado y también expande al clic; expandido = texto completo. */}
             <div className="flex min-w-0 flex-col rounded-md border border-border bg-muted/20 p-3">
               {rendered.sender && <div className="text-sm font-medium">{rendered.sender}</div>}
               {subject && (
                 <div className="mt-0.5 break-words text-sm text-muted-foreground">{subject}</div>
               )}
+              <button
+                type="button"
+                onClick={() => setShowBody((v) => !v)}
+                className="eyebrow mt-2 flex items-center gap-1 self-start hover:text-foreground"
+              >
+                cuerpo del correo {showBody ? "▴" : "▾"}
+              </button>
               {showBody ? (
-                <div className="mt-2">
-                  <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
-                    {bodyText || "(sin texto)"}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() => setShowBody(false)}
-                    className="eyebrow mt-2 hover:text-foreground"
-                  >
-                    cuerpo del correo ▴
-                  </button>
-                </div>
+                <p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                  {bodyText || "(sin texto)"}
+                </p>
               ) : (
                 // Preview ABSOLUTO: no aporta altura, así la fila la marca la columna de adjuntos y
                 // el cuerpo se recorta para rellenar el espacio (flex-1) con un degradado abajo.
-                <div className="relative mt-2 min-h-[4rem] flex-1">
+                <button
+                  type="button"
+                  onClick={() => setShowBody(true)}
+                  className="relative mt-2 min-h-[4rem] flex-1 text-left"
+                >
                   <div className="absolute inset-0 overflow-hidden">
                     <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
                       {bodyText || "(sin texto)"}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowBody(true)}
-                    className="absolute inset-x-0 bottom-0 flex h-16 items-end bg-gradient-to-t from-card via-card/80 to-transparent text-left"
-                  >
-                    <span className="eyebrow text-muted-foreground transition-colors hover:text-foreground">
-                      cuerpo del correo ▾
-                    </span>
-                  </button>
-                </div>
+                  <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-card via-card/80 to-transparent" />
+                </button>
               )}
             </div>
 

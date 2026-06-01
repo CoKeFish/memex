@@ -141,8 +141,12 @@ export interface InboxRow {
   attempts: number
   /** Texto OCR de imágenes adjuntas (etapa memex-ocr), inyectado al render. */
   ocrText?: string
-  /** Resultados de fases (solo en el detalle, GET /inbox/{id}). */
+  /** Tier + avance del pipeline: vienen tanto en la lista (indicadores) como en el detalle. */
   classification?: InboxClassification | null
+  /** ¿Tiene resumen? / ¿corrió extracción? — flags livianos para el estado en la lista. */
+  summarized?: boolean
+  extracted?: boolean
+  /** Objetos completos de cada fase (solo en el detalle, GET /inbox/{id}). */
   summary?: InboxSummary | null
   extraction?: InboxExtraction | null
   llm?: InboxLlmUsage | null

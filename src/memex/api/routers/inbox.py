@@ -43,37 +43,55 @@ async def list_inbox(
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     cursor: int | None = Query(default=None, description="id > cursor for pagination"),
 ) -> dict[str, Any]:
-    where: list[str] = ["user_id = :uid"]
+    where: list[str] = ["i.user_id = :uid"]
     params: dict[str, Any] = {"uid": user_id, "limit": limit}
 
     if source_id is not None:
-        where.append("source_id = :sid")
+        where.append("i.source_id = :sid")
         params["sid"] = source_id
     if since is not None:
-        where.append("occurred_at >= :since")
+        where.append("i.occurred_at >= :since")
         params["since"] = since
     if until is not None:
-        where.append("occurred_at < :until")
+        where.append("i.occurred_at < :until")
         params["until"] = until
     if processed == "true":
-        where.append("processed_at IS NOT NULL")
+        where.append("i.processed_at IS NOT NULL")
     elif processed == "false":
-        where.append("processed_at IS NULL")
+        where.append("i.processed_at IS NULL")
     if cursor is not None:
-        where.append("id > :cur")
+        where.append("i.id > :cur")
         params["cur"] = cursor
 
+    # Estado para la lista (índices por inbox_id en las 3 tablas):
+    #  - classifications: el tier (blacklist/batch/individual) = "en qué filtro entró".
+    #  - summary/extraction (EXISTS): avance real del pipeline. `inbox.processed_at` quedó en desuso
+    #    (casi nunca se setea), así que el estado se deriva de clasificación + resumen/extracción.
     sql = f"""
-        SELECT id, source_id, external_id, occurred_at, received_at,
-               payload, processed_at, process_error, attempts
-        FROM inbox
+        SELECT i.id, i.source_id, i.external_id, i.occurred_at, i.received_at,
+               i.payload, i.processed_at, i.process_error, i.attempts,
+               c.tier AS _tier, c.metadata AS _cmeta,
+               EXISTS (SELECT 1 FROM summary_inbox_links sl
+                       WHERE sl.inbox_id = i.id) AS _summarized,
+               EXISTS (SELECT 1 FROM module_extractions me
+                       WHERE me.inbox_id = i.id) AS _extracted
+        FROM inbox i
+        LEFT JOIN classifications c ON c.inbox_id = i.id
         WHERE {" AND ".join(where)}
-        ORDER BY id
+        ORDER BY i.id
         LIMIT :limit
     """
     with connection() as conn:
         rows = conn.execute(text(sql), params).mappings().all()
-    items = [dict(r) for r in rows]
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        tier = d.pop("_tier", None)
+        cmeta = d.pop("_cmeta", None)
+        d["classification"] = {"tier": tier, "metadata": cmeta} if tier else None
+        d["summarized"] = bool(d.pop("_summarized", False))
+        d["extracted"] = bool(d.pop("_extracted", False))
+        items.append(d)
     next_cursor = items[-1]["id"] if len(items) == limit else None
     return {"items": items, "next_cursor": next_cursor}
 
@@ -246,6 +264,8 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
     }
     data["media"] = [dict(m) for m in media]
     data["feedback"] = feedback
+    data["summarized"] = summary is not None
+    data["extracted"] = len(ext_modules) > 0
     return data
 
 

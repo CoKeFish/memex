@@ -197,12 +197,14 @@ class InboxRow(BaseModel):
     processed_at: datetime | None
     process_error: str | None
     attempts: int
-    # Solo los puebla el detalle (GET /inbox/{id}); en la lista viajan como null.
+    # Tier + avance del pipeline: van TANTO en la lista (indicadores por fila) como en el detalle.
     classification: ClassificationInfo | None = None
+    summarized: bool = False
+    extracted: bool = False
+    # Objetos completos: solo los puebla el detalle (GET /inbox/{id}); en la lista van vacíos/null.
     summary: SummaryInfo | None = None
     extraction: ExtractionInfo | None = None
     llm: LlmUsageInfo | None = None
-    # Adjuntos del mensaje (media_assets) — solo en el detalle; en la lista lista vacía.
     media: list[MediaAssetInfo] = Field(default_factory=list)
     # Feedback manual del usuario sobre este mensaje — solo en el detalle.
     feedback: FeedbackInfo | None = None

@@ -6,13 +6,15 @@ import { cn } from "@/lib/utils"
 import { ATTACHMENT_ICON, ATTACHMENT_LABEL, type AttachmentKind } from "@/lib/attachment-kind"
 import { Panel } from "@/components/common/panel"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
+import { Led } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
 import { Input } from "@/components/ui/input"
 import { fetchInbox, fetchInboxStats, fetchSources } from "@/data"
 import { useAsync } from "@/lib/use-async"
 import { useAutoRefresh } from "@/state/auto-refresh"
 import { dayLabel, initials, sourceMeta, summarizeRow } from "@/lib/inbox-format"
-import type { InboxRow, Source } from "@/types/domain"
+import { inboxStatus, tierLabel, tierTone, toneText } from "@/lib/status"
+import type { InboxRow, Source, Tier } from "@/types/domain"
 
 const MAX = 2000
 type SourceStats = Record<string, { total: number; pending: number; errored: number }>
@@ -235,12 +237,40 @@ function AttachmentIcons({ kinds }: { kinds: AttachmentKind[] }) {
   )
 }
 
+/** LED de estado de procesamiento del mensaje (sin procesar / procesado / error) con tooltip. */
+function StatusDot({ row }: { row: InboxRow }) {
+  const st = inboxStatus(row)
+  return (
+    <span title={st.label} className="flex shrink-0 items-center">
+      <Led tone={st.tone} pulse={st.tone === "error"} size={7} />
+    </span>
+  )
+}
+
+/** Tag compacto del tier ("el filtro en el que entró": Blacklist / Lote / Individual). */
+function TierTag({ tier }: { tier: string }) {
+  const t = tier as Tier
+  return (
+    <span
+      className={cn(
+        "num shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide",
+        toneText[tierTone[t] ?? "neutral"],
+      )}
+      style={{ backgroundColor: "color-mix(in oklch, currentColor 14%, transparent)" }}
+      title={`Clasificación: ${tierLabel[t] ?? tier}`}
+    >
+      {tierLabel[t] ?? tier}
+    </span>
+  )
+}
+
 /** Fila especializada por tipo: el correo se ve distinto al chat/social, y un mensaje corto ocupa
  * lo mínimo (altura adaptativa al contenido vía measureElement). */
 function FeedRow({ row, source, onClick }: { row: InboxRow; source?: Source; onClick: () => void }) {
   const m = sourceMeta(source)
   const s = summarizeRow(row)
   const Icon = m.icon
+  const cls = row.classification
 
   // Chat / social: compacto, una línea — avatar circular de iniciales + remitente + texto inline.
   if (s.kind === "chat" || s.kind === "social") {
@@ -250,6 +280,7 @@ function FeedRow({ row, source, onClick }: { row: InboxRow; source?: Source; onC
         onClick={onClick}
         className="flex w-full items-center gap-2.5 border-b border-border px-4 py-1.5 text-left hover:bg-accent/40"
       >
+        <StatusDot row={row} />
         <div
           className={cn(
             "num grid size-6 shrink-0 place-items-center rounded-full bg-muted text-[9px] font-semibold",
@@ -263,6 +294,7 @@ function FeedRow({ row, source, onClick }: { row: InboxRow; source?: Source; onC
           {s.title || (s.hasMedia ? `[${s.mediaLabel}]` : "(mensaje)")}
         </span>
         {s.title && <AttachmentIcons kinds={s.attachmentKinds} />}
+        {cls && <TierTag tier={cls.tier} />}
         <span className="num ml-auto shrink-0 pl-2 text-[10px] text-muted-foreground">
           <RelativeTime date={row.occurredAt} />
         </span>
@@ -277,12 +309,17 @@ function FeedRow({ row, source, onClick }: { row: InboxRow; source?: Source; onC
       onClick={onClick}
       className="flex w-full items-start gap-3 border-b border-border px-4 py-2 text-left hover:bg-accent/40"
     >
-      <div className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md bg-muted">
+      <div className="relative mt-0.5 grid size-8 shrink-0 place-items-center rounded-md bg-muted">
         <Icon className={cn("size-4", m.tone)} />
+        {/* LED de estado anclado a la esquina del avatar (no ocupa ancho en la fila). */}
+        <span className="absolute -right-0.5 -top-0.5 rounded-full bg-card p-px">
+          <StatusDot row={row} />
+        </span>
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium">{s.sender}</span>
+          <span className="min-w-0 truncate text-sm font-medium">{s.sender}</span>
+          {cls && <TierTag tier={cls.tier} />}
           <AttachmentIcons kinds={s.attachmentKinds} />
           <span className="num ml-auto shrink-0 text-[11px] text-muted-foreground">
             <RelativeTime date={row.occurredAt} />

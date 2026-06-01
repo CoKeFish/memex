@@ -58,6 +58,30 @@ export const tierTone: Record<Tier, Tone> = {
   individual: "review",
 }
 
+export const tierLabel: Record<Tier, string> = {
+  blacklist: "Blacklist",
+  batch: "Lote",
+  individual: "Individual",
+}
+
+/**
+ * Estado de procesamiento de un inbox, derivado del avance REAL del pipeline (clasificación →
+ * resumen/extracción). No usamos `inbox.processed_at` porque quedó en desuso (casi nunca se setea).
+ */
+export function inboxStatus(row: {
+  processError?: string | null
+  classification?: { tier: string } | null
+  summarized?: boolean
+  extracted?: boolean
+}): { tone: Tone; label: string } {
+  if (row.processError) return { tone: "error", label: "Error al procesar" }
+  const tier = row.classification?.tier
+  if (!tier) return { tone: "pending", label: "Sin clasificar" }
+  if (tier === "blacklist") return { tone: "filtered", label: "Ignorado (blacklist)" }
+  if (row.summarized || row.extracted) return { tone: "ok", label: "Procesado" }
+  return { tone: "review", label: "Clasificado · sin procesar" }
+}
+
 // Origen del evento de calendar → token de origin.
 export const originText: Record<CalendarOrigin, string> = {
   extraction: "text-origin-inbox",
