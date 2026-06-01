@@ -27,7 +27,9 @@ export {
   workerLatest,
 } from "@/lib/selectors"
 
-// ---- Finance (mock) -----------------------------------------------------------
+// ---- Finance (datos reales contra la API) -------------------------------------
+export * from "./finance"
+// Agregaciones puras (operan sobre los gastos que trae ./finance) + catálogo de categorías.
 export {
   CATEGORIES,
   CATEGORY_CHART,
@@ -56,7 +58,6 @@ import {
 } from "@/mocks/calendar"
 import { SOURCES } from "@/mocks/catalog"
 import { moduleSettings, schedulerEnabled, schedulerJobs } from "@/mocks/control"
-import { financeExpenses } from "@/mocks/finance"
 import { logEvents } from "@/mocks/logs"
 import { inbox, reviewItems, seedAlerts } from "@/mocks"
 import type {
@@ -66,7 +67,6 @@ import type {
   CalendarSyncRun,
   ConsolidatedEvent,
   DedupDecision,
-  FinanceExpense,
   InboxRow,
   LogEvent,
   ModuleSetting,
@@ -114,10 +114,6 @@ export function getCalendarSyncRuns(): CalendarSyncRun[] {
 
 export function getDedupDecisions(): DedupDecision[] {
   return dedupDecisions
-}
-
-export function getFinanceExpenses(): FinanceExpense[] {
-  return financeExpenses
 }
 
 // Controles de procesamiento (mock) — la página de procesamiento aún no migró a la API.

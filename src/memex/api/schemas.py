@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -315,6 +315,31 @@ class StatsBySource(BaseModel):
 
 class InboxStats(BaseModel):
     sources: dict[int, StatsBySource]
+
+
+class FinanceExpenseRow(BaseModel):
+    """Un gasto extraído (fila de `mod_finance_expenses`).
+
+    Espeja `memex.modules.finance.schema.ExpenseItem` más las columnas de la tabla. `amount` cruza
+    como `float` (la DB es NUMERIC(14,2)) siguiendo la convención del repo para dinero en respuestas
+    (cf. `cost_usd`). `occurred_on` puede ser NULL cuando el LLM no pudo fechar el cargo.
+    """
+
+    id: int
+    amount: float
+    currency: str
+    category: str
+    merchant: str
+    occurred_on: date | None
+    description: str
+    evidence: str
+    source_inbox_ids: list[int]
+    created_at: datetime
+
+
+class FinanceExpenseList(BaseModel):
+    items: list[FinanceExpenseRow]
+    next_cursor: int | None = None
 
 
 class SourceCreate(BaseModel):

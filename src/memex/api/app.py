@@ -7,6 +7,7 @@ from memex.api.middleware import RequestContextMiddleware
 from memex.api.routers import (
     feedback,
     filters,
+    finance,
     gateway,
     health,
     inbox,
@@ -57,3 +58,4 @@ app.include_router(gateway.router)
 app.include_router(media.router)
 app.include_router(filters.router)
 app.include_router(feedback.router)
+app.include_router(finance.router)

@@ -2,7 +2,7 @@ import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer,
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { formatMoney, formatPct } from "@/lib/format"
 import { CATEGORIES, CATEGORY_LABEL, financeByCategory, financeByMerchant, financeByMonth } from "@/data"
-import type { ExpenseCategory } from "@/types/domain"
+import type { ExpenseCategory, FinanceExpense } from "@/types/domain"
 
 function axisMoney(v: number): string {
   return Math.abs(v) >= 1000 ? `${Math.round(v / 1000)}k` : `${v}`
@@ -34,8 +34,8 @@ function MoneyTooltip({ active, payload, label, currency }: { active?: boolean; 
   )
 }
 
-export function MonthlyTrend({ currency }: { currency: string }) {
-  const data = financeByMonth(currency).map((p) => ({ label: p.label, ...p.byCategory }))
+export function MonthlyTrend({ expenses, currency }: { expenses: FinanceExpense[]; currency: string }) {
+  const data = financeByMonth(expenses, currency).map((p) => ({ label: p.label, ...p.byCategory }))
   return (
     <Panel>
       <PanelHeader eyebrow="finanzas · tendencia" title="Gasto mensual" sub={`Apilado por tipo de gasto · ${currency}`} />
@@ -58,8 +58,8 @@ export function MonthlyTrend({ currency }: { currency: string }) {
   )
 }
 
-export function CategoryBreakdown({ currency }: { currency: string }) {
-  const rows = financeByCategory(currency)
+export function CategoryBreakdown({ expenses, currency }: { expenses: FinanceExpense[]; currency: string }) {
+  const rows = financeByCategory(expenses, currency)
   const total = rows.reduce((a, r) => a + r.total, 0) || 1
   return (
     <Panel>
@@ -98,8 +98,8 @@ export function CategoryBreakdown({ currency }: { currency: string }) {
   )
 }
 
-export function TopMerchants({ currency }: { currency: string }) {
-  const rows = financeByMerchant(currency).slice(0, 8)
+export function TopMerchants({ expenses, currency }: { expenses: FinanceExpense[]; currency: string }) {
+  const rows = financeByMerchant(expenses, currency).slice(0, 8)
   const max = Math.max(...rows.map((r) => r.total), 1)
   return (
     <Panel>
