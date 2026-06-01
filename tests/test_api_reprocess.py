@@ -1,0 +1,67 @@
+"""POST /inbox/{id}/reprocess — re-aplica etapas a un mensaje.
+
+Se prueba con la etapa `classify` (determinista, sin LLM/IMAP/OCR): ejercita el endpoint + el
+orquestador + el delegado de clasificación end-to-end. Las etapas externas (media/ocr/summarize/
+extract) van con fakes en sus tests unitarios. Cubre: classify crea la fila; force re-clasifica;
+stage inválida → 422; id ajeno/inexistente → 404.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import text
+
+from memex.core.inbox import insert_record
+from memex.core.source import SourceRecord
+from memex.db import connection
+
+
+def _seed_inbox(source_id: int, ext: str = "r0") -> int:
+    with connection() as c:
+        insert_record(
+            c,
+            user_id=1,
+            source_id=source_id,
+            record=SourceRecord(
+                external_id=ext,
+                occurred_at=datetime(2026, 5, 23, 10, 0, tzinfo=UTC),
+                payload={"subject": "factura", "body_text": "total $100"},
+                dedupe_keys=[],
+            ),
+        )
+        return int(
+            c.execute(
+                text("SELECT id FROM inbox WHERE external_id = :e AND user_id = 1"), {"e": ext}
+            ).scalar_one()
+        )
+
+
+def test_reprocess_classify(client: Any, seed_source: dict[str, Any]) -> None:
+    iid = _seed_inbox(seed_source["id"])
+    r = client.post(f"/inbox/{iid}/reprocess", json={"stages": ["classify"], "force": False})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["targets"] == 1
+    assert body["stages"] == ["classify"]
+    assert body["results"]["classify"]["classified"] == 1
+
+    # 2da vez sin force: ya estaba clasificado.
+    again = client.post(f"/inbox/{iid}/reprocess", json={"stages": ["classify"]})
+    assert again.json()["results"]["classify"]["already"] == 1
+
+    # Con force: re-clasifica (borra la fila previa y vuelve a insertar).
+    forced = client.post(f"/inbox/{iid}/reprocess", json={"stages": ["classify"], "force": True})
+    assert forced.json()["results"]["classify"]["classified"] == 1
+
+
+def test_reprocess_invalid_stage_is_422(client: Any, seed_source: dict[str, Any]) -> None:
+    iid = _seed_inbox(seed_source["id"])
+    r = client.post(f"/inbox/{iid}/reprocess", json={"stages": ["nope"]})
+    assert r.status_code == 422
+
+
+def test_reprocess_unknown_inbox_is_404(client: Any) -> None:
+    r = client.post("/inbox/999999/reprocess", json={"stages": ["classify"]})
+    assert r.status_code == 404

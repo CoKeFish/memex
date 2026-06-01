@@ -75,6 +75,8 @@ export interface InboxExtraction {
 }
 
 export interface InboxLlmCall {
+  /** Agrupa las llamadas de una misma corrida HTTP; null en corridas batch/CLI. */
+  requestId?: string | null
   purpose: string
   model: string
   promptTokens: number
@@ -82,6 +84,7 @@ export interface InboxLlmCall {
   costUsd: number
   latencyMs: number
   status: string
+  errorMessage?: string | null
   createdAt?: string | null
   /** Decisión de la fase: ruteo {slugs_in, chosen}; extracción {items, discarded}. */
   metadata?: Record<string, unknown> | null
@@ -93,6 +96,37 @@ export interface InboxLlmUsage {
   promptTokens: number
   completionTokens: number
   items: InboxLlmCall[]
+}
+
+export type FeedbackKind =
+  | "missing_data"
+  | "missed_important"
+  | "bad_summary"
+  | "wrong_extraction"
+  | "bad_ocr"
+  | "other"
+
+/** Feedback manual rápido del usuario sobre un mensaje (solo captura; ver inbox_feedback). */
+export interface InboxFeedback {
+  kinds: FeedbackKind[]
+  note: string | null
+  metadata?: Record<string, unknown>
+  status: string
+  createdAt?: string | null
+  updatedAt?: string | null
+}
+
+export type FilterAction = "keep" | "ignore" | "archive"
+
+/** Una regla de filtro pre-ingest (filter_rules) — gestión desde el dashboard. */
+export interface FilterRule {
+  id: number
+  sourceType: string | null
+  sourceId: number | null
+  scope: Record<string, unknown>
+  action: FilterAction
+  priority: number
+  enabled: boolean
 }
 
 export interface InboxRow {
@@ -112,6 +146,10 @@ export interface InboxRow {
   summary?: InboxSummary | null
   extraction?: InboxExtraction | null
   llm?: InboxLlmUsage | null
+  /** Adjuntos del mensaje (media_assets) — solo en el detalle (GET /inbox/{id}). */
+  media?: MediaAsset[]
+  /** Feedback manual del usuario sobre este mensaje — solo en el detalle. */
+  feedback?: InboxFeedback | null
 }
 
 export type Tier = "blacklist" | "batch" | "individual"
@@ -362,25 +400,28 @@ export interface ObsTimelineEntry {
 
 export type OcrStatus = "pending" | "ok" | "error" | "skipped"
 
-/** media_assets (migración 0009): la DB guarda solo la REFERENCIA (object_key), nunca el blob. */
+/** media_assets (migración 0009/0016): la DB guarda solo la REFERENCIA; el blob va por /media/{id}. */
 export interface MediaAsset {
   id: number
   sha256: string
-  objectKey: string
-  bucket: string
+  /** Solo en datos mock; la API real no expone la referencia interna (el blob va por /media/{id}). */
+  objectKey?: string
+  bucket?: string
   contentType: string
   sizeBytes: number
   filename: string | null
+  /** Extensión normalizada (migración 0016): 'pdf' | 'png' | 'zip' | … */
+  extension: string | null
   ocrStatus: OcrStatus
   ocrModel: string | null
   /** Lo que "vio" el modelo multimodal (texto OCR). */
   ocrText: string
   ocrError: string | null
   ocrAttempts: number
-  /** finish_reason != stop → transcripción cortada. */
-  truncated: boolean
+  /** finish_reason != stop → transcripción cortada. Se deriva de la traza para datos reales. */
+  truncated?: boolean
   /** Misma imagen ya OCR-eada en otro mensaje (dedup por sha256) → 0 llamadas de visión. */
-  dedupHit: boolean
+  dedupHit?: boolean
 }
 
 export type JourneyStepKind =

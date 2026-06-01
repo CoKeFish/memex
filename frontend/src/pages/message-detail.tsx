@@ -1,5 +1,5 @@
-import { useState } from "react"
-import { ArrowLeft, CalendarDays, DollarSign, Eye, Loader2, RotateCw, ScrollText, Sparkles, Zap } from "lucide-react"
+import { useMemo, useState } from "react"
+import { ArrowLeft, CalendarDays, DollarSign, Eye, Loader2, Paperclip, RotateCw, ScrollText, Sparkles, Zap } from "lucide-react"
 import { Link, useParams } from "react-router-dom"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -11,8 +11,14 @@ import { StatusBadge } from "@/components/common/led"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { RelativeTime } from "@/components/common/time"
 import { JourneyTimeline } from "@/components/features/message/journey-timeline"
+import { LlmTrace } from "@/components/features/message/llm-trace"
+import { MediaOcr, UnstoredAttachments, type DeclaredAttachment } from "@/components/features/message/media-ocr"
+import { fmtCost, groupCallsIntoRuns } from "@/components/features/message/llm-trace-runs"
 import { RelatedData } from "@/components/features/message/related-data"
-import { ReprocessButton, reprocessStepsFor } from "@/components/features/message/reprocess-button"
+import { ReprocessButton } from "@/components/features/message/reprocess-button"
+import { reprocessStepsFor, type ReprocessStep } from "@/components/features/message/reprocess-steps"
+import { FeedbackButton } from "@/components/features/message/feedback-button"
+import { MessageFilterMenu } from "@/components/features/message/message-filter-menu"
 import { LogRow } from "@/components/features/logs/log-row"
 import {
   extractInboxItem,
@@ -28,8 +34,15 @@ import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
 import { renderPayload } from "@/lib/render-payload"
 import { sourceMeta } from "@/lib/inbox-format"
+import {
+  ATTACHMENT_ICON,
+  ATTACHMENT_LABEL,
+  attachmentKind,
+  uniqueKinds,
+  type AttachmentKind,
+} from "@/lib/attachment-kind"
 import type { Tone } from "@/lib/status"
-import type { InboxLlmCall, InboxLlmUsage, InboxRow, MessageJourney, Source } from "@/types/domain"
+import type { InboxRow, MessageJourney, Source } from "@/types/domain"
 
 const TIER_META: Record<string, { label: string; tone: Tone }> = {
   blacklist: { label: "Blacklist", tone: "filtered" },
@@ -113,12 +126,29 @@ export function MessageDetailPage() {
 
 function RealDetail({ row, onProcessed }: { row: InboxRow; onProcessed: () => void }) {
   const [raw, setRaw] = useState(false)
+  const [showBody, setShowBody] = useState(false)
   const { data: sources } = useAsync<Source[]>(() => fetchSources(), [])
   const source = (sources ?? []).find((s) => s.id === row.sourceId)
   const meta = sourceMeta(source)
   const SrcIcon = meta.icon
   const rendered = renderPayload(row.payload, row.ocrText ?? "")
   const cls = row.classification
+  const subject = emailSubject(row.payload)
+  // El asunto se muestra aparte (debajo del título); recortamos el cuerpo desde el body_text real
+  // para no duplicar el "Asunto:" (el asunto puede tener saltos de línea, así que no sirve un regex).
+  const rawBody = bodyTextOf(row.payload)
+  const bodyText =
+    rawBody && rendered.body.includes(rawBody)
+      ? rendered.body.slice(rendered.body.indexOf(rawBody))
+      : rendered.body
+
+  const declared = declaredAttachments(row.payload)
+  const media = row.media ?? []
+  const hasAttachments = declared.length > 0 || media.length > 0
+  const attSource = declared.length
+    ? declared.map((a) => ({ ct: a.contentType, name: a.filename }))
+    : media.map((m) => ({ ct: m.contentType, name: m.extension ?? m.filename }))
+  const attachKinds = uniqueKinds(attSource.map((a) => attachmentKind(a.ct, a.name)))
 
   return (
     <div className="space-y-5">
@@ -143,7 +173,10 @@ function RealDetail({ row, onProcessed }: { row: InboxRow; onProcessed: () => vo
               <span>received <RelativeTime date={row.receivedAt} /></span>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <MessageFilterMenu row={row} sourceType={source?.type ?? null} onDone={onProcessed} />
+            <FeedbackButton inboxId={row.id} current={row.feedback} onDone={onProcessed} />
+            <ReprocessButton inboxId={row.id} steps={reprocessStepsForRow(row)} onDone={onProcessed} />
             <Label htmlFor="raw-detail" className="eyebrow cursor-pointer">JSON crudo</Label>
             <Switch id="raw-detail" checked={raw} onCheckedChange={setRaw} />
           </div>
@@ -153,14 +186,137 @@ function RealDetail({ row, onProcessed }: { row: InboxRow; onProcessed: () => vo
             {JSON.stringify(row.payload, null, 2)}
           </pre>
         ) : (
-          <div className="mt-3 rounded-md border border-border bg-muted/20 p-3 text-sm">
-            {rendered.sender && <div className="mb-1 font-medium">{rendered.sender}</div>}
-            <p className="whitespace-pre-wrap text-muted-foreground">{rendered.body || "(sin texto)"}</p>
+          <div className={cn("mt-3 grid gap-3", hasAttachments && "lg:grid-cols-[4fr_3fr]")}>
+            {/* Cuerpo: nombre + asunto siempre visibles. Colapsado = preview que rellena la columna
+                con degradado; expandido = texto completo sin degradado. */}
+            <div className="flex min-w-0 flex-col rounded-md border border-border bg-muted/20 p-3">
+              {rendered.sender && <div className="text-sm font-medium">{rendered.sender}</div>}
+              {subject && (
+                <div className="mt-0.5 break-words text-sm text-muted-foreground">{subject}</div>
+              )}
+              {showBody ? (
+                <div className="mt-2">
+                  <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                    {bodyText || "(sin texto)"}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowBody(false)}
+                    className="eyebrow mt-2 hover:text-foreground"
+                  >
+                    cuerpo del correo ▴
+                  </button>
+                </div>
+              ) : (
+                // Preview ABSOLUTO: no aporta altura, así la fila la marca la columna de adjuntos y
+                // el cuerpo se recorta para rellenar el espacio (flex-1) con un degradado abajo.
+                <div className="relative mt-2 min-h-[4rem] flex-1">
+                  <div className="absolute inset-0 overflow-hidden">
+                    <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                      {bodyText || "(sin texto)"}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowBody(true)}
+                    className="absolute inset-x-0 bottom-0 flex h-16 items-end bg-gradient-to-t from-card via-card/80 to-transparent text-left"
+                  >
+                    <span className="eyebrow text-muted-foreground transition-colors hover:text-foreground">
+                      cuerpo del correo ▾
+                    </span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Adjuntos a la derecha; el "lo que vio el modelo multimodal" colapsa por adjunto. */}
+            {hasAttachments && (
+              <div className="min-w-0 rounded-md border border-border bg-muted/20 p-3">
+                <div className="mb-2 flex items-center gap-1.5 text-sm font-medium">
+                  <Paperclip className="size-3.5 text-muted-foreground" />
+                  Adjuntos · {declared.length || media.length}
+                  <span className="ml-auto">
+                    <AttachmentIconsRow kinds={attachKinds} />
+                  </span>
+                </div>
+                <AttachmentsContent row={row} />
+              </div>
+            )}
           </div>
         )}
       </Panel>
 
       <PipelinePanel row={row} onProcessed={onProcessed} />
+    </div>
+  )
+}
+
+/** Adjuntos declarados en el payload (siempre presentes), aunque no se hayan almacenado/OCR-eado. */
+function declaredAttachments(payload: unknown): DeclaredAttachment[] {
+  const p = payload as { attachments?: unknown }
+  if (!Array.isArray(p?.attachments)) return []
+  return (p.attachments as Record<string, unknown>[]).map((a) => ({
+    filename: typeof a?.filename === "string" ? a.filename : null,
+    contentType: String(a?.content_type ?? ""),
+    size: Number(a?.size ?? 0),
+  }))
+}
+
+/** Etapas reprocesables según el ESTADO REAL del mensaje (no el mock journey). */
+function reprocessStepsForRow(row: InboxRow): ReprocessStep[] {
+  const out: ReprocessStep[] = []
+  const media = row.media ?? []
+  const declared = declaredAttachments(row.payload)
+  const mediaNames = new Set(media.map((m) => m.filename))
+  if (declared.some((a) => !mediaNames.has(a.filename)))
+    out.push({ stage: "media", label: "Traer adjuntos (IMAP)", hint: "re-baja los declarados sin almacenar" })
+  if (media.length > 0)
+    out.push({ stage: "ocr", label: "Re-OCR de adjuntos", hint: "vuelve a transcribir los adjuntos" })
+  out.push({ stage: "classify", label: "Re-clasificar", hint: "determinista · sin LLM" })
+  if (row.classification) {
+    out.push({ stage: "summarize", label: "Re-resumir", hint: "LLM" })
+    out.push({ stage: "extract", label: "Re-extraer (módulos)", hint: "LLM · finanzas/calendario" })
+  }
+  return out
+}
+
+/** Asunto del correo (vacío para chat/social). Se muestra debajo del título del cuerpo. */
+function emailSubject(payload: unknown): string {
+  const p = payload as { subject?: unknown }
+  return typeof p?.subject === "string" ? p.subject.trim() : ""
+}
+
+/** Cuerpo crudo del payload (body_text / text / media_caption) — para recortar el asunto del render. */
+function bodyTextOf(payload: unknown): string {
+  const p = payload as { body_text?: unknown; text?: unknown; media_caption?: unknown }
+  return String(p?.body_text || p?.text || p?.media_caption || "")
+}
+
+/** Cluster compacto de íconos por tipo de adjunto (hasta 4), con tooltip. */
+function AttachmentIconsRow({ kinds }: { kinds: AttachmentKind[] }) {
+  if (kinds.length === 0) return null
+  return (
+    <span
+      className="flex items-center gap-0.5 text-muted-foreground"
+      title={kinds.map((k) => ATTACHMENT_LABEL[k]).join(", ")}
+    >
+      {kinds.slice(0, 4).map((k, i) => {
+        const Icon = ATTACHMENT_ICON[k]
+        return <Icon key={i} className="size-3.5" />
+      })}
+    </span>
+  )
+}
+
+/** Contenido del colapsable de adjuntos: media_assets (preview/OCR) + declarados sin almacenar. */
+function AttachmentsContent({ row }: { row: InboxRow }) {
+  const media = row.media ?? []
+  const mediaNames = new Set(media.map((m) => m.filename))
+  const unstored = declaredAttachments(row.payload).filter((a) => !mediaNames.has(a.filename))
+  return (
+    <div className="space-y-2.5">
+      {media.length > 0 && <MediaOcr media={media} calls={row.llm?.items ?? []} />}
+      {unstored.length > 0 && <UnstoredAttachments items={unstored} />}
     </div>
   )
 }
@@ -179,6 +335,12 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
   const extDone = !!ext?.done
   const extItems = (ext?.finance.length ?? 0) + (ext?.calendar.length ?? 0)
   const input = renderPayload(row.payload, row.ocrText ?? "")
+
+  // Corridas LLM (agrupadas por request_id / tiempo): alimentan la traza y los sellos de tiempo
+  // "última corrida" de cada fase.
+  const runs = useMemo(() => groupCallsIntoRuns(llm?.items ?? []), [llm])
+  const summaryRunAt = runs.find((r) => r.producedSummary)?.startedAt ?? summary?.createdAt ?? null
+  const extractRunAt = runs.find((r) => r.producedExtraction)?.startedAt ?? null
 
   async function run(phase: Phase, fn: () => Promise<void>) {
     setBusy(phase)
@@ -279,7 +441,7 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
         </Stage>
 
         {/* Fase 2 — Resumen (LLM) */}
-        <Stage icon={ScrollText} title="Resumen" hint="LLM" done={!!summary} blocked={!cls}>
+        <Stage icon={ScrollText} title="Resumen" hint="LLM" done={!!summary} blocked={!cls} at={summary ? summaryRunAt : null}>
           {!cls ? (
             <span className="text-xs text-muted-foreground">Clasificá primero.</span>
           ) : summary ? (
@@ -295,7 +457,7 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
         </Stage>
 
         {/* Fase 3 — Extracción (LLM, módulos) */}
-        <Stage icon={Sparkles} title="Extracción" hint="LLM · finanzas/calendario" done={extDone} blocked={!cls}>
+        <Stage icon={Sparkles} title="Extracción" hint="LLM · finanzas/calendario" done={extDone} blocked={!cls} at={extDone ? extractRunAt : null}>
           {!cls ? (
             <span className="text-xs text-muted-foreground">Clasificá primero.</span>
           ) : extDone ? (
@@ -316,6 +478,7 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
                       tone="text-chart-3"
                       title={`${fmtMoney(f.amount, f.currency)}${f.merchant ? ` · ${str(f.merchant)}` : ""}${f.occurred_on ? ` · ${str(f.occurred_on)}` : ""}`}
                       tag={str(f.category)}
+                      sub={str(f.description)}
                       evidence={str(f.evidence)}
                     />
                   ))}
@@ -337,73 +500,15 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
           )}
         </Stage>
 
-        {/* Traza LLM — auditoría: cada llamada con modelo, tokens, latencia, costo */}
+        {/* Traza LLM — auditoría por corridas: cada llamada con modelo, tokens, latencia, costo */}
         {llm && llm.calls > 0 && (
           <div className="py-3">
-            <LlmTrace llm={llm} />
+            <LlmTrace llm={llm} runs={runs} />
           </div>
         )}
       </PanelBody>
     </Panel>
   )
-}
-
-function LlmTrace({ llm }: { llm: InboxLlmUsage }) {
-  const PURPOSE: Record<string, string> = {
-    summarize_batch: "Resumen (lote)",
-    summarize_individual: "Resumen (individual)",
-    module_route: "Ruteo de módulos",
-    extract_finance: "Extracción · finanzas",
-    extract_calendar: "Extracción · calendario",
-    extract_grouped: "Extracción agrupada",
-  }
-  return (
-    <div>
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="eyebrow">traza llm</span>
-        <span className="num text-xs text-muted-foreground">
-          {llm.calls} llamada(s) · {llm.promptTokens + llm.completionTokens} tokens ·{" "}
-          <span className="text-brand">{fmtCost(llm.costUsd)}</span>
-        </span>
-      </div>
-      <div className="space-y-1">
-        {llm.items.map((c, i) => {
-          const detail = callDetail(c)
-          return (
-            <div key={i} className="rounded-md border border-border bg-muted/20 px-2.5 py-1.5">
-              <div className="num flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px]">
-                <span className="font-medium text-foreground">{PURPOSE[c.purpose] ?? c.purpose}</span>
-                <span className="text-muted-foreground">{c.model}</span>
-                <span className="text-muted-foreground">
-                  {c.promptTokens}+{c.completionTokens} tok
-                </span>
-                <span className="text-muted-foreground">{c.latencyMs}ms</span>
-                <span className={c.status === "ok" ? "text-status-ok" : "text-status-error"}>
-                  {c.status}
-                </span>
-                <span className="ml-auto text-muted-foreground">{fmtCost(c.costUsd)}</span>
-              </div>
-              {detail && <div className="num mt-1 text-[10px] text-muted-foreground">{detail}</div>}
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-/** Resume la decisión de una fase desde su metadata (auditoría del ruteo / extracción). */
-function callDetail(c: InboxLlmCall): string {
-  const m = c.metadata ?? {}
-  const list = (v: unknown) => (Array.isArray(v) ? v.map(String).join(", ") : str(v))
-  if (c.purpose === "module_route") {
-    const chosen = list(m.chosen) || "ninguno"
-    return `evaluó: ${list(m.slugs_in)} → eligió: ${chosen}`
-  }
-  if (c.purpose.startsWith("extract_")) {
-    return `items: ${str(m.items)} · descartados: ${str(m.discarded)}${m.n ? ` · ${str(m.n)} msj en ventana` : ""}`
-  }
-  return ""
 }
 
 function fmtMoney(amount: unknown, currency: unknown): string {
@@ -417,18 +522,13 @@ function fmtMoney(amount: unknown, currency: unknown): string {
   }
 }
 
-function fmtCost(usd: number): string {
-  if (!usd) return "$0"
-  if (usd < 0.01) return `$${usd.toFixed(6)}`
-  return `$${usd.toFixed(4)}`
-}
-
 function Stage({
   icon: Icon,
   title,
   hint,
   done,
   blocked,
+  at,
   children,
 }: {
   icon: React.ComponentType<{ className?: string }>
@@ -436,6 +536,8 @@ function Stage({
   hint: string
   done?: boolean
   blocked?: boolean
+  /** Cuándo corrió la fase vigente (de la traza LLM): "última corrida: hace X". */
+  at?: string | null
   children: React.ReactNode
 }) {
   return (
@@ -452,7 +554,14 @@ function Stage({
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{title}</span>
           <span className="eyebrow">{hint}</span>
-          {done && <span className="num ml-auto text-[10px] text-status-ok">✓ hecho</span>}
+          <div className="num ml-auto flex items-center gap-2 text-[10px] text-muted-foreground">
+            {at && (
+              <span>
+                última corrida <RelativeTime date={at} />
+              </span>
+            )}
+            {done && <span className="text-status-ok">✓ hecho</span>}
+          </div>
         </div>
         <div className="mt-2">{children}</div>
       </div>
@@ -489,12 +598,15 @@ function ExtractionRow({
   tone,
   title,
   tag,
+  sub,
   evidence,
 }: {
   icon: React.ComponentType<{ className?: string }>
   tone: string
   title: string
   tag?: string
+  /** Línea secundaria (p. ej. la descripción/nombre del gasto). */
+  sub?: string
   evidence: string
 }) {
   return (
@@ -503,11 +615,12 @@ function ExtractionRow({
         <Icon className={cn("size-3.5 shrink-0", tone)} />
         <span className="font-medium">{title}</span>
         {tag && (
-          <span className="rounded-full border border-border bg-background px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+          <span className="num rounded-full border border-chart-3/40 bg-chart-3/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-chart-3">
             {tag}
           </span>
         )}
       </div>
+      {sub && <p className="mt-1 pl-5 text-xs text-muted-foreground">{sub}</p>}
       {evidence && <p className="mt-1 pl-5 text-xs italic text-muted-foreground">“{evidence}”</p>}
     </div>
   )

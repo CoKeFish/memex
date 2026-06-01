@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { RotateCw } from "lucide-react"
+import { Loader2, RotateCw } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -12,33 +12,66 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog"
-import { CapBadge } from "@/components/common/cap-badge"
-import type { MessageJourney } from "@/types/domain"
+import { reprocessInboxItem, type ReprocessResult } from "@/data"
+import { ApiError } from "@/lib/api"
+import type { ReprocessStep } from "./reprocess-steps"
 
-export interface ReprocessStep {
-  key: string
-  label: string
-  cursor: string
-  cost: string
+const n = (v: unknown): number => Number(v ?? 0)
+
+/** Resumen corto del resultado por etapa para el toast. */
+function summarize(res: ReprocessResult): string {
+  return Object.entries(res.results)
+    .map(([stage, r]) => {
+      if ("error" in r) return `${stage}: error`
+      if (stage === "media") return `adjuntos +${n(r.assets_created)}`
+      if (stage === "ocr") return `OCR ${n(r.ok)} ok`
+      if (stage === "classify") return `clasif ${n(r.classified)}`
+      if (stage === "summarize") return `resumen ${n(r.ok)} ok`
+      if (stage === "extract") return `extracción ${n(r.items)} item(s)`
+      return stage
+    })
+    .join(" · ")
 }
 
-/** Etapas reprocesables de un mensaje, derivadas de su journey (qué pasos pasó + media). */
-export function reprocessStepsFor(j: MessageJourney | null): ReprocessStep[] {
-  const out: ReprocessStep[] = [{ key: "clasificar", label: "Re-clasificar", cursor: "classifications", cost: "US$0 (reglas)" }]
-  if (!j) return out
-  if (j.steps.some((s) => s.kind === "resumen")) out.push({ key: "resumir", label: "Re-resumir", cursor: "summary_inbox_links", cost: "~US$0.002" })
-  if (j.steps.some((s) => s.kind === "modulo")) out.push({ key: "extraer", label: "Re-extraer (módulos)", cursor: "module_extractions", cost: "~US$0.004" })
-  if (j.media.length > 0) out.push({ key: "ocr", label: "Re-OCR de adjuntos", cursor: "media_assets.ocr_status", cost: "~US$0.015/img" })
-  return out
-}
-
-export function ReprocessButton({ inboxId, steps }: { inboxId: number; steps: ReprocessStep[] }) {
+export function ReprocessButton({
+  inboxId,
+  steps,
+  onDone,
+}: {
+  inboxId: number
+  steps: ReprocessStep[]
+  onDone?: () => void
+}) {
   const [open, setOpen] = useState(false)
-  const [sel, setSel] = useState<Record<string, boolean>>(() => Object.fromEntries(steps.map((s) => [s.key, true])))
-  const chosen = steps.filter((s) => sel[s.key])
+  const [busy, setBusy] = useState(false)
+  const [force, setForce] = useState(true)
+  const [sel, setSel] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(steps.map((s) => [s.stage, true])),
+  )
+  const chosen = steps.filter((s) => sel[s.stage])
+
+  async function run() {
+    setBusy(true)
+    try {
+      const res = await reprocessInboxItem(
+        inboxId,
+        chosen.map((s) => s.stage),
+        force,
+      )
+      toast.success(`Reprocesado #${inboxId}`, { description: summarize(res) || "sin cambios" })
+      setOpen(false)
+      onDone?.()
+    } catch (e) {
+      toast.error("No se pudo reprocesar", {
+        description: e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e),
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={(o) => !busy && setOpen(o)}>
       <DialogTrigger asChild>
         <Button variant="outline" size="sm" className="h-8">
           <RotateCw className="size-3.5" /> Reprocesar
@@ -48,41 +81,39 @@ export function ReprocessButton({ inboxId, steps }: { inboxId: number; steps: Re
         <DialogHeader>
           <DialogTitle>Reprocesar mensaje #{inboxId}</DialogTitle>
           <DialogDescription>
-            Elegí qué etapas re-ejecutar. Cada una invalida su cursor (se descarta la fila previa) y vuelve a correr — puede costar LLM.
+            Elegí qué etapas re-ejecutar. Corren en orden de dependencia (adjuntos → OCR →
+            clasificar → resumir → extraer). Puede costar LLM/OCR.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
           {steps.map((s) => (
-            <label key={s.key} className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-2.5 hover:bg-accent/30">
-              <Checkbox checked={sel[s.key]} onCheckedChange={(c) => setSel((p) => ({ ...p, [s.key]: c === true }))} className="mt-0.5" />
+            <label
+              key={s.stage}
+              className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-2.5 hover:bg-accent/30"
+            >
+              <Checkbox
+                checked={sel[s.stage]}
+                onCheckedChange={(c) => setSel((p) => ({ ...p, [s.stage]: c === true }))}
+                className="mt-0.5"
+              />
               <div className="min-w-0 flex-1">
                 <div className="text-sm font-medium">{s.label}</div>
-                <div className="num text-[11px] text-muted-foreground">
-                  cursor: {s.cursor} · {s.cost}
-                </div>
+                <div className="num text-[11px] text-muted-foreground">{s.hint}</div>
               </div>
             </label>
           ))}
         </div>
-        <div className="flex items-center gap-2 rounded-md border border-status-review/30 bg-status-review/10 px-3 py-2 text-[11px] text-status-review">
-          <CapBadge level="parcial" />
-          Reproceso vía CLI (re-extract / re-clasificar / backfill); endpoint HTTP es futuro.
-        </div>
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+          <Checkbox checked={force} onCheckedChange={(c) => setForce(c === true)} />
+          Forzar — reprocesar lo ya hecho (invalida cursores / re-OCR). Sin esto, salta lo completado.
+        </label>
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => setOpen(false)}>
             Cancelar
           </Button>
-          <Button
-            size="sm"
-            disabled={chosen.length === 0}
-            onClick={() => {
-              setOpen(false)
-              toast.success(`Reprocesando mensaje #${inboxId}`, {
-                description: `${chosen.length} paso(s) encolados: ${chosen.map((s) => s.label).join(", ")}. Se invalidan los cursores correspondientes.`,
-              })
-            }}
-          >
-            <RotateCw className="size-3.5" /> Reprocesar {chosen.length} paso(s)
+          <Button size="sm" disabled={busy || chosen.length === 0} onClick={run}>
+            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCw className="size-3.5" />}
+            Reprocesar {chosen.length} paso(s)
           </Button>
         </DialogFooter>
       </DialogContent>

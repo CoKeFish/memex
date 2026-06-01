@@ -4,7 +4,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from memex.api.middleware import RequestContextMiddleware
-from memex.api.routers import gateway, health, inbox, ingest, sources
+from memex.api.routers import (
+    feedback,
+    filters,
+    gateway,
+    health,
+    inbox,
+    ingest,
+    media,
+    sources,
+)
 from memex.api.streaming import build_streaming_runner
 from memex.logging import get_logger, setup_logging
 
@@ -45,3 +54,6 @@ app.include_router(ingest.router)
 app.include_router(inbox.router)
 app.include_router(sources.router)
 app.include_router(gateway.router)
+app.include_router(media.router)
+app.include_router(filters.router)
+app.include_router(feedback.router)

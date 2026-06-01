@@ -5,6 +5,7 @@ import {
   SchedulerPanel,
   SourcesTogglePanel,
 } from "@/components/features/control/processing-controls"
+import { FiltersManager } from "@/components/features/control/filters-manager"
 
 export function ProcessingPage() {
   return (
@@ -22,6 +23,7 @@ export function ProcessingPage() {
         <SourcesTogglePanel />
         <ModulesTogglePanel />
       </div>
+      <FiltersManager />
     </div>
   )
 }

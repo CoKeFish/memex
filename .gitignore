@@ -9,7 +9,9 @@
 # -----------------------------------------------------------------------------
 # Data — the hard boundary
 # -----------------------------------------------------------------------------
-data/
+# Anclado a la raíz (/) — `data/` sin ancla también ignoraba frontend/src/data (el facade del
+# dashboard) y frontend/src/components/features/data. El ./data de la raíz (sesiones, etc.) sigue.
+/data/
 datasets/
 exports/
 dumps/

@@ -7,15 +7,22 @@ from sqlalchemy import text
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
+    ClassificationInfo,
+    ClassifyRequest,
     ExtractResponse,
+    FeedbackInfo,
+    FeedbackRequest,
     InboxList,
     InboxRow,
     InboxStats,
     ProcessResponse,
+    ReprocessRequest,
+    ReprocessResponse,
     StatsBySource,
     SummarizeResponse,
 )
 from memex.classifier.rules import classify
+from memex.core.feedback import InvalidFeedbackError, get_feedback, record_feedback
 from memex.db import connection
 from memex.logging import bind_request_context, get_logger
 
@@ -148,7 +155,8 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
             conn.execute(
                 text(
                     """
-                    SELECT amount, currency, category, merchant, occurred_on, evidence
+                    SELECT amount, currency, category, merchant, occurred_on,
+                           description, evidence
                     FROM mod_finance_expenses
                     WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
                     ORDER BY id
@@ -191,8 +199,8 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
             conn.execute(
                 text(
                     """
-                    SELECT purpose, model, prompt_tokens, completion_tokens,
-                           cost_usd, latency_ms, status, created_at, metadata
+                    SELECT request_id, purpose, model, prompt_tokens, completion_tokens,
+                           cost_usd, latency_ms, status, error_message, created_at, metadata
                     FROM llm_calls
                     WHERE user_id = :uid AND inbox_id = :id
                     ORDER BY created_at
@@ -203,6 +211,24 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
             .mappings()
             .all()
         )
+        # Adjuntos (media_assets): referencia + estado/texto de OCR. El blob va por /media/{id}.
+        media = (
+            conn.execute(
+                text(
+                    """
+                    SELECT id, sha256, content_type, filename, extension, size_bytes,
+                           ocr_status, ocr_model, ocr_text, ocr_error, ocr_attempts, ocr_done_at
+                    FROM media_assets
+                    WHERE user_id = :uid AND inbox_id = :id
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "id": inbox_id},
+            )
+            .mappings()
+            .all()
+        )
+        feedback = get_feedback(conn, inbox_id)
     data["summary"] = dict(summary) if summary else None
     data["extraction"] = {
         "done": len(ext_modules) > 0,
@@ -218,6 +244,8 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
         "completion_tokens": sum(int(c["completion_tokens"]) for c in calls),
         "items": [{**c, "cost_usd": float(c["cost_usd"])} for c in calls],
     }
+    data["media"] = [dict(m) for m in media]
+    data["feedback"] = feedback
     return data
 
 
@@ -341,3 +369,120 @@ async def extract_inbox_endpoint(
         raise HTTPException(status_code=402, detail="saldo LLM agotado") from e
     except LLMError as e:
         raise HTTPException(status_code=502, detail=f"error de LLM: {e}") from e
+
+
+@router.post("/{inbox_id}/reprocess", response_model=ReprocessResponse)
+async def reprocess_inbox_endpoint(
+    inbox_id: int, user_id: UserID, body: ReprocessRequest
+) -> dict[str, Any]:
+    """Re-aplica etapas (media/ocr/classify/summarize/extract) a UN mensaje.
+
+    Síncrono y best-effort por etapa: cada una se corre en orden de dependencia y su resultado (o
+    error) viaja en `results[<stage>]`. Los lotes van por el CLI `memex-reprocess`.
+    """
+    from memex.reprocess import reprocess
+
+    with connection() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM inbox WHERE id = :id AND user_id = :uid"),
+            {"id": inbox_id, "uid": user_id},
+        ).scalar()
+    if not exists:
+        raise HTTPException(status_code=404, detail="not found")
+
+    bind_request_context(inbox_id=inbox_id)  # atribuye el costo LLM/OCR a este mensaje
+    try:
+        return await reprocess(user_id, stages=body.stages, targets=[inbox_id], force=body.force)
+    except ValueError as e:  # stages inválidas
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.post("/{inbox_id}/feedback", response_model=FeedbackInfo)
+async def feedback_inbox_endpoint(
+    inbox_id: int, user_id: UserID, body: FeedbackRequest
+) -> dict[str, Any]:
+    """Registra feedback rápido del usuario sobre un mensaje (SOLO captura — no corrige nada).
+
+    Guarda las categorías + nota y un snapshot de lo observado (tier/remitente/asunto/adjuntos) para
+    que el feedback sea autocontenido al evaluar/calibrar después. Upsert: re-reportar reemplaza.
+    """
+    try:
+        with connection() as conn:
+            row = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT i.payload->>'subject' AS subject,
+                               i.payload->'from'->>'email' AS from_email,
+                               c.tier AS tier,
+                               EXISTS (SELECT 1 FROM media_assets m WHERE m.inbox_id = i.id)
+                                   AS has_media
+                        FROM inbox i
+                        LEFT JOIN classifications c ON c.inbox_id = i.id
+                        WHERE i.id = :id AND i.user_id = :uid
+                        """
+                    ),
+                    {"id": inbox_id, "uid": user_id},
+                )
+                .mappings()
+                .first()
+            )
+            if not row:
+                raise HTTPException(status_code=404, detail="not found")
+            snapshot = {
+                "tier": row["tier"],
+                "from_email": row["from_email"],
+                "subject": row["subject"],
+                "has_media": bool(row["has_media"]),
+            }
+            return record_feedback(
+                conn,
+                user_id=user_id,
+                inbox_id=inbox_id,
+                kinds=body.kinds,
+                note=body.note,
+                metadata=snapshot,
+            )
+    except InvalidFeedbackError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.post("/{inbox_id}/classification", response_model=ClassificationInfo)
+async def set_classification_endpoint(
+    inbox_id: int, user_id: UserID, body: ClassifyRequest
+) -> dict[str, Any]:
+    """Override MANUAL del tier de un mensaje, aplicado ya (blacklist/batch/individual).
+
+    Marca la clasificación como `manual` (guarda el tier previo en `metadata.prev_tier`). El worker
+    determinista no la pisa (inserta solo si falta); un re-clasificar con `force` sí la recalcula.
+    """
+    meta: dict[str, Any] = {"rule": "manual", "manual": True, "by": "user"}
+    with connection() as conn:
+        prev = (
+            conn.execute(
+                text(
+                    "SELECT c.tier FROM inbox i LEFT JOIN classifications c ON c.inbox_id = i.id "
+                    "WHERE i.id = :id AND i.user_id = :uid"
+                ),
+                {"id": inbox_id, "uid": user_id},
+            )
+            .mappings()
+            .first()
+        )
+        if prev is None:
+            raise HTTPException(status_code=404, detail="not found")
+        if prev["tier"] is not None:
+            meta["prev_tier"] = prev["tier"]
+        conn.execute(
+            text(
+                """
+                INSERT INTO classifications (user_id, inbox_id, tier, metadata)
+                VALUES (:uid, :iid, :tier, CAST(:meta AS JSONB))
+                ON CONFLICT (inbox_id) DO UPDATE
+                    SET tier = EXCLUDED.tier, metadata = EXCLUDED.metadata
+                """
+            ),
+            {"uid": user_id, "iid": inbox_id, "tier": body.tier, "meta": json.dumps(meta)},
+        )
+    _log.info("inbox.classification.manual", user_id=user_id, inbox_id=inbox_id, tier=body.tier)
+    return {"tier": body.tier, "metadata": meta}

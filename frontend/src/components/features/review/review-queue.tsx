@@ -12,7 +12,8 @@ import { formatDate } from "@/lib/format"
 import { originLabel, originText, type Tone } from "@/lib/status"
 import { renderPayload } from "@/lib/render-payload"
 import { getInbox, getMessageJourney, getReviewItems } from "@/data"
-import { ReprocessButton, reprocessStepsFor } from "@/components/features/message/reprocess-button"
+import { ReprocessButton } from "@/components/features/message/reprocess-button"
+import { reprocessStepsFor } from "@/components/features/message/reprocess-steps"
 import type {
   CalendarConflict,
   CalendarDedupCandidate,

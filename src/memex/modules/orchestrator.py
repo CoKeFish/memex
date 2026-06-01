@@ -859,7 +859,8 @@ def read_extractions(user_id: int, inbox_id: int) -> dict[str, Any]:
             conn.execute(
                 text(
                     """
-                    SELECT amount, currency, category, merchant, occurred_on, evidence
+                    SELECT amount, currency, category, merchant, occurred_on,
+                           description, evidence
                     FROM mod_finance_expenses
                     WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
                     ORDER BY id

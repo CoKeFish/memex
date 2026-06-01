@@ -44,6 +44,26 @@ export async function apiGet<T>(path: string): Promise<T> {
   return handle<T>(await fetch(`${BASE}${path}`, { headers: buildHeaders() }))
 }
 
+/**
+ * GET de un blob binario (p. ej. el adjunto original desde /media/{id}) con el mismo Bearer que el
+ * resto. Necesario porque `<img src>` / `<a href>` no mandan el header Authorization; el caller
+ * envuelve el blob en un object URL.
+ */
+export async function apiGetBlob(path: string): Promise<Blob> {
+  const res = await fetch(`${BASE}${path}`, { headers: buildHeaders() })
+  if (!res.ok) {
+    let detail = res.statusText
+    try {
+      const body = (await res.json()) as { detail?: unknown }
+      detail = typeof body?.detail === "string" ? body.detail : detail
+    } catch {
+      // sin cuerpo JSON — nos quedamos con el statusText
+    }
+    throw new ApiError(res.status, detail)
+  }
+  return res.blob()
+}
+
 export async function apiPost<T>(
   path: string,
   body?: unknown,
@@ -58,4 +78,18 @@ export async function apiPost<T>(
       body: body === undefined ? undefined : JSON.stringify(body),
     }),
   )
+}
+
+export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
+  return handle<T>(
+    await fetch(`${BASE}${path}`, {
+      method: "PATCH",
+      headers: buildHeaders(),
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }),
+  )
+}
+
+export async function apiDelete<T>(path: string): Promise<T> {
+  return handle<T>(await fetch(`${BASE}${path}`, { method: "DELETE", headers: buildHeaders() }))
 }

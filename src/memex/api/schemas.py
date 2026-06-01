@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -86,6 +86,12 @@ class ClassificationInfo(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class ClassifyRequest(BaseModel):
+    """Override manual del tier de un mensaje (aplicado de inmediato)."""
+
+    tier: Literal["blacklist", "batch", "individual"]
+
+
 class SummaryInfo(BaseModel):
     id: int | None = None
     tier: str
@@ -104,6 +110,9 @@ class ExtractionInfo(BaseModel):
 class LlmCallInfo(BaseModel):
     """Una llamada LLM atribuida a este mensaje (traza de auditoría)."""
 
+    # `request_id` agrupa las llamadas de una misma corrida HTTP (un "Procesar"); las corridas
+    # batch/CLI lo dejan en None y el front las agrupa por cercanía temporal.
+    request_id: str | None = None
     purpose: str
     model: str
     prompt_tokens: int
@@ -111,6 +120,7 @@ class LlmCallInfo(BaseModel):
     cost_usd: float
     latency_ms: int
     status: str
+    error_message: str | None = None
     created_at: datetime | None = None
     # Decisión de la fase: ruteo {slugs_in, chosen, ...}; extracción {items, discarded, ...}.
     metadata: dict[str, Any] | None = None
@@ -122,6 +132,59 @@ class LlmUsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     items: list[LlmCallInfo] = Field(default_factory=list)
+
+
+class MediaAssetInfo(BaseModel):
+    """Un adjunto del mensaje (media_assets): referencia + estado/texto de OCR.
+
+    El blob NO viaja acá (solo la referencia content-addressed); se sirve aparte por
+    `GET /media/{id}`. `ocr_model` codifica la ruta del PDF (`pymupdf-text` = solo capa de texto;
+    `pymupdf+<modelo>` = texto + visión; `pymupdf-raster+<modelo>` = escaneado) y del ZIP
+    (`zip-text` / `zip+<modelo>`). El detalle de qué imágenes se OCR-earon / omitieron vive en la
+    traza `llm` (llamadas `purpose='ocr'`).
+    """
+
+    id: int
+    sha256: str
+    content_type: str
+    filename: str | None = None
+    extension: str | None = None
+    size_bytes: int
+    ocr_status: str  # pending | ok | error | skipped
+    ocr_model: str | None = None
+    ocr_text: str | None = None
+    ocr_error: str | None = None
+    ocr_attempts: int = 0
+    ocr_done_at: datetime | None = None
+
+
+class FeedbackInfo(BaseModel):
+    kinds: list[str] = Field(default_factory=list)
+    note: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    status: str = "open"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class FeedbackRequest(BaseModel):
+    """Feedback rápido del usuario sobre un mensaje (categorías + nota). Solo captura."""
+
+    kinds: list[str] = Field(default_factory=list)
+    note: str | None = None
+
+
+class FeedbackListItem(FeedbackInfo):
+    """Feedback + contexto del mensaje, para inspección (GET /feedback)."""
+
+    inbox_id: int
+    subject: str | None = None
+    from_email: str | None = None
+    tier: str | None = None
+
+
+class FeedbackList(BaseModel):
+    items: list[FeedbackListItem] = Field(default_factory=list)
 
 
 class InboxRow(BaseModel):
@@ -139,6 +202,10 @@ class InboxRow(BaseModel):
     summary: SummaryInfo | None = None
     extraction: ExtractionInfo | None = None
     llm: LlmUsageInfo | None = None
+    # Adjuntos del mensaje (media_assets) — solo en el detalle; en la lista lista vacía.
+    media: list[MediaAssetInfo] = Field(default_factory=list)
+    # Feedback manual del usuario sobre este mensaje — solo en el detalle.
+    feedback: FeedbackInfo | None = None
 
 
 class ProcessResponse(BaseModel):
@@ -181,6 +248,56 @@ class ExtractResponse(BaseModel):
     cost_usd: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+
+
+class ReprocessRequest(BaseModel):
+    """Etapas a re-aplicar a un mensaje. `force` reprocesa lo ya hecho (invalida cursores)."""
+
+    stages: list[str] = Field(default_factory=list)
+    force: bool = False
+
+
+class ReprocessResponse(BaseModel):
+    """Resultado de un reproceso por mensaje: objetivos, etapas corridas y el detalle por etapa."""
+
+    targets: int
+    stages: list[str]
+    results: dict[str, Any] = Field(default_factory=dict)
+
+
+FilterActionLiteral = Literal["keep", "ignore", "archive"]
+
+
+class FilterRuleInfo(BaseModel):
+    """Una regla de `filter_rules` expuesta al dashboard (sin `user_id`)."""
+
+    id: int
+    source_type: str | None = None
+    source_id: int | None = None
+    scope: dict[str, Any] = Field(default_factory=dict)
+    action: str
+    priority: int
+    enabled: bool
+
+
+class FilterRuleCreate(BaseModel):
+    source_type: str | None = None
+    source_id: int | None = None
+    scope: dict[str, Any] = Field(default_factory=dict)
+    action: FilterActionLiteral = "ignore"
+    priority: int = 100
+    enabled: bool = True
+
+
+class FilterRuleUpdate(BaseModel):
+    scope: dict[str, Any] | None = None
+    action: FilterActionLiteral | None = None
+    priority: int | None = None
+    enabled: bool | None = None
+
+
+class FilterRuleList(BaseModel):
+    items: list[FilterRuleInfo] = Field(default_factory=list)
 
 
 class InboxList(BaseModel):

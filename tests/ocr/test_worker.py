@@ -282,13 +282,14 @@ def test_source_filter() -> None:
     assert _media_row(m2)["ocr_status"] == "ok"
 
 
-def _ocr_call_metadata() -> dict[str, Any]:
+def _ocr_call_metadata(status: str = "ok") -> dict[str, Any]:
     with connection() as c:
         row = c.execute(
             text(
-                "SELECT metadata FROM llm_calls WHERE purpose='ocr' AND status='ok' "
+                "SELECT metadata FROM llm_calls WHERE purpose='ocr' AND status = :s "
                 "ORDER BY id DESC LIMIT 1"
-            )
+            ),
+            {"s": status},
         ).scalar()
     return row if isinstance(row, dict) else {}
 
@@ -427,6 +428,10 @@ def test_pdf_over_image_cap_keeps_text_only() -> None:
     row = _media_row(mid)
     assert "FACTURA" in row["ocr_text"]
     assert row["ocr_model"] == "pymupdf-text"
+    # El "omitido por límite de imágenes" queda como evento (sin costo) en la traza.
+    assert _count_llm("ocr", "filtered") == 1
+    md = _ocr_call_metadata("filtered")
+    assert md["kind"] == "pdf-skipped" and md["skipped_reason"] == "images_over_cap"
 
 
 def test_pdf_dedup_same_sha_single_extraction() -> None:
@@ -534,7 +539,12 @@ def test_zip_text_only_no_vision() -> None:
     row = _media_row(mid)
     assert row["ocr_text"] == "solo texto plano"
     assert row["ocr_model"] == "zip-text"
-    assert _count_llm("ocr") == 0
+    assert _count_llm("ocr", "ok") == 0  # ninguna llamada de visión
+    # El manifiesto del ZIP queda como evento en la traza (entradas + extensiones internas).
+    assert _count_llm("ocr", "filtered") == 1
+    md = _ocr_call_metadata("filtered")
+    assert md["kind"] == "zip-manifest"
+    assert [e["ext"] for e in md["entries"]] == ["txt"]
 
 
 def test_zip_encrypted_unlocked_with_password_pool() -> None:
@@ -582,3 +592,28 @@ def test_zip_dedup_same_sha() -> None:
 
     assert stats.ok == 2 and stats.deduped == 1
     assert _media_row(m1)["ocr_text"] == _media_row(m2)["ocr_text"] == "texto compartido"
+
+
+def test_inbox_scope_and_reocr() -> None:
+    """`inbox_ids` acota el claim; `reocr=True` resetea los `ok` de ese inbox y re-OCR-ea."""
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    other = _seed_inbox(sid, "m2")
+    mid = _seed_media(iid)
+    _seed_media(other, sha256="sha-other")
+    store = FakeStore()
+
+    # Scope a `iid`: solo OCR-ea su asset (el de `other` queda pending).
+    asyncio.run(run_ocr(1, client=FakeOCR(text="v1"), store=store, inbox_ids=[iid]))
+    assert _media_row(mid)["ocr_status"] == "ok" and _media_row(mid)["ocr_text"] == "v1"
+
+    # Sin reocr: el asset ya `ok` NO se reclama de nuevo.
+    f2 = FakeOCR(text="v2")
+    asyncio.run(run_ocr(1, client=f2, store=store, inbox_ids=[iid]))
+    assert f2.calls == 0
+
+    # Con reocr: resetea a pending (intentos a 0) y re-OCR-ea con el texto nuevo.
+    f3 = FakeOCR(text="v3")
+    stats = asyncio.run(run_ocr(1, client=f3, store=store, inbox_ids=[iid], reocr=True))
+    assert f3.calls == 1 and stats.ok == 1
+    assert _media_row(mid)["ocr_text"] == "v3"

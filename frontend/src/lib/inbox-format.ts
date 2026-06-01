@@ -2,6 +2,7 @@
 // interno "imap-gmail-oauth"), separación asunto/snippet con texto limpio, y agrupado por día.
 
 import { AtSign, CalendarDays, Mail, Send, Webhook, type LucideIcon } from "lucide-react"
+import { attachmentKind, mediaKindToAttachment, uniqueKinds, type AttachmentKind } from "@/lib/attachment-kind"
 import type { InboxRow, Source } from "@/types/domain"
 
 function rec(v: unknown): Record<string, unknown> {
@@ -69,6 +70,12 @@ export interface RowSummary {
   hasMedia: boolean
   /** Etiqueta de media para chat/social cuando no hay texto (p. ej. "foto"). */
   mediaLabel: string
+  /** Tipos de adjunto ÚNICOS (para los íconos por fila). Email: por content_type/filename. */
+  attachmentKinds: AttachmentKind[]
+}
+
+function rawAttachments(p: Record<string, unknown>): { filename: unknown; content_type: unknown }[] {
+  return Array.isArray(p.attachments) ? (p.attachments as { filename: unknown; content_type: unknown }[]) : []
 }
 
 /** Saca {kind, remitente, título, snippet, media} del payload agnóstico, separando asunto de cuerpo. */
@@ -81,7 +88,10 @@ export function summarizeRow(row: InboxRow): RowSummary {
     const sender = str(from.name) || str(from.email).split("@")[0] || "—"
     const subject = str(p.subject).trim()
     const body = cleanText(str(p.body_text))
-    const attachments = Array.isArray(p.attachments) ? p.attachments : []
+    const attachments = rawAttachments(p)
+    const attachmentKinds = uniqueKinds(
+      attachments.map((a) => attachmentKind(str(a.content_type), str(a.filename))),
+    )
     return {
       kind: "email",
       sender,
@@ -89,6 +99,7 @@ export function summarizeRow(row: InboxRow): RowSummary {
       snippet: subject ? body : "",
       hasMedia: attachments.length > 0,
       mediaLabel: "",
+      attachmentKinds,
     }
   }
 
@@ -99,7 +110,15 @@ export function summarizeRow(row: InboxRow): RowSummary {
     const text = cleanText(str(p.text) || str(p.media_caption))
     const media = str(p.media_kind)
     const hasMedia = !!media && media !== "none"
-    return { kind: "chat", sender, title: text, snippet: "", hasMedia, mediaLabel: hasMedia ? media : "" }
+    return {
+      kind: "chat",
+      sender,
+      title: text,
+      snippet: "",
+      hasMedia,
+      mediaLabel: hasMedia ? media : "",
+      attachmentKinds: hasMedia ? [mediaKindToAttachment(media)] : [],
+    }
   }
 
   // Social: account + text.
@@ -108,7 +127,15 @@ export function summarizeRow(row: InboxRow): RowSummary {
     const text = cleanText(str(p.text))
     const media = str(p.media_kind)
     const hasMedia = !!media && media !== "none"
-    return { kind: "social", sender, title: text, snippet: "", hasMedia, mediaLabel: hasMedia ? media : "" }
+    return {
+      kind: "social",
+      sender,
+      title: text,
+      snippet: "",
+      hasMedia,
+      mediaLabel: hasMedia ? media : "",
+      attachmentKinds: hasMedia ? [mediaKindToAttachment(media)] : [],
+    }
   }
 
   // Fallback genérico.
@@ -120,6 +147,7 @@ export function summarizeRow(row: InboxRow): RowSummary {
     snippet: "",
     hasMedia: false,
     mediaLabel: "",
+    attachmentKinds: [],
   }
 }
 

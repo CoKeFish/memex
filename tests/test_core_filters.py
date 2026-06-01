@@ -53,6 +53,15 @@ def test_equals_matches_exact_value() -> None:
     assert evaluate(r, {}) is False
 
 
+def test_nested_path_resolves_dotted_key() -> None:
+    """`from.email` matchea aunque `from` sea un objeto {email, name} (bloquear por remitente)."""
+    r = _rule(scope={"from.email": {"equals": "spam@x.com"}})
+    assert evaluate(r, {"from": {"email": "spam@x.com", "name": "Spam"}}) is True
+    assert evaluate(r, {"from": {"email": "otro@x.com"}}) is False
+    assert evaluate(r, {"from": "spam@x.com"}) is False  # string no tiene `.email`
+    assert evaluate(r, {}) is False
+
+
 def test_in_matches_membership_in_list() -> None:
     r = _rule(scope={"chat_id": {"in": [-100, -200]}})
     assert evaluate(r, {"chat_id": -100}) is True

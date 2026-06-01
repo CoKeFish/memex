@@ -115,6 +115,20 @@ class ImapClient(AbstractContextManager["ImapClient"]):
             ms_elapsed=int((time.monotonic() - started) * 1000),
         )
 
+    def fetch_uids(self, folder: str, uids: list[int]) -> Iterator[Any]:
+        """Yield los mensajes con los UIDs dados de `folder` — re-fetch puntual (backfill de media).
+
+        Los UIDs solo son válidos dentro de la UIDVALIDITY actual del folder; el caller debe
+        verificarla antes. Devuelve nada si `uids` está vacío.
+        """
+        if not uids:
+            return
+        mb = self._require_mailbox()
+        mb.folder.set(folder)
+        criteria = f"UID {','.join(str(u) for u in uids)}"
+        self._log.info("imap_fetch_uids_start", folder=folder, criteria=criteria)
+        yield from mb.fetch(criteria=criteria, mark_seen=False, bulk=True)
+
     def fetch_range(
         self,
         folder: str,

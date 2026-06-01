@@ -48,6 +48,7 @@ Para uso desde streaming (Fase 3), también se exporta
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import Callable, Iterable
 from typing import Any, Literal
@@ -119,6 +120,22 @@ def load_active_rules(
     return [FilterRule.model_validate(dict(r)) for r in rows]
 
 
+def _resolve(payload: dict[str, Any], path: str) -> Any:
+    """Resuelve una key del scope contra el payload: top-level o dot-notation anidada.
+
+    "from" -> payload["from"]; "from.email" -> payload["from"]["email"]. None si algún segmento
+    falta o no es dict. Necesario para reglas por remitente (el from del email es {email, name}, no
+    un string)."""
+    if "." not in path:
+        return payload.get(path)
+    cur: Any = payload
+    for seg in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(seg)
+    return cur
+
+
 def evaluate(rule: FilterRule, payload: dict[str, Any]) -> bool:
     """True si todas las keys del scope matchean el payload (AND).
 
@@ -128,7 +145,7 @@ def evaluate(rule: FilterRule, payload: dict[str, Any]) -> bool:
     for key, op_spec in rule.scope.items():
         if not isinstance(op_spec, dict) or not op_spec:
             return False
-        value = payload.get(key)
+        value = _resolve(payload, key)
         if not _match_one(value, op_spec):
             return False
     return True
@@ -199,6 +216,142 @@ def apply(
                 count=count,
             )
     return kept, drops
+
+
+# --- CRUD de reglas (compartido por el CLI `memex-filters` y el router HTTP /filters) ------- #
+
+
+def create_rule(
+    conn: Connection,
+    *,
+    user_id: int,
+    source_type: str | None,
+    source_id: int | None,
+    scope: dict[str, Any],
+    action: FilterAction,
+    priority: int = 100,
+    enabled: bool = True,
+) -> int:
+    """Inserta una `filter_rule` y devuelve su id. El CHECK de la tabla valida `action`."""
+    new_id = conn.execute(
+        text(
+            """
+            INSERT INTO filter_rules
+                (user_id, source_type, source_id, scope, action, priority, enabled)
+            VALUES (:uid, :stype, :sid, CAST(:scope AS JSONB), :action, :prio, :enabled)
+            RETURNING id
+            """
+        ),
+        {
+            "uid": user_id,
+            "stype": source_type,
+            "sid": source_id,
+            "scope": json.dumps(scope),
+            "action": action,
+            "prio": priority,
+            "enabled": enabled,
+        },
+    ).scalar_one()
+    return int(new_id)
+
+
+def list_rules(
+    conn: Connection,
+    *,
+    user_id: int | None = None,
+    source_type: str | None = None,
+    source_id: int | None = None,
+    enabled_only: bool = False,
+) -> list[FilterRule]:
+    """Lista reglas (todas, o filtradas). `user_id=None` (uso admin/CLI) no filtra por dueño."""
+    where: list[str] = ["TRUE"]
+    params: dict[str, Any] = {}
+    if user_id is not None:
+        where.append("user_id = :uid")
+        params["uid"] = user_id
+    if source_type is not None:
+        where.append("source_type = :stype")
+        params["stype"] = source_type
+    if source_id is not None:
+        where.append("source_id = :sid")
+        params["sid"] = source_id
+    if enabled_only:
+        where.append("enabled")
+    sql = (
+        "SELECT id, user_id, source_type, source_id, scope, action, priority, enabled "
+        f"FROM filter_rules WHERE {' AND '.join(where)} ORDER BY priority DESC, id ASC"
+    )
+    rows = conn.execute(text(sql), params).mappings().all()
+    return [FilterRule.model_validate(dict(r)) for r in rows]
+
+
+def get_rule(conn: Connection, rule_id: int, *, user_id: int | None = None) -> FilterRule | None:
+    """Una regla por id (opcionalmente acotada al dueño), o None."""
+    where = ["id = :id"]
+    params: dict[str, Any] = {"id": rule_id}
+    if user_id is not None:
+        where.append("user_id = :uid")
+        params["uid"] = user_id
+    row = (
+        conn.execute(
+            text(
+                "SELECT id, user_id, source_type, source_id, scope, action, priority, enabled "
+                f"FROM filter_rules WHERE {' AND '.join(where)}"
+            ),
+            params,
+        )
+        .mappings()
+        .first()
+    )
+    return FilterRule.model_validate(dict(row)) if row else None
+
+
+def update_rule(
+    conn: Connection,
+    rule_id: int,
+    *,
+    user_id: int | None = None,
+    scope: dict[str, Any] | None = None,
+    action: FilterAction | None = None,
+    priority: int | None = None,
+    enabled: bool | None = None,
+) -> bool:
+    """Update parcial de una regla. Devuelve False si no existe (o no es del `user_id`)."""
+    sets: list[str] = []
+    params: dict[str, Any] = {"id": rule_id}
+    if scope is not None:
+        sets.append("scope = CAST(:scope AS JSONB)")
+        params["scope"] = json.dumps(scope)
+    if action is not None:
+        sets.append("action = :action")
+        params["action"] = action
+    if priority is not None:
+        sets.append("priority = :prio")
+        params["prio"] = priority
+    if enabled is not None:
+        sets.append("enabled = :enabled")
+        params["enabled"] = enabled
+    if not sets:
+        return True
+    owner = ""
+    if user_id is not None:
+        owner = " AND user_id = :uid"
+        params["uid"] = user_id
+    n = conn.execute(
+        text(f"UPDATE filter_rules SET {', '.join(sets)} WHERE id = :id{owner}"), params
+    ).rowcount
+    return n > 0
+
+
+def delete_rule(conn: Connection, rule_id: int, *, user_id: int | None = None) -> bool:
+    """Borra una regla. Devuelve False si no existe (o no es del `user_id`)."""
+    params: dict[str, Any] = {"id": rule_id}
+    owner = ""
+    if user_id is not None:
+        owner = " AND user_id = :uid"
+        params["uid"] = user_id
+    n = conn.execute(text(f"DELETE FROM filter_rules WHERE id = :id{owner}"), params).rowcount
+    return n > 0
 
 
 class DeterministicFilterMiddleware(IngestMiddleware):

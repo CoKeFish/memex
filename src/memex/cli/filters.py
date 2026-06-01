@@ -31,8 +31,6 @@ import json
 import sys
 from typing import Any
 
-from sqlalchemy import text
-
 from memex.core import filters
 from memex.db import connection
 from memex.logging import setup_logging
@@ -60,73 +58,48 @@ def _parse_payload(raw: str) -> dict[str, Any]:
 
 def cmd_add(args: argparse.Namespace) -> int:
     scope = _parse_scope(args.scope)
-    if args.action not in ("keep", "ignore", "archive"):
-        raise SystemExit(f"--action must be keep|ignore|archive, got {args.action!r}")
     with connection() as conn:
-        new_id = conn.execute(
-            text(
-                """
-                INSERT INTO filter_rules
-                    (user_id, source_type, source_id, scope, action, priority, enabled)
-                VALUES
-                    (:uid, :stype, :sid, CAST(:scope AS JSONB), :action, :prio, TRUE)
-                RETURNING id
-                """
-            ),
-            {
-                "uid": args.user_id,
-                "stype": args.source_type,
-                "sid": args.source_id,
-                "scope": json.dumps(scope),
-                "action": args.action,
-                "prio": args.priority,
-            },
-        ).scalar()
+        new_id = filters.create_rule(
+            conn,
+            user_id=args.user_id,
+            source_type=args.source_type,
+            source_id=args.source_id,
+            scope=scope,
+            action=args.action,
+            priority=args.priority,
+        )
     print(f"created rule id={new_id}")
     return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    sql = """
-        SELECT id, user_id, source_type, source_id, scope, action, priority, enabled
-        FROM filter_rules
-        WHERE TRUE
-    """
-    params: dict[str, Any] = {}
-    if args.user_id is not None:
-        sql += " AND user_id = :uid"
-        params["uid"] = args.user_id
-    if args.source_type is not None:
-        sql += " AND source_type = :stype"
-        params["stype"] = args.source_type
-    if args.enabled_only:
-        sql += " AND enabled"
-    sql += " ORDER BY user_id, priority DESC, id ASC"
     with connection() as conn:
-        rows = conn.execute(text(sql), params).mappings().all()
-    if not rows:
+        rules = filters.list_rules(
+            conn,
+            user_id=args.user_id,
+            source_type=args.source_type,
+            enabled_only=args.enabled_only,
+        )
+    if not rules:
         print("(no rules)")
         return 0
-    for r in rows:
+    for r in rules:
         # ASCII en vez de ✓/✗ — la consola Windows (cp1252) revienta con unicode.
-        flag = "on " if r["enabled"] else "off"
-        st = r["source_type"] or "*"
-        sid = r["source_id"] if r["source_id"] is not None else "*"
+        flag = "on " if r.enabled else "off"
+        st = r.source_type or "*"
+        sid = r.source_id if r.source_id is not None else "*"
         print(
-            f"[{flag}] id={r['id']} user={r['user_id']} type={st} source={sid} "
-            f"action={r['action']} prio={r['priority']}"
+            f"[{flag}] id={r.id} user={r.user_id} type={st} source={sid} "
+            f"action={r.action} prio={r.priority}"
         )
-        print(f"     scope={json.dumps(r['scope'])}")
+        print(f"     scope={json.dumps(r.scope)}")
     return 0
 
 
 def cmd_set_enabled(args: argparse.Namespace, enabled: bool) -> int:
     with connection() as conn:
-        n = conn.execute(
-            text("UPDATE filter_rules SET enabled = :v WHERE id = :id"),
-            {"v": enabled, "id": args.rule_id},
-        ).rowcount
-    if n == 0:
+        ok = filters.update_rule(conn, args.rule_id, enabled=enabled)
+    if not ok:
         print(f"no rule with id={args.rule_id}", file=sys.stderr)
         return 1
     print(f"rule id={args.rule_id} {'enabled' if enabled else 'disabled'}")
@@ -135,11 +108,8 @@ def cmd_set_enabled(args: argparse.Namespace, enabled: bool) -> int:
 
 def cmd_remove(args: argparse.Namespace) -> int:
     with connection() as conn:
-        n = conn.execute(
-            text("DELETE FROM filter_rules WHERE id = :id"),
-            {"id": args.rule_id},
-        ).rowcount
-    if n == 0:
+        ok = filters.delete_rule(conn, args.rule_id)
+    if not ok:
         print(f"no rule with id={args.rule_id}", file=sys.stderr)
         return 1
     print(f"rule id={args.rule_id} removed")

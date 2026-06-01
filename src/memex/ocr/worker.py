@@ -78,17 +78,23 @@ class _Limits:
     passwords: tuple[str, ...]
 
 
-def _load_pending(user_id: int, source_id: int | None, limit: int) -> list[_Asset]:
+def _load_pending(
+    user_id: int, source_id: int | None, limit: int, inbox_ids: list[int] | None = None
+) -> list[_Asset]:
     """Assets reclamables del user: `pending`, o `error` con intentos aún disponibles.
 
     Reclamar errores con `ocr_attempts < MAX_OCR_ATTEMPTS` los hace reintentables (errores
-    transitorios: red, 5xx, MinIO temporal) sin loop infinito. Filtrable por source vía inbox.
+    transitorios: red, 5xx, MinIO temporal) sin loop infinito. Filtrable por source vía inbox, o por
+    un set explícito de `inbox_ids` (reproceso por mensaje).
     """
     params: dict[str, object] = {"uid": user_id, "limit": limit, "maxatt": MAX_OCR_ATTEMPTS}
-    source_filter = ""
+    filters = ""
     if source_id is not None:
-        source_filter = "AND i.source_id = :sid"
+        filters += " AND i.source_id = :sid"
         params["sid"] = source_id
+    if inbox_ids is not None:
+        filters += " AND ma.inbox_id = ANY(:iids)"
+        params["iids"] = inbox_ids
 
     with connection() as conn:
         rows = (
@@ -101,7 +107,7 @@ def _load_pending(user_id: int, source_id: int | None, limit: int) -> list[_Asse
                     WHERE ma.user_id = :uid
                       AND (ma.ocr_status = 'pending'
                            OR (ma.ocr_status = 'error' AND ma.ocr_attempts < :maxatt))
-                      {source_filter}
+                      {filters}
                     ORDER BY ma.id
                     LIMIT :limit
                     """
@@ -170,6 +176,32 @@ def _mark_error(asset_id: int, error: str) -> None:
             ),
             {"id": asset_id, "err": error[:1000]},
         )
+
+
+def _entry_ext(name: str) -> str:
+    """Extensión (lowercase, sin punto) de un nombre de entrada interna de un ZIP."""
+    return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+
+def _record_ocr_event(user_id: int, asset: _Asset, metadata: dict[str, object]) -> None:
+    """Registra un evento OCR SIN llamada de visión (`status='filtered'`, costo 0).
+
+    Hace consultable en la traza por mensaje lo que NO generó un `llm_call` real: imágenes de un
+    PDF omitidas por el tope (`pdf-skipped`), o el manifiesto de un ZIP con sus entradas/extensiones
+    (`zip-manifest`). El front lo lee como una línea de log más (mismo `purpose='ocr'`, `inbox_id`).
+    """
+    record_llm_call(
+        user_id=user_id,
+        purpose="ocr",
+        model="-",
+        prompt_tokens=0,
+        completion_tokens=0,
+        cost_usd=Decimal("0"),
+        latency_ms=0,
+        status="filtered",
+        inbox_id=asset.inbox_id,
+        metadata={"sha256": asset.sha256, **metadata},
+    )
 
 
 async def _process_asset(
@@ -359,6 +391,18 @@ async def _process_pdf(
     # Estado ANTES de cualquier costo ya registrado: el `ok` lleva el texto combinado completo.
     _mark_ok(asset.id, combined, _pdf_ocr_model(extract.mode, run.used_vision, run.vision_model))
     stats.ok += 1
+    if extract.skipped_reason:
+        # No hubo llamada de visión para estas imágenes (p. ej. más que `max_images`): lo dejamos
+        # como evento en la traza para que el dashboard pueda decir "omitido por límite".
+        _record_ocr_event(
+            user_id,
+            asset,
+            {
+                "kind": "pdf-skipped",
+                "skipped_reason": extract.skipped_reason,
+                "max_images": limits.pdf.max_images,
+            },
+        )
     _log.info(
         "ocr.pdf.ok",
         asset_id=asset.id,
@@ -421,6 +465,20 @@ async def _process_zip(
         stats.truncated += 1
     _mark_ok(asset.id, combined, _zip_ocr_model(run.used_vision, run.vision_model))
     stats.ok += 1
+    # Manifiesto del ZIP en la traza: qué entradas trae (nombre + extensión + tipo) y qué se salteó
+    # (tipo no soportado / over-cap / zip anidado) → el dashboard lista las extensiones internas.
+    _record_ocr_event(
+        user_id,
+        asset,
+        {
+            "kind": "zip-manifest",
+            "entries": [
+                {"name": e.name, "ext": _entry_ext(e.name), "kind": e.kind} for e in unpack.entries
+            ],
+            "skipped": [{"name": n, "ext": _entry_ext(n)} for n in unpack.skipped],
+            "truncated": unpack.truncated,
+        },
+    )
     _log.info(
         "ocr.zip.ok",
         asset_id=asset.id,
@@ -466,9 +524,40 @@ async def _ocr_inner_pdf(
     run.used_vision = run.used_vision or pdf_run.used_vision
     run.vision_model = run.vision_model or pdf_run.vision_model
     run.any_truncated = run.any_truncated or pdf_run.any_truncated
+    if extract.skipped_reason:
+        _record_ocr_event(
+            user_id,
+            asset,
+            {
+                "kind": "zip-pdf-skipped",
+                "origin": name,
+                "skipped_reason": extract.skipped_reason,
+                "max_images": limits.pdf.max_images,
+            },
+        )
     inner = assemble_pdf_text(extract.text_layer, pdf_run.texts)
     if inner.strip():
         run.texts.append(inner.strip())
+
+
+def _reset_for_reocr(user_id: int, inbox_ids: list[int]) -> int:
+    """Re-OCR forzado: vuelve a `pending` (intentos a 0) los assets `ok`/`error` de esos inbox.
+
+    Devuelve cuántas filas reseteó. Solo para el reproceso por mensaje (`reocr=True`)."""
+    with connection() as conn:
+        return int(
+            conn.execute(
+                text(
+                    """
+                    UPDATE media_assets
+                    SET ocr_status = 'pending', ocr_error = NULL, ocr_attempts = 0
+                    WHERE user_id = :uid AND inbox_id = ANY(:iids)
+                      AND ocr_status IN ('ok', 'error')
+                    """
+                ),
+                {"uid": user_id, "iids": inbox_ids},
+            ).rowcount
+        )
 
 
 async def run_ocr(
@@ -477,6 +566,8 @@ async def run_ocr(
     source_id: int | None = None,
     limit: int = _DEFAULT_LIMIT,
     model: str | None = None,
+    inbox_ids: list[int] | None = None,
+    reocr: bool = False,
     client: OCRClient | None = None,
     store: ObjectStore | None = None,
     caps: PdfCaps | None = None,
@@ -486,12 +577,18 @@ async def run_ocr(
     """OCR-ea las `media_assets` pendientes del user. Inyectables (tests): `client`/`store` y los
     límites (`caps` PDF, `zip_caps`, `passwords`).
 
+    Scopeable a un set de `inbox_ids` (reproceso por mensaje). Con `reocr=True`, los assets ya
+    `ok`/`error` de esos inbox se resetean a `pending` antes de reclamar (re-OCR forzado).
+
     Best-effort por asset: uno que falla se loguea + marca `error` y NO frena los demás. Los límites
     salen de la config del proveedor cuando construimos el cliente; con `client` inyectado (tests)
     caen a defaults conservadores (`PdfCaps`/`ZipCaps`, pool vacío) salvo que se pasen explícitos.
     """
     stats = OcrStats()
-    assets = _load_pending(user_id, source_id, limit)
+    if reocr and inbox_ids:
+        reset = _reset_for_reocr(user_id, inbox_ids)
+        _log.info("ocr.reocr_reset", user_id=user_id, assets=reset, inbox=len(inbox_ids))
+    assets = _load_pending(user_id, source_id, limit, inbox_ids)
     if not assets:
         _log.info("ocr.run.empty", user_id=user_id, source_id=source_id)
         return stats
