@@ -206,6 +206,7 @@ def _record_cost(
     completion_tokens: int,
     cost_usd: Decimal,
     latency_ms: int,
+    cache_hit_tokens: int = 0,
     error_message: str | None = None,
 ) -> None:
     record_llm_call(
@@ -214,6 +215,7 @@ def _record_cost(
         model=model,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        cache_hit_tokens=cache_hit_tokens,
         cost_usd=cost_usd,
         latency_ms=latency_ms,
         status=status,
@@ -262,6 +264,7 @@ async def _process_window(
             model=result.model,
             prompt_tokens=result.usage.prompt_tokens,
             completion_tokens=result.usage.completion_tokens,
+            cache_hit_tokens=result.usage.cache_hit_tokens,
             cost_usd=result.cost_usd,
             latency_ms=result.latency_ms,
             error_message="empty content",

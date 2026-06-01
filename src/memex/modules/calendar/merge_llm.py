@@ -244,6 +244,7 @@ async def run_merge(
                 model=result.model,
                 prompt_tokens=result.usage.prompt_tokens,
                 completion_tokens=result.usage.completion_tokens,
+                cache_hit_tokens=result.usage.cache_hit_tokens,
                 cost_usd=result.cost_usd,
                 latency_ms=result.latency_ms,
                 status="ok",

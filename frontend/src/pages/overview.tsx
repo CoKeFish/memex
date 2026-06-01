@@ -6,14 +6,26 @@ import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { Led } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
 import { CostKpis } from "@/components/features/metrics/cost-kpis"
+import { CardsSkeleton } from "@/components/common/data-state"
 import { FreshnessGrid } from "@/components/features/pipeline/freshness-grid"
 import { formatInt } from "@/lib/format"
-import { inboxErrorCount, inboxPendingCount, reviewCount, staleWorkerCount } from "@/data"
+import { fetchLlmRollup, inboxErrorCount, inboxPendingCount, rangeKeyWindow, reviewCount, staleWorkerCount } from "@/data"
+import { useAsync } from "@/lib/use-async"
+import { useTimeRange } from "@/state/time-range"
 import { useAlerts } from "@/state/alerts"
 import type { Tone } from "@/lib/status"
 import type { AlertSeverity } from "@/types/domain"
 
 const sevTone: Record<AlertSeverity, Tone> = { critica: "error", alta: "review", info: "running" }
+
+/** KPIs de costo LLM (datos reales) para el Resumen, atados al rango GLOBAL del topbar. */
+function OverviewCost() {
+  const { range } = useTimeRange()
+  const { data, loading } = useAsync(() => fetchLlmRollup(rangeKeyWindow(range)), [range])
+  if (loading && !data) return <CardsSkeleton count={6} />
+  if (!data) return null
+  return <CostKpis kpis={data.kpis} daily={data.daily} />
+}
 
 export function OverviewPage() {
   const { alerts, unread } = useAlerts()
@@ -50,7 +62,7 @@ export function OverviewPage() {
 
       <div>
         <div className="eyebrow mb-2">costo del LLM · rango actual</div>
-        <CostKpis />
+        <OverviewCost />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[1fr_1.1fr]">

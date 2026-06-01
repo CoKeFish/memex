@@ -2,9 +2,10 @@ import { KpiCard } from "@/components/common/kpi-card"
 import { Delta } from "@/components/common/stat"
 import { formatInt, formatMoney } from "@/lib/format"
 import { CATEGORY_LABEL, financeKpis } from "@/data"
+import type { FinanceExpense } from "@/types/domain"
 
-export function FinanceKpis({ currency }: { currency: string }) {
-  const k = financeKpis(currency)
+export function FinanceKpis({ expenses, currency }: { expenses: FinanceExpense[]; currency: string }) {
+  const k = financeKpis(expenses, currency)
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <KpiCard
