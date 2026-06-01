@@ -20,7 +20,7 @@ from memex.llm import LLMUsage
 from memex.ocr.client import OcrError, OcrQuotaError, OcrResult
 from memex.ocr.pdf import PdfCaps
 from memex.ocr.worker import run_ocr
-from tests.ocr._pdf_fixtures import digital_pdf, scanned_pdf
+from tests.ocr._pdf_fixtures import digital_pdf, make_png, make_zip, scanned_pdf
 
 
 class FakeOCR:
@@ -489,3 +489,96 @@ def test_pdf_corrupt_bytes_marks_error() -> None:
 
     assert fake.calls == 0 and stats.errors == 1
     assert _media_row(mid)["ocr_status"] == "error"
+
+
+# ----- ZIP: descompresión + ruteo de entradas (imagen/PDF/texto), pool de contraseñas ------------
+
+
+def test_zip_routes_image_pdf_text() -> None:
+    """ZIP con imagen + PDF (con texto) + texto: visión solo para la imagen; todo concatenado."""
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "zip-mix"
+    mid = _seed_media(iid, sha256=sha, content_type="application/zip")
+    zip_bytes = make_zip(
+        {
+            "a.png": make_png(300, (0.2, 0.2, 0.6)),
+            "b.pdf": digital_pdf(text="FACTURA interna 4567 monto total grande"),
+            "c.txt": b"nota interna del zip",
+        }
+    )
+
+    fake = FakeOCR(text="OCRIMG")
+    stats = asyncio.run(run_ocr(1, client=fake, store=_store_for(sha, zip_bytes)))
+
+    assert fake.calls == 1 and stats.ok == 1  # solo la imagen (el PDF tiene capa de texto)
+    row = _media_row(mid)
+    assert "nota interna del zip" in row["ocr_text"]  # entrada de texto
+    assert "FACTURA interna" in row["ocr_text"]  # capa de texto del PDF interno
+    assert "OCRIMG" in row["ocr_text"]  # OCR de la imagen
+    assert row["ocr_model"] == "zip+fake-vision"
+
+
+def test_zip_text_only_no_vision() -> None:
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "zip-text"
+    mid = _seed_media(iid, sha256=sha, content_type="application/zip")
+
+    fake = FakeOCR()
+    stats = asyncio.run(
+        run_ocr(1, client=fake, store=_store_for(sha, make_zip({"c.txt": b"solo texto plano"})))
+    )
+
+    assert fake.calls == 0 and stats.ok == 1
+    row = _media_row(mid)
+    assert row["ocr_text"] == "solo texto plano"
+    assert row["ocr_model"] == "zip-text"
+    assert _count_llm("ocr") == 0
+
+
+def test_zip_encrypted_unlocked_with_password_pool() -> None:
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "zip-enc"
+    mid = _seed_media(iid, sha256=sha, content_type="application/zip")
+    zip_bytes = make_zip({"s.txt": b"contenido protegido"}, password="docID42")
+
+    fake = FakeOCR()
+    stats = asyncio.run(
+        run_ocr(1, client=fake, store=_store_for(sha, zip_bytes), passwords=("nope", "docID42"))
+    )
+
+    assert stats.ok == 1
+    assert _media_row(mid)["ocr_text"] == "contenido protegido"
+
+
+def test_zip_encrypted_no_password_marks_error() -> None:
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "zip-enc2"
+    mid = _seed_media(iid, sha256=sha, content_type="application/zip")
+    zip_bytes = make_zip({"s.txt": b"protegido"}, password="docID42")
+
+    fake = FakeOCR()
+    stats = asyncio.run(run_ocr(1, client=fake, store=_store_for(sha, zip_bytes)))
+
+    assert stats.errors == 1 and stats.ok == 0
+    assert _media_row(mid)["ocr_status"] == "error"
+
+
+def test_zip_dedup_same_sha() -> None:
+    sid = _new_source()
+    i1 = _seed_inbox(sid, "m1")
+    i2 = _seed_inbox(sid, "m2")
+    sha = "zip-dup"
+    m1 = _seed_media(i1, sha256=sha, content_type="application/zip")
+    m2 = _seed_media(i2, sha256=sha, content_type="application/zip")
+
+    fake = FakeOCR()
+    stats = asyncio.run(
+        run_ocr(1, client=fake, store=_store_for(sha, make_zip({"c.txt": b"texto compartido"})))
+    )
+
+    assert stats.ok == 2 and stats.deduped == 1
+    assert _media_row(m1)["ocr_text"] == _media_row(m2)["ocr_text"] == "texto compartido"

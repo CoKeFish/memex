@@ -83,9 +83,21 @@ def test_corrupt_bytes_raise() -> None:
         extract_pdf(b"esto no es un PDF", caps=PdfCaps())
 
 
-def test_encrypted_pdf_raises() -> None:
+def test_encrypted_pdf_no_pool_raises() -> None:
     with pytest.raises(PdfEncryptedError):
         extract_pdf(encrypted_pdf(), caps=PdfCaps())
+
+
+def test_encrypted_pdf_unlocked_with_password_pool() -> None:
+    pdf = encrypted_pdf(password="docID42", full_perms=True, text="cifrado total 123 ref XYZ987")
+    ex = extract_pdf(pdf, caps=PdfCaps(text_min_chars=5), passwords=("nope", "docID42"))
+    assert ex.mode == "text"
+    assert "XYZ987" in ex.text_layer
+
+
+def test_encrypted_pdf_wrong_pool_raises() -> None:
+    with pytest.raises(PdfEncryptedError):
+        extract_pdf(encrypted_pdf(password="docID42"), caps=PdfCaps(), passwords=("nope",))
 
 
 def test_assemble_orders_and_drops_empty() -> None:

@@ -10,11 +10,30 @@ adjunto) no duplica la fila. El insert va en la MISMA tx que el inbox (atomicida
 
 from __future__ import annotations
 
+import mimetypes
 from typing import Literal
 
 from sqlalchemy import Connection, text
 
 OcrStatus = Literal["pending", "ok", "error", "skipped"]
+
+
+def extension_for(filename: str | None, content_type: str) -> str | None:
+    """Extensión normalizada del adjunto (sin punto, lowercase), o None si no se puede derivar.
+
+    Primero del `filename` (último segmento tras el punto, si es alfanumérico); si no hay nombre o
+    extensión usable, cae al `content_type` vía `mimetypes`. Ej.: 'factura.PDF' → 'pdf';
+    sin nombre + 'image/png' → 'png'.
+    """
+    if filename and "." in filename:
+        ext = filename.rsplit(".", 1)[-1].strip().lower()
+        if ext.isalnum():
+            return ext
+    guessed = mimetypes.guess_extension(content_type.split(";", 1)[0].strip())
+    if guessed:
+        return guessed.lstrip(".").lower()
+    return None
+
 
 #: Tope de intentos de OCR por asset. El worker re-reclama filas en 'error' con menos de este
 #: número de intentos (errores transitorios: red, 5xx, MinIO temporal); pasado el tope quedan
@@ -40,6 +59,7 @@ def insert_media_asset(
     content_type: str,
     size_bytes: int,
     filename: str | None,
+    extension: str | None = None,
     ocr_status: OcrStatus = "pending",
 ) -> None:
     """Inserta una fila en `media_assets` (idempotente por (inbox_id, sha256))."""
@@ -48,10 +68,10 @@ def insert_media_asset(
             """
             INSERT INTO media_assets
               (user_id, inbox_id, sha256, object_key, bucket,
-               content_type, size_bytes, filename, ocr_status)
+               content_type, size_bytes, filename, extension, ocr_status)
             VALUES
               (:uid, :iid, :sha, :key, :bucket,
-               :ctype, :size, :filename, :status)
+               :ctype, :size, :filename, :extension, :status)
             ON CONFLICT (inbox_id, sha256) DO NOTHING
             """
         ),
@@ -64,6 +84,7 @@ def insert_media_asset(
             "ctype": content_type,
             "size": size_bytes,
             "filename": filename,
+            "extension": extension,
             "status": ocr_status,
         },
     )

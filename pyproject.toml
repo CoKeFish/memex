@@ -21,6 +21,7 @@ dependencies = [
     "pywin32>=311; sys_platform == 'win32'",
     "telethon>=1.38,<2",
     "pymupdf>=1.24",
+    "pyzipper>=0.4.0",
 ]
 
 [dependency-groups]
@@ -90,6 +91,13 @@ ignore_missing_imports = true
 # `Any` en el único punto de contacto (memex/ocr/pdf.py); nuestras firmas hacia afuera
 # (PdfExtract/PdfImage) sí están tipadas y los retornos se envuelven en bytes/int/str.
 module = "pymupdf"
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# pyzipper no trae py.typed — mismos términos que pymupdf: lo tratamos como `Any` en el único
+# punto de contacto (memex/ocr/zip.py), con nuestras firmas (ZipUnpack/ZipEntry) tipadas hacia afuera.
+module = "pyzipper"
 ignore_missing_imports = true
 follow_imports = "skip"
 

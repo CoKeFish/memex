@@ -85,3 +85,35 @@ def test_pdf_caps_invalid_int_raises() -> None:
 def test_pdf_caps_non_positive_raises() -> None:
     with pytest.raises(OcrConfigError):
         OcrConfig.from_env({"OCR_API_KEY": "k", "MEMEX_OCR_PDF_MAX_PAGES": "0"})
+
+
+def test_zip_caps_defaults() -> None:
+    caps = OcrConfig.from_env({"OCR_API_KEY": "k"}).zip_caps()
+    assert caps.max_entries == 20
+    assert caps.max_total_bytes == 50 * 1024 * 1024
+    assert caps.max_entry_bytes == 15 * 1024 * 1024
+
+
+def test_zip_caps_from_env_mb_to_bytes() -> None:
+    caps = OcrConfig.from_env(
+        {
+            "OCR_API_KEY": "k",
+            "MEMEX_OCR_ZIP_MAX_ENTRIES": "8",
+            "MEMEX_OCR_ZIP_MAX_TOTAL_MB": "30",
+            "MEMEX_OCR_ZIP_MAX_ENTRY_MB": "5",
+        }
+    ).zip_caps()
+    assert caps.max_entries == 8
+    assert caps.max_total_bytes == 30 * 1024 * 1024
+    assert caps.max_entry_bytes == 5 * 1024 * 1024
+
+
+def test_password_pool_empty_by_default() -> None:
+    cfg = OcrConfig.from_env({"OCR_API_KEY": "k"})
+    assert cfg.password_pool() == ()
+
+
+def test_password_pool_parsed_and_redacted() -> None:
+    cfg = OcrConfig.from_env({"OCR_API_KEY": "k", "MEMEX_ATTACHMENT_PASSWORDS": "docID42, otra , "})
+    assert cfg.password_pool() == ("docID42", "otra")  # trim + descarta vacíos
+    assert "docID42" not in repr(cfg)  # SecretStr → redactado en repr/logs

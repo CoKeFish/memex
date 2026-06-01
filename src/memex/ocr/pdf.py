@@ -80,11 +80,12 @@ class PdfExtract:
     skipped_reason: str | None = None
 
 
-def extract_pdf(pdf_bytes: bytes, *, caps: PdfCaps) -> PdfExtract:
+def extract_pdf(pdf_bytes: bytes, *, caps: PdfCaps, passwords: Sequence[str] = ()) -> PdfExtract:
     """Abre el PDF y produce su texto-capa + las imágenes a OCR-ear. Puro, sync, sin red ni DB.
 
-    Levanta `PdfCorruptError` si los bytes no abren y `PdfEncryptedError` si pide contraseña; el
-    worker las trata como cualquier fallo de OCR (asset → `error`, reintentable).
+    Si el PDF pide contraseña, prueba el pool `passwords` (`doc.authenticate`). Levanta
+    `PdfCorruptError` si los bytes no abren y `PdfEncryptedError` si está cifrado y ninguna
+    contraseña funciona; el worker las trata como cualquier fallo de OCR (asset → `error`).
     """
     try:
         doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
@@ -92,8 +93,8 @@ def extract_pdf(pdf_bytes: bytes, *, caps: PdfCaps) -> PdfExtract:
         raise PdfCorruptError(f"no se pudo abrir el PDF: {e}") from e
 
     try:
-        if doc.needs_pass:
-            raise PdfEncryptedError("PDF protegido con contraseña")
+        if doc.needs_pass and not _unlock_pdf(doc, passwords):
+            raise PdfEncryptedError("PDF protegido; ninguna contraseña del pool funcionó")
 
         page_count = int(doc.page_count)
         if page_count == 0:  # PDF válido pero sin páginas: nada que OCR-ear → texto vacío (ok)
@@ -114,6 +115,11 @@ def extract_pdf(pdf_bytes: bytes, *, caps: PdfCaps) -> PdfExtract:
         return PdfExtract("", "scanned", tuple(images), page_count)
     finally:
         doc.close()
+
+
+def _unlock_pdf(doc: pymupdf.Document, passwords: Sequence[str]) -> bool:
+    """Prueba el pool contra un PDF cifrado. `authenticate` devuelve 0 si falla, !=0 si destraba."""
+    return any(int(doc.authenticate(pw)) for pw in passwords)
 
 
 def _collect_embedded_images(doc: pymupdf.Document, caps: PdfCaps) -> tuple[list[PdfImage], bool]:

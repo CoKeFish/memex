@@ -164,6 +164,23 @@ def test_pdf_ingests_as_pending(
     assert rows[0]["ocr_status"] == "pending"
 
 
+def test_extension_stored_from_filename_or_content_type(
+    client: Any, seed_source: dict[str, Any], fake_store: FakeStore
+) -> None:
+    sid = seed_source["id"]
+    pdf = _media_item(b"%PDF-fixture", sha256="ext1", content_type="application/pdf")
+    pdf["filename"] = "factura.PDF"  # del filename, normalizada a lowercase
+    img = _media_item(b"\x89PNG-fixture", sha256="ext2", content_type="image/png")
+    img["filename"] = "captura"  # sin extensión → derivada del content_type
+    resp = client.post("/ingest/batch", json={"records": [_record(sid, "m1", [pdf, img])]})
+    assert resp.status_code == 200
+    with connection() as c:
+        exts = (
+            c.execute(text("SELECT extension FROM media_assets ORDER BY extension")).scalars().all()
+        )
+    assert list(exts) == ["pdf", "png"]  # del filename y del content_type, respectivamente
+
+
 def test_duplicate_inbox_skips_media(
     client: Any, seed_source: dict[str, Any], fake_store: FakeStore
 ) -> None:

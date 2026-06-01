@@ -20,7 +20,7 @@ from memex.api.object_store import get_object_store
 from memex.api.schemas import IngestRequest
 from memex.core import filters
 from memex.core.inbox import insert_record
-from memex.core.media import insert_media_asset
+from memex.core.media import extension_for, insert_media_asset
 from memex.core.source import MediaBlob, SourceRecord
 from memex.storage import object_key_for
 
@@ -104,6 +104,7 @@ def persist_media(conn: Connection, user_id: int, inbox_id: int, media: list[Dec
             content_type=m.content_type,
             size_bytes=len(m.data),
             filename=m.filename,
+            extension=extension_for(m.filename, m.content_type),
         )
 
 

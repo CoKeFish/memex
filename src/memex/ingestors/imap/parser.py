@@ -23,9 +23,9 @@ RAW_HEADERS_WHITELIST = (
 
 BodySource = Literal["text", "html_stripped"]
 
-#: Content-types de adjuntos que extraemos para OCR. Imágenes + PDF. El PDF se ALMACENA pero el
-#: worker lo marca `skipped` (los endpoints chat/visión no aceptan application/pdf; rasterizar
-#: queda en backlog). `image/jpg` es no-estándar pero algunos clientes lo emiten.
+#: Content-types de adjuntos que extraemos para OCR. Imágenes + PDF + ZIP. El worker `memex-ocr`
+#: procesa cada uno (imágenes por visión; PDF por capa de texto + visión; ZIP descomprimiendo y
+#: ruteando sus entradas). `image/jpg` es no-estándar pero algunos clientes lo emiten.
 MEDIA_CONTENT_TYPES = frozenset(
     {
         "image/png",
@@ -36,6 +36,10 @@ MEDIA_CONTENT_TYPES = frozenset(
         "image/bmp",
         "image/tiff",
         "application/pdf",
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/zip-compressed",
+        "multipart/x-zip",
     }
 )
 #: Tope de bytes por adjunto (default 10 MiB). Arriba de esto se saltea + loguea.

@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 
 from memex.ocr.client import OcrError
 from memex.ocr.pdf import PdfCaps
+from memex.ocr.zip import ZipCaps
 
 #: Nombre canónico de la env var con la API key del proveedor OCR (Doppler).
 _DEFAULT_API_KEY_ENV = "OCR_API_KEY"
@@ -41,6 +42,20 @@ _DEFAULT_PDF_MAX_IMAGES = 5
 _DEFAULT_PDF_MAX_PAGES = 5
 _DEFAULT_PDF_MIN_IMAGE_PX = 200
 _DEFAULT_PDF_TEXT_MIN_CHARS = 32
+
+#: Topes de ZIP (conservadores) — acotan el fan-out de costo y protegen de zip-bombs. Override por
+#: env (los de tamaño se expresan en MiB para legibilidad y se convierten a bytes en `zip_caps`).
+_ZIP_MAX_ENTRIES_ENV = "MEMEX_OCR_ZIP_MAX_ENTRIES"
+_ZIP_MAX_TOTAL_MB_ENV = "MEMEX_OCR_ZIP_MAX_TOTAL_MB"
+_ZIP_MAX_ENTRY_MB_ENV = "MEMEX_OCR_ZIP_MAX_ENTRY_MB"
+_DEFAULT_ZIP_MAX_ENTRIES = 20
+_DEFAULT_ZIP_MAX_TOTAL_MB = 50
+_DEFAULT_ZIP_MAX_ENTRY_MB = 15
+
+#: Pool de contraseñas para adjuntos encriptados (ZIP/PDF). SECRETO (suelen ser nº de documento de
+#: identidad): viene de Doppler, separado por comas, redactado en repr/logs (`SecretStr`). Nunca en
+#: la DB ni en logs/errores. Vacío por default → los adjuntos encriptados quedan `error`.
+_PASSWORDS_ENV = "MEMEX_ATTACHMENT_PASSWORDS"
 
 
 class OcrConfigError(OcrError):
@@ -78,6 +93,14 @@ class OcrConfig(BaseModel):
     pdf_min_image_px: int = _DEFAULT_PDF_MIN_IMAGE_PX
     pdf_text_min_chars: int = _DEFAULT_PDF_TEXT_MIN_CHARS
 
+    #: Topes de ZIP (ver `zip_caps`). Los de tamaño en bytes (resueltos desde MiB en `from_env`).
+    zip_max_entries: int = _DEFAULT_ZIP_MAX_ENTRIES
+    zip_max_total_bytes: int = _DEFAULT_ZIP_MAX_TOTAL_MB * 1024 * 1024
+    zip_max_entry_bytes: int = _DEFAULT_ZIP_MAX_ENTRY_MB * 1024 * 1024
+
+    #: Pool de contraseñas para adjuntos encriptados (ZIP/PDF). `SecretStr` → redactado en logs.
+    attachment_passwords: tuple[SecretStr, ...] = ()
+
     # Carry el *nombre* de la env var (no el valor) para logging / debugging.
     api_key_env: str = ""
 
@@ -89,6 +112,18 @@ class OcrConfig(BaseModel):
             min_image_px=self.pdf_min_image_px,
             text_min_chars=self.pdf_text_min_chars,
         )
+
+    def zip_caps(self) -> ZipCaps:
+        """Topes de ZIP resueltos, listos para `memex.ocr.zip.unpack_zip`."""
+        return ZipCaps(
+            max_entries=self.zip_max_entries,
+            max_total_bytes=self.zip_max_total_bytes,
+            max_entry_bytes=self.zip_max_entry_bytes,
+        )
+
+    def password_pool(self) -> tuple[str, ...]:
+        """Contraseñas en claro para destrabar adjuntos encriptados. NO loguear el resultado."""
+        return tuple(p.get_secret_value() for p in self.attachment_passwords)
 
     @classmethod
     def from_env(
@@ -135,6 +170,22 @@ class OcrConfig(BaseModel):
             ),
             pdf_text_min_chars=_pos_int_env(
                 env_map, _PDF_TEXT_MIN_CHARS_ENV, _DEFAULT_PDF_TEXT_MIN_CHARS
+            ),
+            zip_max_entries=_pos_int_env(env_map, _ZIP_MAX_ENTRIES_ENV, _DEFAULT_ZIP_MAX_ENTRIES),
+            zip_max_total_bytes=_pos_int_env(
+                env_map, _ZIP_MAX_TOTAL_MB_ENV, _DEFAULT_ZIP_MAX_TOTAL_MB
+            )
+            * 1024
+            * 1024,
+            zip_max_entry_bytes=_pos_int_env(
+                env_map, _ZIP_MAX_ENTRY_MB_ENV, _DEFAULT_ZIP_MAX_ENTRY_MB
+            )
+            * 1024
+            * 1024,
+            attachment_passwords=tuple(
+                SecretStr(p.strip())
+                for p in env_map.get(_PASSWORDS_ENV, "").split(",")
+                if p.strip()
             ),
         )
 

@@ -29,11 +29,21 @@ from memex.ocr.client import OCRClient, OcrQuotaError
 from memex.ocr.config import OcrConfig
 from memex.ocr.openai_vision import OpenAIVisionClient
 from memex.ocr.pdf import PdfCaps, PdfMode, assemble_pdf_text, extract_pdf
+from memex.ocr.zip import ZipCaps, unpack_zip
 from memex.storage import MinioObjectStore, ObjectStore, StorageConfig
 
 _log = get_logger("memex.ocr.worker")
 
 _DEFAULT_LIMIT = 200
+#: Content-types que el worker trata como ZIP (el parser IMAP extrae sus bytes a MinIO).
+_ZIP_CONTENT_TYPES = frozenset(
+    {
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/zip-compressed",
+        "multipart/x-zip",
+    }
+)
 #: finish_reason que cuenta como transcripción completa. Cualquier otro (length, content_filter)
 #: = truncada: se guarda igual (es lo mejor que hay) pero se marca para auditoría, NUNCA queda
 #: indistinguible de un OCR completo. Espeja `summarizer.worker._OK_FINISH`.
@@ -57,6 +67,15 @@ class _Asset:
     sha256: str
     object_key: str
     content_type: str
+
+
+@dataclass(frozen=True)
+class _Limits:
+    """Topes + pool de contraseñas resueltos para una corrida (PDF, ZIP, adjuntos encriptados)."""
+
+    pdf: PdfCaps
+    zip: ZipCaps
+    passwords: tuple[str, ...]
 
 
 def _load_pending(user_id: int, source_id: int | None, limit: int) -> list[_Asset]:
@@ -159,7 +178,7 @@ async def _process_asset(
     store: ObjectStore,
     asset: _Asset,
     model: str | None,
-    caps: PdfCaps,
+    limits: _Limits,
     stats: OcrStats,
 ) -> None:
     """OCR-ea UN asset. Lanza si la descarga o el OCR fallan (lo maneja el caller)."""
@@ -179,7 +198,10 @@ async def _process_asset(
 
     data = await asyncio.to_thread(store.get, asset.object_key)
     if asset.content_type == "application/pdf":
-        await _process_pdf(user_id, client, asset, model, caps, stats, data)
+        await _process_pdf(user_id, client, asset, model, limits, stats, data)
+        return
+    if asset.content_type in _ZIP_CONTENT_TYPES:
+        await _process_zip(user_id, client, asset, model, limits, stats, data)
         return
 
     result = await client.ocr_image(image_bytes=data, content_type=asset.content_type, model=model)
@@ -241,64 +263,101 @@ def _pdf_ocr_model(mode: PdfMode, used_vision: bool, vision_model: str | None) -
     return f"pymupdf+{vision_model}"
 
 
+@dataclass
+class _VisionRun:
+    """Acumula el resultado de OCR-ear N imágenes de un contenedor (PDF/ZIP) por visión."""
+
+    texts: list[str]
+    used_vision: bool = False
+    vision_model: str | None = None
+    any_truncated: bool = False
+
+
+async def _ocr_blob(
+    user_id: int,
+    client: OCRClient,
+    asset: _Asset,
+    run: _VisionRun,
+    *,
+    image_bytes: bytes,
+    content_type: str,
+    model: str | None,
+    kind: str,
+    origin: str,
+) -> None:
+    """OCR-ea UN blob por visión, registra su `llm_call` y acumula el texto en `run`.
+
+    Lanza si la visión falla (lo maneja el caller → marca el contenedor `error`). Una llamada de
+    visión = una fila `llm_calls` (mismo `inbox_id`); `kind`/`origin` desambiguan el fan-out.
+    """
+    result = await client.ocr_image(image_bytes=image_bytes, content_type=content_type, model=model)
+    run.used_vision = True
+    run.vision_model = result.model
+    text = result.text.strip()
+    truncated = result.finish_reason is not None and result.finish_reason not in _OK_FINISH
+    run.any_truncated = run.any_truncated or truncated
+    if text:
+        run.texts.append(text)
+    record_llm_call(
+        user_id=user_id,
+        purpose="ocr",
+        model=result.model,
+        prompt_tokens=result.usage.prompt_tokens,
+        completion_tokens=result.usage.completion_tokens,
+        cost_usd=result.cost_usd,
+        latency_ms=result.latency_ms,
+        status="ok",
+        inbox_id=asset.inbox_id,
+        metadata={
+            "sha256": asset.sha256,
+            "kind": kind,
+            "origin": origin,
+            "chars": len(text),
+            "truncated": truncated,
+            "finish_reason": result.finish_reason,
+        },
+    )
+
+
 async def _process_pdf(
     user_id: int,
     client: OCRClient,
     asset: _Asset,
     model: str | None,
-    caps: PdfCaps,
+    limits: _Limits,
     stats: OcrStats,
     pdf_bytes: bytes,
 ) -> None:
-    """OCR-ea un PDF: capa de texto (gratis) + visión por imagen/página (acotado por `caps`).
+    """OCR-ea un PDF: capa de texto (gratis) + visión por imagen/página (acotado por `limits.pdf`).
 
-    Fase A (sync, en thread): `extract_pdf` decide texto-vs-escaneado y produce los PNG a OCR-ear.
-    Fase B (async, acá): una llamada de visión por blob, cada una con su `record_llm_call`. El asset
-    es atómico: se marca `ok` con el texto COMPLETO al final; si una imagen falla a mitad, propaga y
-    el caller marca todo el PDF `error` (reintentable) — nunca un PDF medio-OCR-eado marcado `ok`.
+    Fase A (sync, en thread): `extract_pdf` destraba con el pool si hace falta, decide texto-vs-
+    escaneado y produce los PNG a OCR-ear. Fase B (async, acá): una llamada de visión por blob. El
+    asset es atómico: se marca `ok` con el texto COMPLETO al final; si una imagen falla a mitad,
+    propaga y el caller marca todo el PDF `error` (reintentable) — nunca un PDF medio-OCR-eado `ok`.
     """
-    extract = await asyncio.to_thread(extract_pdf, pdf_bytes, caps=caps)
+    extract = await asyncio.to_thread(
+        extract_pdf, pdf_bytes, caps=limits.pdf, passwords=limits.passwords
+    )
 
-    image_texts: list[str] = []
-    used_vision = False
-    any_truncated = False
-    vision_model: str | None = None
+    run = _VisionRun(texts=[])
     for img in extract.images:
-        result = await client.ocr_image(
-            image_bytes=img.png_bytes, content_type=img.content_type, model=model
-        )
-        used_vision = True
-        vision_model = result.model
-        page_text = result.text.strip()
-        truncated = result.finish_reason is not None and result.finish_reason not in _OK_FINISH
-        any_truncated = any_truncated or truncated
-        if page_text:
-            image_texts.append(page_text)
-        record_llm_call(
-            user_id=user_id,
-            purpose="ocr",
-            model=result.model,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            cost_usd=result.cost_usd,
-            latency_ms=result.latency_ms,
-            status="ok",
-            inbox_id=asset.inbox_id,
-            metadata={
-                "sha256": asset.sha256,
-                "kind": "pdf-image",
-                "origin": img.origin,
-                "chars": len(page_text),
-                "truncated": truncated,
-                "finish_reason": result.finish_reason,
-            },
+        await _ocr_blob(
+            user_id,
+            client,
+            asset,
+            run,
+            image_bytes=img.png_bytes,
+            content_type=img.content_type,
+            model=model,
+            kind="pdf-image",
+            origin=img.origin,
         )
 
-    combined = assemble_pdf_text(extract.text_layer, image_texts)
-    if any_truncated:
+    combined = assemble_pdf_text(extract.text_layer, run.texts)
+    if run.any_truncated:
         stats.truncated += 1
     # Estado ANTES de cualquier costo ya registrado: el `ok` lleva el texto combinado completo.
-    _mark_ok(asset.id, combined, _pdf_ocr_model(extract.mode, used_vision, vision_model))
+    _mark_ok(asset.id, combined, _pdf_ocr_model(extract.mode, run.used_vision, run.vision_model))
     stats.ok += 1
     _log.info(
         "ocr.pdf.ok",
@@ -312,6 +371,106 @@ async def _process_pdf(
     )
 
 
+def _zip_ocr_model(used_vision: bool, vision_model: str | None) -> str:
+    """`ocr_model` de un ZIP: `zip-text` (sin visión) o `zip+<modelo>` (con OCR de imágenes/PDF)."""
+    if not used_vision or vision_model is None:
+        return "zip-text"
+    return f"zip+{vision_model}"
+
+
+async def _process_zip(
+    user_id: int,
+    client: OCRClient,
+    asset: _Asset,
+    model: str | None,
+    limits: _Limits,
+    stats: OcrStats,
+    zip_bytes: bytes,
+) -> None:
+    """OCR-ea un ZIP: descomprime (Fase A) y rutea cada entrada (Fase B): imagen→visión,
+    PDF→pipeline de PDF, texto→directo. Transitorio: las entradas NO se guardan como assets.
+
+    Atómico igual que el PDF: si una visión falla a mitad, propaga → el caller marca todo el ZIP
+    `error` (reintentable). El pool de contraseñas destraba el ZIP y también los PDF internos.
+    """
+    unpack = await asyncio.to_thread(
+        unpack_zip, zip_bytes, caps=limits.zip, passwords=limits.passwords
+    )
+
+    run = _VisionRun(texts=[])
+    for entry in unpack.entries:
+        if entry.kind == "text" and entry.text and entry.text.strip():
+            run.texts.append(entry.text.strip())
+        elif entry.kind == "image" and entry.data is not None and entry.content_type is not None:
+            await _ocr_blob(
+                user_id,
+                client,
+                asset,
+                run,
+                image_bytes=entry.data,
+                content_type=entry.content_type,
+                model=model,
+                kind="zip-image",
+                origin=entry.name,
+            )
+        elif entry.kind == "pdf" and entry.data is not None:
+            await _ocr_inner_pdf(user_id, client, asset, run, entry.data, entry.name, model, limits)
+
+    combined = "\n\n".join(run.texts)
+    if run.any_truncated:
+        stats.truncated += 1
+    _mark_ok(asset.id, combined, _zip_ocr_model(run.used_vision, run.vision_model))
+    stats.ok += 1
+    _log.info(
+        "ocr.zip.ok",
+        asset_id=asset.id,
+        inbox_id=asset.inbox_id,
+        entries=len(unpack.entries),
+        skipped=len(unpack.skipped),
+        truncated_caps=unpack.truncated,
+        chars=len(combined),
+    )
+
+
+async def _ocr_inner_pdf(
+    user_id: int,
+    client: OCRClient,
+    asset: _Asset,
+    run: _VisionRun,
+    pdf_bytes: bytes,
+    name: str,
+    model: str | None,
+    limits: _Limits,
+) -> None:
+    """Procesa un PDF que vino DENTRO de un ZIP: capa de texto + visión de sus imágenes/páginas.
+
+    Acumula en el mismo `run` del ZIP (el texto del PDF se concatena al del ZIP). Reusa el pool de
+    contraseñas para PDFs internos encriptados.
+    """
+    extract = await asyncio.to_thread(
+        extract_pdf, pdf_bytes, caps=limits.pdf, passwords=limits.passwords
+    )
+    pdf_run = _VisionRun(texts=[])
+    for img in extract.images:
+        await _ocr_blob(
+            user_id,
+            client,
+            asset,
+            pdf_run,
+            image_bytes=img.png_bytes,
+            content_type=img.content_type,
+            model=model,
+            kind="zip-pdf-image",
+            origin=f"{name}:{img.origin}",
+        )
+    run.used_vision = run.used_vision or pdf_run.used_vision
+    run.vision_model = run.vision_model or pdf_run.vision_model
+    run.any_truncated = run.any_truncated or pdf_run.any_truncated
+    inner = assemble_pdf_text(extract.text_layer, pdf_run.texts)
+    if inner.strip():
+        run.texts.append(inner.strip())
+
+
 async def run_ocr(
     user_id: int,
     *,
@@ -321,12 +480,15 @@ async def run_ocr(
     client: OCRClient | None = None,
     store: ObjectStore | None = None,
     caps: PdfCaps | None = None,
+    zip_caps: ZipCaps | None = None,
+    passwords: tuple[str, ...] | None = None,
 ) -> OcrStats:
-    """OCR-ea las `media_assets` pendientes del user. `client`/`store`/`caps` inyectables (tests).
+    """OCR-ea las `media_assets` pendientes del user. Inyectables (tests): `client`/`store` y los
+    límites (`caps` PDF, `zip_caps`, `passwords`).
 
-    Best-effort por asset: uno que falla se loguea + marca `error` y NO frena los demás. `caps`
-    (topes de PDF) sale de la config del proveedor cuando construimos el cliente; con `client`
-    inyectado (tests) cae a los defaults conservadores de `PdfCaps`, salvo que se pasen explícitos.
+    Best-effort por asset: uno que falla se loguea + marca `error` y NO frena los demás. Los límites
+    salen de la config del proveedor cuando construimos el cliente; con `client` inyectado (tests)
+    caen a defaults conservadores (`PdfCaps`/`ZipCaps`, pool vacío) salvo que se pasen explícitos.
     """
     stats = OcrStats()
     assets = _load_pending(user_id, source_id, limit)
@@ -337,11 +499,19 @@ async def run_ocr(
     owns_client = client is None
     if client is not None:
         active_client: OCRClient = client
-        resolved_caps = caps if caps is not None else PdfCaps()
+        limits = _Limits(
+            pdf=caps or PdfCaps(),
+            zip=zip_caps or ZipCaps(),
+            passwords=passwords or (),
+        )
     else:
         cfg = OcrConfig.from_env(model=model)
         active_client = OpenAIVisionClient(cfg)
-        resolved_caps = caps if caps is not None else cfg.pdf_caps()
+        limits = _Limits(
+            pdf=caps or cfg.pdf_caps(),
+            zip=zip_caps or cfg.zip_caps(),
+            passwords=passwords if passwords is not None else cfg.password_pool(),
+        )
     active_store: ObjectStore = (
         store if store is not None else MinioObjectStore(StorageConfig.from_env())
     )
@@ -351,7 +521,7 @@ async def run_ocr(
         for asset in assets:
             try:
                 await _process_asset(
-                    user_id, active_client, active_store, asset, model, resolved_caps, stats
+                    user_id, active_client, active_store, asset, model, limits, stats
                 )
             except OcrQuotaError:
                 # Saldo agotado: abortar la corrida. NO se marca el asset como error (no es su

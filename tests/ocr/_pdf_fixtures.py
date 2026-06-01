@@ -6,9 +6,11 @@ y `test_worker.py` (pipeline contra DB). Los PDFs se arman con el propio PyMuPDF
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import io
+from collections.abc import Mapping, Sequence
 
 import pymupdf
+import pyzipper
 
 #: Texto largo (> text_min_chars por defecto) para que un PDF cuente como "digital".
 ENOUGH_TEXT = "FACTURA NRO 123 total 45 USD vencimiento 2026-06-01 ref ABC"
@@ -55,10 +57,35 @@ def scanned_pdf(pages: int = 1) -> bytes:
     return out
 
 
-def encrypted_pdf() -> bytes:
-    """PDF protegido con contraseña (al reabrirlo `needs_pass` es True)."""
+def encrypted_pdf(
+    *, password: str = "secreto", full_perms: bool = False, text: str = "documento cifrado ref XYZ"
+) -> bytes:
+    """PDF protegido con contraseña (`needs_pass` True al reabrir).
+
+    `full_perms` concede permisos de extracción: sin él, autenticar con la contraseña de usuario
+    igual restringe `get_text` (el contenido se recupera por rasterizado/visión, no por texto).
+    """
     doc = pymupdf.open()
-    doc.new_page().insert_text((72, 72), "secreto")
-    out = bytes(doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, owner_pw="o", user_pw="u"))
+    doc.new_page().insert_text((72, 72), text)
+    kwargs: dict[str, object] = {"encryption": pymupdf.PDF_ENCRYPT_AES_256, "user_pw": password}
+    if full_perms:
+        kwargs["permissions"] = int(
+            pymupdf.PDF_PERM_ACCESSIBILITY | pymupdf.PDF_PERM_PRINT | pymupdf.PDF_PERM_COPY
+        )
+    out = bytes(doc.tobytes(**kwargs))
     doc.close()
     return out
+
+
+def make_zip(files: Mapping[str, bytes], *, password: str | None = None) -> bytes:
+    """Arma un ZIP in-memory con `files` (nombre→bytes). Si `password`, cifra con AES (WZ_AES)."""
+    buf = io.BytesIO()
+    kwargs: dict[str, object] = {"compression": pyzipper.ZIP_DEFLATED}
+    if password:
+        kwargs["encryption"] = pyzipper.WZ_AES
+    with pyzipper.AESZipFile(buf, "w", **kwargs) as zf:
+        if password:
+            zf.setpassword(password.encode("utf-8"))
+        for name, data in files.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
