@@ -46,3 +46,42 @@ def test_explicit_model_arg_overrides_env() -> None:
 def test_raises_when_no_key() -> None:
     with pytest.raises(OcrConfigError):
         OcrConfig.from_env({})
+
+
+def test_pdf_caps_defaults() -> None:
+    caps = OcrConfig.from_env({"OCR_API_KEY": "k"}).pdf_caps()
+    assert (caps.max_images, caps.max_pages, caps.min_image_px, caps.text_min_chars) == (
+        5,
+        5,
+        200,
+        32,
+    )
+    assert caps.raster_dpi == 150  # default de PdfCaps (no es env var aún)
+
+
+def test_pdf_caps_from_env_override() -> None:
+    caps = OcrConfig.from_env(
+        {
+            "OCR_API_KEY": "k",
+            "MEMEX_OCR_PDF_MAX_IMAGES": "12",
+            "MEMEX_OCR_PDF_MAX_PAGES": "8",
+            "MEMEX_OCR_PDF_MIN_IMAGE_PX": "150",
+            "MEMEX_OCR_PDF_TEXT_MIN_CHARS": "64",
+        }
+    ).pdf_caps()
+    assert (caps.max_images, caps.max_pages, caps.min_image_px, caps.text_min_chars) == (
+        12,
+        8,
+        150,
+        64,
+    )
+
+
+def test_pdf_caps_invalid_int_raises() -> None:
+    with pytest.raises(OcrConfigError):
+        OcrConfig.from_env({"OCR_API_KEY": "k", "MEMEX_OCR_PDF_MAX_IMAGES": "abc"})
+
+
+def test_pdf_caps_non_positive_raises() -> None:
+    with pytest.raises(OcrConfigError):
+        OcrConfig.from_env({"OCR_API_KEY": "k", "MEMEX_OCR_PDF_MAX_PAGES": "0"})

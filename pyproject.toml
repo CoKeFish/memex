@@ -20,6 +20,7 @@ dependencies = [
     "google-auth>=2.35",
     "pywin32>=311; sys_platform == 'win32'",
     "telethon>=1.38,<2",
+    "pymupdf>=1.24",
 ]
 
 [dependency-groups]
@@ -82,6 +83,15 @@ ignore_missing_imports = true
 # nuestras firmas tipadas hacia afuera.
 module = ["boto3.*", "botocore.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# PyMuPDF trae py.typed pero sus anotaciones son INCOMPLETAS (Document no declara
+# __iter__, varias funciones quedan sin tipar). `follow_imports = skip` lo trata como
+# `Any` en el único punto de contacto (memex/ocr/pdf.py); nuestras firmas hacia afuera
+# (PdfExtract/PdfImage) sí están tipadas y los retornos se envuelven en bytes/int/str.
+module = "pymupdf"
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

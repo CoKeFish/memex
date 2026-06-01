@@ -84,8 +84,9 @@ def persist_media(conn: Connection, user_id: int, inbox_id: int, media: list[Dec
 
     Se llama SOLO tras un insert de inbox exitoso (necesita el `inbox_id`). El `put` va ANTES del
     insert de media: si MinIO falla, propaga → la tx del batch hace rollback (ni inbox ni media) y
-    el runner re-fetchea (idempotente). PDF se almacena pero queda `skipped` (no se OCR-ea en este
-    slice). El object storage se construye lazy (solo si hay media).
+    el runner re-fetchea (idempotente). Tanto imágenes como PDFs entran `pending` (el default de
+    `insert_media_asset`): el worker `memex-ocr` los procesa — imágenes por visión directa, PDFs
+    por capa de texto + visión de imágenes/páginas. El object storage se construye lazy.
     """
     if not media:
         return
@@ -103,7 +104,6 @@ def persist_media(conn: Connection, user_id: int, inbox_id: int, media: list[Dec
             content_type=m.content_type,
             size_bytes=len(m.data),
             filename=m.filename,
-            ocr_status="skipped" if m.content_type == "application/pdf" else "pending",
         )
 
 

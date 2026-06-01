@@ -18,7 +18,9 @@ from memex.core.media import MAX_OCR_ATTEMPTS
 from memex.db import connection
 from memex.llm import LLMUsage
 from memex.ocr.client import OcrError, OcrQuotaError, OcrResult
+from memex.ocr.pdf import PdfCaps
 from memex.ocr.worker import run_ocr
+from tests.ocr._pdf_fixtures import digital_pdf, scanned_pdf
 
 
 class FakeOCR:
@@ -57,12 +59,17 @@ class FakeOCR:
 
 
 class FakeStore:
-    """Satisface el Protocol ObjectStore. Devuelve bytes fijos; cuenta los get."""
+    """Satisface el Protocol ObjectStore. Devuelve bytes por key (o fijos); cuenta los get.
+
+    `blobs` mapea object_key → bytes para los casos que necesitan contenido real (p. ej. un PDF
+    generado); las keys no mapeadas caen a unos bytes fijos (suficiente para la ruta de imagen).
+    """
 
     bucket = "test-bucket"
 
-    def __init__(self) -> None:
+    def __init__(self, blobs: dict[str, bytes] | None = None) -> None:
         self.gets = 0
+        self._blobs = blobs or {}
 
     def ensure_bucket(self) -> None:  # pragma: no cover - no usado por el worker
         pass
@@ -72,7 +79,7 @@ class FakeStore:
 
     def get(self, key: str) -> bytes:
         self.gets += 1
-        return b"\x89PNG-fake"
+        return self._blobs.get(key, b"\x89PNG-fake")
 
     def exists(self, key: str) -> bool:  # pragma: no cover
         return True
@@ -340,3 +347,145 @@ def test_error_terminal_after_max_attempts() -> None:
     fake = FakeOCR()
     stats = asyncio.run(run_ocr(1, client=fake, store=FakeStore()))
     assert fake.calls == 0 and stats.ok == 0  # agotado → no se reclama
+
+
+# ----- PDF: capa de texto + visión de imágenes/páginas (extiende la ruta de imagen) -------------
+
+
+def _store_for(sha: str, blob: bytes) -> FakeStore:
+    """FakeStore que devuelve `blob` para la object_key del media con ese sha (ver _seed_media)."""
+    return FakeStore({f"media/1/{sha}": blob})
+
+
+def test_pdf_text_layer_only_no_vision() -> None:
+    """PDF digital: la capa de texto se extrae GRATIS (sin visión, sin filas llm_calls)."""
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "pdf-text"
+    mid = _seed_media(iid, sha256=sha, content_type="application/pdf")
+
+    fake = FakeOCR()
+    stats = asyncio.run(run_ocr(1, client=fake, store=_store_for(sha, digital_pdf())))
+
+    assert fake.calls == 0 and stats.ok == 1
+    row = _media_row(mid)
+    assert row["ocr_status"] == "ok"
+    assert "FACTURA" in row["ocr_text"]
+    assert row["ocr_model"] == "pymupdf-text"
+    assert _count_llm("ocr") == 0
+
+
+def test_pdf_digital_with_images_ocrs_each() -> None:
+    """PDF digital con 2 imágenes: texto + una llamada de visión por imagen (1 llm_call c/u)."""
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "pdf-img"
+    mid = _seed_media(iid, sha256=sha, content_type="application/pdf")
+
+    fake = FakeOCR(text="OCRIMG")
+    pdf = digital_pdf(image_px=(300, 300))
+    stats = asyncio.run(run_ocr(1, client=fake, store=_store_for(sha, pdf)))
+
+    assert fake.calls == 2 and stats.ok == 1
+    row = _media_row(mid)
+    assert "FACTURA" in row["ocr_text"]
+    assert row["ocr_text"].count("OCRIMG") == 2
+    assert row["ocr_model"] == "pymupdf+fake-vision"
+    assert _count_llm("ocr", "ok") == 2
+
+
+def test_pdf_scanned_rasterizes_and_ocrs() -> None:
+    """PDF escaneado (sin capa de texto): se rasteriza cada página y se OCR-ea."""
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "pdf-scan"
+    mid = _seed_media(iid, sha256=sha, content_type="application/pdf")
+
+    fake = FakeOCR(text="texto del escaneo")
+    stats = asyncio.run(run_ocr(1, client=fake, store=_store_for(sha, scanned_pdf(pages=2))))
+
+    assert fake.calls == 2 and stats.ok == 1
+    row = _media_row(mid)
+    assert row["ocr_text"].count("texto del escaneo") == 2
+    assert row["ocr_model"] == "pymupdf-raster+fake-vision"
+
+
+def test_pdf_over_image_cap_keeps_text_only() -> None:
+    """Más imágenes que el tope → se OMITE el paso de imágenes (queda solo el texto, sin visión)."""
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "pdf-overcap"
+    mid = _seed_media(iid, sha256=sha, content_type="application/pdf")
+
+    fake = FakeOCR(text="no debería llamarse")
+    pdf = digital_pdf(image_px=(300, 300, 300))
+    stats = asyncio.run(
+        run_ocr(1, client=fake, store=_store_for(sha, pdf), caps=PdfCaps(max_images=2))
+    )
+
+    assert fake.calls == 0 and stats.ok == 1
+    row = _media_row(mid)
+    assert "FACTURA" in row["ocr_text"]
+    assert row["ocr_model"] == "pymupdf-text"
+
+
+def test_pdf_dedup_same_sha_single_extraction() -> None:
+    """Dos mensajes con el MISMO PDF (mismo sha) → el 2do se resuelve por dedup, sin re-OCR."""
+    sid = _new_source()
+    i1 = _seed_inbox(sid, "m1")
+    i2 = _seed_inbox(sid, "m2")
+    sha = "pdf-dup"
+    m1 = _seed_media(i1, sha256=sha, content_type="application/pdf")
+    m2 = _seed_media(i2, sha256=sha, content_type="application/pdf")
+
+    fake = FakeOCR(text="OCRIMG")
+    pdf = digital_pdf(image_px=(300, 300))
+    stats = asyncio.run(run_ocr(1, client=fake, store=_store_for(sha, pdf)))
+
+    assert fake.calls == 2  # solo el 1ro extrae; el 2do copia (no re-OCR-ea)
+    assert stats.ok == 2 and stats.deduped == 1
+    assert _media_row(m1)["ocr_text"] == _media_row(m2)["ocr_text"]
+    assert _media_row(m2)["ocr_model"] == "pymupdf+fake-vision"
+
+
+def test_pdf_vision_failure_marks_whole_pdf_error() -> None:
+    """Si una imagen falla, TODO el PDF queda `error` (reintentable) — nunca un `ok` parcial."""
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "pdf-fail"
+    mid = _seed_media(iid, sha256=sha, content_type="application/pdf")
+
+    fake = FakeOCR(fail=True)
+    stats = asyncio.run(run_ocr(1, client=fake, store=_store_for(sha, scanned_pdf(pages=2))))
+
+    assert stats.errors == 1 and stats.ok == 0
+    assert _media_row(mid)["ocr_status"] == "error"
+    assert _count_llm("ocr", "error") == 1
+
+
+def test_pdf_quota_mid_run_aborts_without_marking() -> None:
+    """402 a mitad del PDF aborta la corrida; el asset queda `pending` (no consume intento)."""
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "pdf-quota"
+    mid = _seed_media(iid, sha256=sha, content_type="application/pdf")
+
+    fake = FakeOCR(quota=True)
+    with pytest.raises(OcrQuotaError):
+        asyncio.run(run_ocr(1, client=fake, store=_store_for(sha, scanned_pdf(pages=2))))
+
+    assert _media_row(mid)["ocr_status"] == "pending"
+
+
+def test_pdf_corrupt_bytes_marks_error() -> None:
+    """Bytes que no son un PDF válido → el asset se marca `error` (reintentable)."""
+    sid = _new_source()
+    iid = _seed_inbox(sid, "m1")
+    sha = "pdf-corrupt"
+    mid = _seed_media(iid, sha256=sha, content_type="application/pdf")
+
+    fake = FakeOCR()
+    stats = asyncio.run(run_ocr(1, client=fake, store=_store_for(sha, b"esto no es un PDF")))
+
+    assert fake.calls == 0 and stats.errors == 1
+    assert _media_row(mid)["ocr_status"] == "error"

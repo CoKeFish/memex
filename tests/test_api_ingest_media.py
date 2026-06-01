@@ -1,8 +1,8 @@
 """Wiring de media en POST /ingest/batch: sube a MinIO (fake) + inserta media_assets.
 
 Usa el TestClient + un ObjectStore FALSO inyectado vía `set_object_store`. Cubre: upload con
-key content-addressed, fila media_assets `pending`, PDF → `skipped`, e inbox duplicado → media
-no se reprocesa.
+key content-addressed, fila media_assets `pending` (imágenes y PDFs por igual), e inbox
+duplicado → media no se reprocesa.
 """
 
 from __future__ import annotations
@@ -148,7 +148,11 @@ def test_invalid_base64_errors_without_orphan_inbox(
     assert fake_store.puts == []
 
 
-def test_pdf_is_skipped(client: Any, seed_source: dict[str, Any], fake_store: FakeStore) -> None:
+def test_pdf_ingests_as_pending(
+    client: Any, seed_source: dict[str, Any], fake_store: FakeStore
+) -> None:
+    """PDF entra `pending` (como las imágenes): el worker `memex-ocr` lo procesa luego
+    (capa de texto + visión de imágenes/páginas vía pymupdf)."""
     sid = seed_source["id"]
     pdf = _media_item(b"%PDF", sha256="pdf1", content_type="application/pdf")
     body = {"records": [_record(sid, "m1", [pdf])]}
@@ -157,7 +161,7 @@ def test_pdf_is_skipped(client: Any, seed_source: dict[str, Any], fake_store: Fa
     rows = _media_rows()
     assert len(rows) == 1
     assert rows[0]["content_type"] == "application/pdf"
-    assert rows[0]["ocr_status"] == "skipped"
+    assert rows[0]["ocr_status"] == "pending"
 
 
 def test_duplicate_inbox_skips_media(

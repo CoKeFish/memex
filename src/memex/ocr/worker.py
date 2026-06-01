@@ -28,6 +28,7 @@ from memex.logging import get_logger
 from memex.ocr.client import OCRClient, OcrQuotaError
 from memex.ocr.config import OcrConfig
 from memex.ocr.openai_vision import OpenAIVisionClient
+from memex.ocr.pdf import PdfCaps, PdfMode, assemble_pdf_text, extract_pdf
 from memex.storage import MinioObjectStore, ObjectStore, StorageConfig
 
 _log = get_logger("memex.ocr.worker")
@@ -158,6 +159,7 @@ async def _process_asset(
     store: ObjectStore,
     asset: _Asset,
     model: str | None,
+    caps: PdfCaps,
     stats: OcrStats,
 ) -> None:
     """OCR-ea UN asset. Lanza si la descarga o el OCR fallan (lo maneja el caller)."""
@@ -175,10 +177,12 @@ async def _process_asset(
         )
         return
 
-    image_bytes = await asyncio.to_thread(store.get, asset.object_key)
-    result = await client.ocr_image(
-        image_bytes=image_bytes, content_type=asset.content_type, model=model
-    )
+    data = await asyncio.to_thread(store.get, asset.object_key)
+    if asset.content_type == "application/pdf":
+        await _process_pdf(user_id, client, asset, model, caps, stats, data)
+        return
+
+    result = await client.ocr_image(image_bytes=data, content_type=asset.content_type, model=model)
     ocr_text = result.text.strip()  # transcripción vacía es OCR válido → se guarda '' con ok
 
     # Truncación (max_tokens agotado): se guarda igual (mejor que nada) pero NUNCA indistinguible
@@ -224,6 +228,90 @@ async def _process_asset(
     )
 
 
+def _pdf_ocr_model(mode: PdfMode, used_vision: bool, vision_model: str | None) -> str:
+    """Convención greppable para `ocr_model` de un PDF (distingue las tres rutas reales).
+
+    Sin llamada de visión (digital sin imágenes, o imágenes sobre el tope) → `pymupdf-text`.
+    Digital + imágenes → `pymupdf+<modelo>`. Escaneado (rasterizado) → `pymupdf-raster+<modelo>`.
+    """
+    if not used_vision or vision_model is None:
+        return "pymupdf-text"
+    if mode == "scanned":
+        return f"pymupdf-raster+{vision_model}"
+    return f"pymupdf+{vision_model}"
+
+
+async def _process_pdf(
+    user_id: int,
+    client: OCRClient,
+    asset: _Asset,
+    model: str | None,
+    caps: PdfCaps,
+    stats: OcrStats,
+    pdf_bytes: bytes,
+) -> None:
+    """OCR-ea un PDF: capa de texto (gratis) + visión por imagen/página (acotado por `caps`).
+
+    Fase A (sync, en thread): `extract_pdf` decide texto-vs-escaneado y produce los PNG a OCR-ear.
+    Fase B (async, acá): una llamada de visión por blob, cada una con su `record_llm_call`. El asset
+    es atómico: se marca `ok` con el texto COMPLETO al final; si una imagen falla a mitad, propaga y
+    el caller marca todo el PDF `error` (reintentable) — nunca un PDF medio-OCR-eado marcado `ok`.
+    """
+    extract = await asyncio.to_thread(extract_pdf, pdf_bytes, caps=caps)
+
+    image_texts: list[str] = []
+    used_vision = False
+    any_truncated = False
+    vision_model: str | None = None
+    for img in extract.images:
+        result = await client.ocr_image(
+            image_bytes=img.png_bytes, content_type=img.content_type, model=model
+        )
+        used_vision = True
+        vision_model = result.model
+        page_text = result.text.strip()
+        truncated = result.finish_reason is not None and result.finish_reason not in _OK_FINISH
+        any_truncated = any_truncated or truncated
+        if page_text:
+            image_texts.append(page_text)
+        record_llm_call(
+            user_id=user_id,
+            purpose="ocr",
+            model=result.model,
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            cost_usd=result.cost_usd,
+            latency_ms=result.latency_ms,
+            status="ok",
+            inbox_id=asset.inbox_id,
+            metadata={
+                "sha256": asset.sha256,
+                "kind": "pdf-image",
+                "origin": img.origin,
+                "chars": len(page_text),
+                "truncated": truncated,
+                "finish_reason": result.finish_reason,
+            },
+        )
+
+    combined = assemble_pdf_text(extract.text_layer, image_texts)
+    if any_truncated:
+        stats.truncated += 1
+    # Estado ANTES de cualquier costo ya registrado: el `ok` lleva el texto combinado completo.
+    _mark_ok(asset.id, combined, _pdf_ocr_model(extract.mode, used_vision, vision_model))
+    stats.ok += 1
+    _log.info(
+        "ocr.pdf.ok",
+        asset_id=asset.id,
+        inbox_id=asset.inbox_id,
+        mode=extract.mode,
+        pages=extract.page_count,
+        vision_calls=len(extract.images),
+        skipped_reason=extract.skipped_reason,
+        chars=len(combined),
+    )
+
+
 async def run_ocr(
     user_id: int,
     *,
@@ -232,10 +320,13 @@ async def run_ocr(
     model: str | None = None,
     client: OCRClient | None = None,
     store: ObjectStore | None = None,
+    caps: PdfCaps | None = None,
 ) -> OcrStats:
-    """OCR-ea las `media_assets` pendientes del user. `client`/`store` inyectables (tests).
+    """OCR-ea las `media_assets` pendientes del user. `client`/`store`/`caps` inyectables (tests).
 
-    Best-effort por asset: uno que falla se loguea + marca `error` y NO frena los demás.
+    Best-effort por asset: uno que falla se loguea + marca `error` y NO frena los demás. `caps`
+    (topes de PDF) sale de la config del proveedor cuando construimos el cliente; con `client`
+    inyectado (tests) cae a los defaults conservadores de `PdfCaps`, salvo que se pasen explícitos.
     """
     stats = OcrStats()
     assets = _load_pending(user_id, source_id, limit)
@@ -244,9 +335,13 @@ async def run_ocr(
         return stats
 
     owns_client = client is None
-    active_client: OCRClient = (
-        client if client is not None else OpenAIVisionClient(OcrConfig.from_env(model=model))
-    )
+    if client is not None:
+        active_client: OCRClient = client
+        resolved_caps = caps if caps is not None else PdfCaps()
+    else:
+        cfg = OcrConfig.from_env(model=model)
+        active_client = OpenAIVisionClient(cfg)
+        resolved_caps = caps if caps is not None else cfg.pdf_caps()
     active_store: ObjectStore = (
         store if store is not None else MinioObjectStore(StorageConfig.from_env())
     )
@@ -255,7 +350,9 @@ async def run_ocr(
     try:
         for asset in assets:
             try:
-                await _process_asset(user_id, active_client, active_store, asset, model, stats)
+                await _process_asset(
+                    user_id, active_client, active_store, asset, model, resolved_caps, stats
+                )
             except OcrQuotaError:
                 # Saldo agotado: abortar la corrida. NO se marca el asset como error (no es su
                 # culpa, no debe consumir intentos); el cliente se cierra en el finally.

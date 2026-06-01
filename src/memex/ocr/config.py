@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from pydantic import BaseModel, ConfigDict, SecretStr
 
 from memex.ocr.client import OcrError
+from memex.ocr.pdf import PdfCaps
 
 #: Nombre canónico de la env var con la API key del proveedor OCR (Doppler).
 _DEFAULT_API_KEY_ENV = "OCR_API_KEY"
@@ -29,6 +30,17 @@ _MODEL_ENV = "MEMEX_OCR_MODEL"
 #: Defaults razonables para un proveedor OpenAI-compatible con visión. Override por env.
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_MODEL = "gpt-4o-mini"
+
+#: Topes de PDF (conservadores) — acotan el fan-out de costo (cada imagen/página = 1 llamada de
+#: visión). Override por env. El default de `raster_dpi` vive en `PdfCaps` (no amerita env var aún).
+_PDF_MAX_IMAGES_ENV = "MEMEX_OCR_PDF_MAX_IMAGES"
+_PDF_MAX_PAGES_ENV = "MEMEX_OCR_PDF_MAX_PAGES"
+_PDF_MIN_IMAGE_PX_ENV = "MEMEX_OCR_PDF_MIN_IMAGE_PX"
+_PDF_TEXT_MIN_CHARS_ENV = "MEMEX_OCR_PDF_TEXT_MIN_CHARS"
+_DEFAULT_PDF_MAX_IMAGES = 5
+_DEFAULT_PDF_MAX_PAGES = 5
+_DEFAULT_PDF_MIN_IMAGE_PX = 200
+_DEFAULT_PDF_TEXT_MIN_CHARS = 32
 
 
 class OcrConfigError(OcrError):
@@ -60,8 +72,23 @@ class OcrConfig(BaseModel):
     max_retries: int = 3
     backoff_base: float = 0.5
 
+    #: Topes de procesamiento de PDF (ver `pdf_caps`). Defaults conservadores; override por env.
+    pdf_max_images: int = _DEFAULT_PDF_MAX_IMAGES
+    pdf_max_pages: int = _DEFAULT_PDF_MAX_PAGES
+    pdf_min_image_px: int = _DEFAULT_PDF_MIN_IMAGE_PX
+    pdf_text_min_chars: int = _DEFAULT_PDF_TEXT_MIN_CHARS
+
     # Carry el *nombre* de la env var (no el valor) para logging / debugging.
     api_key_env: str = ""
+
+    def pdf_caps(self) -> PdfCaps:
+        """Topes de PDF resueltos, listos para `memex.ocr.pdf.extract_pdf`."""
+        return PdfCaps(
+            max_images=self.pdf_max_images,
+            max_pages=self.pdf_max_pages,
+            min_image_px=self.pdf_min_image_px,
+            text_min_chars=self.pdf_text_min_chars,
+        )
 
     @classmethod
     def from_env(
@@ -101,4 +128,30 @@ class OcrConfig(BaseModel):
             api_key_env=resolved_env,
             base_url=resolved_base,
             default_model=resolved_model,
+            pdf_max_images=_pos_int_env(env_map, _PDF_MAX_IMAGES_ENV, _DEFAULT_PDF_MAX_IMAGES),
+            pdf_max_pages=_pos_int_env(env_map, _PDF_MAX_PAGES_ENV, _DEFAULT_PDF_MAX_PAGES),
+            pdf_min_image_px=_pos_int_env(
+                env_map, _PDF_MIN_IMAGE_PX_ENV, _DEFAULT_PDF_MIN_IMAGE_PX
+            ),
+            pdf_text_min_chars=_pos_int_env(
+                env_map, _PDF_TEXT_MIN_CHARS_ENV, _DEFAULT_PDF_TEXT_MIN_CHARS
+            ),
         )
+
+
+def _pos_int_env(env_map: Mapping[str, str], name: str, default: int) -> int:
+    """Lee un entero > 0 de la env var `name`, o `default` si está vacía.
+
+    Levanta `OcrConfigError` si el valor no es un entero o es <= 0 (config inválida = falla rápido,
+    igual que una API key faltante; nunca cae a un default silencioso ante un valor malo).
+    """
+    raw = env_map.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise OcrConfigError(f"env var {name!r} debe ser un entero, no {raw!r}") from e
+    if value <= 0:
+        raise OcrConfigError(f"env var {name!r} debe ser > 0, no {value}")
+    return value

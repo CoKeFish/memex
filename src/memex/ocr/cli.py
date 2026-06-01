@@ -4,6 +4,7 @@ Subcomandos:
   run           — una pasada de OCR sobre las `media_assets` pendientes de un user
                   (filtrable por --source, acotable por --limit, modelo override con --model).
   ensure-bucket — crea el bucket de MinIO si no existe (idempotente; útil para bootstrap).
+  reclaim-pdfs  — marca skipped→pending los PDFs viejos para re-OCR (opt-in; no corre OCR).
 
 Server-side + async. Necesita OCR_API_KEY + MEMEX_OCR_BASE_URL/MODEL (proveedor de visión) y
 MEMEX_MINIO_* + MINIO_* (object storage), inyectadas por `doppler run`. Orden del pipeline:
@@ -19,7 +20,9 @@ import asyncio
 import sys
 
 from dotenv import load_dotenv
+from sqlalchemy import text
 
+from memex.db import connection
 from memex.logging import get_logger, setup_logging
 from memex.ocr.client import OcrError, OcrQuotaError
 from memex.ocr.worker import run_ocr
@@ -39,6 +42,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("ensure-bucket", help="Crea el bucket de MinIO si no existe (idempotente).")
+
+    reclaim_p = sub.add_parser(
+        "reclaim-pdfs",
+        help="Marca los PDFs en 'skipped' como 'pending' para re-OCR (opt-in; no corre OCR).",
+    )
+    reclaim_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     return parser
 
 
@@ -60,6 +69,25 @@ def _cmd_ensure_bucket() -> int:
     return 0
 
 
+def _cmd_reclaim_pdfs(args: argparse.Namespace) -> int:
+    """Marca skipped→pending los PDFs del user. Idempotente (solo toca 'skipped'); NO corre OCR.
+
+    Sirve para reprocesar PDFs ingestados antes de que existiera el OCR de PDFs (quedaron
+    `skipped`). El operador después corre `memex-ocr run` (procesamiento explícito, opt-in).
+    """
+    with connection() as conn:
+        n = conn.execute(
+            text(
+                "UPDATE media_assets SET ocr_status = 'pending' "
+                "WHERE user_id = :uid AND content_type = 'application/pdf' "
+                "AND ocr_status = 'skipped'"
+            ),
+            {"uid": args.user},
+        ).rowcount
+    print(f"\nreclaim-pdfs: {n} PDF(s) → pending. Corré `memex-ocr run` para OCR-earlos.\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -74,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_run(args)
         if args.cmd == "ensure-bucket":
             return _cmd_ensure_bucket()
+        if args.cmd == "reclaim-pdfs":
+            return _cmd_reclaim_pdfs(args)
         log.error("ocr.cli.unknown_command", cmd=args.cmd)
         return 1
     except OcrQuotaError as e:
