@@ -22,7 +22,7 @@ import math
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from memex.core.payloads import SocialEngagement, SocialPostPayload
+from memex.core.payloads import SocialEngagement, SocialMediaRef, SocialPostPayload
 from memex.core.source import SourceRecord
 
 MediaKind = Literal["none", "image", "video", "carousel", "reel", "other"]
@@ -63,6 +63,7 @@ def parse_instagram_item(item: dict[str, Any], account: str) -> SourceRecord | N
         text=_as_str(_first(item, "caption")) or "",
         posted_at=posted_at,
         media_kind=_lookup_media(raw_type, _IG_MEDIA),
+        media_refs=_ig_media_refs(item),
         engagement=_engagement(
             likes=_as_int(_first(item, "likesCount", "likes")),
             comments=_as_int(_first(item, "commentsCount", "comments")),
@@ -93,6 +94,7 @@ def parse_facebook_item(item: dict[str, Any], account: str) -> SourceRecord | No
         text=_as_str(_first(item, "text", "message", "postText")) or "",
         posted_at=posted_at,
         media_kind=_fb_media_kind(item),
+        media_refs=_fb_media_refs(item),
         engagement=_engagement(
             likes=_as_int(_first(item, "likes", "likesCount", "reactionsCount", "reactions")),
             comments=_as_int(_first(item, "comments", "commentsCount")),
@@ -130,6 +132,7 @@ def parse_x_item(item: dict[str, Any], account: str) -> SourceRecord | None:
         text=_as_str(_first(item, "text", "full_text", "fullText")) or "",
         posted_at=posted_at,
         media_kind=_x_media_kind(item),
+        media_refs=_x_media_refs(item),
         engagement=_engagement(
             likes=_as_int(_first(item, "likeCount", "favoriteCount", "favorite_count", "likes")),
             comments=_as_int(_first(item, "replyCount", "reply_count", "replies")),
@@ -152,6 +155,7 @@ def _build_record(
     text: str,
     posted_at: datetime,
     media_kind: MediaKind,
+    media_refs: list[SocialMediaRef],
     engagement: SocialEngagement | None,
     account_name: str | None,
     is_paid_partnership: bool | None,
@@ -167,6 +171,7 @@ def _build_record(
         text=text,
         posted_at=posted_at,
         media_kind=media_kind,
+        media_refs=media_refs,
         engagement=engagement,
         is_paid_partnership=is_paid_partnership,
         raw_type=raw_type,
@@ -211,6 +216,154 @@ def _lookup_media(raw_type: str | None, table: dict[str, MediaKind]) -> MediaKin
     if not raw_type:
         return "none"
     return table.get(raw_type.lower(), "other")
+
+
+class _MediaRefCollector:
+    """Acumula `SocialMediaRef` deduplicando por URL, preservando el orden de inserción."""
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+        self.refs: list[SocialMediaRef] = []
+
+    def add(
+        self, url: Any, kind: Literal["image", "video"], content_type: str | None = None
+    ) -> None:
+        u = _as_str(url)
+        if not u or u in self._seen:
+            return
+        self._seen.add(u)
+        self.refs.append(SocialMediaRef(url=u, kind=kind, content_type=content_type))
+
+
+def _ig_media_refs(item: dict[str, Any]) -> list[SocialMediaRef]:
+    """URLs de media de un post de Instagram (foto / video / carrusel).
+
+    En videos/reels, `displayUrl` es el poster (OCR-able) y `videoUrl` el video. Los
+    carruseles (`childPosts`) llevan una entrada por slide.
+    """
+    c = _MediaRefCollector()
+    c.add(_first(item, "displayUrl", "display_url"), "image")
+    _add_image_list(c, _first(item, "images"))
+    c.add(_first(item, "videoUrl", "video_url"), "video")
+    children = _first(item, "childPosts", "child_posts", "sidecarChildren")
+    if isinstance(children, list):
+        for ch in children:
+            if not isinstance(ch, dict):
+                continue
+            c.add(_first(ch, "displayUrl", "display_url"), "image")
+            c.add(_first(ch, "videoUrl", "video_url"), "video")
+    return c.refs
+
+
+def _fb_media_refs(item: dict[str, Any]) -> list[SocialMediaRef]:
+    """URLs de media de un post de Facebook. El shape de `media[]` varía bastante; defensivo."""
+    c = _MediaRefCollector()
+    c.add(_first(item, "imageUrl", "image"), "image")
+    c.add(_first(item, "thumbnailUrl", "thumbnail"), "image")
+    _add_image_list(c, _first(item, "images"))
+    c.add(_first(item, "videoUrl", "video_url"), "video")
+    media = _first(item, "media", "attachments")
+    if isinstance(media, list):
+        for m in media:
+            if not isinstance(m, dict):
+                continue
+            photo = m.get("photo_image")
+            if isinstance(photo, dict):
+                c.add(_first(photo, "uri", "url"), "image")
+            c.add(_first(m, "thumbnail", "thumbnailUrl", "image", "url", "src"), "image")
+            c.add(_first(m, "videoUrl", "video_url"), "video")
+    return c.refs
+
+
+def _x_media_refs(item: dict[str, Any]) -> list[SocialMediaRef]:
+    """URLs de media de un tweet.
+
+    `apidojo/tweet-scraper` expone la media en dos formas que combinamos (dedup por URL):
+    - `media`: lista CONVENIENTE de URLs (strings) — el poster/imagen ya resuelta.
+    - `media` (dicts) + `extendedEntities`/`extended_entities`/`entities`.media: objetos
+      ricos con `type` y, para video, `video_info.variants` (elegimos la mejor mp4) + poster.
+    """
+    c = _MediaRefCollector()
+    media = item.get("media")
+    if isinstance(media, list):
+        for m in media:
+            if isinstance(m, str):
+                c.add(m, "image")
+    for m in _x_media_dicts(item):
+        if _x_is_video(m):
+            url, ctype = _best_x_video_variant(m.get("video_info") or m.get("videoInfo"))
+            c.add(url, "video", ctype)
+            c.add(_first(m, "media_url_https", "media_url", "thumbnail"), "image")  # poster
+        else:
+            c.add(_first(m, "media_url_https", "media_url", "url"), "image")
+    return c.refs
+
+
+def _add_image_list(c: _MediaRefCollector, value: Any) -> None:
+    """Agrega una lista de imágenes que puede venir como list[str] o list[dict]."""
+    if not isinstance(value, list):
+        return
+    for im in value:
+        if isinstance(im, str):
+            c.add(im, "image")
+        elif isinstance(im, dict):
+            c.add(_first(im, "url", "src", "displayUrl", "uri"), "image")
+
+
+def _x_media_dicts(item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Objetos de media (dicts) de un tweet: de `media` y de
+    `extendedEntities`/`extended_entities`/`entities` (.media). El caller deduplica por URL."""
+    out: list[dict[str, Any]] = []
+    media = item.get("media")
+    if isinstance(media, list):
+        out.extend(m for m in media if isinstance(m, dict))
+    for key in ("extendedEntities", "extended_entities", "entities"):
+        ent = item.get(key)
+        nested = ent.get("media") if isinstance(ent, dict) else ent
+        if isinstance(nested, list):
+            out.extend(m for m in nested if isinstance(m, dict))
+    return out
+
+
+def _x_is_video(m: dict[str, Any]) -> bool:
+    """True si el media de X es video/gif (por `type`, `video_info` o `/video/` en la URL)."""
+    if str(m.get("type", "")).lower() in ("video", "animated_gif"):
+        return True
+    if "video_info" in m or "videoInfo" in m:
+        return True
+    return "/video/" in str(m.get("expanded_url") or m.get("expandedUrl") or "")
+
+
+def _best_x_video_variant(video_info: Any) -> tuple[str | None, str | None]:
+    """Elige la variante de mayor bitrate de un video de X (URL, content_type).
+
+    Saltea playlists `m3u8` (no son un archivo de bytes descargable directo). Devuelve
+    `(None, None)` si no hay variante mp4 usable.
+    """
+    if not isinstance(video_info, dict):
+        return None, None
+    variants = video_info.get("variants")
+    if not isinstance(variants, list):
+        return None, None
+    best_url: str | None = None
+    best_ct: str | None = None
+    best_bitrate = -1
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        url = _as_str(v.get("url"))
+        if not url:
+            continue
+        ctype = _as_str(v.get("content_type") or v.get("contentType"))
+        if ctype and "mpegurl" in ctype.lower():
+            continue  # m3u8 playlist
+        bitrate = v.get("bitrate")
+        b = bitrate if isinstance(bitrate, int) and not isinstance(bitrate, bool) else 0
+        if b > best_bitrate:
+            best_bitrate = b
+            best_url = url
+            best_ct = ctype
+    return best_url, best_ct
 
 
 def _engagement(

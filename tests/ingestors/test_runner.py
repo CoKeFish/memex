@@ -101,9 +101,11 @@ def test_run_ingestor_single_chunk_posts_and_advances() -> None:
     posted = client.post_ingest_batch.call_args[0][0]
     assert [r["external_id"] for r in posted] == ["e0", "e1", "e2"]
     assert all(r["source_id"] == 42 for r in posted)
-    # advance_checkpoint is invoked once per flush with the LAST record of the
-    # chunk — so only "e2" lands in `seen`, not the full batch.
-    client.put_checkpoint.assert_called_once_with(42, {"last_external_id": "e2", "seen": ["e2"]})
+    # advance_checkpoint is folded over EVERY record of the flushed chunk (per-entity
+    # advance), so the whole batch lands in `seen` and `last_external_id` ends on "e2".
+    client.put_checkpoint.assert_called_once_with(
+        42, {"last_external_id": "e2", "seen": ["e0", "e1", "e2"]}
+    )
 
 
 def test_run_ingestor_multiple_chunks_advances_after_each() -> None:
@@ -123,10 +125,10 @@ def test_run_ingestor_multiple_chunks_advances_after_each() -> None:
     # Chunks: [e0,e1], [e2,e3], [e4] → 3 flushes
     assert client.post_ingest_batch.call_count == 3
     assert client.put_checkpoint.call_count == 3
-    # Three flushes: ["e0","e1"] -> last="e1", ["e2","e3"] -> last="e3",
-    # ["e4"] -> last="e4". seen accumulates only the LAST of each chunk.
+    # The fold advances on EVERY record of each chunk, so `seen` accumulates the full
+    # stream and `last_external_id` ends on the last record overall.
     final_call = client.put_checkpoint.call_args_list[-1][0]
-    assert final_call == (1, {"last_external_id": "e4", "seen": ["e1", "e3", "e4"]})
+    assert final_call == (1, {"last_external_id": "e4", "seen": ["e0", "e1", "e2", "e3", "e4"]})
 
 
 def test_run_ingestor_aggregates_stats_across_chunks() -> None:

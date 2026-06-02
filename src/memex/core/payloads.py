@@ -161,6 +161,27 @@ class SocialEngagement(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+class SocialMediaRef(BaseModel):
+    """Referencia a un asset de media de un post social (foto / video).
+
+    La metadata (la `url` del CDN) viaja SIEMPRE en el payload, aunque no se hayan
+    bajado los bytes — espejo de cómo `EmailPayload.attachments` lleva metadata sin
+    contenido. Cuando `extract_media` está on, los bytes viajan aparte en
+    `SourceRecord.media` (`MediaBlob`) y el borde de ingest los sube a MinIO; esta
+    ref queda como puntero al origen. `content_type` puede ser `None` cuando el actor
+    de Apify no lo informa.
+
+    OJO: las URLs de CDN de redes sociales EXPIRAN, así que sirven para bajar en la
+    ingesta (fresco), no como link permanente — re-bajar media vieja puede fallar.
+    """
+
+    url: str
+    kind: Literal["image", "video"]
+    content_type: str | None = None
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 class SocialPostPayload(BasePayload):
     """Payload schema para un post público de red social (broadcast).
 
@@ -189,6 +210,7 @@ class SocialPostPayload(BasePayload):
     posted_at: datetime
 
     media_kind: Literal["none", "image", "video", "carousel", "reel", "other"] = "none"
+    media_refs: list[SocialMediaRef] = Field(default_factory=list)
     engagement: SocialEngagement | None = None
     is_paid_partnership: bool | None = None
     raw_type: str | None = None

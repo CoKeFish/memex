@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import base64
 import email.utils
-import hashlib
 import re
 from datetime import UTC, datetime, timedelta
 from email.header import decode_header, make_header
@@ -11,6 +9,11 @@ from html.parser import HTMLParser
 from io import StringIO
 from typing import Literal
 
+from memex.core.media_types import (
+    DEFAULT_MAX_ATTACHMENT_BYTES,
+    MEDIA_CONTENT_TYPES,
+    make_media_blob,
+)
 from memex.core.payloads import Address, Attachment, EmailPayload
 from memex.core.source import MediaBlob, SourceRecord
 from memex.logging import get_logger
@@ -23,27 +26,10 @@ RAW_HEADERS_WHITELIST = (
 
 BodySource = Literal["text", "html_stripped"]
 
-#: Content-types de adjuntos que extraemos para OCR. Imágenes + PDF + ZIP. El worker `memex-ocr`
-#: procesa cada uno (imágenes por visión; PDF por capa de texto + visión; ZIP descomprimiendo y
-#: ruteando sus entradas). `image/jpg` es no-estándar pero algunos clientes lo emiten.
-MEDIA_CONTENT_TYPES = frozenset(
-    {
-        "image/png",
-        "image/jpeg",
-        "image/jpg",
-        "image/gif",
-        "image/webp",
-        "image/bmp",
-        "image/tiff",
-        "application/pdf",
-        "application/zip",
-        "application/x-zip-compressed",
-        "application/zip-compressed",
-        "multipart/x-zip",
-    }
-)
-#: Tope de bytes por adjunto (default 10 MiB). Arriba de esto se saltea + loguea.
-DEFAULT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+#: Content-types de adjuntos que extraemos para OCR (imágenes + PDF + ZIP) y el tope por adjunto
+#: viven en `core.media_types` (fuente única, compartida con las sources sociales). Re-exportados
+#: acá por compatibilidad con quien los importe desde el parser.
+__all__ = ["DEFAULT_MAX_ATTACHMENT_BYTES", "MEDIA_CONTENT_TYPES"]
 
 _log = get_logger("memex.ingestors.imap.parser")
 
@@ -381,12 +367,10 @@ def _extract_media(msg: Message, *, max_bytes: int) -> list[MediaBlob]:
             continue
         filename = part.get_filename()
         result.append(
-            MediaBlob(
-                sha256=hashlib.sha256(payload).hexdigest(),
+            make_media_blob(
+                payload,
                 content_type=ctype,
                 filename=_decode_header(filename) if filename else None,
-                size=len(payload),
-                data_b64=base64.b64encode(payload).decode("ascii"),
             )
         )
     return result

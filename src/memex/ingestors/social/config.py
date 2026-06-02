@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from memex.core.media_types import DEFAULT_MAX_ATTACHMENT_BYTES
 from memex.core.source import SourceConfigError
 
 Platform = Literal["instagram", "facebook", "x"]
@@ -34,6 +35,9 @@ _DEFAULT_ACTORS: dict[Platform, str] = {
     "x": "apidojo/tweet-scraper",
 }
 _DEFAULT_APIFY_TOKEN_ENV = "MEMEX_APIFY_TOKEN"
+#: Tope para video crudo: más alto que el de imágenes/PDF (el usuario quiere el video completo).
+#: Override por-source en sources.config (`max_video_bytes`).
+_DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
 
 
 class SocialConfigError(SourceConfigError):
@@ -79,6 +83,13 @@ class SocialConfig(BaseModel):
     results_limit: int = 30
     run_timeout_s: int = 120
 
+    # Extracción de media (fotos + video crudo) para MinIO + OCR. Off por default → sin cambio de
+    # comportamiento. Se habilita por-source en sources.config (`extract_media: true`). Espejo de
+    # `ImapConfig.extract_media`. Las imágenes alimentan OCR; el video se guarda pero no se OCR-ea.
+    extract_media: bool = False
+    max_attachment_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES
+    max_video_bytes: int = _DEFAULT_MAX_VIDEO_BYTES
+
     # Carry el *nombre* de la env var (no el valor) para logging / debugging.
     apify_token_env: str = ""
 
@@ -90,7 +101,10 @@ class SocialConfig(BaseModel):
             f"actor_id={self.actor_id!r}, "
             f"accounts={len(self.accounts)} entries, "
             f"results_limit={self.results_limit}, "
-            f"run_timeout_s={self.run_timeout_s})"
+            f"run_timeout_s={self.run_timeout_s}, "
+            f"extract_media={self.extract_media}, "
+            f"max_attachment_bytes={self.max_attachment_bytes}, "
+            f"max_video_bytes={self.max_video_bytes})"
         )
 
     @classmethod
@@ -111,6 +125,8 @@ class SocialConfig(BaseModel):
           `priority`.
         - `results_limit` opcional (default 30) — posts a scrapear por cuenta/run.
         - `run_timeout_s` opcional (default 120) — timeout del run del actor.
+        - `extract_media` opcional (default False) — bajar fotos + video crudo a MinIO + OCR.
+        - `max_attachment_bytes` / `max_video_bytes` opcionales — topes por asset (foto / video).
         """
         env_map: Mapping[str, str] = env if env is not None else os.environ
 
@@ -147,6 +163,13 @@ class SocialConfig(BaseModel):
         if run_timeout_s <= 0:
             raise SocialConfigError("'run_timeout_s' must be positive")
 
+        max_attachment_bytes = int(cfg.get("max_attachment_bytes", DEFAULT_MAX_ATTACHMENT_BYTES))
+        if max_attachment_bytes <= 0:
+            raise SocialConfigError("'max_attachment_bytes' must be positive")
+        max_video_bytes = int(cfg.get("max_video_bytes", _DEFAULT_MAX_VIDEO_BYTES))
+        if max_video_bytes <= 0:
+            raise SocialConfigError("'max_video_bytes' must be positive")
+
         return cls(
             platform=platform,
             apify_token=SecretStr(token_value),
@@ -154,23 +177,33 @@ class SocialConfig(BaseModel):
             accounts=accounts,
             results_limit=results_limit,
             run_timeout_s=run_timeout_s,
+            extract_media=bool(cfg.get("extract_media", False)),
+            max_attachment_bytes=max_attachment_bytes,
+            max_video_bytes=max_video_bytes,
             apify_token_env=token_env,
         )
 
 
-def _normalize_account(raw: str) -> str:
+def normalize_account(raw: str) -> str:
     """Normaliza un identificador de cuenta a su handle canónico en minúsculas.
 
     Acepta handles (`@utnfrba`), nombres de página y URLs completas
     (`https://www.instagram.com/utn.frba/`) y devuelve el último segmento sin `@`
     ni barras, en minúsculas. Defensivo, no exhaustivo: para casos raros (ej.
     `facebook.com/profile.php?id=123`) el operador puede pasar el handle directo.
+
+    Público: lo reusa la API (`/sources/{id}/social/accounts`) para que la key del
+    allowlist matchee la del cursor — la MISMA normalización que `from_source_config`.
     """
     s = raw.strip()
     if "://" in s or s.startswith("www."):
         s = s.split("?", 1)[0].rstrip("/")
         s = s.rsplit("/", 1)[-1]
     return s.lstrip("@").strip().lower()
+
+
+# Alias privado retro-compatible (el constructor de config lo usa internamente).
+_normalize_account = normalize_account
 
 
 def _require_env(env_map: Mapping[str, str], var: str) -> str:

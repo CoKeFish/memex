@@ -53,6 +53,15 @@ def run_ingestor(
     the last successfully-flushed position. The next run re-fetches the
     affected records and memex deduplicates via UNIQUE(source_id, external_id).
 
+    Per-entity checkpoint advance: after a chunk is flushed, `advance_checkpoint`
+    is folded over EVERY record in the chunk (not just the last). For multi-entity
+    cursors (IMAP folders, social accounts) this means each entity advances to its
+    own latest flushed record in a single pass — a chunk that mixes accounts no
+    longer leaves the non-last accounts un-advanced. Safe because records arrive
+    ascending within each entity, so the fold lands each entity on its max; and the
+    fold runs only after the chunk posted successfully, preserving the idempotency
+    guarantee above.
+
     Adapter at the wire boundary: the sink stores cursors as JSONB (`dict`),
     but the Source contract requires a typed `CursorT`. The runner is the
     only place that does the dict ↔ CursorT conversion — Sources never see
@@ -72,7 +81,6 @@ def run_ingestor(
         nonlocal checkpoint, chunk_index
         if not chunk:
             return
-        last_record = chunk[-1]
         payload = [_record_to_request(r, source_id) for r in chunk]
         result = sink.post_ingest_batch(payload)
         stats.posted += len(chunk)
@@ -80,7 +88,10 @@ def run_ingestor(
         stats.duplicates += int(result.get("duplicates", 0))
         stats.errors += int(result.get("errors", 0))
         stats.filtered += int(result.get("filtered", 0))
-        checkpoint = source.advance_checkpoint(checkpoint, last_record)
+        # Fold sobre TODO el chunk (no solo el último): cada entidad del cursor
+        # (carpeta IMAP / cuenta social) avanza a su propio último record flusheado.
+        for record in chunk:
+            checkpoint = source.advance_checkpoint(checkpoint, record)
         sink.put_checkpoint(source_id, checkpoint.model_dump(mode="json"))
         log.info(
             "ingestor.chunk.flushed",

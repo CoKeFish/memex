@@ -8,11 +8,15 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import MagicMock
 
+import httpx
 import pytest
+import respx
 
 from memex.core.cursors import AccountCursor, SocialCursor
 from memex.core.source import HealthResult, Source, SourceKind, SourceRecord
+from memex.ingestors.runner import run_ingestor
 from memex.ingestors.social._common import (
     advance_social_checkpoint,
     is_new_record,
@@ -32,7 +36,14 @@ from memex.ingestors.social.source import (
 from memex.logging import get_logger
 
 
-def _cfg(accounts: list[AllowedAccount] | None = None, results_limit: int = 30) -> SocialConfig:
+def _cfg(
+    accounts: list[AllowedAccount] | None = None,
+    results_limit: int = 30,
+    *,
+    extract_media: bool = False,
+    max_attachment_bytes: int = 10 * 1024 * 1024,
+    max_video_bytes: int = 100 * 1024 * 1024,
+) -> SocialConfig:
     return SocialConfig(
         platform="instagram",
         apify_token="tok",
@@ -40,11 +51,26 @@ def _cfg(accounts: list[AllowedAccount] | None = None, results_limit: int = 30) 
         accounts=accounts if accounts is not None else [AllowedAccount(account="utn.frba")],
         results_limit=results_limit,
         run_timeout_s=10,
+        extract_media=extract_media,
+        max_attachment_bytes=max_attachment_bytes,
+        max_video_bytes=max_video_bytes,
     )
 
 
 def _ig(ts: str, pid: str) -> dict[str, Any]:
     return {"id": pid, "shortCode": pid, "caption": "c", "timestamp": ts, "type": "Image"}
+
+
+def _ig_media(
+    ts: str, pid: str, *, img: str | None = None, video: str | None = None
+) -> dict[str, Any]:
+    item = _ig(ts, pid)
+    if img is not None:
+        item["displayUrl"] = img
+    if video is not None:
+        item["videoUrl"] = video
+        item["type"] = "Video"
+    return item
 
 
 def _fake_apify_returning(items: list[dict[str, Any]], *, usage: float | None = 0.01) -> type:
@@ -315,3 +341,112 @@ async def test_health_check_unhealthy_on_error(monkeypatch: pytest.MonkeyPatch) 
     result = await InstagramSource(_cfg()).health_check()
     assert result.status == "unhealthy"
     assert "ConnectionError" in result.detail
+
+
+# ---- media: download bytes (extract_media) ---- #
+
+
+@respx.mock
+def test_fetch_does_not_download_when_extract_media_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sin `extract_media`: la metadata (media_refs) va en el payload, pero NO se bajan bytes."""
+    items = [_ig_media("2026-05-28T10:00:00Z", "p1", img="https://cdn.example/a.jpg")]
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_returning(items))
+    recs = list(InstagramSource(_cfg()).fetch(SocialCursor()))
+    assert recs[0].media == []
+    assert recs[0].payload["media_refs"][0]["url"] == "https://cdn.example/a.jpg"
+    assert not respx.calls  # nunca pegó al CDN
+
+
+@respx.mock
+def test_fetch_downloads_image_media(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [_ig_media("2026-05-28T10:00:00Z", "p1", img="https://cdn.example/a.jpg")]
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_returning(items))
+    body = b"\xff\xd8\xff-image-bytes"
+    respx.get("https://cdn.example/a.jpg").mock(
+        return_value=httpx.Response(200, content=body, headers={"content-type": "image/jpeg"})
+    )
+    recs = list(InstagramSource(_cfg(extract_media=True)).fetch(SocialCursor()))
+    assert len(recs) == 1
+    media = recs[0].media
+    assert len(media) == 1
+    assert media[0].content_type == "image/jpeg"
+    assert media[0].size == len(body)
+    assert len(media[0].sha256) == 64
+    assert media[0].filename == "a.jpg"
+
+
+@respx.mock
+def test_fetch_downloads_video_media(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [_ig_media("2026-05-28T10:00:00Z", "p1", video="https://cdn.example/v.mp4")]
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_returning(items))
+    respx.get("https://cdn.example/v.mp4").mock(
+        return_value=httpx.Response(
+            200, content=b"\x00\x00video", headers={"content-type": "video/mp4"}
+        )
+    )
+    recs = list(InstagramSource(_cfg(extract_media=True)).fetch(SocialCursor()))
+    media = recs[0].media
+    assert len(media) == 1
+    assert media[0].content_type == "video/mp4"
+
+
+@respx.mock
+def test_fetch_skips_too_large_media(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [_ig_media("2026-05-28T10:00:00Z", "p1", img="https://cdn.example/big.jpg")]
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_returning(items))
+    respx.get("https://cdn.example/big.jpg").mock(
+        return_value=httpx.Response(200, content=b"x" * 100, headers={"content-type": "image/jpeg"})
+    )
+    cfg = _cfg(extract_media=True, max_attachment_bytes=10)
+    recs = list(InstagramSource(cfg).fetch(SocialCursor()))
+    assert recs[0].media == []  # superó el tope → salteado, no tumba el post
+
+
+@respx.mock
+def test_fetch_skips_media_on_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [_ig_media("2026-05-28T10:00:00Z", "p1", img="https://cdn.example/gone.jpg")]
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_returning(items))
+    respx.get("https://cdn.example/gone.jpg").mock(return_value=httpx.Response(404))
+    recs = list(InstagramSource(_cfg(extract_media=True)).fetch(SocialCursor()))
+    assert recs[0].media == []
+
+
+@respx.mock
+def test_fetch_skips_non_whitelisted_content_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Un CDN que devuelve 200 con HTML (ej. página de error) NO se guarda como media."""
+    items = [_ig_media("2026-05-28T10:00:00Z", "p1", img="https://cdn.example/err.jpg")]
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_returning(items))
+    respx.get("https://cdn.example/err.jpg").mock(
+        return_value=httpx.Response(
+            200, content=b"<html>nope</html>", headers={"content-type": "text/html"}
+        )
+    )
+    recs = list(InstagramSource(_cfg(extract_media=True)).fetch(SocialCursor()))
+    assert recs[0].media == []
+
+
+# ---- cursor: per-account advance through the runner ---- #
+
+
+def test_runner_fold_advances_every_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Con varias cuentas en un mismo chunk, el fold del runner avanza el cursor de TODAS,
+    no solo la última (el fix de avance por-cuenta)."""
+    items = [_ig("2026-05-28T10:00:00Z", "p1")]
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_returning(items))
+    src = InstagramSource(_cfg(accounts=[AllowedAccount(account="a"), AllowedAccount(account="b")]))
+    client = MagicMock()
+    client.get_checkpoint.return_value = None
+    client.post_ingest_batch.return_value = {
+        "inserted": 2,
+        "duplicates": 0,
+        "errors": 0,
+        "filtered": 0,
+    }
+
+    run_ingestor(src, source_id=7, sink=client, chunk_size=10, chunk_sleep_ms=0)
+
+    client.put_checkpoint.assert_called_once()
+    saved = client.put_checkpoint.call_args[0][1]
+    assert set(saved["accounts"].keys()) == {"a", "b"}
+    assert saved["accounts"]["a"]["last_post_id"] == "p1"
+    assert saved["accounts"]["b"]["last_post_id"] == "p1"

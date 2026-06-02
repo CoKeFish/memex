@@ -198,3 +198,111 @@ def test_account_segment_uses_allowlist_not_scraped_owner() -> None:
     # X: NUNCA el handle scrapeado del author.
     assert x.external_id.split(":")[1] == "utnfrba"
     assert "scraped_handle" not in x.external_id
+
+
+# ---- media_refs: extracción de URLs de media ---- #
+
+
+def test_instagram_media_refs_image_and_video() -> None:
+    rec = parse_instagram_item(
+        _ig_item(displayUrl="https://cdn/ig.jpg", type="Video", videoUrl="https://cdn/ig.mp4"),
+        "utn.frba",
+    )
+    assert rec is not None
+    refs = {(r["url"], r["kind"]) for r in rec.payload["media_refs"]}
+    assert ("https://cdn/ig.jpg", "image") in refs
+    assert ("https://cdn/ig.mp4", "video") in refs
+
+
+def test_instagram_carousel_media_refs() -> None:
+    item = _ig_item(
+        type="Sidecar",
+        childPosts=[
+            {"displayUrl": "https://cdn/1.jpg"},
+            {"displayUrl": "https://cdn/2.jpg", "videoUrl": "https://cdn/2.mp4"},
+        ],
+    )
+    rec = parse_instagram_item(item, "x")
+    assert rec is not None
+    urls = [r["url"] for r in rec.payload["media_refs"]]
+    assert "https://cdn/1.jpg" in urls
+    assert "https://cdn/2.jpg" in urls
+    assert "https://cdn/2.mp4" in urls
+
+
+def test_instagram_media_refs_empty_when_no_media() -> None:
+    item = _ig_item()
+    item.pop("displayUrl", None)
+    rec = parse_instagram_item(item, "utn.frba")
+    assert rec is not None
+    assert rec.payload["media_refs"] == []
+
+
+def test_facebook_media_refs() -> None:
+    item = _fb_item(
+        media=[{"photo_image": {"uri": "https://cdn/fb.jpg"}}],
+        videoUrl="https://cdn/fb.mp4",
+    )
+    rec = parse_facebook_item(item, "utn")
+    assert rec is not None
+    refs = {(r["url"], r["kind"]) for r in rec.payload["media_refs"]}
+    assert ("https://cdn/fb.jpg", "image") in refs
+    assert ("https://cdn/fb.mp4", "video") in refs
+
+
+def test_x_media_refs_photo_and_best_video_variant() -> None:
+    item = _x_item(
+        media=[
+            {"type": "photo", "media_url_https": "https://cdn/x.jpg"},
+            {
+                "type": "video",
+                "media_url_https": "https://cdn/poster.jpg",
+                "video_info": {
+                    "variants": [
+                        {
+                            "bitrate": 256000,
+                            "content_type": "video/mp4",
+                            "url": "https://cdn/lo.mp4",
+                        },
+                        {
+                            "bitrate": 832000,
+                            "content_type": "video/mp4",
+                            "url": "https://cdn/hi.mp4",
+                        },
+                        {"content_type": "application/x-mpegURL", "url": "https://cdn/play.m3u8"},
+                    ]
+                },
+            },
+        ],
+    )
+    rec = parse_x_item(item, "utnfrba")
+    assert rec is not None
+    by_url = {r["url"]: r for r in rec.payload["media_refs"]}
+    assert "https://cdn/x.jpg" in by_url
+    assert "https://cdn/poster.jpg" in by_url  # poster del video como imagen (OCR-able)
+    assert by_url["https://cdn/hi.mp4"]["kind"] == "video"  # mayor bitrate
+    assert by_url["https://cdn/hi.mp4"]["content_type"] == "video/mp4"
+    assert "https://cdn/lo.mp4" not in by_url  # bitrate menor descartado
+    assert "https://cdn/play.m3u8" not in by_url  # playlist m3u8 descartada
+
+
+def test_x_media_refs_apidojo_shape() -> None:
+    """Shape real de `apidojo/tweet-scraper`: `media` = lista de URLs (strings) + el objeto
+    rico en `extendedEntities.media` (video sin `video_info`). Antes daba 0 refs porque `media`
+    (no vacío) tapaba a `extendedEntities`. Esperamos 1 ref imagen (el poster), deduplicado."""
+    poster = "https://pbs.twimg.com/media/HJwKD0pWEAA5e1u.png"
+    item = _x_item(
+        media=[poster],
+        extendedEntities={
+            "media": [
+                {
+                    "media_url_https": poster,
+                    "expanded_url": "https://x.com/NASA/status/2061/video/1",
+                }
+            ]
+        },
+        entities={"media": [{"media_url_https": poster}]},
+    )
+    rec = parse_x_item(item, "nasa")
+    assert rec is not None
+    assert rec.payload["media_refs"] == [{"url": poster, "kind": "image", "content_type": None}]

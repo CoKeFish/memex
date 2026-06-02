@@ -15,18 +15,32 @@ ADR-001: vive en `ingestors/`, solo importa `memex.core.*`, `memex.logging` y lo
 módulos de `social/`. No toca DB.
 
 Event names = literales estáticos (ADR-007): `social.fetch.{start,account_done,account_error,
-end}`. La plataforma va como campo bindeado del logger, no en el nombre del evento.
+end}` y `social.media.{downloaded,too_large,fetch_error,skipped}`. La plataforma/cuenta van
+como campos bindeados del logger, no en el nombre del evento.
+
+Extracción de media: si `cfg.extract_media`, tras parsear se bajan los bytes de las
+`media_refs` del payload (fotos + video crudo) con un `httpx.AsyncClient` PROPIO (no el de
+Apify: son CDNs públicos) y se adjuntan en `SourceRecord.media` para que el borde de ingest
+los suba a MinIO + OCR. Las URLs de CDN llevan tokens firmados → se redactan (sin query) en logs.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+import httpx
+
 from memex.core.cursors import AccountCursor, SocialCursor
-from memex.core.source import HealthResult, SourceRecord
+from memex.core.media_types import (
+    SOCIAL_MEDIA_CONTENT_TYPES,
+    make_media_blob,
+    normalize_content_type,
+)
+from memex.core.source import HealthResult, MediaBlob, SourceRecord
 from memex.ingestors.social.apify_client import ApifyClient, ApifyError
 from memex.ingestors.social.config import SocialConfig
 
@@ -62,14 +76,11 @@ def advance_social_checkpoint(checkpoint: SocialCursor, last: SourceRecord) -> S
     allowlist). `posted_at` se toma de `last.occurred_at` (ya es el timestamp del
     post). Record de otra source / malformado → cursor sin cambios (defensivo).
 
-    LIMITACIÓN (compartida con IMAP/Telegram): el runner avanza el checkpoint a
-    `chunk[-1]` por flush, y eso solo actualiza la cuenta de ese último record. Si
-    un chunk mezcla varias cuentas, las cuentas que no terminan el chunk no avanzan
-    su cursor en esa pasada. Es benigno: los posts ya quedaron en `inbox` y la
-    próxima pasada los re-postea deduplicados (`UNIQUE(source_id, external_id)`); no
-    hay pérdida de datos ni costo extra de scrape (siempre se scrapean los últimos N
-    por cuenta). El fix "correcto" (flush por cuenta) es un cambio en el runner que
-    aplicaría a todos los ingestors — fuera del alcance de este ticket.
+    Avance por-cuenta: esta función actualiza UNA cuenta (la del record que recibe).
+    El runner la pliega sobre todos los records del chunk flusheado, así CADA cuenta
+    avanza a su propio último post en una sola pasada (ver `run_ingestor`). Como los
+    records salen oldest-first dentro de cada cuenta, el fold deja a cada cuenta en su
+    máximo; las demás cuentas se preservan intactas.
     """
     parsed = split_social_external_id(last.external_id)
     if parsed is None:
@@ -96,6 +107,97 @@ def is_new_record(record: SourceRecord, cursor: AccountCursor | None) -> bool:
         post_id = parsed[2] if parsed is not None else None
         return post_id != cursor.last_post_id
     return False
+
+
+def _redact_url(url: str) -> str:
+    """Quita el query string (tokens firmados de CDN) para que la URL sea loggeable."""
+    return url.split("?", 1)[0]
+
+
+def _filename_from_url(url: str) -> str | None:
+    """Último segmento del path de la URL como filename (para extensión / media_assets)."""
+    name = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    return name or None
+
+
+async def download_social_media(
+    refs: list[dict[str, Any]],
+    *,
+    http: httpx.AsyncClient,
+    max_image_bytes: int,
+    max_video_bytes: int,
+    log: Any,
+) -> list[MediaBlob]:
+    """Baja los bytes de las `media_refs` de un post → lista de `MediaBlob`.
+
+    Defensivo y best-effort: una URL que falla (404, red, tipo no whitelisteado, supera el
+    tope) se loggea y se saltea — nunca tumba el post ni el run. Dedup por sha256 (un mismo
+    asset referenciado dos veces se sube una vez). El `content_type` real sale del header de
+    respuesta (cae al de la ref si el header no viene); solo se aceptan los de
+    `SOCIAL_MEDIA_CONTENT_TYPES` (imágenes + video).
+    """
+    blobs: list[MediaBlob] = []
+    seen_sha: set[str] = set()
+    total_bytes = 0
+    for ref in refs:
+        url = ref.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        is_video = ref.get("kind") == "video"
+        max_bytes = max_video_bytes if is_video else max_image_bytes
+        try:
+            resp = await http.get(url)
+            resp.raise_for_status()
+        except Exception as e:
+            log.warning(
+                "social.media.fetch_error",
+                url=_redact_url(url),
+                exc_type=type(e).__name__,
+                exc_msg=str(e),
+            )
+            continue
+        data = resp.content
+        if not data:
+            continue
+        if len(data) > max_bytes:
+            log.warning(
+                "social.media.too_large", url=_redact_url(url), size=len(data), max_bytes=max_bytes
+            )
+            continue
+        ctype = normalize_content_type(resp.headers.get("content-type")) or normalize_content_type(
+            ref.get("content_type")
+        )
+        if ctype not in SOCIAL_MEDIA_CONTENT_TYPES:
+            log.warning("social.media.skipped", url=_redact_url(url), content_type=ctype)
+            continue
+        blob = make_media_blob(data, content_type=ctype, filename=_filename_from_url(url))
+        if blob.sha256 in seen_sha:
+            continue
+        seen_sha.add(blob.sha256)
+        blobs.append(blob)
+        total_bytes += len(data)
+    if blobs:
+        log.info("social.media.downloaded", count=len(blobs), bytes=total_bytes)
+    return blobs
+
+
+async def _attach_media(
+    record: SourceRecord, *, http: httpx.AsyncClient, cfg: SocialConfig, log: Any
+) -> SourceRecord:
+    """Baja la media del record (de `payload['media_refs']`) y la adjunta en `record.media`."""
+    refs = record.payload.get("media_refs")
+    if not isinstance(refs, list) or not refs:
+        return record
+    blobs = await download_social_media(
+        refs,
+        http=http,
+        max_image_bytes=cfg.max_attachment_bytes,
+        max_video_bytes=cfg.max_video_bytes,
+        log=log,
+    )
+    if not blobs:
+        return record
+    return replace(record, media=blobs)
 
 
 def social_fetch(
@@ -151,6 +253,13 @@ async def _social_fetch_async(
         timeout=float(cfg.run_timeout_s),
         max_wait_s=float(cfg.run_timeout_s),
     ) as apify:
+        # Cliente HTTP separado para bajar media de los CDNs públicos (NO el de Apify, que lleva
+        # el token). `follow_redirects` porque los CDN suelen redirigir a un host de assets.
+        media_http: httpx.AsyncClient | None = None
+        if cfg.extract_media:
+            media_http = httpx.AsyncClient(
+                timeout=httpx.Timeout(float(cfg.run_timeout_s)), follow_redirects=True
+            )
 
         async def _one(account: str) -> tuple[list[SourceRecord], float | None]:
             acct_cursor = checkpoint.accounts.get(account)
@@ -191,18 +300,30 @@ async def _social_fetch_async(
             # flusheado es el más nuevo. Los actores devuelven newest-first.
             kept.sort(key=lambda r: (r.occurred_at, r.external_id))
 
+            # Media: bajar bytes (fotos + video) FUERA del semáforo de Apify (no retener el slot
+            # del actor durante descargas). Best-effort por record; un fallo no tumba la cuenta.
+            if media_http is not None:
+                kept = [
+                    await _attach_media(rec, http=media_http, cfg=cfg, log=acct_log) for rec in kept
+                ]
+
             acct_log.info(
                 "social.fetch.account_done",
                 scraped=len(result.items),
                 kept=len(kept),
+                media_assets=sum(len(r.media) for r in kept),
                 apify_run_id=result.run_id,
                 apify_cost_usd=result.usage_usd,
             )
             return kept, result.usage_usd
 
-        results: list[tuple[list[SourceRecord], float | None]] = await asyncio.gather(
-            *(_one(allowed.account) for allowed in cfg.accounts)
-        )
+        try:
+            results: list[tuple[list[SourceRecord], float | None]] = await asyncio.gather(
+                *(_one(allowed.account) for allowed in cfg.accounts)
+            )
+        finally:
+            if media_http is not None:
+                await media_http.aclose()
 
     records: list[SourceRecord] = []
     total_cost = 0.0
