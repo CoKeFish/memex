@@ -2,7 +2,6 @@ import { PageHeader } from "@/components/common/page-header"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { Led } from "@/components/common/led"
 import { AdHocIngest, FetchControl } from "@/components/features/control/fetch-control"
-import { BackfillControl } from "@/components/features/control/backfill-control"
 
 export function IngestPage() {
   return (
@@ -13,7 +12,6 @@ export function IngestPage() {
         description="Traer datos a demanda (correo, Telegram, redes): incremental para todas; por rango o cantidad solo para correo. Más ingesta puntual. El dry-run muestra cuántos serían nuevos: lo ya guardado se ignora, no se duplica."
       />
       <FetchControl />
-      <BackfillControl />
       <Panel>
         <PanelHeader eyebrow="duplicados" title="¿Cómo evita guardar el mismo correo dos veces?" />
         <PanelBody>

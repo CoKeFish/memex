@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Link } from "react-router-dom"
-import { ArrowRight, Download, FlaskConical, Loader2 } from "lucide-react"
+import { ArrowRight, Download, FlaskConical, Loader2, TriangleAlert } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -17,6 +17,10 @@ import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
 import { fetchPullableSources, fetchSourceCheckpoint, fetchSources, ingestAdHoc, triggerFetch } from "@/data"
 import type { FetchPreview, Source } from "@/types/domain"
+import { BackfillSection } from "./backfill-control"
+
+// Tipos de fuente cuya ingesta pega contra una API de paga (Apify) → mostramos aviso de costo.
+const PAID_API_TYPES = new Set(["instagram", "facebook", "x", "social"])
 
 type Mode = "incremental" | "range" | "last"
 const MODES: { v: Mode; label: string; cap: CapLevel }[] = [
@@ -161,6 +165,11 @@ export function FetchControl() {
   const enabledIds = useMemo(
     () => (sources ?? []).filter((s) => supportsMode(s.type, mode)).map((s) => s.id),
     [sources, mode],
+  )
+  // Fuente de correo sobre la que opera la Importación masiva: la primera imap TILDADA (opción 2).
+  const activeImapId = useMemo(
+    () => (sources ?? []).find((s) => s.type === "imap" && selected.has(s.id))?.id ?? null,
+    [sources, selected],
   )
 
   // Punto guardado de cada fuente (para la línea bajo cada fila).
@@ -350,8 +359,8 @@ export function FetchControl() {
               <p className="text-xs text-status-review">Indicá al menos la fecha “Desde”.</p>
             )}
 
-            {/* Selección de fuentes (izq) + acciones/preview (der); switches estilo Scheduler. */}
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+            {/* Lista de fuentes (mitad izq) + acciones del fetch + Importación masiva (mitad der). */}
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
               <div className="min-w-0 flex-1 divide-y divide-border overflow-hidden rounded-md border border-border">
                 <div className="flex items-center gap-2.5 bg-muted/30 px-3 py-2">
                   <Switch
@@ -395,7 +404,17 @@ export function FetchControl() {
                       >
                         <Icon className={cn("size-4 shrink-0", m.tone)} />
                         <div className="min-w-0">
-                          <div className="truncate text-sm font-medium">{sourceFullLabel(s)}</div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate text-sm font-medium">{sourceFullLabel(s)}</span>
+                            {PAID_API_TYPES.has(s.type) && (
+                              <span
+                                className="shrink-0"
+                                title="Red social: la ingesta usa API de paga (Apify), tiene costo por corrida"
+                              >
+                                <TriangleAlert className="size-3 text-status-review" />
+                              </span>
+                            )}
+                          </div>
                           <div className="truncate text-[11px] text-muted-foreground">
                             {enabled
                               ? checkpointLabel(checkpoints?.[s.id])
@@ -411,13 +430,13 @@ export function FetchControl() {
                 })}
               </div>
 
-              {/* Acciones: el dry-run/traer a la derecha de los selectores; preview debajo. */}
-              <div className="flex w-full shrink-0 flex-col gap-3 sm:w-72">
-                <div className="flex flex-col gap-2">
-                  <Button variant="outline" size="sm" className="w-full" disabled={disabled} onClick={() => run(true)}>
+              {/* Mitad derecha: acciones del fetch arriba, Importación masiva (backfill) abajo. */}
+              <div className="min-w-0 flex-1 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button variant="outline" size="sm" disabled={disabled} onClick={() => run(true)}>
                     {busy === "dry" ? <Loader2 className="size-3.5 animate-spin" /> : <FlaskConical className="size-3.5" />} Dry-run
                   </Button>
-                  <Button size="sm" className="w-full" disabled={disabled} onClick={() => run(false)}>
+                  <Button size="sm" disabled={disabled} onClick={() => run(false)}>
                     {busy === "run" ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
                     {selected.size > 1 ? `Traer ${selected.size} ahora` : "Traer ahora"}
                   </Button>
@@ -434,6 +453,12 @@ export function FetchControl() {
                     Ver en datos <ArrowRight className="size-3.5" />
                   </Link>
                 )}
+
+                {/* Importación masiva (backfill) sobre la fuente de correo tildada en la lista. */}
+                <div className="border-t border-border pt-3">
+                  <div className="eyebrow mb-2">Importación masiva</div>
+                  <BackfillSection sourceId={activeImapId} />
+                </div>
               </div>
             </div>
           </>
