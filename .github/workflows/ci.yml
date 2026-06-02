@@ -48,7 +48,9 @@ jobs:
 
       - name: pytest
         env:
-          MEMEX_DATABASE_URL: postgresql+psycopg://memex:memex@localhost:5454/memex_test
-          MEMEX_AUTH_ENFORCED: "false"
-          MEMEX_API_TOKEN: ""
+          # El conftest construye la URL de test desde MEMEX_TEST_PG (base sin nombre de DB) y crea
+          # una DB por worker de xdist. En CI apuntamos al Postgres de servicio (localhost:5454); el
+          # default local (5455, instancia en RAM) no existe acá. El runner Linux usa disco nativo,
+          # así que no sufre el stall de I/O de WSL2 que motivó la instancia en RAM en local.
+          MEMEX_TEST_PG: postgresql+psycopg://memex:memex@localhost:5454
         run: uv run pytest -q

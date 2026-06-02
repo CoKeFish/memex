@@ -1,8 +1,9 @@
 """Pytest fixtures.
 
 Strategy:
-- One session-scoped fixture creates `memex_test` database and applies
-  migrations once.
+- One session-scoped fixture creates this worker's test database and applies
+  migrations once. Under pytest-xdist each worker gets its OWN database
+  (`memex_test_gw0`, …) so its per-test TRUNCATE never clobbers another worker.
 - Per-test fixture truncates all data tables (RESTART IDENTITY) and re-seeds
   user id=1 so each test starts from a known state.
 - `MEMEX_DATABASE_URL` is overridden BEFORE memex modules are imported.
@@ -17,8 +18,20 @@ from typing import Any
 import pytest
 
 # Pin test DB URL before any memex imports so memex.config picks it up.
-ADMIN_DB_URL = "postgresql+psycopg://memex:memex@localhost:5454/postgres"
-TEST_DB_URL = "postgresql+psycopg://memex:memex@localhost:5454/memex_test"
+# Base del servidor Postgres de TEST, configurable. El default apunta a la instancia dedicada en
+# RAM (servicio `postgres-test` del compose, puerto 5455): los datos de test son efímeros, así que
+# correrlos en tmpfs evita el I/O del volumen Docker sobre WSL2 — que en Windows intermitentemente
+# se cuelga ~3 min en un commit/CREATE DATABASE y domina el tiempo de cada test. Override con
+# MEMEX_TEST_PG (p.ej. en CI, donde el Postgres de servicio ya es efímero) si se usa otra instancia.
+_PG_BASE = os.environ.get("MEMEX_TEST_PG", "postgresql+psycopg://memex:memex@localhost:5455")
+ADMIN_DB_URL = f"{_PG_BASE}/postgres"
+# Bajo pytest-xdist cada worker corre en su propio proceso y recibe PYTEST_XDIST_WORKER
+# (gw0, gw1, …) en el entorno ANTES de importar este conftest. Derivamos una DB por worker
+# (memex_test_gw0, …) para que el TRUNCATE+reseed por test de un worker no pise a otro. Sin
+# xdist la variable no existe → memex_test (corrida secuencial, retro-compatible).
+_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "")
+_DB_NAME = f"memex_test_{_WORKER}" if _WORKER else "memex_test"
+TEST_DB_URL = f"{_PG_BASE}/{_DB_NAME}"
 os.environ["MEMEX_DATABASE_URL"] = TEST_DB_URL
 os.environ["MEMEX_AUTH_ENFORCED"] = "false"
 os.environ["MEMEX_API_TOKEN"] = ""
@@ -31,15 +44,17 @@ os.environ["MEMEX_LOG_PERSIST"] = "false"
 
 @pytest.fixture(scope="session", autouse=True)
 def _setup_test_database() -> Iterator[None]:
-    """Drop + recreate memex_test, then apply migrations once per session."""
+    """Drop + recreate this worker's DB, then apply migrations once per session."""
     from alembic import command
     from alembic.config import Config
     from sqlalchemy import create_engine, text
 
     admin = create_engine(ADMIN_DB_URL, isolation_level="AUTOCOMMIT")
     with admin.connect() as conn:
-        conn.execute(text("DROP DATABASE IF EXISTS memex_test"))
-        conn.execute(text("CREATE DATABASE memex_test"))
+        # `_DB_NAME` es interno/derivado (no input de usuario) → f-string en DDL es seguro,
+        # y los identificadores de base de datos no se pueden parametrizar en SQL igualmente.
+        conn.execute(text(f"DROP DATABASE IF EXISTS {_DB_NAME}"))
+        conn.execute(text(f"CREATE DATABASE {_DB_NAME}"))
     admin.dispose()
 
     cfg = Config("alembic.ini")

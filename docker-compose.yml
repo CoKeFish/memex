@@ -18,6 +18,40 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # Postgres EFÍMERO dedicado a la suite de tests (pytest apunta acá por default — ver
+  # tests/conftest.py, _PG_BASE). Datos en tmpfs (RAM): evita el I/O del volumen Docker sobre WSL2,
+  # que en Windows intermitentemente se cuelga ~3 min en un commit/CREATE DATABASE y dominaba el
+  # tiempo de cada test (~0.5s/test → ~5ms/test en RAM; suite ~61s → ~20s). NO comparte datos con la
+  # DB de dev `postgres`: otro puerto (5455), se vacía en cada reinicio. Durabilidad apagada porque
+  # los datos son descartables (cada sesión de pytest dropea/recrea sus DBs).
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: memex-postgres-test
+    command:
+      - "postgres"
+      - "-c"
+      - "fsync=off"
+      - "-c"
+      - "synchronous_commit=off"
+      - "-c"
+      - "full_page_writes=off"
+      - "-c"
+      - "max_connections=300"
+    environment:
+      POSTGRES_USER: memex
+      POSTGRES_PASSWORD: memex
+      POSTGRES_DB: postgres
+    ports:
+      - "5455:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   minio:
     image: minio/minio:latest
     container_name: memex-minio

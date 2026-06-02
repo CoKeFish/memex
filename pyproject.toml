@@ -34,6 +34,7 @@ dev = [
     "pytest>=9.0.3",
     "respx>=0.21",
     "pytest-asyncio>=1.4.0",
+    "pytest-xdist>=3.6",
 ]
 
 [build-system]
@@ -106,6 +107,8 @@ follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --tb=short --strict-markers"
+# `-n auto` paraleliza la suite con pytest-xdist (una DB por worker, ver tests/conftest.py).
+# Para depurar un test con -s/pdb sin workers: agregar `-n0` al comando.
+addopts = "-ra --tb=short --strict-markers -n auto"
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
