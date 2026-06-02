@@ -10,6 +10,9 @@ export * from "./email"
 // ---- Filtros (filter_rules, datos reales) -------------------------------------
 export * from "./filters"
 
+// ---- Redes sociales monitoreadas (sources social + allowlist, datos reales) ---
+export * from "./social"
+
 // ---- Métricas de costo LLM (datos reales contra la API) -----------------------
 export * from "./metrics"
 // Catálogo de módulos (etiquetas/colores) — el corte por módulo lo agrega el backend.

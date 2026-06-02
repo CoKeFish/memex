@@ -82,6 +82,24 @@ class MemexServerClient:
         result: dict[str, Any] = self._request("POST", "/sources/ensure", json=body).json()
         return result
 
+    def add_social_account(
+        self, source_id: int, handle: str, *, priority: bool = False
+    ) -> dict[str, Any]:
+        """POST /sources/{id}/social/accounts — agrega una cuenta seguida. Devuelve la source."""
+        resp = self._request(
+            "POST",
+            f"/sources/{source_id}/social/accounts",
+            json={"handle": handle, "priority": priority},
+        )
+        result: dict[str, Any] = resp.json()
+        return result
+
+    def remove_social_account(self, source_id: int, handle: str) -> dict[str, Any]:
+        """DELETE /sources/{id}/social/accounts/{handle} — quita una cuenta seguida."""
+        resp = self._request("DELETE", f"/sources/{source_id}/social/accounts/{handle}")
+        result: dict[str, Any] = resp.json()
+        return result
+
     def get_checkpoint(self, source_id: int) -> dict[str, Any] | None:
         data = self._request("GET", f"/sources/{source_id}/checkpoint").json()
         cursor = data.get("cursor")

@@ -5,7 +5,6 @@ import {
   SchedulerPanel,
   SourcesTogglePanel,
 } from "@/components/features/control/processing-controls"
-import { FiltersManager } from "@/components/features/control/filters-manager"
 
 export function ProcessingPage() {
   return (
@@ -13,7 +12,7 @@ export function ProcessingPage() {
       <PageHeader
         eyebrow="vista · procesamiento"
         title="Procesamiento"
-        description="Prender/apagar el procesamiento automático y correr cada etapa a mano. Hoy: scheduler por config (off por defecto, nada corre solo) + CLIs idempotentes; los badges indican qué ya existe vs qué falta cablear por HTTP."
+        description="Prender/apagar el procesamiento automático y correr cada etapa a mano. Hoy: scheduler por config (off por defecto, nada corre solo) + CLIs idempotentes; los badges indican qué ya existe vs qué falta cablear por HTTP. Las reglas de filtro se movieron a la sección Filtros."
       />
       <div className="grid gap-5 xl:grid-cols-2">
         <SchedulerPanel />
@@ -23,7 +22,6 @@ export function ProcessingPage() {
         <SourcesTogglePanel />
         <ModulesTogglePanel />
       </div>
-      <FiltersManager />
     </div>
   )
 }

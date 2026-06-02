@@ -59,6 +59,10 @@ services:
       # LLM (memex.llm) — sin prefijo MEMEX_; inyectada por Doppler. El consumidor
       # (classifier/summarizer) aún no existe, pero queda disponible desde ya.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Apify (memex.ingestors.social) — token para scrapear redes (instagram/facebook/x).
+      # La config social lo busca como MEMEX_APIFY_TOKEN; en Doppler el secreto canónico
+      # (sin prefijo MEMEX_, como DEEPSEEK/OPENAI) se llama APIFY → lo mapeamos acá.
+      MEMEX_APIFY_TOKEN: ${MEMEX_APIFY_TOKEN:-${APIFY:-}}
       # Almacenamiento de imágenes (memex.storage). El endpoint apunta al servicio
       # minio del compose; las credenciales sin prefijo MEMEX_ (root user/password).
       MEMEX_MINIO_ENDPOINT: http://minio:9000

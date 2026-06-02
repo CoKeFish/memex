@@ -15,6 +15,7 @@ import { FinancePage } from "@/pages/finance"
 import { CalendarPage } from "@/pages/calendar"
 import { IngestPage } from "@/pages/ingest"
 import { ProcessingPage } from "@/pages/processing"
+import { FiltersPage } from "@/pages/filters"
 import { StubView } from "@/pages/stub"
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -53,6 +54,7 @@ export default function App() {
         <Route path="logs" element={<LogsPage />} />
         <Route path="cuenta" element={<AccountPage />} />
         <Route path="carga" element={<IngestPage />} />
+        <Route path="filtros" element={<FiltersPage />} />
         <Route
           path="ocr"
           element={

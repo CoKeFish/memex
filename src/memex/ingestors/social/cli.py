@@ -79,6 +79,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=3, help="Posts to scrape per account (default 3)."
     )
 
+    acc_p = sub.add_parser(
+        "accounts",
+        help="Manage the followed-accounts allowlist of a social source (list/add/remove).",
+    )
+    acc_p.add_argument("op", choices=["list", "add", "remove"], help="Operation.")
+    acc_p.add_argument("--source-id", type=int, required=True, help="Social source id.")
+    acc_p.add_argument("--handle", default=None, help="Handle/URL (required for add/remove).")
+    acc_p.add_argument("--priority", action="store_true", help="Mark as priority (add only).")
+
     return parser
 
 
@@ -197,6 +206,35 @@ def _cmd_discover(args: argparse.Namespace, client: MemexServerClient, log: Any)
         return 1
 
 
+def _print_accounts(row: dict[str, Any]) -> None:
+    accounts = (row.get("config") or {}).get("accounts") or []
+    handles = [str(a.get("account", "?")) for a in accounts if isinstance(a, dict)]
+    label = ", ".join(_safe(h) for h in handles) if handles else "(vacío)"
+    print(f"\n{len(handles)} cuenta(s) seguida(s): {label}\n")
+
+
+def _cmd_accounts(args: argparse.Namespace, client: MemexServerClient, log: Any) -> int:
+    if args.op == "list":
+        sources = _select_sources(client, args.source_id, None)
+        if not sources:
+            log.error("social.cli.source.not_found", source_id=args.source_id)
+            return 1
+        _print_accounts(sources[0])
+        return 0
+
+    if not args.handle:
+        log.error("social.cli.accounts.handle_required", op=args.op)
+        return 1
+    if args.op == "add":
+        row = client.add_social_account(args.source_id, args.handle, priority=args.priority)
+        log.info("social.cli.accounts.added", source_id=args.source_id, handle=args.handle)
+    else:  # remove
+        row = client.remove_social_account(args.source_id, args.handle)
+        log.info("social.cli.accounts.removed", source_id=args.source_id, handle=args.handle)
+    _print_accounts(row)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -218,6 +256,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_health(args, client, log)
             if args.cmd == "discover":
                 return _cmd_discover(args, client, log)
+            if args.cmd == "accounts":
+                return _cmd_accounts(args, client, log)
             log.error("social.cli.unknown_command", cmd=args.cmd)
             return 1
     except MemexAPIError as e:

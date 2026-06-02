@@ -607,6 +607,17 @@ class SourcePatch(BaseModel):
     enabled: bool | None = None
 
 
+class SocialAccountAdd(BaseModel):
+    """Alta de una cuenta seguida en el allowlist de una source social.
+
+    `handle` admite handle / nombre de página / URL completa: el backend lo normaliza
+    al handle canónico (lowercase, sin `@` ni URL) con la MISMA función que usa el ingestor.
+    """
+
+    handle: str = Field(min_length=1)
+    priority: bool = False
+
+
 # ----- Auth / login (0018) -------------------------------------------------- #
 
 
