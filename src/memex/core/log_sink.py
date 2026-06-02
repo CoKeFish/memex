@@ -219,14 +219,16 @@ class _BatchWriter(threading.Thread):
         self._q = q
         self._batch_size = max(1, batch_size)
         self._flush_interval_s = flush_interval_s
-        self._stop = threading.Event()
+        # OJO: NO usar el nombre `_stop` — pisa el método interno `Thread._stop()` que `join()`
+        # invoca en ciertos timings de `join()` (→ TypeError). De ahí el sufijo `_event`.
+        self._stop_event = threading.Event()
         self.db_errors: int = 0
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             batch = self._collect_batch()
             if batch:
                 self._flush(batch)
