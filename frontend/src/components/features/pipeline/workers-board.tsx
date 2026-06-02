@@ -9,15 +9,7 @@ import { workerLabel, workerTone } from "@/lib/status"
 import { JOB_LABEL } from "@/data"
 import type { WorkerLatestRow } from "@/data"
 import type { WorkerJob } from "@/types/domain"
-
-function flattenStats(stats: Record<string, number | Record<string, number>>): { k: string; v: number }[] {
-  const out: { k: string; v: number }[] = []
-  for (const [k, v] of Object.entries(stats)) {
-    if (typeof v === "number") out.push({ k, v })
-    else for (const [sk, sv] of Object.entries(v)) out.push({ k: `${k}.${sk}`, v: sv })
-  }
-  return out
-}
+import { flattenStats } from "./worker-stats"
 
 export function WorkersBoard({ items }: { items: WorkerLatestRow[] }) {
   return (

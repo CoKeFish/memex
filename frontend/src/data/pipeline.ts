@@ -35,7 +35,7 @@ export interface WorkerLatestRun {
   startedAt: string
   finishedAt: string | null
   status: WorkerRunStatus
-  stats: Record<string, number | Record<string, number>>
+  stats: Record<string, unknown>
   error: string | null
 }
 
@@ -121,7 +121,7 @@ interface WorkerRunApi {
   started_at: string
   finished_at: string | null
   status: WorkerRunStatus
-  stats: Record<string, number | Record<string, number>>
+  stats: Record<string, unknown>
   error: string | null
 }
 interface WorkerLatestApi { job: string; latest: WorkerRunApi | null; is_stale: boolean }

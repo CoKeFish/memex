@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react"
-import { Outlet } from "react-router-dom"
+import { Outlet, useLocation } from "react-router-dom"
+import { ErrorBoundary } from "@/components/common/error-boundary"
 import { CommandPalette } from "./command-palette"
 import { Sidebar } from "./sidebar"
 import { TopBar } from "./topbar"
 
 export function AppShell() {
   const [cmdkOpen, setCmdkOpen] = useState(false)
+  const location = useLocation()
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -25,7 +27,9 @@ export function AppShell() {
         <TopBar onOpenCmdk={() => setCmdkOpen(true)} />
         <main className="flex-1 overflow-y-auto">
           <div className="mx-auto w-full max-w-[1400px] p-4 md:p-6">
-            <Outlet />
+            <ErrorBoundary key={location.pathname}>
+              <Outlet />
+            </ErrorBoundary>
           </div>
         </main>
       </div>
