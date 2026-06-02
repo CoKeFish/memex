@@ -111,3 +111,14 @@ def kind_types() -> list[str]:
     tipos push-only (sin factory de pull) como `outlook`. El work-set de extracción enumera
     por acá, no por `known_types()`, para no saltearse esos mensajes."""
     return list(_KIND_BY_TYPE.keys())
+
+
+# Tipos cuyo ingestor honra ventanas de fecha (since/until) en `mode=range`. Hoy solo IMAP: telegram
+# y social solo hacen incremental (su `fetch` ignora la ventana). El backfill segmentado, que avanza
+# por rangos de fecha, solo se ofrece para estos tipos. Agregar uno acá lo habilita en API y UI.
+_DATE_WINDOW_TYPES: frozenset[str] = frozenset({"imap"})
+
+
+def supports_date_window(source_type: str) -> bool:
+    """True si el ingestor del tipo honra ventanas de fecha (`mode=range` con since/until)."""
+    return source_type in _DATE_WINDOW_TYPES

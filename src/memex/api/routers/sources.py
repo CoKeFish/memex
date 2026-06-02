@@ -4,11 +4,9 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from starlette.concurrency import run_in_threadpool
 
-from memex import sources as source_registry
 from memex.api.auth import current_user_id
-from memex.api.inprocess_sink import DryRunSink, InProcessSink
+from memex.api.fetch_runner import run_fetch_window
 from memex.api.schemas import (
     CheckpointBody,
     FetchResponse,
@@ -18,15 +16,12 @@ from memex.api.schemas import (
     SourceRow,
 )
 from memex.core import checkpoint
-from memex.core.observability import ingestion_run
-from memex.core.sink import MemexSink
-from memex.core.source import SourceConfigError, SourceKind
+from memex.core.source import SourceKind
 from memex.db import connection
-from memex.ingestors.runner import RunStats, run_ingestor
+from memex.ingestors.runner import RunStats
 from memex.ingestors.social.config import normalize_account
 from memex.logging import get_logger
 from memex.sources import kind_for_type
-from memex.sources.resolver import build_resolved_env
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
@@ -348,63 +343,21 @@ async def fetch_source(
         )
         assert row is not None
         source_type = str(row["type"])
-
-        # Override transitorio de la ventana de fetch (no se persiste en sources.config).
         cfg = dict(row["config"] or {})
-        if mode != "incremental":
-            cfg["fetch_mode"] = mode
-            if since:
-                cfg["fetch_since"] = since
-            if until:
-                cfg["fetch_until"] = until
-            if limit is not None:
-                cfg["fetch_limit"] = limit
+        account_id = row["account_id"]
 
-        # Inyecta los secretos del vault de la cuenta (si hay) bajo el nombre de su env var.
-        # Usa la master key del servidor → funciona sin sesión. Fallback a os.environ si no hay.
-        resolved_env = build_resolved_env(
-            conn,
-            user_id=user_id,
-            source_type=source_type,
-            cfg=cfg,
-            account_id=row["account_id"],
-        )
-
-    try:
-        factory = source_registry.resolve(source_type)
-    except KeyError as e:
-        raise HTTPException(
-            status_code=422,
-            detail=f"source type {source_type!r} no se puede traer desde el server (sin ingestor)",
-        ) from e
-    try:
-        source = factory(cfg, env=resolved_env)
-    except SourceConfigError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-
-    _log.info(
-        "fetch.requested",
+    # El camino resolve → sink → runner vive en `run_fetch_window` (lo comparte el backfill).
+    stats = await run_fetch_window(
         user_id=user_id,
         source_id=source_id,
-        dry_run=dry_run,
+        source_type=source_type,
+        cfg=cfg,
+        account_id=account_id,
         mode=mode,
         since=since,
         until=until,
         limit=limit,
+        dry_run=dry_run,
+        trigger="dashboard",
     )
-
-    if dry_run:
-        dry_sink: MemexSink = DryRunSink(user_id)
-        stats = await run_in_threadpool(run_ingestor, source, source_id, dry_sink, chunk_sleep_ms=0)
-        return _stats_response(stats, dry_run=True)
-
-    # range/last son backfills: insertan pero no avanzan el cursor incremental.
-    sink: MemexSink = InProcessSink(user_id, persist_checkpoint=(mode == "incremental"))
-    with ingestion_run(user_id=user_id, source_id=source_id, trigger="dashboard") as run:
-        try:
-            stats = await run_in_threadpool(run_ingestor, source, source_id, sink, chunk_sleep_ms=0)
-            run.finalize(stats)
-        except Exception as e:
-            run.fail(e)
-            raise HTTPException(status_code=502, detail=f"fetch falló: {e}") from e
-    return _stats_response(stats, dry_run=False)
+    return _stats_response(stats, dry_run=dry_run)

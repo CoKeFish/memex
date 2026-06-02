@@ -1,7 +1,7 @@
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class MediaItem(BaseModel):
@@ -875,3 +875,71 @@ class SchedulerState(BaseModel):
     daemon_enabled: bool
     enabled_jobs: list[str]  # CSV parseado
     jobs: list[SchedulerJobState]
+
+
+# --- Backfill segmentado (importación masiva por ventanas) ----------------------------------------
+# Importa `[range_start, range_end]` de una fuente de correo en ventanas que avanzan hacia adelante.
+# `range_end` viaja INCLUSIVO en la API (la UI elige "hasta"); el router suma 1 día para la DB →
+# exclusivo, como el `until` del fetch (IMAP `BEFORE` es exclusivo).
+BackfillWindowUnit = Literal["day", "week", "month"]
+
+
+class BackfillConfig(BaseModel):
+    """Alta/reconfiguración de un backfill por fuente. Resetea la frontera al inicio del rango."""
+
+    range_start: date  # fecha1, inclusiva
+    range_end: date  # fecha2, INCLUSIVA (el router la convierte a exclusiva para la DB)
+    window_unit: BackfillWindowUnit = "month"
+    window_count: int = Field(default=1, ge=1, le=365)
+    per_window_limit: int = Field(default=2000, ge=1, le=10000)
+
+    @model_validator(mode="after")
+    def _check_range(self) -> Self:
+        if self.range_end < self.range_start:
+            raise ValueError("range_end debe ser >= range_start")
+        return self
+
+
+class BackfillAdvanceOverride(BaseModel):
+    """Override del tamaño de ventana para ESTE avance; se guarda como nuevo default."""
+
+    window_unit: BackfillWindowUnit | None = None
+    window_count: int | None = Field(default=None, ge=1, le=365)
+
+
+class BackfillWindowResult(BaseModel):
+    """Una ventana ejecutada (item del history); `end` exclusivo, `cap_hit` = quizá truncado."""
+
+    start: date
+    end: date
+    posted: int
+    inserted: int
+    duplicates: int
+    errors: int
+    filtered: int
+    cap_hit: bool
+    ms_elapsed: int
+    at: datetime
+
+
+class BackfillState(BaseModel):
+    """Estado completo del backfill para restaurar la UI. `range_end` vuelve INCLUSIVO."""
+
+    source_id: int
+    range_start: date
+    range_end: date  # inclusiva (como la eligió el usuario)
+    frontier: date
+    window_unit: BackfillWindowUnit
+    window_count: int
+    per_window_limit: int
+    status: str  # active | done
+    progress_pct: float
+    history: list[BackfillWindowResult] = Field(default_factory=list)
+
+
+class BackfillAdvanceResponse(BaseModel):
+    """Resultado de avanzar: la ventana corrida (None si ya completo) + el estado resultante."""
+
+    window: BackfillWindowResult | None
+    state: BackfillState
+    dry_run: bool

@@ -7,6 +7,9 @@
 // ---- Correos (datos reales contra la API) -------------------------------------
 export * from "./email"
 
+// ---- Backfill segmentado (importación masiva por ventanas, datos reales) ------
+export * from "./backfill"
+
 // ---- Filtros (filter_rules, datos reales) -------------------------------------
 export * from "./filters"
 

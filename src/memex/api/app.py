@@ -7,6 +7,7 @@ from memex.api.middleware import RequestContextMiddleware
 from memex.api.routers import (
     accounts,
     auth,
+    backfill,
     feedback,
     filters,
     finance,
@@ -65,6 +66,7 @@ app.include_router(oauth.router)
 app.include_router(ingest.router)
 app.include_router(inbox.router)
 app.include_router(sources.router)
+app.include_router(backfill.router)
 app.include_router(gateway.router)
 app.include_router(media.router)
 app.include_router(filters.router)
