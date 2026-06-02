@@ -3,14 +3,20 @@ import { Coins, Timer } from "lucide-react"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { EmptyState } from "@/components/common/data-state"
 import { Skeleton } from "@/components/ui/skeleton"
-import { formatDurationMs, formatUsd } from "@/lib/format"
-import { moduleLabel } from "@/lib/metrics"
+import { formatDurationMs, formatUsdFine } from "@/lib/format"
+import { isBatchModule, moduleLabel } from "@/lib/metrics"
 import { fetchLlmCalls, type LlmCallRow, type MetricsWindow } from "@/data"
 import { useAsync } from "@/lib/use-async"
 
 function InboxLink({ row }: { row: LlmCallRow }) {
   if (row.inboxId === null) {
-    return <span className="num text-muted-foreground/60" title="batch: cubre N mensajes">batch</span>
+    // inbox_id null es batch REAL solo en módulos que agrupan N mensajes (grouped/calendar); en el
+    // resto es "sin atribución" — no lo etiquetamos "batch" para no engañar en el debug.
+    return isBatchModule(row.module) ? (
+      <span className="num text-muted-foreground/60" title="batch: cubre N mensajes">batch</span>
+    ) : (
+      <span className="num text-muted-foreground/40" title="sin inbox asociado">—</span>
+    )
   }
   return (
     <Link to={`/datos/${row.inboxId}`} className="num text-origin-inbox hover:underline">
@@ -36,7 +42,7 @@ function TopCalls({
 }) {
   const { data, loading } = useAsync(
     () => fetchLlmCalls({ ...win, sort, dir: "desc", limit: 6 }),
-    [win.since, win.until, sort],
+    [win.since, win.until, win.tz, sort],
   )
   const rows = data?.items ?? []
   return (
@@ -82,7 +88,7 @@ export function Outliers({ window: win }: { window: MetricsWindow }) {
         eyebrow="Outliers · costo"
         title="Llamadas más caras"
         icon={<Coins className="size-4 text-muted-foreground" />}
-        metric={(r) => formatUsd(r.costUsd)}
+        metric={(r) => formatUsdFine(r.costUsd)}
       />
       <TopCalls
         window={win}

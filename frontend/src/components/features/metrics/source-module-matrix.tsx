@@ -81,7 +81,9 @@ export function SourceModuleMatrix({
                         </td>
                       )
                     })}
-                    <td className="num px-3 py-2 text-right font-medium">{formatUsd(r.total)}</td>
+                    <td className="num px-3 py-2 text-right font-medium">
+                      {r.total > 0 ? formatUsd(r.total) : <span className="text-muted-foreground/40">—</span>}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -93,7 +95,9 @@ export function SourceModuleMatrix({
                       {colTotals[m] ? formatUsd(colTotals[m]) : <span className="text-muted-foreground/40">—</span>}
                     </td>
                   ))}
-                  <td className="num px-3 py-2 text-right">{formatUsd(grand)}</td>
+                  <td className="num px-3 py-2 text-right">
+                    {grand > 0 ? formatUsd(grand) : <span className="text-muted-foreground/40">—</span>}
+                  </td>
                 </tr>
               </tfoot>
             </table>

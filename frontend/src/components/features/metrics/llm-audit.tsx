@@ -11,7 +11,7 @@ import { StatusBadge } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
 import { formatCompact, formatDurationMs, formatUsd } from "@/lib/format"
 import { llmTone } from "@/lib/status"
-import { moduleLabel } from "@/lib/metrics"
+import { isBatchModule, moduleLabel } from "@/lib/metrics"
 import {
   fetchLlmCalls,
   type FilterMode,
@@ -98,6 +98,7 @@ export function LlmAudit({
     [
       win.since,
       win.until,
+      win.tz,
       statusF.value,
       statusF.mode,
       moduleF.value,
@@ -130,7 +131,7 @@ export function LlmAudit({
       <PanelHeader
         eyebrow="Auditoría · llm_calls"
         title="Llamadas al LLM"
-        sub={`${total} llamadas en el rango · filtrá, ordená y saltá a la traza del mensaje`}
+        sub={`${total} llamadas con los filtros actuales · ordená y saltá a la traza del mensaje`}
         right={
           <div className="relative">
             <Search className="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -246,9 +247,13 @@ export function LlmAudit({
                         <Link to={`/datos/${c.inboxId}`} className="text-origin-inbox hover:underline">
                           #{c.inboxId}
                         </Link>
-                      ) : (
+                      ) : isBatchModule(c.module) ? (
                         <span className="opacity-50" title="batch: la llamada cubre N mensajes (sin inbox_id)">
                           batch
+                        </span>
+                      ) : (
+                        <span className="opacity-40" title="sin inbox asociado">
+                          —
                         </span>
                       )}
                     </td>

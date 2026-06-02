@@ -358,10 +358,12 @@ class LlmKpis(BaseModel):
     cache_hit_tokens: int
     cache_hit_ratio: float  # cache_hit_tokens / prompt_tokens (0..1); 0 si no hay prompt tokens
     avg_cost_usd: float
-    avg_latency_ms: float
+    avg_latency_ms: float  # promedio de status='ok' (excluye filtered/error con latencia 0)
     errors: int
-    # Costo del periodo anterior de igual longitud (para la variación %); None si no hay `since`.
+    # Costo y #llamadas del periodo anterior de igual longitud (para la variación %); None si no hay
+    # `since`. prev_calls distingue "periodo previo sin datos" (0) de "creció mucho" en el front.
     prev_cost_usd: float | None = None
+    prev_calls: int | None = None
 
 
 class LlmBySource(BaseModel):

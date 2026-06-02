@@ -88,6 +88,16 @@ def test_rollup_kpis_totals(client: Any) -> None:
     assert abs(k["avg_cost_usd"] - (0.05 / 3)) < 1e-9
 
 
+def test_rollup_avg_latency_excludes_non_ok(client: Any) -> None:
+    # avg_latency_ms promedia SOLO status='ok'; los filtered/error de latencia 0 no son llamadas
+    # reales al LLM y diluirían el promedio.
+    _seed_llm_call(status="ok", latency_ms=400)
+    _seed_llm_call(status="filtered", latency_ms=0, cost_usd="0")
+    _seed_llm_call(status="error", latency_ms=0, cost_usd="0")
+    k = client.get("/metrics/llm/rollup").json()["kpis"]
+    assert k["avg_latency_ms"] == 400.0
+
+
 def test_rollup_prev_window(client: Any) -> None:
     # Ventana [05-20, 05-27); previa [05-13, 05-20).
     _seed_llm_call(cost_usd="0.05", created_at=datetime(2026, 5, 22, 12, tzinfo=UTC))
@@ -99,6 +109,23 @@ def test_rollup_prev_window(client: Any) -> None:
     assert body["kpis"]["prev_cost_usd"] == 0.03
     # Sin `since` (todo el tiempo) → no hay variación.
     assert client.get("/metrics/llm/rollup").json()["kpis"]["prev_cost_usd"] is None
+
+
+def test_rollup_prev_calls(client: Any) -> None:
+    # prev_calls cuenta las filas del periodo previo (distingue "previo vacío" de "creció mucho").
+    _seed_llm_call(cost_usd="0.05", created_at=datetime(2026, 5, 22, 12, tzinfo=UTC))  # en ventana
+    _seed_llm_call(cost_usd="0.03", created_at=datetime(2026, 5, 15, 12, tzinfo=UTC))  # en previa
+    k = client.get(
+        "/metrics/llm/rollup?since=2026-05-20T00:00:00Z&until=2026-05-27T00:00:00Z"
+    ).json()["kpis"]
+    assert k["prev_calls"] == 1
+    # Ventana [05-13, 05-20): su periodo previo [05-06, 05-13) no tiene datos → 0 (no None).
+    k2 = client.get(
+        "/metrics/llm/rollup?since=2026-05-13T00:00:00Z&until=2026-05-20T00:00:00Z"
+    ).json()["kpis"]
+    assert k2["prev_calls"] == 0
+    # Sin `since` → None.
+    assert client.get("/metrics/llm/rollup").json()["kpis"]["prev_calls"] is None
 
 
 def test_rollup_cross_tenant(client: Any, seed_user2: int) -> None:
@@ -191,6 +218,23 @@ def test_rollup_source_module_matrix_and_daily(client: Any) -> None:
     assert "2026-05-12" in days
     assert days["2026-05-10"]["by_module"]["finance"] == 0.02
     assert days["2026-05-12"]["total"] == 0.01
+
+
+# ---- rollup: TZ del bucket diario --------------------------------------------------------------
+
+
+def test_rollup_daily_bucket_respects_tz(client: Any) -> None:
+    # 2026-06-02T04:00Z = 2026-06-01 23:00 en Bogotá (UTC-5); el bucket debe seguir la TZ pedida.
+    _seed_llm_call(cost_usd="0.01", created_at=datetime(2026, 6, 2, 4, tzinfo=UTC))
+    bogota = {d["day"] for d in client.get("/metrics/llm/rollup?tz=America/Bogota").json()["daily"]}
+    assert bogota == {"2026-06-01"}
+    utc = {d["day"] for d in client.get("/metrics/llm/rollup?tz=UTC").json()["daily"]}
+    assert utc == {"2026-06-02"}
+
+
+def test_rollup_tz_invalid_returns_422(client: Any) -> None:
+    assert client.get("/metrics/llm/rollup?tz=Marte/Olympus").status_code == 422
+    assert client.get("/metrics/llm/calls?tz=Marte/Olympus").status_code == 422
 
 
 # ---- auditoría: filtros incluir/excluir --------------------------------------------------------

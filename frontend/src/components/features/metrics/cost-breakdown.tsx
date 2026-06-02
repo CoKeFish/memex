@@ -1,7 +1,7 @@
 import { TriangleAlert } from "lucide-react"
 import { EmptyState } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
-import { formatCompact, formatInt, formatPct, formatUsd, formatUsdFine } from "@/lib/format"
+import { formatCompact, formatInt, formatUsd, formatUsdFine, pctShare } from "@/lib/format"
 import { moduleChart, moduleLabel } from "@/lib/metrics"
 import type { ModelCost, ModuleCost } from "@/data"
 
@@ -20,7 +20,7 @@ function ModuleBars({ rows }: { rows: ModuleCost[] }) {
             </span>
             <span className="num font-medium">
               {formatUsd(r.costUsd)}
-              <span className="ml-1.5 text-muted-foreground">{total ? formatPct(r.costUsd / total, 0) : "0%"}</span>
+              <span className="ml-1.5 text-muted-foreground">{pctShare(r.costUsd, total)}</span>
             </span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-muted">
@@ -56,7 +56,7 @@ function ModelTable({ rows }: { rows: ModelCost[] }) {
               <tr key={r.model} className="hover:bg-accent/40">
                 <td className="px-3 py-2">
                   <div className="flex items-center gap-2">
-                    <span className="num font-medium">{r.model}</span>
+                    <span className="num font-medium">{r.model === "-" ? "(sin modelo)" : r.model}</span>
                     {r.untabulated && (
                       <span
                         className="inline-flex items-center gap-1 rounded border border-status-review/40 bg-status-review/10 px-1 py-0.5 text-[10px] font-medium text-status-review"

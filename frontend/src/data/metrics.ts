@@ -5,6 +5,7 @@
 
 import { apiGet } from "@/lib/api"
 import { rangeMs, type RangeKey } from "@/lib/selectors"
+import { startOfDayInTz, todayInTz } from "@/lib/timezone"
 
 // ---- Tipos de dominio (camelCase) ---------------------------------------------------------------
 
@@ -20,6 +21,8 @@ export interface LlmKpis {
   errors: number
   /** Costo del periodo anterior de igual longitud; null si el rango es "todo". */
   prevCostUsd: number | null
+  /** #Llamadas del periodo anterior; null si no hay `since`. 0 distingue "previo vacío" del delta. */
+  prevCalls: number | null
 }
 
 export interface SourceCost {
@@ -94,33 +97,36 @@ export interface LlmCallRow {
 
 // ---- Ventana temporal ---------------------------------------------------------------------------
 
-/** Ventana [since, until) en ISO; ambos opcionales (omitir = sin límite por ese lado). */
+/** Ventana [since, until) en ISO; ambos opcionales (omitir = sin límite por ese lado). `tz` (IANA)
+ *  es la zona de display: el cliente computa "hoy"/custom como medianoche-en-`tz` y la pasa al
+ *  backend para que el bucket diario coincida con el reloj de pared del usuario. */
 export interface MetricsWindow {
   since?: string
   until?: string
+  tz?: string
 }
 
 export type RangePreset = "today" | "7d" | "30d" | "90d" | "all"
 
 const DAY = 86_400_000
 
-/** Ventana de un preset. "today" arranca a las 00:00 locales; "all" no acota. */
-export function presetWindow(preset: RangePreset): MetricsWindow {
+/** Ventana de un preset, anclada a `tz`. "today" arranca en la medianoche de `tz` (no la local del
+ *  navegador); 7d/30d/90d son instantes relativos (TZ-agnósticos); "all" no acota. */
+export function presetWindow(preset: RangePreset, tz: string): MetricsWindow {
   const now = Date.now()
   switch (preset) {
     case "today": {
-      const d = new Date()
-      d.setHours(0, 0, 0, 0)
-      return { since: d.toISOString() }
+      const { y, m, d } = todayInTz(tz)
+      return { since: startOfDayInTz(y, m, d, tz), tz }
     }
     case "7d":
-      return { since: new Date(now - 7 * DAY).toISOString() }
+      return { since: new Date(now - 7 * DAY).toISOString(), tz }
     case "30d":
-      return { since: new Date(now - 30 * DAY).toISOString() }
+      return { since: new Date(now - 30 * DAY).toISOString(), tz }
     case "90d":
-      return { since: new Date(now - 90 * DAY).toISOString() }
+      return { since: new Date(now - 90 * DAY).toISOString(), tz }
     case "all":
-      return {}
+      return { tz }
   }
 }
 
@@ -131,12 +137,19 @@ export function rangeKeyWindow(range: RangeKey): MetricsWindow {
   return { since: new Date(Date.now() - span).toISOString() }
 }
 
-/** Ventana de un rango personalizado (inputs date YYYY-MM-DD). `until` se vuelve exclusivo del día
- *  siguiente para incluir el día completo (el backend filtra created_at < until). */
-export function customWindow(sinceDay?: string, untilDay?: string): MetricsWindow {
-  const w: MetricsWindow = {}
-  if (sinceDay) w.since = new Date(`${sinceDay}T00:00:00`).toISOString()
-  if (untilDay) w.until = new Date(new Date(`${untilDay}T00:00:00`).getTime() + DAY).toISOString()
+/** Ventana de un rango personalizado (inputs date YYYY-MM-DD) anclada a `tz`. Cada día arranca en
+ *  la medianoche de `tz` (no la local del navegador); `until` se vuelve exclusivo del día siguiente
+ *  para incluir el día completo (el backend filtra created_at < until). */
+export function customWindow(sinceDay: string | undefined, untilDay: string | undefined, tz: string): MetricsWindow {
+  const w: MetricsWindow = { tz }
+  if (sinceDay) {
+    const [y, m, d] = sinceDay.split("-").map(Number)
+    w.since = startOfDayInTz(y, m, d, tz)
+  }
+  if (untilDay) {
+    const [y, m, d] = untilDay.split("-").map(Number)
+    w.until = new Date(new Date(startOfDayInTz(y, m, d, tz)).getTime() + DAY).toISOString()
+  }
   return w
 }
 
@@ -153,6 +166,7 @@ interface KpisApi {
   avg_latency_ms: number
   errors: number
   prev_cost_usd: number | null
+  prev_calls: number | null
 }
 interface SourceApi { source_id: number | null; source_name: string; calls: number; tokens: number; cost_usd: number }
 interface ModuleApi { module: string; calls: number; tokens: number; cost_usd: number }
@@ -200,6 +214,7 @@ function toRollup(r: RollupApi): LlmRollup {
       avgLatencyMs: r.kpis.avg_latency_ms,
       errors: r.kpis.errors,
       prevCostUsd: r.kpis.prev_cost_usd,
+      prevCalls: r.kpis.prev_calls,
     },
     bySource: r.by_source.map((s) => ({
       sourceId: s.source_id,
@@ -253,6 +268,7 @@ function toRow(r: CallApi): LlmCallRow {
 function windowParams(qs: URLSearchParams, w: MetricsWindow): void {
   if (w.since) qs.set("since", w.since)
   if (w.until) qs.set("until", w.until)
+  if (w.tz) qs.set("tz", w.tz)
 }
 
 /** Rollup de costo LLM del rango (KPIs + cortes por fuente/módulo/modelo + matriz + serie diaria). */

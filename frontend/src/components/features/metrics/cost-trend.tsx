@@ -38,7 +38,7 @@ function TrendTooltip({ active, payload, label }: { active?: boolean; payload?: 
   )
 }
 
-export function CostTrend({ daily, modules }: { daily: DailyCost[]; modules: string[] }) {
+export function CostTrend({ daily, modules, tz }: { daily: DailyCost[]; modules: string[]; tz?: string }) {
   // Serie ancha para Recharts: una columna por módulo presente (rellena 0 donde no hubo gasto).
   const data = daily.map((d) => {
     const row: Record<string, number | string> = { label: dayLabel(d.day) }
@@ -51,14 +51,14 @@ export function CostTrend({ daily, modules }: { daily: DailyCost[]; modules: str
       <PanelHeader
         eyebrow="Tendencia · costo diario"
         title="Gasto LLM en el tiempo"
-        sub="Área apilada por módulo (llm_calls.cost_usd, zona America/Mexico_City)"
+        sub={`Área apilada por módulo (llm_calls.cost_usd, zona ${tz ?? "local"})`}
       />
       <PanelBody>
         {data.length === 0 ? (
           <EmptyState title="Sin gasto en el rango" />
         ) : (
           <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minHeight={256}>
               <AreaChart data={data} margin={{ top: 4, right: 8, left: -12, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
                 <XAxis

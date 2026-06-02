@@ -20,7 +20,7 @@ export function RecentErrors({ window: win, module }: { window: MetricsWindow; m
         dir: "desc",
         limit: 10,
       }),
-    [win.since, win.until, module],
+    [win.since, win.until, win.tz, module],
   )
   const rows = data?.items ?? []
   return (
@@ -29,7 +29,13 @@ export function RecentErrors({ window: win, module }: { window: MetricsWindow; m
         eyebrow="Debug · errores"
         title="Errores recientes"
         sub="Llamadas con status=error y su mensaje"
-        right={data ? <span className="num text-xs text-muted-foreground">{data.total} en el rango</span> : undefined}
+        right={
+          data ? (
+            <span className="num text-xs text-muted-foreground">
+              {data.total > rows.length ? `mostrando ${rows.length} de ${data.total}` : `${data.total} en el rango`}
+            </span>
+          ) : undefined
+        }
       />
       <PanelBody className="p-0">
         {loading && !data ? (

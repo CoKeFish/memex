@@ -1,16 +1,19 @@
 import { EmptyState } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
-import { formatCompact, formatInt, formatPct, formatUsd } from "@/lib/format"
+import { formatCompact, formatInt, formatUsd, pctShare } from "@/lib/format"
 import type { SourceCost } from "@/data"
 
+//: 8 hues distintos (antes 7, con chart-5 y origin-module casi idénticos → la 8va fuente reusaba
+//: color). chart-6/7 son tokens nuevos del tema; origin-provider cierra la paleta.
 const PALETTE = [
   "var(--chart-1)",
   "var(--chart-2)",
   "var(--chart-3)",
   "var(--chart-4)",
   "var(--chart-5)",
+  "var(--chart-6)",
+  "var(--chart-7)",
   "var(--origin-provider)",
-  "var(--origin-module)",
 ]
 
 /** Costo por fuente (ingestor). Las llamadas sin source caen en los pseudo "(calendar)"/"(sin
@@ -47,9 +50,7 @@ export function CostBySource({ bySource }: { bySource: SourceCost[] }) {
                     </span>
                     <span className="num font-medium">
                       {formatUsd(r.costUsd)}
-                      <span className="ml-1.5 text-muted-foreground">
-                        {total ? formatPct(r.costUsd / total, 0) : "0%"}
-                      </span>
+                      <span className="ml-1.5 text-muted-foreground">{pctShare(r.costUsd, total)}</span>
                     </span>
                   </div>
                   <div className="h-1.5 overflow-hidden rounded-full bg-muted">

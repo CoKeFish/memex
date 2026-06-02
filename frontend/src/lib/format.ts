@@ -40,6 +40,15 @@ export function formatPct(n: number, digits = 1): string {
   return `${(n * 100).toFixed(digits)}%`
 }
 
+/** Participación `part/total` como %: "<1%" cuando es >0 pero redondea a 0 (no esconde gasto real);
+ *  "0%" cuando es exactamente 0. (La suma de participaciones puede dar 99/101% por redondeo.) */
+export function pctShare(part: number, total: number): string {
+  if (!total) return "0%"
+  const p = part / total
+  if (p > 0 && p < 0.005) return "<1%"
+  return formatPct(p, 0)
+}
+
 /** Monto en cualquier moneda (USD/MXN/ARS…). */
 export function formatMoney(amount: number, currency: string): string {
   try {
@@ -81,7 +90,9 @@ export function formatCompact(n: number): string {
 export function formatDurationMs(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)} ms`
   const s = ms / 1000
-  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)} s`
+  // 1 decimal bajo 60s siempre: desambigua outliers de latencia cercanos (p.ej. 15.6s vs 16.2s, que
+  // a 0 decimales colapsaban a "16 s").
+  if (s < 60) return `${s.toFixed(1)} s`
   const m = Math.floor(s / 60)
   const rem = Math.round(s % 60)
   return `${m}m ${rem}s`

@@ -15,8 +15,9 @@ TIMESTAMPTZ). `untabulated` (modelo sin precio) se deriva de datos: tokens>0 con
 
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from memex.api.auth import current_user_id
@@ -30,7 +31,8 @@ UserID = Annotated[int, Depends(current_user_id)]
 
 _log = get_logger("memex.api.metrics")
 
-#: TZ del bucket diario (locale es-MX del dashboard) — alinea "hoy" con el reloj de pared.
+#: TZ por defecto del bucket diario (cuando el cliente no manda `tz`). El front pasa su TZ activa
+#: (autodetectada/override) para que los días del eje coincidan con su reloj de pared.
 _BUCKET_TZ = "America/Mexico_City"
 
 #: Deriva el módulo/etapa desde `purpose`. El literal `extract_grouped` va ANTES del wildcard
@@ -70,14 +72,34 @@ def _window(since: datetime | None, until: datetime | None, params: dict[str, An
     return " AND ".join(clauses)
 
 
+def _resolve_tz(tz: str | None) -> str:
+    """Valida/resuelve la TZ del bucket diario. None → `_BUCKET_TZ`; nombre IANA inválido → 422.
+
+    El valor va al SQL como bind param (`:tz` en `AT TIME ZONE`), no es injection; pero un nombre
+    inválido reventaría en Postgres, así que se valida acá contra el catálogo IANA (zoneinfo).
+    """
+    if tz is None:
+        return _BUCKET_TZ
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"timezone inválida: {tz}") from exc
+    return tz
+
+
 @router.get("/llm/rollup", response_model=LlmRollup)
 async def llm_rollup(
     user_id: UserID,
     since: datetime | None = None,
     until: datetime | None = None,
+    tz: str | None = None,
 ) -> dict[str, Any]:
-    """Agregaciones de costo LLM del rango [`since`, `until`) para la vista /metricas."""
-    params: dict[str, Any] = {"uid": user_id, "tz": _BUCKET_TZ}
+    """Agregaciones de costo LLM del rango [`since`, `until`) para la vista /metricas.
+
+    `tz` (IANA, p.ej. `America/Bogota`) fija la TZ del bucket diario para que "hoy"/los días del
+    cliente coincidan con su reloj de pared. Default: `_BUCKET_TZ`.
+    """
+    params: dict[str, Any] = {"uid": user_id, "tz": _resolve_tz(tz)}
     where = _window(since, until, params)
 
     with connection() as conn:
@@ -91,7 +113,8 @@ async def llm_rollup(
                     COALESCE(SUM(lc.completion_tokens), 0) AS completion_tokens,
                     COALESCE(SUM(lc.cache_hit_tokens), 0) AS cache_hit_tokens,
                     COUNT(*) FILTER (WHERE lc.status = 'error') AS errors,
-                    COALESCE(AVG(lc.latency_ms), 0) AS avg_latency_ms
+                    COALESCE(AVG(lc.latency_ms) FILTER (WHERE lc.status = 'ok'), 0)
+                        AS avg_latency_ms
                 FROM llm_calls lc
                 WHERE {where}
             """),
@@ -101,20 +124,28 @@ async def llm_rollup(
             .one()
         )
 
-        # Periodo anterior de igual longitud, solo si hay `since` (para la variación %).
+        # Periodo anterior de igual longitud, solo si hay `since` (para la variación %). prev_calls
+        # distingue "periodo previo sin datos" (0) de "creció mucho" en el front (evita un % gigante
+        # contra una base casi vacía, p.ej. cuando la ingesta arrancó hace poco).
         prev_cost: float | None = None
+        prev_calls: int | None = None
         if since is not None:
             until_eff = until if until is not None else datetime.now(UTC)
             span = until_eff - since
-            prev_cost = float(
+            prow = (
                 conn.execute(
                     text(
-                        "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls "
+                        "SELECT COALESCE(SUM(cost_usd), 0) AS cost, COUNT(*) AS calls "
+                        "FROM llm_calls "
                         "WHERE user_id = :uid AND created_at >= :ps AND created_at < :pe"
                     ),
                     {"uid": user_id, "ps": since - span, "pe": since},
-                ).scalar_one()
+                )
+                .mappings()
+                .one()
             )
+            prev_cost = float(prow["cost"])
+            prev_calls = int(prow["calls"])
 
         by_source = (
             conn.execute(
@@ -237,6 +268,7 @@ async def llm_rollup(
         "avg_latency_ms": float(krow["avg_latency_ms"]),
         "errors": int(krow["errors"]),
         "prev_cost_usd": prev_cost,
+        "prev_calls": prev_calls,
     }
 
     _log.info("metrics.rollup", user_id=user_id, calls=calls, cost_usd=cost)
@@ -311,6 +343,7 @@ async def llm_calls(
     user_id: UserID,
     since: datetime | None = None,
     until: datetime | None = None,
+    tz: str | None = None,
     status: Annotated[list[str] | None, Query()] = None,
     status_mode: FilterMode = "include",
     module: Annotated[list[str] | None, Query()] = None,
@@ -330,6 +363,7 @@ async def llm_calls(
     Filtros incluir/excluir multi-valor por estado/módulo/modelo/fuente (aislar o excluir);
     `q` busca substring en inbox/request/model/purpose. `sort`/`dir` salen de una whitelist fija.
     """
+    _resolve_tz(tz)  # valida (422 si inválida); calls no bucketea por día → no se usa más
     params: dict[str, Any] = {"uid": user_id, "limit": limit, "offset": offset}
     where = _window(since, until, params)
 
