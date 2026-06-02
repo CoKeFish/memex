@@ -88,6 +88,8 @@ export interface LlmCallRow {
   inboxId: number | null
   sourceId: number | null
   sourceName: string | null
+  /** Metadata de la fase: extracción {items, discarded, n, ...}; ruteo {chosen, ...}. */
+  metadata: Record<string, unknown> | null
 }
 
 // ---- Ventana temporal ---------------------------------------------------------------------------
@@ -182,6 +184,7 @@ interface CallApi {
   inbox_id: number | null
   source_id: number | null
   source_name: string | null
+  metadata: Record<string, unknown> | null
 }
 
 function toRollup(r: RollupApi): LlmRollup {
@@ -243,6 +246,7 @@ function toRow(r: CallApi): LlmCallRow {
     inboxId: r.inbox_id,
     sourceId: r.source_id,
     sourceName: r.source_name,
+    metadata: r.metadata,
   }
 }
 

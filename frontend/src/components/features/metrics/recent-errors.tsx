@@ -7,11 +7,20 @@ import { moduleLabel } from "@/lib/metrics"
 import { fetchLlmCalls, type MetricsWindow } from "@/data"
 import { useAsync } from "@/lib/use-async"
 
-/** Panel dedicado de llamadas con error en el rango (status=error + su mensaje), para debug rápido. */
-export function RecentErrors({ window: win }: { window: MetricsWindow }) {
+/** Panel dedicado de llamadas con error en el rango (status=error + su mensaje), para debug rápido.
+ *  `module` opcional: acota los errores a un módulo (p. ej. "finance" para la vista de finanzas). */
+export function RecentErrors({ window: win, module }: { window: MetricsWindow; module?: string }) {
   const { data, loading } = useAsync(
-    () => fetchLlmCalls({ ...win, status: ["error"], sort: "created_at", dir: "desc", limit: 10 }),
-    [win.since, win.until],
+    () =>
+      fetchLlmCalls({
+        ...win,
+        status: ["error"],
+        module: module ? [module] : undefined,
+        sort: "created_at",
+        dir: "desc",
+        limit: 10,
+      }),
+    [win.since, win.until, module],
   )
   const rows = data?.items ?? []
   return (

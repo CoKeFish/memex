@@ -23,6 +23,12 @@ interface FinanceExpenseApiList {
   next_cursor: number | null
 }
 
+/** Fecha calendario LOCAL de un timestamp ISO, como `YYYY-MM-DD` (sin desplazamiento UTC). */
+function localDateKey(iso: string): string {
+  const d = new Date(iso)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`
+}
+
 function toFinanceExpense(r: FinanceExpenseApiRow): FinanceExpense {
   return {
     id: r.id,
@@ -31,8 +37,10 @@ function toFinanceExpense(r: FinanceExpenseApiRow): FinanceExpense {
     merchant: r.merchant,
     category: r.category as ExpenseCategory,
     // `occurred_on` puede ser null (el LLM no logró fechar el cargo): caemos a la fecha de creación
-    // para que el bucketeo por mes (`monthKey`) siempre tenga una fecha válida.
-    occurredOn: r.occurred_on ?? r.created_at.slice(0, 10),
+    // para que el bucketeo por mes (`monthKey`) siempre tenga una fecha válida. Usamos la fecha
+    // calendario LOCAL del `created_at` (no `slice(0,10)` sobre el ISO UTC), así no se corre un día
+    // —y por ende un mes— en zonas negativas como UTC-5.
+    occurredOn: r.occurred_on ?? localDateKey(r.created_at),
     description: r.description,
     evidence: r.evidence,
     sourceInboxIds: r.source_inbox_ids,

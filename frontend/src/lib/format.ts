@@ -63,9 +63,12 @@ export function monthLabel(d: Date | string): string {
 export function monthLongLabel(d: Date | string): string {
   return monthLongFmt.format(typeof d === "string" ? new Date(d) : d)
 }
-/** Clave de mes "2026-01". */
+/** Clave de mes "2026-01". Timezone-safe: una string `YYYY-MM[-DD]` se corta tal cual (NO se
+ *  reinterpreta como UTC), y un `Date` usa sus componentes LOCALES — evita que `.toISOString()`
+ *  desplace el mes en zonas no-UTC (p. ej. el inicio de mes local caía en el mes anterior en UTC). */
 export function monthKey(d: Date | string): string {
-  return (typeof d === "string" ? new Date(d) : d).toISOString().slice(0, 7)
+  if (typeof d === "string") return d.slice(0, 7)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`
 }
 
 /** Conteos grandes de tokens: 1.2k / 3.4M. */
@@ -102,6 +105,21 @@ export function formatDateTime(d: Date | string): string {
 
 export function formatDate(d: Date | string): string {
   return dateFmt.format(typeof d === "string" ? new Date(d) : d)
+}
+
+// Fecha-sólo `YYYY-MM-DD` (sin hora): se interpreta y formatea en UTC para NO desplazarla por la
+// zona horaria local (`new Date("2026-05-31")` es UTC-medianoche; formatear en local mostraría el
+// día anterior en zonas negativas como UTC-5). Para campos DATE como `occurred_on`.
+const dateOnlyFmt = new Intl.DateTimeFormat("es-MX", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+  timeZone: "UTC",
+})
+
+/** Formatea una fecha-sólo `YYYY-MM-DD` sin off-by-one por timezone (cf. `formatDate`). */
+export function formatDateOnly(d: string): string {
+  return dateOnlyFmt.format(new Date(d))
 }
 
 /** "hace 3 min" / "hace 2 h" / "hace 4 d" / "en 2 h". */

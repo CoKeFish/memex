@@ -1,8 +1,10 @@
 import { Panel } from "@/components/common/panel"
-import { EmptyState } from "@/components/common/data-state"
+import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { Led } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
-import { buildObsTimeline } from "@/data"
+import { Skeleton } from "@/components/ui/skeleton"
+import { fetchObsTimeline } from "@/data"
+import { useAsync } from "@/lib/use-async"
 import type { ObsKind } from "@/types/domain"
 
 const KIND_LABEL: Record<ObsKind, string> = {
@@ -13,13 +15,30 @@ const KIND_LABEL: Record<ObsKind, string> = {
   calendar: "Calendario",
 }
 
-/** Timeline derivado de la observabilidad PERSISTIDA (ingestion_runs, worker_runs, llm_calls,
- * dead-letters) — no de los logs efímeros. Ordenado por recencia. */
+/** Timeline derivado de la observabilidad PERSISTIDA del pipeline (ingestion_runs + worker_runs vía
+ * /stats/pipeline) — no de los logs efímeros. Ordenado por recencia; refresca con la topbar. */
 export function ObsTimeline() {
-  const entries = [...buildObsTimeline()].sort(
-    (a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime(),
-  )
+  const { data, loading, error, reload } = useAsync(() => fetchObsTimeline(), [])
+  const entries = data ?? []
 
+  if (error) {
+    return (
+      <Panel>
+        <ErrorState detail={error} onRetry={reload} />
+      </Panel>
+    )
+  }
+  if (loading && !data) {
+    return (
+      <Panel>
+        <div className="space-y-2 p-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-10 w-full" />
+          ))}
+        </div>
+      </Panel>
+    )
+  }
   if (entries.length === 0) {
     return (
       <Panel>

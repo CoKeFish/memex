@@ -6,6 +6,7 @@ import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { FinanceKpis } from "@/components/features/finance/finance-kpis"
 import { CategoryBreakdown, MonthlyTrend, TopMerchants } from "@/components/features/finance/finance-charts"
 import { ExpenseTable } from "@/components/features/finance/expense-table"
+import { FinanceActivity } from "@/components/features/finance/finance-activity"
 import { fetchFinanceExpenses, financeCurrencies } from "@/data"
 import { useAsync } from "@/lib/use-async"
 import { formatMoney } from "@/lib/format"
@@ -50,30 +51,39 @@ export function FinancePage() {
         <div className="flex items-center justify-center gap-2 py-24 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" /> Cargando finanzas…
         </div>
-      ) : expenses.length === 0 ? (
-        <EmptyState title="Sin gastos" hint="El módulo finance aún no extrajo nada." />
       ) : (
         <>
-          <FinanceKpis expenses={expenses} currency={currency} />
-          {others.length > 0 && (
-            <p className="text-xs text-muted-foreground">
-              Otras monedas (todo el periodo):{" "}
-              {others.map((o) => (
-                <span key={o.currency} className="num">
-                  {o.currency} {formatMoney(o.total, o.currency)}{" "}
-                </span>
-              ))}
-              · los montos no se suman entre monedas (sin tipo de cambio).
-            </p>
+          {expenses.length === 0 ? (
+            <EmptyState
+              title="Sin gastos"
+              hint="El módulo finance aún no extrajo gastos. Mirá la actividad del módulo abajo para ver si corrió, qué procesó y si hubo errores."
+            />
+          ) : (
+            <>
+              <FinanceKpis expenses={expenses} currency={currency} />
+              {others.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Otras monedas (todo el periodo):{" "}
+                  {others.map((o) => (
+                    <span key={o.currency} className="num">
+                      {o.currency} {formatMoney(o.total, o.currency)}{" "}
+                    </span>
+                  ))}
+                  · los montos no se suman entre monedas (sin tipo de cambio).
+                </p>
+              )}
+              <div className="grid gap-5 xl:grid-cols-2">
+                <MonthlyTrend expenses={expenses} currency={currency} />
+                <CategoryBreakdown expenses={expenses} currency={currency} />
+              </div>
+              <div className="grid gap-5 xl:grid-cols-[1fr_1.4fr]">
+                <TopMerchants expenses={expenses} currency={currency} />
+                <ExpenseTable expenses={expenses} currency={currency} />
+              </div>
+            </>
           )}
-          <div className="grid gap-5 xl:grid-cols-2">
-            <MonthlyTrend expenses={expenses} currency={currency} />
-            <CategoryBreakdown expenses={expenses} currency={currency} />
-          </div>
-          <div className="grid gap-5 xl:grid-cols-[1fr_1.4fr]">
-            <TopMerchants expenses={expenses} currency={currency} />
-            <ExpenseTable expenses={expenses} currency={currency} />
-          </div>
+          {/* Siempre visible: cuando hay 0 gastos es justo lo que explica el "por qué". */}
+          <FinanceActivity />
         </>
       )}
     </div>

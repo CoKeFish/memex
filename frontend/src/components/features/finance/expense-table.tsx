@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Button } from "@/components/ui/button"
 import { EmptyState, Stateful, TableSkeleton } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
-import { formatDate, formatMoney } from "@/lib/format"
+import { formatDateOnly, formatMoney } from "@/lib/format"
 import { CATEGORIES, CATEGORY_CHART, CATEGORY_LABEL } from "@/data"
 import type { ExpenseCategory, FinanceExpense } from "@/types/domain"
 
@@ -106,7 +106,7 @@ export function ExpenseTable({ expenses, currency }: { expenses: FinanceExpense[
               <tbody className="divide-y divide-border">
                 {view.map((e) => (
                   <tr key={e.id} className="hover:bg-accent/30">
-                    <td className="num whitespace-nowrap px-3 py-2 text-muted-foreground">{formatDate(e.occurredOn)}</td>
+                    <td className="num whitespace-nowrap px-3 py-2 text-muted-foreground">{formatDateOnly(e.occurredOn)}</td>
                     <td className="px-3 py-2">
                       <div className="font-medium">{e.merchant}</div>
                       <div className="truncate text-[11px] text-muted-foreground" title={e.evidence}>{e.evidence}</div>

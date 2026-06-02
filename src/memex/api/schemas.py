@@ -441,6 +441,8 @@ class LlmCallRow(BaseModel):
     inbox_id: int | None = None
     source_id: int | None = None
     source_name: str | None = None
+    # Decisión de la fase: extracción {items, discarded, n, ...}; ruteo {slugs_in, chosen, ...}.
+    metadata: dict[str, Any] | None = None
 
 
 class LlmCallList(BaseModel):

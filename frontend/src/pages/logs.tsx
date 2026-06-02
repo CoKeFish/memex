@@ -9,7 +9,7 @@ export function LogsPage() {
       <PageHeader
         eyebrow="Vista · logs"
         title="Logs"
-        description="Eventos del sistema para debug: el stream de logs structlog (efímeros, vía API/CLI en real) y un timeline derivado de la observabilidad persistida. Activá el auto-refresco (arriba) para ver el stream en vivo."
+        description="Eventos del sistema para debug, con datos reales: el stream reconstruido de las llamadas LLM (tabla llm_calls, filtrable por módulo) y un timeline de la observabilidad persistida del pipeline (ingestas y workers). Activá el auto-refresco (arriba) para verlo en vivo."
       />
       <Tabs defaultValue="stream">
         <TabsList>

@@ -354,7 +354,7 @@ async def llm_calls(
             SELECT lc.id, lc.created_at, lc.purpose, {_MODULE_CASE} AS module, lc.model,
                    lc.prompt_tokens, lc.completion_tokens, lc.cache_hit_tokens, lc.cost_usd,
                    lc.latency_ms, lc.status, lc.error_message, lc.inbox_id, lc.source_id,
-                   lc.request_id,
+                   lc.request_id, lc.metadata,
                    {_SOURCE_LABEL} AS source_name
             FROM llm_calls lc
             LEFT JOIN sources s ON s.id = lc.source_id
@@ -362,7 +362,7 @@ async def llm_calls(
         )
         SELECT id, created_at, purpose, module, model, prompt_tokens, completion_tokens,
                cache_hit_tokens, cost_usd, latency_ms, status, error_message, inbox_id,
-               source_id, source_name, COUNT(*) OVER() AS total
+               source_id, source_name, metadata, COUNT(*) OVER() AS total
         FROM c{filter_sql}
         ORDER BY {col} {direction}, id {direction}
         LIMIT :limit OFFSET :offset
@@ -388,6 +388,7 @@ async def llm_calls(
             "inbox_id": r["inbox_id"],
             "source_id": r["source_id"],
             "source_name": r["source_name"],
+            "metadata": r["metadata"],
         }
         for r in rows
     ]

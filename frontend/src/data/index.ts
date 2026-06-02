@@ -57,7 +57,11 @@ export { JOB_LABEL, JOBS, MODEL_PRICING, PURPOSES, PURPOSE_LABEL, SOURCE_BY_ID }
 export { NOW } from "@/mocks"
 export { dryRunFetch, dryRunRun } from "@/mocks/control"
 export { getMessageJourney } from "@/mocks/journey"
-export { buildObsTimeline } from "@/mocks/logs"
+
+// ---- Logs del sistema (datos reales: /metrics/llm/calls + /stats/pipeline) ----
+// Stream reconstruido de llm_calls + timeline de observabilidad del pipeline (reemplazan los
+// mocks getLogEvents/buildObsTimeline).
+export * from "./logs"
 
 // ---- Getters mock síncronos sobre los seeds existentes ------------------------
 import { account } from "@/mocks/account"
@@ -69,7 +73,6 @@ import {
 } from "@/mocks/calendar"
 import { SOURCES } from "@/mocks/catalog"
 import { moduleSettings, schedulerEnabled, schedulerJobs } from "@/mocks/control"
-import { logEvents } from "@/mocks/logs"
 import { inbox, reviewItems, seedAlerts } from "@/mocks"
 import type {
   Account,
@@ -79,7 +82,6 @@ import type {
   ConsolidatedEvent,
   DedupDecision,
   InboxRow,
-  LogEvent,
   ModuleSetting,
   ReviewItem,
   SchedulerJob,
@@ -93,10 +95,6 @@ export function getSources(): Source[] {
 
 export function getInbox(): InboxRow[] {
   return inbox
-}
-
-export function getLogEvents(): LogEvent[] {
-  return logEvents
 }
 
 export function getReviewItems(): ReviewItem[] {
