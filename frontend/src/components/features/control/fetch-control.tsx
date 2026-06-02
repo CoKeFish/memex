@@ -4,7 +4,7 @@ import { ArrowRight, Download, FlaskConical, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
+import { Switch } from "@/components/ui/switch"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
@@ -92,7 +92,7 @@ function SourceSelect({
   )
 }
 
-function PreviewView({ p, title }: { p: FetchPreview; title?: string }) {
+function PreviewView({ p, title, compact }: { p: FetchPreview; title?: string; compact?: boolean }) {
   const cells = [
     { label: "escaneados", value: p.scanned, cls: "text-foreground" },
     { label: "nuevos", value: p.nuevos, cls: "text-status-ok" },
@@ -102,7 +102,7 @@ function PreviewView({ p, title }: { p: FetchPreview; title?: string }) {
   return (
     <div className="rounded-md border border-border bg-muted/30 p-3">
       {title && <div className="eyebrow mb-2">{title}</div>}
-      <div className="grid grid-cols-4 gap-2 text-center">
+      <div className={cn("grid gap-2 text-center", compact ? "grid-cols-2" : "grid-cols-4")}>
         {cells.map((c) => (
           <div key={c.label}>
             <div className={cn("num text-lg font-semibold", c.cls)}>{formatInt(c.value)}</div>
@@ -350,85 +350,92 @@ export function FetchControl() {
               <p className="text-xs text-status-review">Indicá al menos la fecha “Desde”.</p>
             )}
 
-            {/* Lista de cuentas: tildá las que querés traer (estilo Scheduler). */}
-            <div className="divide-y divide-border overflow-hidden rounded-md border border-border">
-              <div className="flex items-center gap-2.5 bg-muted/30 px-3 py-2">
-                <Checkbox
-                  checked={allSelected}
-                  disabled={enabledIds.length === 0}
-                  onCheckedChange={toggleAll}
-                  aria-label="Seleccionar todas las fuentes"
-                />
-                <button
-                  type="button"
-                  onClick={toggleAll}
-                  disabled={enabledIds.length === 0}
-                  className="flex flex-1 items-center text-left disabled:cursor-default"
-                >
-                  <span className="text-sm font-medium">Todas las fuentes</span>
-                  <span className="num ml-auto text-xs text-muted-foreground">
-                    {selected.size}/{enabledIds.length}
-                  </span>
-                </button>
-              </div>
-              {sources.map((s) => {
-                const m = sourceMeta(s)
-                const Icon = m.icon
-                const enabled = supportsMode(s.type, mode)
-                return (
-                  <div
-                    key={s.id}
-                    className={cn("flex items-center gap-2.5 px-3 py-2", !enabled && "opacity-55")}
+            {/* Selección de fuentes (izq) + acciones/preview (der); switches estilo Scheduler. */}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+              <div className="min-w-0 flex-1 divide-y divide-border overflow-hidden rounded-md border border-border">
+                <div className="flex items-center gap-2.5 bg-muted/30 px-3 py-2">
+                  <Switch
+                    checked={allSelected}
+                    disabled={enabledIds.length === 0}
+                    onCheckedChange={toggleAll}
+                    aria-label="Seleccionar todas las fuentes"
+                  />
+                  <button
+                    type="button"
+                    onClick={toggleAll}
+                    disabled={enabledIds.length === 0}
+                    className="flex flex-1 items-center text-left disabled:cursor-default"
                   >
-                    <Checkbox
-                      checked={enabled && selected.has(s.id)}
-                      disabled={!enabled}
-                      onCheckedChange={() => toggle(s.id)}
-                      aria-label={`Seleccionar ${sourceFullLabel(s)}`}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => enabled && toggle(s.id)}
-                      disabled={!enabled}
-                      className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
+                    <span className="text-sm font-medium">Todas las fuentes</span>
+                    <span className="num ml-auto text-xs text-muted-foreground">
+                      {selected.size}/{enabledIds.length}
+                    </span>
+                  </button>
+                </div>
+                {sources.map((s) => {
+                  const m = sourceMeta(s)
+                  const Icon = m.icon
+                  const enabled = supportsMode(s.type, mode)
+                  return (
+                    <div
+                      key={s.id}
+                      className={cn("flex items-center gap-2.5 px-3 py-2", !enabled && "opacity-55")}
                     >
-                      <Icon className={cn("size-4 shrink-0", m.tone)} />
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium">{sourceFullLabel(s)}</div>
-                        <div className="truncate text-[11px] text-muted-foreground">
-                          {enabled
-                            ? checkpointLabel(checkpoints?.[s.id])
-                            : "Solo modo incremental (no admite rango/cantidad)"}
+                      <Switch
+                        checked={enabled && selected.has(s.id)}
+                        disabled={!enabled}
+                        onCheckedChange={() => toggle(s.id)}
+                        aria-label={`Seleccionar ${sourceFullLabel(s)}`}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => enabled && toggle(s.id)}
+                        disabled={!enabled}
+                        className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
+                      >
+                        <Icon className={cn("size-4 shrink-0", m.tone)} />
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium">{sourceFullLabel(s)}</div>
+                          <div className="truncate text-[11px] text-muted-foreground">
+                            {enabled
+                              ? checkpointLabel(checkpoints?.[s.id])
+                              : "Solo modo incremental (no admite rango/cantidad)"}
+                          </div>
                         </div>
+                      </button>
+                      <div className="shrink-0 pl-2">
+                        <RowResultView r={results[s.id]} />
                       </div>
-                    </button>
-                    <div className="shrink-0 pl-2">
-                      <RowResultView r={results[s.id]} />
                     </div>
-                  </div>
-                )
-              })}
-            </div>
+                  )
+                })}
+              </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" disabled={disabled} onClick={() => run(true)}>
-                {busy === "dry" ? <Loader2 className="size-3.5 animate-spin" /> : <FlaskConical className="size-3.5" />} Dry-run
-              </Button>
-              <Button size="sm" disabled={disabled} onClick={() => run(false)}>
-                {busy === "run" ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
-                {selected.size > 1 ? `Traer ${selected.size} ahora` : "Traer ahora"}
-              </Button>
-            </div>
+              {/* Acciones: el dry-run/traer a la derecha de los selectores; preview debajo. */}
+              <div className="flex w-full shrink-0 flex-col gap-3 sm:w-72">
+                <div className="flex flex-col gap-2">
+                  <Button variant="outline" size="sm" className="w-full" disabled={disabled} onClick={() => run(true)}>
+                    {busy === "dry" ? <Loader2 className="size-3.5 animate-spin" /> : <FlaskConical className="size-3.5" />} Dry-run
+                  </Button>
+                  <Button size="sm" className="w-full" disabled={disabled} onClick={() => run(false)}>
+                    {busy === "run" ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                    {selected.size > 1 ? `Traer ${selected.size} ahora` : "Traer ahora"}
+                  </Button>
+                </div>
 
-            {okCount > 0 && <PreviewView p={agg} title={okCount > 1 ? `total · ${okCount} fuentes` : undefined} />}
-            {ranReal && (
-              <Link
-                to={datosHref}
-                className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
-              >
-                Ver en datos <ArrowRight className="size-3.5" />
-              </Link>
-            )}
+                {okCount > 0 && (
+                  <PreviewView p={agg} compact title={okCount > 1 ? `total · ${okCount} fuentes` : undefined} />
+                )}
+                {ranReal && (
+                  <Link
+                    to={datosHref}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+                  >
+                    Ver en datos <ArrowRight className="size-3.5" />
+                  </Link>
+                )}
+              </div>
+            </div>
           </>
         )}
       </PanelBody>
