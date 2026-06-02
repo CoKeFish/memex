@@ -22,6 +22,11 @@ TEST_DB_URL = "postgresql+psycopg://memex:memex@localhost:5454/memex_test"
 os.environ["MEMEX_DATABASE_URL"] = TEST_DB_URL
 os.environ["MEMEX_AUTH_ENFORCED"] = "false"
 os.environ["MEMEX_API_TOKEN"] = ""
+# El log sink queda INERTE en tests: con `log_persist=True` su escritor por lotes corre en un daemon
+# thread e inserta en `log_events`, lo que deadlockea contra el `TRUNCATE ... users ... CASCADE` de
+# `_reset_tables` (la FK `log_events.user_id → users` hace que el CASCADE alcance `log_events`).
+# Apagarlo no baja cobertura: `test_log_sink` fuerza su estado a mano y `test_api_logs` lo aísla.
+os.environ["MEMEX_LOG_PERSIST"] = "false"
 
 
 @pytest.fixture(scope="session", autouse=True)

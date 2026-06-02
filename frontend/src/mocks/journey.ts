@@ -3,7 +3,7 @@ import { renderPayload } from "@/lib/render-payload"
 import type {
   JourneyStep,
   LlmExchange,
-  LogEvent,
+  LogEventRow,
   MediaAsset,
   MessageJourney,
   RelatedRecord,
@@ -142,21 +142,22 @@ export function getMessageJourney(inboxId: number): MessageJourney | null {
   const ocrSuffix = okOcr.length ? " + texto OCR de adjuntos" : ""
 
   const steps: JourneyStep[] = []
-  const logs: LogEvent[] = []
+  const logs: LogEventRow[] = []
   const srcId = row.sourceId
   let logSeq = 0
-  function addLog(event: string, module: string, level: LogEvent["level"], offsetMin: number, fields: Record<string, unknown>) {
+  function addLog(event: string, module: string, level: LogEventRow["level"], offsetMin: number, fields: Record<string, unknown>) {
     logs.push({
-      id: `j-${inboxId}-${logSeq++}`,
+      id: inboxId * 1000 + logSeq++,
       ts: at(offsetMin),
       level,
       event,
-      module,
+      logger: `memex.${module}`,
       requestId: rid,
       userId: 1,
       runId: null,
       sourceId: srcId,
       inboxId,
+      exception: null,
       fields,
     })
   }

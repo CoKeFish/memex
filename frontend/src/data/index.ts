@@ -63,9 +63,10 @@ export { NOW } from "@/mocks"
 export { dryRunFetch } from "@/mocks/control"
 export { getMessageJourney } from "@/mocks/journey"
 
-// ---- Logs del sistema (datos reales: /metrics/llm/calls + /stats/pipeline) ----
-// Stream reconstruido de llm_calls + timeline de observabilidad del pipeline (reemplazan los
-// mocks getLogEvents/buildObsTimeline).
+// ---- Logs del sistema (datos reales: /logs + /logs/stats + /stats/pipeline) ---
+// fetchLogs/fetchLogStats: stream y agregados de la tabla log_events (sink real de structlog, 0020).
+// fetchObsTimeline: timeline de observabilidad del pipeline. Reemplazan el viejo stream reconstruido
+// de llm_calls (fetchLogEvents) y los mocks getLogEvents/buildObsTimeline.
 export * from "./logs"
 
 // ---- Getters mock síncronos sobre los seeds existentes ------------------------

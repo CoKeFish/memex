@@ -372,20 +372,62 @@ export interface Account {
 
 // ---- Logs ---------------------------------------------------------------------
 
-export type LogLevel = "info" | "warning" | "error"
+export type LogLevel = "debug" | "info" | "warning" | "error" | "critical"
 
-export interface LogEvent {
-  id: string
+/** Una fila de `log_events` (el sink de structlog, migración 0020) tal como la sirve GET /logs. */
+export interface LogEventRow {
+  id: number
   ts: string
   level: LogLevel
   event: string
-  module: string
-  requestId: string | null
+  logger: string | null
   userId: number | null
+  requestId: string | null
   runId: string | null
   sourceId: number | null
   inboxId: number | null
+  exception: string | null
   fields: Record<string, unknown>
+}
+
+export interface LogLevelCount {
+  level: LogLevel
+  count: number
+}
+
+export interface LogEventCount {
+  event: string
+  count: number
+}
+
+export interface LogLoggerCount {
+  logger: string
+  count: number
+}
+
+export interface LogHistogramPoint {
+  bucket: string
+  total: number
+  errors: number
+}
+
+export interface LogLatency {
+  p50: number | null
+  p95: number | null
+  p99: number | null
+}
+
+/** Agregaciones de GET /logs/stats para el panel de métricas de logs. */
+export interface LogStats {
+  total: number
+  errors: number
+  errorRate: number
+  byLevel: LogLevelCount[]
+  byEvent: LogEventCount[]
+  byLogger: LogLoggerCount[]
+  histogram: LogHistogramPoint[]
+  latency: LogLatency
+  sinkDropped: number
 }
 
 export type ObsKind = "ingestion" | "worker" | "llm" | "failure" | "calendar"
@@ -473,7 +515,7 @@ export interface RelatedRecord {
 export interface MessageJourney {
   row: InboxRow
   steps: JourneyStep[]
-  logs: LogEvent[]
+  logs: LogEventRow[]
   related: RelatedRecord[]
   media: MediaAsset[]
 }

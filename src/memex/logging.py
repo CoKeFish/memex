@@ -5,6 +5,7 @@ from typing import Any, cast
 import structlog
 
 from memex.config import settings
+from memex.core.log_sink import install_log_sink, persist_processor
 
 
 def setup_logging() -> None:
@@ -18,15 +19,25 @@ def setup_logging() -> None:
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.StackInfoRenderer(),
             structlog.dev.set_exc_info,
+            # El sink corre JUSTO ANTES del JSONRenderer: acá el event_dict todavía es un dict
+            # (el renderer lo convierte en string). Solo encola; no muta el evento.
+            persist_processor,
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
         cache_logger_on_first_use=True,
     )
+    # Idempotente: arranca el escritor por lotes la primera vez, no-op en llamadas siguientes.
+    install_log_sink()
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
-    return cast("structlog.stdlib.BoundLogger", structlog.get_logger(name))
+    bound = structlog.get_logger(name)
+    if name is not None:
+        # Bindeamos `logger=name` como campo ADITIVO: así el nombre del logger aparece en el
+        # event_dict tanto para el sink (columna/filtro `logger`) como para la línea de stderr.
+        bound = bound.bind(logger=name)
+    return cast("structlog.stdlib.BoundLogger", bound)
 
 
 def bind_request_context(

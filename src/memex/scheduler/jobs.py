@@ -54,6 +54,46 @@ def _sync(fn: Callable[[int], Any]) -> JobRun:
 
 
 @dataclass
+class LogPurgeStats:
+    """Roll-up del purge de `log_events`: filas borradas + salud del sink al momento del corte."""
+
+    deleted: int = 0
+    sink_dropped: int = 0
+    sink_db_errors: int = 0
+
+
+def run_log_purge(user_id: int) -> LogPurgeStats:
+    """Borra los `log_events` más viejos que la retención y reporta la salud del sink.
+
+    Retención global (no por user): el sink persiste líneas de TODOS (incl. pre-auth/infra), así
+    que el DELETE no filtra por `user_id` — el parámetro existe solo para cumplir la firma del Job.
+    """
+    from memex.config import settings  # import local: evita el ciclo config↔jobs al importar
+    from memex.core.log_sink import sink_health
+
+    retention_days = settings.log_persist_retention_days
+    with connection() as conn:
+        res = conn.execute(
+            text("DELETE FROM log_events WHERE ts < NOW() - make_interval(days => :d)"),
+            {"d": retention_days},
+        )
+    deleted = res.rowcount or 0
+    health = sink_health()
+    _log.info(
+        "log_purge.done",
+        deleted=deleted,
+        retention_days=retention_days,
+        sink_dropped=health["dropped"],
+        sink_db_errors=health["db_errors"],
+    )
+    return LogPurgeStats(
+        deleted=deleted,
+        sink_dropped=health["dropped"],
+        sink_db_errors=health["db_errors"],
+    )
+
+
+@dataclass
 class CalendarCycleStats:
     """Roll-up de un ciclo completo de calendar (pull→dedup→consolidate→merge→push).
 
@@ -170,6 +210,7 @@ _REGISTRY: dict[str, Job] = {
     "extract": Job("extract", "PT1H", run_extraction),
     "ocr": Job("ocr", "PT1H", run_ocr),
     "calendar": Job("calendar", "PT30M", run_calendar_cycle),
+    "log_purge": Job("log_purge", "P1D", _sync(run_log_purge)),
 }
 
 

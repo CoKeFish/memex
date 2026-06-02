@@ -17,7 +17,7 @@ from sqlalchemy import text
 
 from memex.db import connection
 
-_JOBS = ("classify", "summarize", "extract", "ocr", "calendar")
+_JOBS = ("classify", "summarize", "extract", "ocr", "calendar", "log_purge")
 
 
 def _seed_source(name: str, stype: str = "imap", user_id: int = 1) -> int:
@@ -194,7 +194,7 @@ def _seed_conflict(user_id: int = 1, status: str = "pending") -> None:
 def test_pipeline_empty(client: Any) -> None:
     body = client.get("/stats/pipeline").json()
     assert body["sources"] == []
-    # los 5 jobs fijos aparecen aunque no haya corridas, con latest=None
+    # los jobs fijos aparecen aunque no haya corridas, con latest=None
     assert [w["job"] for w in body["workers"]] == list(_JOBS)
     assert all(w["latest"] is None and w["is_stale"] is False for w in body["workers"])
     assert body["ingestion"]["runs"] == []

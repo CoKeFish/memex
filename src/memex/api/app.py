@@ -14,6 +14,7 @@ from memex.api.routers import (
     health,
     inbox,
     ingest,
+    logs,
     media,
     metrics,
     modules,
@@ -70,6 +71,7 @@ app.include_router(filters.router)
 app.include_router(feedback.router)
 app.include_router(finance.router)
 app.include_router(metrics.router)
+app.include_router(logs.router)
 app.include_router(stats.router)
 app.include_router(modules.router)
 app.include_router(processing.router)
