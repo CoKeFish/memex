@@ -32,8 +32,9 @@ UserID = Annotated[int, Depends(current_user_id)]
 _log = get_logger("memex.api.metrics")
 
 #: TZ por defecto del bucket diario (cuando el cliente no manda `tz`). El front pasa su TZ activa
-#: (autodetectada/override) para que los días del eje coincidan con su reloj de pared.
-_BUCKET_TZ = "America/Mexico_City"
+#: (autodetectada/override) para que los días del eje coincidan con su reloj de pared. Default a
+#: Bogota (TZ del usuario), no asumir México; alineado con el default de `routers/logs.py`.
+_BUCKET_TZ = "America/Bogota"
 
 #: Deriva el módulo/etapa desde `purpose`. El literal `extract_grouped` va ANTES del wildcard
 #: `extract_%`; un purpose futuro desconocido cae al ELSE y se ve nombrado (no se pierde el gasto).
