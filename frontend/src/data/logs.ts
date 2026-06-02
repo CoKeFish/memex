@@ -1,54 +1,141 @@
-// Logs del sistema contra la API real. structlog NO se persiste, así que el "stream" de eventos se
-// RECONSTRUYE de la tabla `llm_calls` (cada llamada = un evento), igual que la traza de un mensaje.
-// El timeline de "observabilidad" se compone de lo persistido por el pipeline: ingestion_runs +
-// worker_runs (vía /stats/pipeline). Ambos soportan acotar por módulo donde tiene sentido.
+// Logs del sistema contra la API real. AHORA el "stream" de eventos sale de la tabla `log_events`
+// (el sink real de structlog, migración 0020) vía GET /logs — ya NO se reconstruye de `llm_calls`.
+// Cada evento structlog se persiste con su nivel/logger/correlación reales (request_id, run_id,
+// source_id, inbox_id) y sus `fields`. GET /logs/stats agrega el rango (KPIs + histograma + cortes
+// por nivel/evento/logger + percentiles de latencia). El timeline de "observabilidad" sigue saliendo
+// de lo persistido por el pipeline (ingestion_runs + worker_runs vía /stats/pipeline).
 
-import { fetchLlmCalls, type LlmCallRow, type MetricsWindow } from "./metrics"
+import { apiGet } from "@/lib/api"
 import { fetchPipeline } from "./pipeline"
-import type { LogEvent, LogLevel, ObsTimelineEntry } from "@/types/domain"
+import { multiParam, windowParams, type FilterMode, type MetricsWindow } from "./metrics"
+import type {
+  LogEventRow,
+  LogStats,
+  ObsTimelineEntry,
+} from "@/types/domain"
 
+// ---- Query (ventana + filtros server-side) ------------------------------------------------------
+
+/** Filtros del stream/stats de logs. Reusa `MetricsWindow` (since/until/tz) y agrega las dimensiones
+ *  de `log_events`: nivel/evento/logger con modo incluir/excluir, correlación, búsqueda y paginación.
+ *  /logs usa sort/dir/limit/offset; /logs/stats ignora esos cuatro (agrega todo el rango filtrado). */
 export interface LogsQuery extends MetricsWindow {
-  /** Acota a un módulo (derivado de `purpose`: finance, calendar, summarize, routing, ocr, …). */
-  module?: string
+  level?: string[]
+  levelMode?: FilterMode
+  event?: string[]
+  eventMode?: FilterMode
+  logger?: string[]
+  loggerMode?: FilterMode
+  requestId?: string
+  runId?: string
+  sourceId?: number
+  inboxId?: number
+  q?: string
+  sort?: "ts"
+  dir?: "asc" | "desc"
   limit?: number
+  offset?: number
 }
 
-/** status de una llamada LLM → nivel de log. */
-function levelOf(status: string): LogLevel {
-  if (status === "error") return "error"
-  if (status === "filtered") return "warning"
-  return "info"
+// ---- API rows (snake_case) + transform ----------------------------------------------------------
+
+interface LogEventApi {
+  id: number
+  ts: string
+  level: string
+  event: string
+  logger: string | null
+  user_id: number | null
+  request_id: string | null
+  run_id: string | null
+  source_id: number | null
+  inbox_id: number | null
+  exception: string | null
+  fields: Record<string, unknown>
 }
 
-/** Una fila de `llm_calls` → un evento de log (el "stream" reconstruido). */
-function callToEvent(c: LlmCallRow): LogEvent {
-  const meta = c.metadata ?? {}
+interface LogLevelCountApi { level: string; count: number }
+interface LogEventCountApi { event: string; count: number }
+interface LogLoggerCountApi { logger: string; count: number }
+interface LogHistogramPointApi { bucket: string; total: number; errors: number }
+interface LogLatencyApi { p50: number | null; p95: number | null; p99: number | null }
+interface LogStatsApi {
+  total: number
+  errors: number
+  error_rate: number
+  by_level: LogLevelCountApi[]
+  by_event: LogEventCountApi[]
+  by_logger: LogLoggerCountApi[]
+  histogram: LogHistogramPointApi[]
+  latency: LogLatencyApi
+  sink_dropped: number
+}
+
+/** Fila cruda de /logs (snake_case) → `LogEventRow` (camelCase). `level` viene como string libre del
+ *  backend; el tipo `LogLevel` lo restringe a debug|info|warning|error|critical (se asume válido). */
+function toRow(r: LogEventApi): LogEventRow {
   return {
-    id: `llm-${c.id}`,
-    ts: c.createdAt,
-    level: levelOf(c.status),
-    event: c.errorMessage ? `${c.purpose}: ${c.errorMessage}` : c.purpose,
-    module: c.module,
-    requestId: null, // /metrics/llm/calls no devuelve request_id por fila
-    userId: null,
-    runId: null,
-    sourceId: c.sourceId,
-    inboxId: c.inboxId,
-    fields: { model: c.model, cost_usd: c.costUsd, latency_ms: c.latencyMs, ...meta },
+    id: r.id,
+    ts: r.ts,
+    level: r.level as LogEventRow["level"],
+    event: r.event,
+    logger: r.logger,
+    userId: r.user_id,
+    requestId: r.request_id,
+    runId: r.run_id,
+    sourceId: r.source_id,
+    inboxId: r.inbox_id,
+    exception: r.exception,
+    fields: r.fields,
   }
 }
 
-/** Stream de eventos reconstruido de `llm_calls`, más nuevos primero, opcionalmente por módulo. */
-export async function fetchLogEvents(query: LogsQuery = {}): Promise<LogEvent[]> {
-  const { module, limit, ...win } = query
-  const { items } = await fetchLlmCalls({
-    ...win,
-    module: module ? [module] : undefined,
-    sort: "created_at",
-    dir: "desc",
-    limit: limit ?? 100,
-  })
-  return items.map(callToEvent)
+function toStats(r: LogStatsApi): LogStats {
+  return {
+    total: r.total,
+    errors: r.errors,
+    errorRate: r.error_rate,
+    byLevel: r.by_level.map((l) => ({ level: l.level as LogStats["byLevel"][number]["level"], count: l.count })),
+    byEvent: r.by_event.map((e) => ({ event: e.event, count: e.count })),
+    byLogger: r.by_logger.map((g) => ({ logger: g.logger, count: g.count })),
+    histogram: r.histogram.map((h) => ({ bucket: h.bucket, total: h.total, errors: h.errors })),
+    latency: { p50: r.latency.p50, p95: r.latency.p95, p99: r.latency.p99 },
+    sinkDropped: r.sink_dropped,
+  }
+}
+
+/** Filtros comunes a /logs y /logs/stats: ventana + dimensiones incluir/excluir + correlación + q. */
+function logParams(qs: URLSearchParams, query: LogsQuery): void {
+  windowParams(qs, query)
+  multiParam(qs, "level", query.level, query.levelMode)
+  multiParam(qs, "event", query.event, query.eventMode)
+  multiParam(qs, "logger", query.logger, query.loggerMode)
+  if (query.requestId) qs.set("request_id", query.requestId)
+  if (query.runId) qs.set("run_id", query.runId)
+  if (query.sourceId != null) qs.set("source_id", String(query.sourceId))
+  if (query.inboxId != null) qs.set("inbox_id", String(query.inboxId))
+  if (query.q) qs.set("q", query.q)
+}
+
+// ---- Endpoints ----------------------------------------------------------------------------------
+
+/** Stream de eventos de `log_events` con filtros incluir/excluir, orden y paginación offset. */
+export async function fetchLogs(query: LogsQuery): Promise<{ items: LogEventRow[]; total: number }> {
+  const qs = new URLSearchParams()
+  logParams(qs, query)
+  if (query.sort) qs.set("sort", query.sort)
+  if (query.dir) qs.set("dir", query.dir)
+  qs.set("limit", String(query.limit ?? 100))
+  qs.set("offset", String(query.offset ?? 0))
+  const r = await apiGet<{ items: LogEventApi[]; total: number }>(`/logs?${qs.toString()}`)
+  return { items: r.items.map(toRow), total: r.total }
+}
+
+/** Agregaciones del rango filtrado (KPIs + histograma + cortes por nivel/evento/logger + latencia). */
+export async function fetchLogStats(query: LogsQuery): Promise<LogStats> {
+  const qs = new URLSearchParams()
+  logParams(qs, query)
+  return toStats(await apiGet<LogStatsApi>(`/logs/stats?${qs.toString()}`))
 }
 
 /** Timeline de observabilidad persistida (ingestion_runs + worker_runs), más nuevos primero. */

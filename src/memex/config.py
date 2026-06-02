@@ -14,6 +14,17 @@ class Settings(BaseSettings):
     api_token: str = ""
     log_level: str = "INFO"
 
+    # --- Log sink: persistencia consultable de structlog (ver migración 0020 / ADR-007) ---
+    # Un processor no bloqueante persiste cada evento >= log_persist_level a la tabla `log_events`
+    # vía una cola en memoria + escritor por lotes. `log_persist=False` deja el sink inerte (tests).
+    # La cola es acotada (queue_max): al llenarse descarta el más nuevo y lo CUENTA (no silent cap).
+    log_persist: bool = True
+    log_persist_level: str = "INFO"
+    log_persist_batch_size: int = 100
+    log_persist_flush_ms: int = 1000
+    log_persist_queue_max: int = 10000
+    log_persist_retention_days: int = 30
+
     # --- Vault de credenciales (ver credentials-vault-architecture / ADR auth+vault) ---
     # Llave maestra ÚNICA del servidor, global, configurada una sola vez (Doppler:
     # MEMEX_SECRET_KEY). Envuelve un DEK por-usuario que cifra los secretos de los ingestors.

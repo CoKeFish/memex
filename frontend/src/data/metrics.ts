@@ -265,7 +265,7 @@ function toRow(r: CallApi): LlmCallRow {
   }
 }
 
-function windowParams(qs: URLSearchParams, w: MetricsWindow): void {
+export function windowParams(qs: URLSearchParams, w: MetricsWindow): void {
   if (w.since) qs.set("since", w.since)
   if (w.until) qs.set("until", w.until)
   if (w.tz) qs.set("tz", w.tz)
@@ -297,7 +297,7 @@ export interface LlmCallsQuery extends MetricsWindow {
   offset?: number
 }
 
-function multiParam(
+export function multiParam(
   qs: URLSearchParams,
   name: string,
   values: string[] | undefined,

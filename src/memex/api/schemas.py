@@ -452,6 +452,78 @@ class LlmCallList(BaseModel):
     total: int
 
 
+# ---- Log events (vista /logs) -------------------------------------------------------------------
+# Filas crudas de `log_events` (el sink de structlog, migración 0020) + agregaciones para el panel
+# de métricas. `fields` es el resto de kwargs estructurados del evento; `exception` el traceback
+# formateado cuando lo hubo. Las llamadas LLM aparecen acá como event='llm.call'.
+
+
+class LogEventRow(BaseModel):
+    """Un evento persistido por el sink (una línea de log consultable)."""
+
+    id: int
+    ts: datetime
+    level: str
+    event: str
+    logger: str | None = None
+    user_id: int | None = None
+    request_id: str | None = None
+    run_id: str | None = None
+    source_id: int | None = None
+    inbox_id: int | None = None
+    exception: str | None = None
+    fields: dict[str, Any]
+
+
+class LogEventList(BaseModel):
+    items: list[LogEventRow]
+    total: int
+
+
+class LogLevelCount(BaseModel):
+    level: str
+    count: int
+
+
+class LogEventCount(BaseModel):
+    event: str
+    count: int
+
+
+class LogLoggerCount(BaseModel):
+    logger: str
+    count: int
+
+
+class LogHistogramPoint(BaseModel):
+    """Un bucket temporal del histograma (granularidad según el rango: minuto/hora/día)."""
+
+    bucket: datetime
+    total: int
+    errors: int
+
+
+class LogLatency(BaseModel):
+    """Percentiles de `fields->>'duration_ms'` (solo eventos que lo llevan; null si ninguno)."""
+
+    p50: float | None = None
+    p95: float | None = None
+    p99: float | None = None
+
+
+class LogStats(BaseModel):
+    total: int
+    errors: int
+    error_rate: float
+    by_level: list[LogLevelCount]
+    by_event: list[LogEventCount]
+    by_logger: list[LogLoggerCount]
+    histogram: list[LogHistogramPoint]
+    latency: LogLatency
+    # Eventos descartados por overflow de la cola del sink (no silent cap): el front lo muestra.
+    sink_dropped: int
+
+
 # ---- Observabilidad del pipeline (vistas /pipeline y /resumen) ----------------------------------
 # Agregaciones de solo lectura sobre las tablas de observabilidad ya existentes (ingestion_runs,
 # worker_runs, work_item_failures, mod_calendar_conflicts, inbox). El router `stats` las arma.
