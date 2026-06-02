@@ -23,6 +23,11 @@ export { MODULES, moduleChart, moduleLabel } from "@/lib/metrics"
 // /resumen). Reemplazan a los selectores mock sourceHealth/workerLatest/ingestion*/*Count de abajo.
 export * from "./pipeline"
 
+// ---- Procesamiento (datos reales: routers /modules y /processing) -------------
+// Toggle de fuentes/módulos + cobertura, control del scheduler y corridas por lote (dry-run + run en
+// background + polling). Reemplaza los getters mock getSources/getModuleSettings/getScheduler*/dryRunRun.
+export * from "./processing"
+
 // ---- Selectores de agregación (mock) ------------------------------------------
 // Nota: los selectores de costo LLM (costKpis/costDaily/costBy*/callsInRange) se RETIRARON del
 // facade: la vista /metricas ahora consume `./metrics` (API real). Siguen viviendo en lib/selectors
@@ -55,7 +60,7 @@ export {
 // ---- Catálogo / constantes (mock) ---------------------------------------------
 export { JOB_LABEL, JOBS, MODEL_PRICING, PURPOSES, PURPOSE_LABEL, SOURCE_BY_ID } from "@/mocks/catalog"
 export { NOW } from "@/mocks"
-export { dryRunFetch, dryRunRun } from "@/mocks/control"
+export { dryRunFetch } from "@/mocks/control"
 export { getMessageJourney } from "@/mocks/journey"
 
 // ---- Logs del sistema (datos reales: /metrics/llm/calls + /stats/pipeline) ----
@@ -71,8 +76,6 @@ import {
   consolidatedEvents,
   dedupDecisions,
 } from "@/mocks/calendar"
-import { SOURCES } from "@/mocks/catalog"
-import { moduleSettings, schedulerEnabled, schedulerJobs } from "@/mocks/control"
 import { inbox, reviewItems, seedAlerts } from "@/mocks"
 import type {
   Account,
@@ -82,16 +85,8 @@ import type {
   ConsolidatedEvent,
   DedupDecision,
   InboxRow,
-  ModuleSetting,
   ReviewItem,
-  SchedulerJob,
-  Source,
 } from "@/types/domain"
-
-/** Fuentes (mock) para vistas aún no migradas a la API (p. ej. controles de procesamiento). */
-export function getSources(): Source[] {
-  return SOURCES
-}
 
 export function getInbox(): InboxRow[] {
   return inbox
@@ -123,17 +118,4 @@ export function getCalendarSyncRuns(): CalendarSyncRun[] {
 
 export function getDedupDecisions(): DedupDecision[] {
   return dedupDecisions
-}
-
-// Controles de procesamiento (mock) — la página de procesamiento aún no migró a la API.
-export function getModuleSettings(): ModuleSetting[] {
-  return moduleSettings
-}
-
-export function getSchedulerEnabled(): boolean {
-  return schedulerEnabled
-}
-
-export function getSchedulerJobs(): SchedulerJob[] {
-  return schedulerJobs
 }

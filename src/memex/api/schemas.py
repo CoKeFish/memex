@@ -701,3 +701,105 @@ class HealthCheckResponse(BaseModel):
 
 class OAuthStartResponse(BaseModel):
     authorization_url: str
+
+
+# --- Procesamiento: módulos (toggle + cobertura) ---
+BatchingPolicy = Literal["per_module", "grouped", "all"]
+
+
+class ModuleRow(BaseModel):
+    """Estado + cobertura de un módulo de extracción para /procesamiento."""
+
+    slug: str
+    label: str
+    enabled: bool
+    batching_policy: BatchingPolicy
+    group_size: int
+    processed: int  # inbox distintos con fila en module_extractions para el slug
+    total: int  # inbox elegibles (clasificados + source.type ∈ consumes_kinds, media terminal)
+    pending: int  # total - processed
+
+
+class ModulePatch(BaseModel):
+    """Edición parcial de un módulo. Usar `model_fields_set` para saber qué se setea."""
+
+    enabled: bool | None = None
+    batching_policy: BatchingPolicy | None = None
+    group_size: int | None = Field(default=None, ge=1, le=100)
+
+
+class ModuleList(BaseModel):
+    items: list[ModuleRow]
+
+
+# --- Procesamiento: corridas por lote (reprocess on-demand) ---
+ProcessingStage = Literal["media", "ocr", "classify", "summarize", "extract"]
+ProcessingOnly = Literal["unstored-attachments", "errored"]
+
+
+class ProcessingRunRequest(BaseModel):
+    """Selección + etapas de una corrida por lote (calca los filtros de `memex-reprocess`)."""
+
+    stages: list[ProcessingStage] = Field(default_factory=list)
+    source_id: int | None = None
+    since: date | None = None  # inclusive (YYYY-MM-DD)
+    until: date | None = None  # exclusivo (YYYY-MM-DD)
+    limit: int | None = Field(default=None, ge=1, le=5000)
+    only: ProcessingOnly | None = None
+    force: bool = False
+
+
+class ProcessingDryRun(BaseModel):
+    """Previa sin escribir: cuántos objetivos caen bajo el filtro + una muestra de ids."""
+
+    count: int
+    sample_ids: list[int]
+    stages: list[str]
+
+
+class ProcessingRunStatus(BaseModel):
+    """Respuesta inmediata de POST /processing/run (la corrida sigue en background)."""
+
+    run_id: int | None = None
+    status: str  # running | empty
+    count: int = 0
+    stages: list[str] = Field(default_factory=list)
+
+
+class ProcessingRunRow(BaseModel):
+    """Una corrida por lote (worker_runs con run_type='reprocess') para el polling de la UI."""
+
+    id: int
+    status: str  # running | ok | error
+    stats: dict[str, Any]  # el dict de reprocess(): {targets, stages, results:{...}}
+    error: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    run_config: dict[str, Any]  # {stages, targets, force, filters}
+    is_stale: bool
+
+
+class ProcessingRunList(BaseModel):
+    items: list[ProcessingRunRow]
+
+
+# --- Procesamiento: control runtime del scheduler ---
+class SchedulerSettingsPatch(BaseModel):
+    """Cambio en runtime del daemon. `enabled_jobs` es CSV (mismo formato que el env)."""
+
+    daemon_enabled: bool | None = None
+    enabled_jobs: str | None = None
+
+
+class SchedulerJobState(BaseModel):
+    name: str
+    default_interval: str  # ISO-8601 (PT15M, PT1H, ...)
+    enabled: bool  # name ∈ enabled_jobs
+    latest: StatsWorkerRun | None = None
+    is_stale: bool = False
+
+
+class SchedulerState(BaseModel):
+    daemon_enabled: bool
+    enabled_jobs: list[str]  # CSV parseado
+    jobs: list[SchedulerJobState]

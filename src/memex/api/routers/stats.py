@@ -135,7 +135,7 @@ async def pipeline(
                        job, started_at, finished_at, status, stats, error,
                        (status = 'running' AND NOW() - started_at > {_STALE}) AS is_stale
                 FROM worker_runs
-                WHERE user_id = :uid
+                WHERE user_id = :uid AND run_type = 'job'
                 ORDER BY job, started_at DESC
             """),
                 {"uid": user_id},
@@ -318,7 +318,7 @@ async def overview(user_id: UserID) -> dict[str, Any]:
                 SELECT COUNT(*) FROM (
                     SELECT DISTINCT ON (job) status, started_at
                     FROM worker_runs
-                    WHERE user_id = :uid
+                    WHERE user_id = :uid AND run_type = 'job'
                     ORDER BY job, started_at DESC
                 ) latest
                 WHERE status = 'running' AND NOW() - started_at > {_STALE}

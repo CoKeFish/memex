@@ -3,7 +3,7 @@
 Espeja `mod_calendar_sync_runs._start_run/_finish_run` (sync.py) pero genérico para cualquier
 job. Cada helper abre su PROPIA `connection()` (auto-commit): la fila 'running' commitea de
 inmediato, así un daemon que muere a media corrida deja una fila huérfana VISIBLE (diagnóstico),
-no un hueco. `stats` se serializa con `dataclasses.asdict` → JSONB.
+no un hueco. `stats` se serializa con `dataclasses.asdict` (o tal cual si ya es dict) → JSONB.
 """
 
 from __future__ import annotations
@@ -32,10 +32,16 @@ def start_run(user_id: int, job: str) -> int:
 
 
 def finish_run(run_id: int, *, status: str, stats: Any = None, error: str | None = None) -> None:
-    """Cierra la fila: status final ('ok'/'error'), stats (dataclass → JSON) y error opcional."""
+    """Cierra la fila: status final, stats (dataclass o dict → JSON) y error opcional.
+
+    Acepta tanto un dataclass (corridas del daemon, p. ej. `RunStats`) como un `dict` ya armado
+    (corridas reprocess del API, donde `reprocess()` devuelve un dict con `results` por etapa).
+    """
     payload = "{}"
     if stats is not None and dataclasses.is_dataclass(stats) and not isinstance(stats, type):
         payload = json.dumps(dataclasses.asdict(stats))
+    elif isinstance(stats, dict):
+        payload = json.dumps(stats)
     with connection() as conn:
         conn.execute(
             text(

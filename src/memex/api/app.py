@@ -16,7 +16,9 @@ from memex.api.routers import (
     ingest,
     media,
     metrics,
+    modules,
     oauth,
+    processing,
     sources,
     stats,
 )
@@ -69,3 +71,5 @@ app.include_router(feedback.router)
 app.include_router(finance.router)
 app.include_router(metrics.router)
 app.include_router(stats.router)
+app.include_router(modules.router)
+app.include_router(processing.router)

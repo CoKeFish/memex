@@ -12,7 +12,7 @@ export function ProcessingPage() {
       <PageHeader
         eyebrow="vista · procesamiento"
         title="Procesamiento"
-        description="Prender/apagar el procesamiento automático y correr cada etapa a mano. Hoy: scheduler por config (off por defecto, nada corre solo) + CLIs idempotentes; los badges indican qué ya existe vs qué falta cablear por HTTP. Las reglas de filtro se movieron a la sección Filtros."
+        description="Decidí qué procesar: elegí etapas y acotá por fuente, fecha o cantidad, con dry-run previo; las corridas van en background. Prendé/apagá el procesamiento automático (off por defecto, nada corre solo), la ingesta por fuente y los módulos de extracción. Las reglas de filtro persistentes viven en la sección Filtros."
       />
       <div className="grid gap-5 xl:grid-cols-2">
         <SchedulerPanel />

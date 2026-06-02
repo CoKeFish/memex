@@ -16,9 +16,13 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 
+from sqlalchemy import text
+
 from memex.core.schedule import backoff_seconds, parse_duration
+from memex.db import connection
 from memex.logging import get_logger
 from memex.scheduler import runs
+from memex.scheduler.config import SchedulerSettings, build_jobs
 from memex.scheduler.jobs import Job
 
 _log = get_logger("memex.scheduler.daemon")
@@ -67,10 +71,62 @@ class AsyncScheduler:
             _log.warning("scheduler.no_jobs_enabled")  # desarmado: no procesa nada
         _log.info("scheduler.start", user_id=self._user_id, jobs=list(self._runtimes))
         while not self._stop.is_set():
+            # Control runtime: la DB (scheduler_settings) manda; el env solo fue el bootstrap.
+            await asyncio.to_thread(self._reload_jobs_if_needed)
             await self._tick(time.monotonic())
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=self._tick_s)
         _log.info("scheduler.stop")
+
+    def _desired_jobs(self) -> list[Job] | None:
+        """Jobs que la DB quiere correr ahora, o `None` si no hay fila (conservar el bootstrap env).
+
+        `daemon_enabled=False` → lista vacía (idlea). Resiliente: un error de DB (tabla ausente o
+        caída) loguea y devuelve `None` para no tumbar el loop.
+        """
+        try:
+            with connection() as conn:
+                row = (
+                    conn.execute(
+                        text(
+                            "SELECT daemon_enabled, enabled_jobs "
+                            "FROM scheduler_settings WHERE user_id = :uid"
+                        ),
+                        {"uid": self._user_id},
+                    )
+                    .mappings()
+                    .first()
+                )
+        except Exception as e:  # tabla no migrada / DB caída: no tumbar el daemon
+            _log.warning("scheduler.settings_read_failed", error=str(e))
+            return None
+        if row is None:
+            return None
+        if not row["daemon_enabled"]:
+            return []
+        return build_jobs(SchedulerSettings(enabled_jobs=str(row["enabled_jobs"] or "")))
+
+    def _reload_jobs_if_needed(self) -> None:
+        """Reconcilia los runtimes con lo que pide la DB; preserva el timing existente."""
+        desired = self._desired_jobs()
+        if desired is None:
+            return  # sin fila / error: conservar lo actual
+        new_names = {j.name for j in desired}
+        if new_names == set(self._runtimes):
+            return  # sin cambios
+        now = time.monotonic()
+        runtimes: dict[str, _JobRuntime] = {}
+        for job in desired:
+            existing = self._runtimes.get(job.name)
+            if existing is not None:
+                runtimes[job.name] = existing  # preserva next_run_at + failure_count
+            else:
+                interval = parse_duration(job.default_interval)
+                runtimes[job.name] = _JobRuntime(
+                    job=job, interval_s=interval, next_run_at=now + interval
+                )
+        self._runtimes = runtimes
+        _log.info("scheduler.jobs_reloaded", jobs=sorted(new_names))
 
     async def _tick(self, now: float) -> None:
         for rt in self._runtimes.values():

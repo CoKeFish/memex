@@ -44,7 +44,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: memex-api
-    environment:
+    environment: &api_env
       # Dentro del compose, postgres se resuelve por nombre de servicio.
       MEMEX_DATABASE_URL: postgresql+psycopg://memex:memex@postgres:5432/memex
       MEMEX_AUTH_ENFORCED: "false"
@@ -85,6 +85,29 @@ services:
       - memex_telegram_sessions:/var/lib/memex/telegram
       # OAuth de IMAP/calendar (client_secret + tokens). Gitignored. Montado RW para que el
       # refresh del access_token pueda persistir el token actualizado.
+      - ./secrets:/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Daemon de procesamiento automático (memex-scheduler). IMPLEMENTADO pero APAGADO: está bajo el
+  # profile "scheduler", así que `docker compose up` NO lo arranca. Para desplegarlo cuando se quiera
+  # automatizar: `docker compose --profile scheduler up -d scheduler`. Aun corriendo, no procesa nada
+  # hasta que el toggle de /procesamiento (tabla scheduler_settings) lo arme (daemon_enabled +
+  # enabled_jobs); el daemon relee esa config cada tick. Apagado por default (filosofía del proyecto).
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: memex-scheduler
+    profiles: ["scheduler"]
+    command: ["memex-scheduler", "daemon", "start"]
+    environment: *api_env
+    volumes:
+      - memex_telegram_sessions:/var/lib/memex/telegram
       - ./secrets:/secrets
     depends_on:
       postgres:
