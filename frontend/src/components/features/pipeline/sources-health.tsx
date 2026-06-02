@@ -1,11 +1,11 @@
-import { EmptyState, Stateful, TableSkeleton } from "@/components/common/data-state"
+import { EmptyState } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { StatusBadge } from "@/components/common/led"
 import { Sparkline } from "@/components/common/stat"
 import { FreshnessDot, RelativeTime } from "@/components/common/time"
 import { formatInt, formatPct } from "@/lib/format"
 import { ingestionLabel, ingestionTone } from "@/lib/status"
-import { sourceHealth } from "@/data"
+import type { SourceHealthRow } from "@/data"
 import type { SourceType } from "@/types/domain"
 
 const TYPE_LABEL: Record<SourceType, string> = {
@@ -16,8 +16,7 @@ const TYPE_LABEL: Record<SourceType, string> = {
   gateway: "Gateway",
 }
 
-export function SourcesHealth() {
-  const items = sourceHealth()
+export function SourcesHealth({ items }: { items: SourceHealthRow[] }) {
   return (
     <Panel>
       <PanelHeader
@@ -26,59 +25,88 @@ export function SourcesHealth() {
         sub="Última corrida, tasa de éxito y volumen por fuente (ingestion_runs)"
       />
       <PanelBody>
-        <Stateful
-          skeleton={<TableSkeleton rows={6} cols={4} />}
-          empty={<EmptyState title="Sin sources configuradas" hint="Configurá tu primera fuente para empezar a ingerir." />}
-          errorDetail="HTTP 500 — GET /sources falló"
-        >
+        {items.length === 0 ? (
+          <EmptyState
+            title="Sin sources configuradas"
+            hint="Configurá tu primera fuente para empezar a ingerir."
+          />
+        ) : (
           <div className="grid gap-3 md:grid-cols-2">
-            {items.map(({ source, lastRun, runs, successRate, totalInserted, totalFiltered }) => (
-              <div key={source.id} className="rounded-lg border border-border bg-background/40 p-3.5">
+            {items.map((s) => (
+              <div key={s.sourceId} className="rounded-lg border border-border bg-background/40 p-3.5">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2.5">
-                    {lastRun ? <FreshnessDot date={lastRun.startedAt} pulse={lastRun.status === "running"} /> : null}
+                    {s.lastRun ? (
+                      <FreshnessDot date={s.lastRun.startedAt} pulse={s.lastRun.status === "running"} />
+                    ) : null}
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{source.name}</div>
+                      <div className="truncate text-sm font-medium">{s.name}</div>
                       <div className="eyebrow mt-0.5">
-                        {TYPE_LABEL[source.type]}
-                        {!source.enabled && " · deshabilitada"}
+                        {TYPE_LABEL[s.type]}
+                        {!s.enabled && " · deshabilitada"}
                       </div>
                     </div>
                   </div>
-                  {lastRun && <StatusBadge tone={ingestionTone(lastRun.status)} label={ingestionLabel(lastRun.status)} pulse={lastRun.status === "running"} />}
+                  {s.lastRun && (
+                    <StatusBadge
+                      tone={ingestionTone(s.lastRun.status)}
+                      label={ingestionLabel(s.lastRun.status)}
+                      pulse={s.lastRun.status === "running"}
+                    />
+                  )}
                 </div>
 
                 <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-                  <Metric label="Éxito" value={formatPct(successRate, 0)} tone={successRate >= 0.95 ? "ok" : successRate >= 0.8 ? "warn" : "bad"} />
-                  <Metric label="Insertados" value={formatInt(totalInserted)} />
-                  <Metric label="Filtrados" value={formatInt(totalFiltered)} />
+                  <Metric
+                    label="Éxito"
+                    value={formatPct(s.successRate, 0)}
+                    tone={s.successRate >= 0.95 ? "ok" : s.successRate >= 0.8 ? "warn" : "bad"}
+                  />
+                  <Metric label="Insertados" value={formatInt(s.totalInserted)} />
+                  <Metric label="Filtrados" value={formatInt(s.totalFiltered)} />
                 </div>
 
                 <div className="mt-3 flex items-center justify-between gap-3">
                   <span className="text-xs text-muted-foreground">
-                    {lastRun ? <>última <RelativeTime date={lastRun.startedAt} /></> : "sin corridas"}
+                    {s.lastRun ? (
+                      <>
+                        última <RelativeTime date={s.lastRun.startedAt} />
+                      </>
+                    ) : (
+                      "sin corridas"
+                    )}
                   </span>
                   <div className="w-24">
-                    <Sparkline data={[...runs].reverse().map((r) => r.inserted)} stroke="var(--chart-2)" />
+                    <Sparkline data={s.recent} stroke="var(--chart-2)" />
                   </div>
                 </div>
 
-                {lastRun?.status === "failed" && lastRun.errorMessage && (
-                  <p className="mt-2 truncate font-mono text-[11px] text-status-error" title={lastRun.errorMessage}>
-                    {lastRun.errorClass}: {lastRun.errorMessage}
+                {s.lastRun?.status === "failed" && s.lastRun.errorMessage && (
+                  <p
+                    className="mt-2 truncate font-mono text-[11px] text-status-error"
+                    title={s.lastRun.errorMessage}
+                  >
+                    {s.lastRun.errorClass}: {s.lastRun.errorMessage}
                   </p>
                 )}
               </div>
             ))}
           </div>
-        </Stateful>
+        )}
       </PanelBody>
     </Panel>
   )
 }
 
 function Metric({ label, value, tone }: { label: string; value: string; tone?: "ok" | "warn" | "bad" }) {
-  const cls = tone === "ok" ? "text-status-ok" : tone === "warn" ? "text-status-review" : tone === "bad" ? "text-status-error" : "text-foreground"
+  const cls =
+    tone === "ok"
+      ? "text-status-ok"
+      : tone === "warn"
+        ? "text-status-review"
+        : tone === "bad"
+          ? "text-status-error"
+          : "text-foreground"
   return (
     <div className="rounded-md bg-muted/40 py-1.5">
       <div className={`num text-sm font-semibold ${cls}`}>{value}</div>

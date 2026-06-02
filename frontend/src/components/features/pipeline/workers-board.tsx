@@ -1,15 +1,16 @@
 import { TriangleAlert } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { EmptyState, Stateful, TableSkeleton } from "@/components/common/data-state"
+import { EmptyState } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { StatusBadge } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
 import { formatDurationMs } from "@/lib/format"
 import { workerLabel, workerTone } from "@/lib/status"
-import { JOB_LABEL, workerLatest } from "@/data"
-import type { WorkerRun } from "@/types/domain"
+import { JOB_LABEL } from "@/data"
+import type { WorkerLatestRow } from "@/data"
+import type { WorkerJob } from "@/types/domain"
 
-function flattenStats(stats: WorkerRun["stats"]): { k: string; v: number }[] {
+function flattenStats(stats: Record<string, number | Record<string, number>>): { k: string; v: number }[] {
   const out: { k: string; v: number }[] = []
   for (const [k, v] of Object.entries(stats)) {
     if (typeof v === "number") out.push({ k, v })
@@ -18,8 +19,7 @@ function flattenStats(stats: WorkerRun["stats"]): { k: string; v: number }[] {
   return out
 }
 
-export function WorkersBoard() {
-  const items = workerLatest()
+export function WorkersBoard({ items }: { items: WorkerLatestRow[] }) {
   return (
     <Panel>
       <PanelHeader
@@ -28,10 +28,9 @@ export function WorkersBoard() {
         sub="Última corrida por job (worker_runs) — detecta corridas colgadas"
       />
       <PanelBody className="p-0">
-        <Stateful
-          skeleton={<TableSkeleton rows={5} cols={4} />}
-          empty={<EmptyState title="Sin corridas de workers" hint="El scheduler todavía no corrió ningún job." />}
-        >
+        {items.length === 0 ? (
+          <EmptyState title="Sin corridas de workers" hint="El scheduler todavía no corrió ningún job." />
+        ) : (
           <ul className="divide-y divide-border">
             {items.map(({ job, latest, isStale }) => (
               <li
@@ -40,9 +39,13 @@ export function WorkersBoard() {
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2.5">
-                    <span className="text-sm font-medium">{JOB_LABEL[job]}</span>
+                    <span className="text-sm font-medium">{JOB_LABEL[job as WorkerJob] ?? job}</span>
                     {latest ? (
-                      <StatusBadge tone={workerTone(latest.status)} label={workerLabel(latest.status)} pulse={latest.status === "running"} />
+                      <StatusBadge
+                        tone={workerTone(latest.status)}
+                        label={workerLabel(latest.status)}
+                        pulse={latest.status === "running"}
+                      />
                     ) : (
                       <span className="eyebrow">sin corridas</span>
                     )}
@@ -59,7 +62,9 @@ export function WorkersBoard() {
                       </span>
                       <span>
                         {latest.finishedAt
-                          ? formatDurationMs(new Date(latest.finishedAt).getTime() - new Date(latest.startedAt).getTime())
+                          ? formatDurationMs(
+                              new Date(latest.finishedAt).getTime() - new Date(latest.startedAt).getTime(),
+                            )
                           : "en curso"}
                       </span>
                     </div>
@@ -69,7 +74,10 @@ export function WorkersBoard() {
                 {latest && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {flattenStats(latest.stats).map(({ k, v }) => (
-                      <span key={k} className="num rounded bg-muted/50 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                      <span
+                        key={k}
+                        className="num rounded bg-muted/50 px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                      >
                         {k} <span className="font-medium text-foreground">{v}</span>
                       </span>
                     ))}
@@ -82,7 +90,7 @@ export function WorkersBoard() {
               </li>
             ))}
           </ul>
-        </Stateful>
+        )}
       </PanelBody>
     </Panel>
   )

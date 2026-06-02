@@ -9,7 +9,7 @@ import { CostKpis } from "@/components/features/metrics/cost-kpis"
 import { CardsSkeleton } from "@/components/common/data-state"
 import { FreshnessGrid } from "@/components/features/pipeline/freshness-grid"
 import { formatInt } from "@/lib/format"
-import { fetchLlmRollup, inboxErrorCount, inboxPendingCount, rangeKeyWindow, reviewCount, staleWorkerCount } from "@/data"
+import { fetchLlmRollup, fetchOverview, fetchPipeline, rangeKeyWindow } from "@/data"
 import { useAsync } from "@/lib/use-async"
 import { useTimeRange } from "@/state/time-range"
 import { useAlerts } from "@/state/alerts"
@@ -29,7 +29,15 @@ function OverviewCost() {
 
 export function OverviewPage() {
   const { alerts, unread } = useAlerts()
+  const { range } = useTimeRange()
   const critical = alerts.find((a) => a.severity === "critica" && !a.read)
+  // Contadores de operación (datos reales) y data del pipeline para la grilla de frescura.
+  const { data: ov } = useAsync(fetchOverview, [])
+  const { data: pipe } = useAsync(() => fetchPipeline(rangeKeyWindow(range)), [range])
+  const review = ov?.review.total ?? 0
+  const inboxPending = ov?.inboxPending ?? 0
+  const inboxErrors = ov?.inboxErrors ?? 0
+  const staleWorkers = ov?.staleWorkers ?? 0
 
   return (
     <div className="space-y-5">
@@ -54,10 +62,10 @@ export function OverviewPage() {
       )}
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <OpsCard to="/revision" eyebrow="Pendiente de revisión" value={reviewCount()} icon={ListChecks} tone="review" hint="dead-letter + conflictos + dedup" />
-        <OpsCard to="/datos" eyebrow="Inbox pendiente" value={inboxPendingCount()} icon={Inbox} tone="running" hint="mensajes sin procesar" />
-        <OpsCard to="/datos" eyebrow="Inbox con error" value={inboxErrorCount()} icon={TriangleAlert} tone="error" hint="process_error ≠ null" />
-        <OpsCard to="/pipeline" eyebrow="Workers colgados" value={staleWorkerCount()} icon={OctagonAlert} tone={staleWorkerCount() > 0 ? "review" : "ok"} hint="running >30 min" />
+        <OpsCard to="/revision" eyebrow="Pendiente de revisión" value={review} icon={ListChecks} tone="review" hint="dead-letter + conflictos de calendar" />
+        <OpsCard to="/datos" eyebrow="Inbox pendiente" value={inboxPending} icon={Inbox} tone="running" hint="mensajes sin procesar" />
+        <OpsCard to="/datos" eyebrow="Inbox con error" value={inboxErrors} icon={TriangleAlert} tone="error" hint="process_error ≠ null" />
+        <OpsCard to="/pipeline" eyebrow="Workers colgados" value={staleWorkers} icon={OctagonAlert} tone={staleWorkers > 0 ? "review" : "ok"} hint="running >30 min" />
       </div>
 
       <div>
@@ -87,7 +95,7 @@ export function OverviewPage() {
             </ul>
           </PanelBody>
         </Panel>
-        <FreshnessGrid />
+        <FreshnessGrid sources={pipe?.sources ?? []} workers={pipe?.workers ?? []} />
       </div>
     </div>
   )

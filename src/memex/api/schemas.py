@@ -448,6 +448,118 @@ class LlmCallList(BaseModel):
     total: int
 
 
+# ---- Observabilidad del pipeline (vistas /pipeline y /resumen) ----------------------------------
+# Agregaciones de solo lectura sobre las tablas de observabilidad ya existentes (ingestion_runs,
+# worker_runs, work_item_failures, mod_calendar_conflicts, inbox). El router `stats` las arma.
+
+
+class StatsSourceRun(BaseModel):
+    """Última corrida de ingesta de una fuente (subconjunto de `ingestion_runs`)."""
+
+    started_at: datetime
+    ended_at: datetime | None = None
+    status: str  # running | ok | failed | aborted
+    error_class: str | None = None
+    error_message: str | None = None
+
+
+class StatsSparkPoint(BaseModel):
+    """Un punto del sparkline de insertados (corridas recientes de la fuente, viejo→nuevo)."""
+
+    started_at: datetime
+    inserted: int
+
+
+class StatsSourceHealth(BaseModel):
+    """Salud de una fuente: última corrida + agregados de por vida + sparkline."""
+
+    source_id: int
+    name: str
+    type: str
+    enabled: bool
+    alias: str | None = None
+    last_run: StatsSourceRun | None = None
+    success_rate: float  # ok / terminadas (0..1); 0 si no hay corridas terminadas
+    total_inserted: int
+    total_filtered: int
+    recent: list[StatsSparkPoint]
+
+
+class StatsWorkerRun(BaseModel):
+    """Última corrida de un worker del scheduler (subconjunto de `worker_runs`)."""
+
+    started_at: datetime
+    finished_at: datetime | None = None
+    status: str  # running | ok | error
+    stats: dict[str, Any]
+    error: str | None = None
+
+
+class StatsWorkerLatest(BaseModel):
+    """Estado del último run de un job; `is_stale` = sigue 'running' pasados 30 min (colgado)."""
+
+    job: str
+    latest: StatsWorkerRun | None = None
+    is_stale: bool
+
+
+class StatsIngestionRun(BaseModel):
+    """Una corrida de ingesta con el invariante posted = inserted+duplicates+errors+filtered."""
+
+    id: str  # ingestion_runs.id es UUID
+    source_id: int
+    source_name: str | None = None
+    trigger: str
+    status: str
+    started_at: datetime
+    ended_at: datetime | None = None
+    posted: int
+    inserted: int
+    duplicates: int
+    errors: int
+    filtered: int
+    error_class: str | None = None
+    error_message: str | None = None
+    expected: int  # inserted + duplicates + errors + filtered
+    balanced: bool  # posted == expected
+
+
+class StatsIngestionTotals(BaseModel):
+    posted: int
+    inserted: int
+    duplicates: int
+    errors: int
+    filtered: int
+    runs: int
+    unbalanced: int  # nº de corridas con posted != expected
+
+
+class StatsIngestion(BaseModel):
+    runs: list[StatsIngestionRun]
+    totals: StatsIngestionTotals
+
+
+class StatsPipeline(BaseModel):
+    sources: list[StatsSourceHealth]
+    workers: list[StatsWorkerLatest]
+    ingestion: StatsIngestion
+
+
+class StatsReviewCounts(BaseModel):
+    """Pendientes de revisión: dead-letter de workers + conflictos de calendar."""
+
+    dead_letter: int
+    calendar_conflicts: int
+    total: int
+
+
+class StatsOverview(BaseModel):
+    review: StatsReviewCounts
+    inbox_pending: int
+    inbox_errors: int
+    stale_workers: int
+
+
 class SourceCreate(BaseModel):
     name: str
     type: str

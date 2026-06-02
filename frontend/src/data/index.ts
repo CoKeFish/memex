@@ -15,6 +15,11 @@ export * from "./metrics"
 // Catálogo de módulos (etiquetas/colores) — el corte por módulo lo agrega el backend.
 export { MODULES, moduleChart, moduleLabel } from "@/lib/metrics"
 
+// ---- Observabilidad del pipeline (datos reales contra la API: router /stats) --
+// fetchPipeline (salud por fuente + workers + corridas de ingesta) y fetchOverview (contadores del
+// /resumen). Reemplazan a los selectores mock sourceHealth/workerLatest/ingestion*/*Count de abajo.
+export * from "./pipeline"
+
 // ---- Selectores de agregación (mock) ------------------------------------------
 // Nota: los selectores de costo LLM (costKpis/costDaily/costBy*/callsInRange) se RETIRARON del
 // facade: la vista /metricas ahora consume `./metrics` (API real). Siguen viviendo en lib/selectors

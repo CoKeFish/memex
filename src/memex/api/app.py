@@ -18,6 +18,7 @@ from memex.api.routers import (
     metrics,
     oauth,
     sources,
+    stats,
 )
 from memex.api.streaming import build_streaming_runner
 from memex.logging import get_logger, setup_logging
@@ -67,3 +68,4 @@ app.include_router(filters.router)
 app.include_router(feedback.router)
 app.include_router(finance.router)
 app.include_router(metrics.router)
+app.include_router(stats.router)

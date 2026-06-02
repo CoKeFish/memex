@@ -1,18 +1,14 @@
 import { cn } from "@/lib/utils"
-import { EmptyState, Stateful, TableSkeleton } from "@/components/common/data-state"
+import { EmptyState } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { StatusBadge } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
 import { formatInt } from "@/lib/format"
 import { ingestionLabel, ingestionTone } from "@/lib/status"
-import { ingestionTotals, ingestionWithInvariant, SOURCE_BY_ID } from "@/data"
-import { useTimeRange } from "@/state/time-range"
+import type { IngestionRunRow, IngestionTotalsRow } from "@/data"
 
-export function IngestionRuns() {
-  const { range } = useTimeRange()
-  const runs = ingestionWithInvariant(range).slice(0, 16)
-  const totals = ingestionTotals(range)
-
+export function IngestionRuns({ runs, totals }: { runs: IngestionRunRow[]; totals: IngestionTotalsRow }) {
+  const rows = runs.slice(0, 16)
   return (
     <Panel>
       <PanelHeader
@@ -28,10 +24,9 @@ export function IngestionRuns() {
         }
       />
       <PanelBody className="p-0">
-        <Stateful
-          skeleton={<TableSkeleton rows={8} cols={6} />}
-          empty={<EmptyState title="Sin corridas en el rango" />}
-        >
+        {rows.length === 0 ? (
+          <EmptyState title="Sin corridas en el rango" />
+        ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
@@ -48,11 +43,15 @@ export function IngestionRuns() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {runs.map((r) => (
+                {rows.map((r) => (
                   <tr key={r.id} className={cn("hover:bg-accent/30", !r.balanced && "bg-status-error/5")}>
-                    <td className="whitespace-nowrap px-3 py-2 font-medium">{SOURCE_BY_ID[r.sourceId]?.name ?? r.sourceId}</td>
+                    <td className="whitespace-nowrap px-3 py-2 font-medium">{r.sourceName ?? r.sourceId}</td>
                     <td className="px-3 py-2">
-                      <StatusBadge tone={ingestionTone(r.status)} label={ingestionLabel(r.status)} pulse={r.status === "running"} />
+                      <StatusBadge
+                        tone={ingestionTone(r.status)}
+                        label={ingestionLabel(r.status)}
+                        pulse={r.status === "running"}
+                      />
                     </td>
                     <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
                       <RelativeTime date={r.startedAt} />
@@ -60,7 +59,12 @@ export function IngestionRuns() {
                     <td className="num px-3 py-2 text-right font-medium">{formatInt(r.posted)}</td>
                     <td className="num px-3 py-2 text-right text-status-ok">{formatInt(r.inserted)}</td>
                     <td className="num px-3 py-2 text-right text-muted-foreground">{formatInt(r.duplicates)}</td>
-                    <td className={cn("num px-3 py-2 text-right", r.errors > 0 ? "text-status-error" : "text-muted-foreground")}>
+                    <td
+                      className={cn(
+                        "num px-3 py-2 text-right",
+                        r.errors > 0 ? "text-status-error" : "text-muted-foreground",
+                      )}
+                    >
                       {formatInt(r.errors)}
                     </td>
                     <td className="num px-3 py-2 text-right text-status-filtered">{formatInt(r.filtered)}</td>
@@ -82,7 +86,7 @@ export function IngestionRuns() {
               </tbody>
             </table>
           </div>
-        </Stateful>
+        )}
       </PanelBody>
     </Panel>
   )
