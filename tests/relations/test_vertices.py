@@ -1,0 +1,104 @@
+"""Proyección de vértices (Fase 1): las tablas `mod_*` se leen como una lista uniforme de vértices
+`(slug, id, label, kind)`. calendar -> consolidado (sin borrados); identidades -> person/org; inbox
+NO es vértice; scoping por usuario.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from sqlalchemy import text
+
+from memex.db import connection
+from memex.relations.edges import Ref
+from memex.relations.vertices import get_vertex, known_slugs, list_vertices
+
+
+def _exec(sql: str, **params: Any) -> Any:
+    with connection() as c:
+        result = c.execute(text(sql), params)
+        return result.scalar() if result.returns_rows else None
+
+
+def _seed_all(user_id: int = 1) -> dict[str, int]:
+    fin = _exec(
+        "INSERT INTO mod_finance_expenses (user_id, source_inbox_ids, amount, currency, merchant) "
+        "VALUES (:u, ARRAY[5]::bigint[], 100, 'COP', 'Rappi') RETURNING id",
+        u=user_id,
+    )
+    hack = _exec(
+        "INSERT INTO mod_hackathones_events (user_id, source_inbox_ids, name) "
+        "VALUES (:u, ARRAY[5]::bigint[], 'HackBogota') RETURNING id",
+        u=user_id,
+    )
+    cal = _exec(
+        "INSERT INTO mod_calendar_consolidated (user_id, title, starts_on) "
+        "VALUES (:u, 'Reunión', DATE '2026-07-01') RETURNING id",
+        u=user_id,
+    )
+    person = _exec(
+        "INSERT INTO mod_identidades_persons (user_id, display_name) "
+        "VALUES (:u, 'Juan Valdez') RETURNING id",
+        u=user_id,
+    )
+    org = _exec(
+        "INSERT INTO mod_identidades_orgs (user_id, name) VALUES (:u, 'Acme') RETURNING id",
+        u=user_id,
+    )
+    return {
+        "finance": int(fin),
+        "hackathones": int(hack),
+        "calendar": int(cal),
+        "identidades:person": int(person),
+        "identidades:org": int(org),
+    }
+
+
+def test_proyecta_los_cinco_tipos() -> None:
+    ids = _seed_all()
+    with connection() as c:
+        verts = list_vertices(c, 1)
+    by_slug = {v.slug: v for v in verts}
+    assert set(by_slug) == set(known_slugs())
+    assert by_slug["finance"].kind == "gasto"
+    assert by_slug["finance"].label == "Rappi"
+    assert by_slug["finance"].id == ids["finance"]
+    assert by_slug["calendar"].label == "Reunión"
+    assert by_slug["calendar"].kind == "evento"
+    assert by_slug["identidades:person"].label == "Juan Valdez"
+    assert by_slug["identidades:org"].kind == "organizacion"
+
+
+def test_calendar_excluye_borrados() -> None:
+    _exec(
+        "INSERT INTO mod_calendar_consolidated (user_id, title, starts_on, deleted) "
+        "VALUES (1, 'Borrado', DATE '2026-07-02', TRUE)"
+    )
+    with connection() as c:
+        verts = list_vertices(c, 1, slugs=("calendar",))
+    assert verts == []
+
+
+def test_get_vertex_y_no_vertices() -> None:
+    ids = _seed_all()
+    with connection() as c:
+        v = get_vertex(c, 1, Ref("finance", ids["finance"]))
+        assert v is not None
+        assert v.label == "Rappi"
+        assert v.ref == Ref("finance", ids["finance"])
+        assert get_vertex(c, 1, Ref("finance", 999999)) is None  # no existe
+        assert get_vertex(c, 1, Ref("inbox", 1)) is None  # inbox NO es vértice (atributo)
+        assert get_vertex(c, 1, Ref("desconocido", 1)) is None  # slug desconocido
+
+
+def test_scoped_por_usuario() -> None:
+    _exec("INSERT INTO users (id, email, display_name) VALUES (2, 'u2@local', 'u2')")
+    _exec(
+        "INSERT INTO mod_finance_expenses (user_id, source_inbox_ids, amount, currency, merchant) "
+        "VALUES (2, ARRAY[5]::bigint[], 50, 'COP', 'Otro')"
+    )
+    _seed_all(1)
+    with connection() as c:
+        verts = list_vertices(c, 1, slugs=("finance",))
+    assert len(verts) == 1
+    assert verts[0].label == "Rappi"
