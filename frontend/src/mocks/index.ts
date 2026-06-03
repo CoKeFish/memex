@@ -372,7 +372,7 @@ workerRuns.push({
 })
 // Extract: corrida con ERROR por 402 (saldo DeepSeek agotado) hace ~2h.
 workerRuns.push({
-  id: ++wId,
+  id: wId + 1,
   job: "extract",
   status: "error",
   stats: { routed: 22, extracted: 4, by_module: { finance: 1, calendar: 3 } },
@@ -431,8 +431,8 @@ const conflicts: CalendarConflict[] = [
 const dedupCandidates: CalendarDedupCandidate[] = [
   {
     id: 1,
-    a: { id: 31, title: "Cena de fin de año", startsOn: "2026-06-20", startTime: "21:00", location: "Casa de Ana", origin: "extraction", provider: null },
-    b: { id: 32, title: "Cena fin de año 🎉", startsOn: "2026-06-20", startTime: null, location: "", origin: "provider", provider: "google" },
+    a: { id: 31, title: "Cena de fin de año", startsOn: "2026-06-20", startTime: "21:00", location: "Casa de Ana", origin: "extraction", provider: null, sourceInboxIds: [] },
+    b: { id: 32, title: "Cena fin de año 🎉", startsOn: "2026-06-20", startTime: null, location: "", origin: "provider", provider: "google", sourceInboxIds: [] },
     reason: "Mismo título aproximado y misma fecha; hora difiere",
     score: 0.86,
     status: "candidate",
@@ -440,8 +440,8 @@ const dedupCandidates: CalendarDedupCandidate[] = [
   },
   {
     id: 2,
-    a: { id: 41, title: "Parcial de Sistemas", startsOn: "2026-06-09", startTime: "09:00", location: "Aula 204", origin: "extraction", provider: null },
-    b: { id: 42, title: "Examen Sistemas Operativos", startsOn: "2026-06-09", startTime: "09:00", location: "Aula 204", origin: "extraction", provider: null },
+    a: { id: 41, title: "Parcial de Sistemas", startsOn: "2026-06-09", startTime: "09:00", location: "Aula 204", origin: "extraction", provider: null, sourceInboxIds: [] },
+    b: { id: 42, title: "Examen Sistemas Operativos", startsOn: "2026-06-09", startTime: "09:00", location: "Aula 204", origin: "extraction", provider: null, sourceInboxIds: [] },
     reason: "Misma fecha, hora y lugar; títulos similares",
     score: 0.92,
     status: "candidate",

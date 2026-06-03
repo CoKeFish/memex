@@ -399,6 +399,7 @@ class CalendarEventLiteRow(BaseModel):
     location: str
     origin: str
     provider: str | None
+    source_inbox_ids: list[int]
 
 
 class CalendarDedupDecisionRow(BaseModel):

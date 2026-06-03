@@ -94,8 +94,8 @@ export const consolidatedEvents = events.sort((a, b) => a.startsOn.localeCompare
 export const dedupDecisions: DedupDecision[] = [
   {
     id: 1,
-    a: { id: 31, title: "Cena de fin de año", startsOn: "2026-06-20", startTime: "21:00", location: "Casa de Ana", origin: "extraction", provider: null },
-    b: { id: 32, title: "Cena fin de año 🎉", startsOn: "2026-06-20", startTime: null, location: "", origin: "provider", provider: "google" },
+    a: { id: 31, title: "Cena de fin de año", startsOn: "2026-06-20", startTime: "21:00", location: "Casa de Ana", origin: "extraction", provider: null, sourceInboxIds: [] },
+    b: { id: 32, title: "Cena fin de año 🎉", startsOn: "2026-06-20", startTime: null, location: "", origin: "provider", provider: "google", sourceInboxIds: [] },
     reason: "Mismo título aproximado y misma fecha; hora difiere",
     score: 0.86,
     status: "confirmed",
@@ -106,8 +106,8 @@ export const dedupDecisions: DedupDecision[] = [
   },
   {
     id: 2,
-    a: { id: 11, title: "Parcial de Sistemas", startsOn: "2026-06-09", startTime: "09:00", location: "Aula 204", origin: "extraction", provider: null },
-    b: { id: 12, title: "Examen Sistemas Operativos", startsOn: "2026-06-09", startTime: "09:00", location: "Aula 204", origin: "extraction", provider: null },
+    a: { id: 11, title: "Parcial de Sistemas", startsOn: "2026-06-09", startTime: "09:00", location: "Aula 204", origin: "extraction", provider: null, sourceInboxIds: [] },
+    b: { id: 12, title: "Examen Sistemas Operativos", startsOn: "2026-06-09", startTime: "09:00", location: "Aula 204", origin: "extraction", provider: null, sourceInboxIds: [] },
     reason: "Misma fecha, hora y lugar; títulos similares",
     score: 0.74,
     status: "rejected",
@@ -118,8 +118,8 @@ export const dedupDecisions: DedupDecision[] = [
   },
   {
     id: 3,
-    a: { id: 41, title: "Reunión de seguimiento", startsOn: "2026-05-22", startTime: "10:00", location: "Google Meet", origin: "provider", provider: "google" },
-    b: { id: 42, title: "Seguimiento semanal", startsOn: "2026-05-22", startTime: "10:00", location: "Meet", origin: "extraction", provider: null },
+    a: { id: 41, title: "Reunión de seguimiento", startsOn: "2026-05-22", startTime: "10:00", location: "Google Meet", origin: "provider", provider: "google", sourceInboxIds: [] },
+    b: { id: 42, title: "Seguimiento semanal", startsOn: "2026-05-22", startTime: "10:00", location: "Meet", origin: "extraction", provider: null, sourceInboxIds: [] },
     reason: "Misma fecha y hora; lugar equivalente",
     score: 0.81,
     status: "confirmed",
@@ -130,8 +130,8 @@ export const dedupDecisions: DedupDecision[] = [
   },
   {
     id: 4,
-    a: { id: 51, title: "Clase de Cálculo", startsOn: "2026-06-03", startTime: "07:00", location: "Aula 305", origin: "provider", provider: "google" },
-    b: { id: 52, title: "Cálculo I", startsOn: "2026-06-03", startTime: "07:00", location: "Aula 305", origin: "provider", provider: "google" },
+    a: { id: 51, title: "Clase de Cálculo", startsOn: "2026-06-03", startTime: "07:00", location: "Aula 305", origin: "provider", provider: "google", sourceInboxIds: [] },
+    b: { id: 52, title: "Cálculo I", startsOn: "2026-06-03", startTime: "07:00", location: "Aula 305", origin: "provider", provider: "google", sourceInboxIds: [] },
     reason: "Mismo horario y lugar; alias del nombre",
     score: 0.78,
     status: "candidate",
@@ -142,8 +142,8 @@ export const dedupDecisions: DedupDecision[] = [
   },
   {
     id: 5,
-    a: { id: 61, title: "Gym", startsOn: "2026-06-11", startTime: "18:00", location: "SmartFit", origin: "provider", provider: "google" },
-    b: { id: 62, title: "Entrenamiento", startsOn: "2026-06-11", startTime: "18:30", location: "SmartFit", origin: "extraction", provider: null },
+    a: { id: 61, title: "Gym", startsOn: "2026-06-11", startTime: "18:00", location: "SmartFit", origin: "provider", provider: "google", sourceInboxIds: [] },
+    b: { id: 62, title: "Entrenamiento", startsOn: "2026-06-11", startTime: "18:30", location: "SmartFit", origin: "extraction", provider: null, sourceInboxIds: [] },
     reason: "Mismo lugar y fecha; hora cercana",
     score: 0.66,
     status: "rejected",

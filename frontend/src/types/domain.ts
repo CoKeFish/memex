@@ -283,6 +283,8 @@ export interface CalendarEventLite {
   location: string
   origin: CalendarOrigin
   provider: string | null
+  /** Mensajes de inbox de los que se extrajo (link al camino de decisión); vacío si es del proveedor. */
+  sourceInboxIds: number[]
 }
 
 export interface CalendarDedupCandidate {

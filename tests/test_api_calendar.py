@@ -201,7 +201,7 @@ def test_list_events_empty(client: Any) -> None:
 
 
 def test_list_dedup_candidates_shape(client: Any) -> None:
-    a = _seed_event(1, title="Cena de fin de año", origin="extraction")
+    a = _seed_event(1, title="Cena de fin de año", origin="extraction", source_inbox_ids=[7, 8])
     b = _seed_event(1, title="Cena fin de año 🎉", origin="provider", provider="google")
     lo, hi = sorted((a, b))
     with connection() as c:
@@ -223,6 +223,9 @@ def test_list_dedup_candidates_shape(client: Any) -> None:
     assert row["decided_by"] is None and row["confidence"] is None
     assert row["a"]["id"] == lo and row["b"]["id"] == hi
     assert {row["a"]["origin"], row["b"]["origin"]} == {"extraction", "provider"}
+    # source_inbox_ids cruza para enlazar al mensaje de origen; el provider no tiene (vacío)
+    assert row["a"]["source_inbox_ids"] == [7, 8]
+    assert row["b"]["source_inbox_ids"] == []
 
 
 def test_list_dedup_filter_by_status(client: Any) -> None:

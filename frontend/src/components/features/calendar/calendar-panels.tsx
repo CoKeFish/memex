@@ -1,5 +1,6 @@
 import { useState } from "react"
-import { Bot, CalendarClock, Hand, Loader2, Lock, MapPin, Repeat } from "lucide-react"
+import { Link } from "react-router-dom"
+import { ArrowUpRight, Bot, CalendarClock, Hand, Loader2, Lock, MapPin, Repeat } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { StatusBadge } from "@/components/common/led"
@@ -191,6 +192,23 @@ export function DedupDecisions() {
                         {e.location && <span>· {e.location}</span>}
                         {e.provider && <span>· {e.provider}</span>}
                       </div>
+                      {e.sourceInboxIds.length > 0 ? (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {e.sourceInboxIds.map((sid) => (
+                            <Link
+                              key={sid}
+                              to={`/datos/${sid}`}
+                              className="num inline-flex items-center gap-0.5 rounded bg-origin-inbox/10 px-1.5 py-0.5 text-[10px] text-origin-inbox hover:bg-origin-inbox/20"
+                            >
+                              inbox #{sid} <ArrowUpRight className="size-2.5" />
+                            </Link>
+                          ))}
+                        </div>
+                      ) : e.provider ? (
+                        <div className="mt-1 text-[10px] text-muted-foreground">
+                          evento del proveedor ({e.provider}) — sin mensaje de origen
+                        </div>
+                      ) : null}
                     </div>
                     <span className="eyebrow shrink-0">{i === 0 ? "A" : "B"}</span>
                   </div>

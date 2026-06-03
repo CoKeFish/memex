@@ -145,6 +145,7 @@ def _lite(prefix: str, r: Any) -> dict[str, Any]:
         "location": r[f"{prefix}_location"],
         "origin": r[f"{prefix}_origin"],
         "provider": r[f"{prefix}_provider"],
+        "source_inbox_ids": list(r[f"{prefix}_source_inbox_ids"]),
     }
 
 
@@ -174,10 +175,10 @@ async def list_dedup_candidates(
                d.decided_at,
                a.id AS a_id, a.title AS a_title, a.starts_on AS a_starts_on,
                a.start_time AS a_start_time, a.location AS a_location, a.origin AS a_origin,
-               a.provider AS a_provider,
+               a.provider AS a_provider, a.source_inbox_ids AS a_source_inbox_ids,
                b.id AS b_id, b.title AS b_title, b.starts_on AS b_starts_on,
                b.start_time AS b_start_time, b.location AS b_location, b.origin AS b_origin,
-               b.provider AS b_provider
+               b.provider AS b_provider, b.source_inbox_ids AS b_source_inbox_ids
         FROM mod_calendar_dedup_candidates d
         JOIN mod_calendar_events a ON a.id = d.event_a_id
         JOIN mod_calendar_events b ON b.id = d.event_b_id

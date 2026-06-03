@@ -52,6 +52,7 @@ interface EventLiteApi {
   location: string
   origin: CalendarOrigin
   provider: string | null
+  source_inbox_ids: number[]
 }
 
 interface DedupDecisionApi {
@@ -171,6 +172,7 @@ function toEventLite(e: EventLiteApi): CalendarEventLite {
     location: e.location,
     origin: e.origin,
     provider: e.provider,
+    sourceInboxIds: e.source_inbox_ids,
   }
 }
 
