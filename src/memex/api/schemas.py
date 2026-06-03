@@ -342,6 +342,41 @@ class FinanceExpenseList(BaseModel):
     next_cursor: int | None = None
 
 
+# ---- Módulo hackathones (extractor puro) --------------------------------------------------------
+# El dashboard lee `mod_hackathones_events` de SOLO LECTURA (GET). Las fechas pueden ser NULL (un
+# anuncio suele traer solo el deadline de inscripción); el front decide cómo mostrarlas.
+
+
+class HackathonRow(BaseModel):
+    """Un hackatón extraído (fila de `mod_hackathones_events`).
+
+    Espeja `memex.modules.hackathones.schema.HackathonItem` más las columnas de la tabla. Las tres
+    fechas son nullable: `name` es el único campo de dominio obligatorio.
+    """
+
+    id: int
+    name: str
+    starts_on: date | None
+    ends_on: date | None
+    registration_deadline: date | None
+    modality: str
+    location: str
+    url: str
+    organizer: str
+    technologies: str
+    prizes: str
+    requirements: str
+    description: str
+    evidence: str
+    source_inbox_ids: list[int]
+    created_at: datetime
+
+
+class HackathonList(BaseModel):
+    items: list[HackathonRow]
+    next_cursor: int | None = None
+
+
 # ---- Módulo calendar (dominio bidireccional) ----------------------------------------------------
 # El dashboard lee la capa CONSOLIDADA (`mod_calendar_consolidated`) + sus miembros crudos
 # (`event_links` → `mod_calendar_events`), los pares de dedup, los conflictos, las corridas de sync

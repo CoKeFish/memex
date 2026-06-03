@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { ArrowLeft, CalendarDays, DollarSign, Eye, Loader2, Paperclip, RotateCw, ScrollText, Sparkles, Zap } from "lucide-react"
+import { ArrowLeft, CalendarDays, DollarSign, Eye, Loader2, Paperclip, RotateCw, ScrollText, Sparkles, Trophy, Zap } from "lucide-react"
 import { Link, useParams } from "react-router-dom"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -270,7 +270,7 @@ function reprocessStepsForRow(row: InboxRow): ReprocessStep[] {
   out.push({ stage: "classify", label: "Re-clasificar", hint: "determinista · sin LLM" })
   if (row.classification) {
     out.push({ stage: "summarize", label: "Re-resumir", hint: "LLM" })
-    out.push({ stage: "extract", label: "Re-extraer (módulos)", hint: "LLM · finanzas/calendario" })
+    out.push({ stage: "extract", label: "Re-extraer (módulos)", hint: "LLM · finanzas/calendario/hackatones" })
   }
   return out
 }
@@ -328,7 +328,8 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
   const ext = row.extraction
   const llm = row.llm
   const extDone = !!ext?.done
-  const extItems = (ext?.finance.length ?? 0) + (ext?.calendar.length ?? 0)
+  const extItems =
+    (ext?.finance.length ?? 0) + (ext?.calendar.length ?? 0) + (ext?.hackathones.length ?? 0)
   const input = renderPayload(row.payload, row.ocrText ?? "")
 
   // Corridas LLM (agrupadas por request_id / tiempo): alimentan la traza y los sellos de tiempo
@@ -370,7 +371,7 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
   const extract = (force: boolean) =>
     run("extract", async () => {
       const r = await extractInboxItem(row.id, { scope, force })
-      const n = (r.finance?.length ?? 0) + (r.calendar?.length ?? 0)
+      const n = (r.finance?.length ?? 0) + (r.calendar?.length ?? 0) + (r.hackathones?.length ?? 0)
       toast.success(n > 0 ? `Extracción: ${n} dato(s)` : "Extracción: sin datos relevantes", {
         description: [
           (r.discarded ?? 0) > 0 ? `${r.discarded} descartado(s)` : null,
@@ -452,7 +453,7 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
         </Stage>
 
         {/* Fase 3 — Extracción (LLM, módulos) */}
-        <Stage icon={Sparkles} title="Extracción" hint="LLM · finanzas/calendario" done={extDone} blocked={!cls} at={extDone ? extractRunAt : null}>
+        <Stage icon={Sparkles} title="Extracción" hint="LLM · finanzas/calendario/hackatones" done={extDone} blocked={!cls} at={extDone ? extractRunAt : null}>
           {!cls ? (
             <span className="text-xs text-muted-foreground">Clasificá primero.</span>
           ) : extDone ? (
@@ -484,6 +485,17 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
                       tone="text-chart-4"
                       title={`${str(c.title)} · ${str(c.starts_on)}${c.start_time ? ` ${str(c.start_time)}` : ""}${c.location ? ` · ${str(c.location)}` : ""}`}
                       evidence={str(c.evidence)}
+                    />
+                  ))}
+                  {(ext?.hackathones ?? []).map((h, i) => (
+                    <ExtractionRow
+                      key={`h${i}`}
+                      icon={Trophy}
+                      tone="text-chart-5"
+                      title={`${str(h.name)}${h.starts_on ? ` · ${str(h.starts_on)}` : ""}${h.location ? ` · ${str(h.location)}` : ""}`}
+                      tag={h.modality && h.modality !== "desconocido" ? str(h.modality) : undefined}
+                      sub={str(h.prizes)}
+                      evidence={str(h.evidence)}
                     />
                   ))}
                 </>

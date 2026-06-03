@@ -335,6 +335,7 @@ export interface ExtractResult {
   modules?: string[]
   finance?: Record<string, unknown>[]
   calendar?: Record<string, unknown>[]
+  hackathones?: Record<string, unknown>[]
   calls?: number
   cost_usd?: number
   prompt_tokens?: number

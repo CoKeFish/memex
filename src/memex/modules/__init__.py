@@ -33,9 +33,16 @@ def _calendar_loader() -> InterestModule:
     return CalendarModule()
 
 
+def _hackathones_loader() -> InterestModule:
+    from memex.modules.hackathones.module import HackathonModule
+
+    return HackathonModule()
+
+
 _LAZY_FACTORIES: dict[str, Callable[[], ModuleFactory]] = {
     "finance": lambda: _finance_loader,
     "calendar": lambda: _calendar_loader,
+    "hackathones": lambda: _hackathones_loader,
 }
 
 

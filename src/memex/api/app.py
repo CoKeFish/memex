@@ -13,6 +13,7 @@ from memex.api.routers import (
     filters,
     finance,
     gateway,
+    hackathones,
     health,
     inbox,
     ingest,
@@ -76,6 +77,7 @@ app.include_router(filters.router)
 app.include_router(feedback.router)
 app.include_router(finance.router)
 app.include_router(calendar.router)
+app.include_router(hackathones.router)
 app.include_router(metrics.router)
 app.include_router(logs.router)
 app.include_router(stats.router)

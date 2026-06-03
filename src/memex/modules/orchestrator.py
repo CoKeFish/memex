@@ -846,7 +846,7 @@ def _load_one_workrow(user_id: int, inbox_id: int) -> WorkRow:
 
 
 def read_extractions(user_id: int, inbox_id: int) -> dict[str, Any]:
-    """Estado de extracción de un inbox: módulos ya corridos (cursor) + filas finance/calendar.
+    """Estado de extracción de un inbox: módulos ya corridos (cursor) + filas por módulo.
 
     `done`=True aunque NO haya filas: el cursor en `module_extractions` marca "ya procesado, 0 datos
     relevantes" — clave para que la UI distinga "sin extraer" de "extraído sin resultados"."""
@@ -893,11 +893,29 @@ def read_extractions(user_id: int, inbox_id: int) -> dict[str, Any]:
             .mappings()
             .all()
         )
+        hackathones = (
+            conn.execute(
+                text(
+                    """
+                    SELECT name, starts_on, ends_on, registration_deadline, modality,
+                           location, url, organizer, technologies, prizes, requirements,
+                           description, evidence
+                    FROM mod_hackathones_events
+                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "id": inbox_id},
+            )
+            .mappings()
+            .all()
+        )
     return {
         "done": len(modules) > 0,
         "modules": [str(m) for m in modules],
         "finance": [dict(r) for r in finance],
         "calendar": [dict(r) for r in calendar],
+        "hackathones": [dict(r) for r in hackathones],
     }
 
 
@@ -928,6 +946,7 @@ async def extract_inbox(
             "modules": [],
             "finance": [],
             "calendar": [],
+            "hackathones": [],
         }
     active_by_slug = {m.slug: m for m in active}
 
@@ -953,6 +972,13 @@ async def extract_inbox(
                 conn.execute(
                     text(
                         "DELETE FROM mod_calendar_events "
+                        "WHERE user_id = :uid AND :id = ANY(source_inbox_ids)"
+                    ),
+                    {"uid": user_id, "id": inbox_id},
+                )
+                conn.execute(
+                    text(
+                        "DELETE FROM mod_hackathones_events "
                         "WHERE user_id = :uid AND :id = ANY(source_inbox_ids)"
                     ),
                     {"uid": user_id, "id": inbox_id},

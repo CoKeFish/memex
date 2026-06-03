@@ -12,6 +12,7 @@ import {
   ScrollText,
   ShieldCheck,
   SlidersHorizontal,
+  Trophy,
   UserCog,
   Wallet,
 } from "lucide-react"
@@ -33,6 +34,7 @@ export const NAV: NavItem[] = [
   { path: "/datos", label: "Datos", icon: Database },
   { path: "/calendario", label: "Calendario", icon: CalendarDays },
   { path: "/finanzas", label: "Finanzas", icon: Wallet },
+  { path: "/hackathones", label: "Hackatones", icon: Trophy },
   { path: "/metricas", label: "Métricas y costo", icon: DollarSign },
   { path: "/logs", label: "Logs", icon: ScrollText },
   { path: "/carga", label: "Carga / ingesta", icon: PlusCircle },

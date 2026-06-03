@@ -200,6 +200,23 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
             .mappings()
             .all()
         )
+        hackathones = (
+            conn.execute(
+                text(
+                    """
+                    SELECT name, starts_on, ends_on, registration_deadline, modality,
+                           location, url, organizer, technologies, prizes, requirements,
+                           description, evidence
+                    FROM mod_hackathones_events
+                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "id": inbox_id},
+            )
+            .mappings()
+            .all()
+        )
         # Estado de extracción: el cursor marca "procesado" aunque no haya filas (sin datos).
         ext_modules = (
             conn.execute(
@@ -253,6 +270,7 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
         "modules": [str(m) for m in ext_modules],
         "finance": [dict(r) for r in finance],
         "calendar": [dict(r) for r in calendar],
+        "hackathones": [dict(r) for r in hackathones],
     }
     calls = [dict(c) for c in llm_calls]
     data["llm"] = {

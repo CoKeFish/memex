@@ -67,11 +67,12 @@ export interface InboxSummary {
 }
 
 export interface InboxExtraction {
-  /** True aunque finance/calendar estén vacíos: el cursor marca "procesado, sin datos". */
+  /** True aunque finance/calendar/hackathones estén vacíos: el cursor marca "procesado, sin datos". */
   done: boolean
   modules: string[]
   finance: Record<string, unknown>[]
   calendar: Record<string, unknown>[]
+  hackathones: Record<string, unknown>[]
 }
 
 export interface InboxLlmCall {
@@ -552,6 +553,30 @@ export interface FinanceExpense {
   /** Categoría DERIVADA (no es columna real de mod_finance_expenses todavía). */
   category: ExpenseCategory
   occurredOn: string // fecha (date)
+  description: string
+  evidence: string
+  sourceInboxIds: number[]
+  createdAt: string
+}
+
+// ---- Módulo hackathones (extractor puro) --------------------------------------
+
+export type HackathonModality = "presencial" | "online" | "hibrido" | "desconocido"
+
+/** Un hackatón extraído (fila de mod_hackathones_events). Las fechas pueden ser null. */
+export interface Hackathon {
+  id: number
+  name: string
+  startsOn: string | null
+  endsOn: string | null
+  registrationDeadline: string | null
+  modality: HackathonModality
+  location: string
+  url: string
+  organizer: string
+  technologies: string
+  prizes: string
+  requirements: string
   description: string
   evidence: string
   sourceInboxIds: number[]

@@ -12,6 +12,7 @@ import { MetricsPage } from "@/pages/metrics"
 import { LogsPage } from "@/pages/logs"
 import { AccountPage } from "@/pages/account"
 import { FinancePage } from "@/pages/finance"
+import { HackathonesPage } from "@/pages/hackathones"
 import { CalendarPage } from "@/pages/calendar"
 import { IngestPage } from "@/pages/ingest"
 import { ProcessingPage } from "@/pages/processing"
@@ -50,6 +51,7 @@ export default function App() {
         <Route path="datos/:id" element={<MessageDetailPage />} />
         <Route path="calendario" element={<CalendarPage />} />
         <Route path="finanzas" element={<FinancePage />} />
+        <Route path="hackathones" element={<HackathonesPage />} />
         <Route path="metricas" element={<MetricsPage />} />
         <Route path="logs" element={<LogsPage />} />
         <Route path="cuenta" element={<AccountPage />} />

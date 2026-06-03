@@ -56,6 +56,9 @@ export {
 // fetchCalendarSyncRuns, fetchCalendarProviderAccounts. Reemplazan los getters mock de calendario.
 export * from "./calendar"
 
+// ---- Hackathones (datos reales contra la API) ---------------------------------
+export * from "./hackathones"
+
 // ---- Finance (datos reales contra la API) -------------------------------------
 export * from "./finance"
 // Agregaciones puras (operan sobre los gastos que trae ./finance) + catálogo de categorías.
