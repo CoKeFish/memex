@@ -41,8 +41,12 @@ CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 #: Google Tasks read/write: memex todavía no lo usa, pero el cliente OAuth del dueño ya lo tiene
 #: habilitado en la consola y lo pedimos "por si acaso" (decisión 6) para no re-consentir a futuro.
 TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
+#: Google Contacts (People API) READ-ONLY: lo usa el módulo `identidades` para sincronizar los
+#: contactos. Sumarlo acá NO basta para los tokens YA emitidos (se acuñaron sin este scope): hay
+#: que RE-CONECTAR Google una vez (re-correr el flujo) para que el token del vault lo incluya.
+CONTACTS_SCOPE = "https://www.googleapis.com/auth/contacts.readonly"
 #: Superset pedido en un solo consentimiento (decisión 6). ÚNICA fuente de verdad de scopes.
-GOOGLE_OAUTH_SCOPES = [GMAIL_SCOPE, CALENDAR_SCOPE, TASKS_SCOPE]
+GOOGLE_OAUTH_SCOPES = [GMAIL_SCOPE, CALENDAR_SCOPE, TASKS_SCOPE, CONTACTS_SCOPE]
 
 
 class GoogleOAuthError(Exception):

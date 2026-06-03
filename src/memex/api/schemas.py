@@ -546,6 +546,177 @@ class CalendarProviderAccountList(BaseModel):
     items: list[CalendarProviderAccountRow]
 
 
+# ---- Módulo identidades (tablas `mod_identidades_*`) --------------------------------------------
+
+
+class IdentityPersonRow(BaseModel):
+    """Una persona del directorio (`mod_identidades_persons`)."""
+
+    id: int
+    display_name: str
+    given_name: str | None = None
+    family_name: str | None = None
+    emails: list[str] = []
+    phones: list[str] = []
+    org_name: str | None = None
+    role: str | None = None
+    source: str
+    interest: bool = False
+    provider: str | None = None
+    photo_url: str | None = None
+    deleted: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class IdentityPersonList(BaseModel):
+    items: list[IdentityPersonRow]
+    next_cursor: int | None = None
+
+
+class IdentityOrgRow(BaseModel):
+    """Una organización/producto/agente (`mod_identidades_orgs`)."""
+
+    id: int
+    name: str
+    kind: str
+    aliases: list[str] = []
+    domains: list[str] = []
+    interest: bool
+    description: str = ""
+    source: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class IdentityOrgList(BaseModel):
+    items: list[IdentityOrgRow]
+    next_cursor: int | None = None
+
+
+class IdentityMentionRow(BaseModel):
+    """Una mención cruda extraída (`mod_identidades_mentions`), con su resolución determinista."""
+
+    id: int
+    source_inbox_ids: list[int] = []
+    evidence: str = ""
+    mentioned_name: str
+    mentioned_kind: str
+    email: str | None = None
+    handle: str | None = None
+    org_hint: str | None = None
+    role_hint: str | None = None
+    confidence: float | None = None
+    resolved_kind: str | None = None
+    resolved_person_id: int | None = None
+    resolved_org_id: int | None = None
+    resolution_method: str | None = None
+    created_at: datetime
+
+
+class IdentityMentionList(BaseModel):
+    items: list[IdentityMentionRow]
+    next_cursor: int | None = None
+
+
+class IdentityPersonDetail(BaseModel):
+    person: IdentityPersonRow
+    orgs: list[IdentityOrgRow] = []
+    mentions: list[IdentityMentionRow] = []
+
+
+class IdentityOrgDetail(BaseModel):
+    org: IdentityOrgRow
+    members: list[IdentityPersonRow] = []
+    mentions: list[IdentityMentionRow] = []
+
+
+class IdentityProviderAccountRow(BaseModel):
+    """Una cuenta de proveedor de contactos (`mod_identidades_provider_accounts`).
+
+    NO expone el token: `account_id` apunta a la cuenta del dashboard cuyo vault lo tiene;
+    `sync_token_present` solo dice si hay cursor delta."""
+
+    id: int
+    provider: str
+    account_label: str
+    account_id: int | None = None
+    enabled: bool
+    last_sync_at: datetime | None = None
+    sync_token_present: bool
+
+
+class IdentityProviderAccountList(BaseModel):
+    items: list[IdentityProviderAccountRow]
+
+
+class IdentitySyncRunRow(BaseModel):
+    """Una corrida de sync de contactos (`mod_identidades_sync_runs`)."""
+
+    id: int
+    provider_account_id: int | None = None
+    pulled: int
+    created: int
+    modified: int
+    deleted: int
+    unchanged: int
+    errors: int
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+
+
+class IdentitySyncRunList(BaseModel):
+    items: list[IdentitySyncRunRow]
+    next_cursor: int | None = None
+
+
+class IdentityOrgCreate(BaseModel):
+    """Alta de una org en la lista de interés (`kind` se valida en el router)."""
+
+    name: str
+    kind: str = "organizacion"
+    aliases: list[str] = []
+    domains: list[str] = []
+    description: str = ""
+    interest: bool = True
+
+
+class IdentityOrgUpdate(BaseModel):
+    name: str | None = None
+    kind: str | None = None
+    aliases: list[str] | None = None
+    domains: list[str] | None = None
+    description: str | None = None
+    interest: bool | None = None
+
+
+class IdentityPersonUpdate(BaseModel):
+    interest: bool | None = None
+    display_name: str | None = None
+    role: str | None = None
+    notes: str | None = None
+
+
+class IdentityPersonOrgCreate(BaseModel):
+    org_id: int
+    role: str | None = None
+
+
+class IdentitySyncRequest(BaseModel):
+    account_id: int
+    full: bool = False
+
+
+class IdentitySyncResult(BaseModel):
+    pulled: int
+    created: int
+    modified: int
+    deleted: int
+    unchanged: int
+    errors: int
+
+
 # ---- Métricas de costo LLM (tabla `llm_calls`) --------------------------------------------------
 # La vista /metricas agrega server-side (GROUP BY) sobre llm_calls: cortes por fuente, por módulo
 # (de `purpose`), por modelo, matriz fuente x módulo y serie diaria. `untabulated` se deriva

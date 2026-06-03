@@ -59,6 +59,10 @@ export * from "./calendar"
 // ---- Hackathones (datos reales contra la API) ---------------------------------
 export * from "./hackathones"
 
+// ---- Identidades (módulo, datos reales contra la API: router /identidades) ---------------------
+// fetchIdentityPersons/Orgs/Mentions/ProviderAccounts/SyncRuns + mutaciones (CRUD de orgs, sync).
+export * from "./identidades"
+
 // ---- Finance (datos reales contra la API) -------------------------------------
 export * from "./finance"
 // Agregaciones puras (operan sobre los gastos que trae ./finance) + catálogo de categorías.
