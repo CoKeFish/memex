@@ -57,6 +57,7 @@ memex-ocr = "memex.ocr.cli:main"
 memex-reprocess = "memex.reprocess_cli:main"
 memex-calendar-sync = "memex.modules.calendar.cli:main"
 memex-scheduler = "memex.scheduler.cli:main"
+memex-geo = "memex.geo.cli:main"
 
 [tool.ruff]
 target-version = "py312"
