@@ -95,6 +95,13 @@ def test_timed_events_truly_overlapping_conflict() -> None:
     assert find_conflicts([a, b]) == [(1, 2)]
 
 
+def test_back_to_back_timed_events_no_conflict() -> None:
+    # Clases consecutivas (10:00-11:00 y 11:00-12:00) solo se tocan en el borde: no se pisan.
+    a = _cf(1, start_time=time(10, 0), end_time=time(11, 0), protected=True)
+    b = _cf(2, start_time=time(11, 0), end_time=time(12, 0), protected=True)
+    assert find_conflicts([a, b]) == []
+
+
 # ----- DB: detección dentro de run_consolidation --------------------------------- #
 
 

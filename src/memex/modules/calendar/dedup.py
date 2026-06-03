@@ -94,6 +94,10 @@ def _temporal_overlap(
     if _is_single_day_timed(a) and _is_single_day_timed(b):
         a_start, a_end = _timed_interval(a, default_duration)
         b_start, b_end = _timed_interval(b, default_duration)
+        if timed_only:
+            # Choque real: dos eventos back-to-back que solo se TOCAN en el borde (una clase de
+            # 10-11 y otra de 11-12) no se pisan → comparación ESTRICTA, sin tolerancia difusa.
+            return a_start < b_end and b_start < a_end
         return a_start <= b_end + tolerance and b_start <= a_end + tolerance
 
     return not timed_only  # todo-el-día / multi-día: solape de fechas salvo que se exija hora
