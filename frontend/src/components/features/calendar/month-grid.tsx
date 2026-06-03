@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ChevronLeft, ChevronRight, Loader2, Lock } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -26,13 +26,35 @@ export function MonthGrid({
   onSelect,
   loading,
   error,
+  focusDate,
+  highlightIds,
 }: {
   events: ConsolidatedEvent[]
   onSelect: (e: ConsolidatedEvent) => void
   loading?: boolean
   error?: string | null
+  /** Salta el calendario al mes de esta fecha (YYYY-MM-DD) cuando cambia. */
+  focusDate?: string | null
+  /** Ids de eventos consolidados a resaltar (p.ej. los dos lados de un conflicto). */
+  highlightIds?: number[]
 }) {
   const [cursor, setCursor] = useState(() => new Date(NOW.getFullYear(), NOW.getMonth(), 1))
+  const panelRef = useRef<HTMLDivElement>(null)
+  const highlight = new Set(highlightIds ?? [])
+  const hlKey = (highlightIds ?? []).join(",")
+
+  // Saltar al mes de un conflicto enfocado: ajuste de estado al cambiar el prop (patrón React, sin
+  // efecto). https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  const [lastFocus, setLastFocus] = useState(focusDate)
+  if (focusDate && focusDate !== lastFocus) {
+    setLastFocus(focusDate)
+    const [y, m] = focusDate.split("-").map(Number)
+    setCursor(new Date(y, m - 1, 1))
+  }
+  // Traer el calendario a la vista al resaltar un conflicto (side-effect del DOM → sí va en efecto).
+  useEffect(() => {
+    if (hlKey) panelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }, [hlKey])
   const year = cursor.getFullYear()
   const month = cursor.getMonth()
   const first = new Date(year, month, 1)
@@ -53,6 +75,7 @@ export function MonthGrid({
   const todayKey = dateKey(NOW)
 
   return (
+    <div ref={panelRef} className="scroll-mt-4">
     <Panel>
       <PanelHeader
         eyebrow="calendario · mes"
@@ -94,6 +117,7 @@ export function MonthGrid({
                     "min-h-[4.75rem] rounded-md border border-border/60 p-1",
                     !inMonth && "opacity-40",
                     key === todayKey && "ring-1 ring-brand/60",
+                    evs.some((e) => highlight.has(e.id)) && "ring-2 ring-status-review",
                   )}
                 >
                   <div className={cn("num mb-0.5 px-1 text-[11px]", key === todayKey ? "font-bold text-brand" : "text-muted-foreground")}>
@@ -105,7 +129,10 @@ export function MonthGrid({
                         type="button"
                         key={e.id}
                         onClick={() => onSelect(e)}
-                        className="flex w-full items-center gap-1 truncate rounded px-1 py-0.5 text-left text-[10px] transition hover:brightness-125"
+                        className={cn(
+                          "flex w-full items-center gap-1 truncate rounded px-1 py-0.5 text-left text-[10px] transition hover:brightness-125",
+                          highlight.has(e.id) && "ring-1 ring-status-review",
+                        )}
                         style={{ background: `color-mix(in oklch, ${eventColor(e)} 16%, transparent)`, color: eventColor(e) }}
                         title={`${e.startTime ? e.startTime + " " : ""}${e.title}`}
                       >
@@ -125,5 +152,6 @@ export function MonthGrid({
         )}
       </PanelBody>
     </Panel>
+    </div>
   )
 }

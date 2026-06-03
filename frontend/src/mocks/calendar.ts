@@ -163,6 +163,10 @@ export const calendarConflicts: CalendarConflict[] = [
     reason: "Solape 09:00–10:00; ambos de alta importancia",
     status: "pending",
     createdAt: "2026-05-30T08:00:00Z",
+    instanceCount: 1,
+    recurring: false,
+    firstOn: "2026-06-12",
+    lastOn: "2026-06-12",
   },
   {
     id: 2,
@@ -171,6 +175,10 @@ export const calendarConflicts: CalendarConflict[] = [
     reason: "Solape 11:00–11:45; ambos de alta importancia",
     status: "resolved",
     createdAt: "2026-05-28T12:00:00Z",
+    instanceCount: 1,
+    recurring: false,
+    firstOn: "2026-06-18",
+    lastOn: "2026-06-18",
   },
 ]
 

@@ -264,6 +264,13 @@ export interface CalendarConflict {
   reason: string
   status: "pending" | "resolved" | "dismissed"
   createdAt: string
+  /** Instancias agrupadas de un mismo par de series recurrentes (1 = choque único). */
+  instanceCount: number
+  /** Se repite (>1 instancia) — choque entre dos series recurrentes. */
+  recurring: boolean
+  /** Rango de fechas del grupo (YYYY-MM-DD). `a`/`b` son la ocurrencia representante. */
+  firstOn: string
+  lastOn: string
 }
 
 export type CalendarOrigin = "extraction" | "provider" | "module"

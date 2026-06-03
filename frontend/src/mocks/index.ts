@@ -409,6 +409,10 @@ const conflicts: CalendarConflict[] = [
     reason: "Solape horario 09:00–10:00; ambos de alta importancia",
     status: "pending",
     createdAt: iso(8 * HOUR),
+    instanceCount: 1,
+    recurring: false,
+    firstOn: "2026-06-12",
+    lastOn: "2026-06-12",
   },
   {
     id: 2,
@@ -417,6 +421,10 @@ const conflicts: CalendarConflict[] = [
     reason: "Solape horario 11:00–11:45; ambos de alta importancia",
     status: "pending",
     createdAt: iso(28 * HOUR),
+    instanceCount: 1,
+    recurring: false,
+    firstOn: "2026-06-18",
+    lastOn: "2026-06-18",
   },
 ]
 

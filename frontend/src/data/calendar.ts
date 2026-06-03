@@ -86,6 +86,10 @@ interface ConflictApi {
   reason: string
   status: CalendarConflict["status"]
   created_at: string
+  instance_count: number
+  recurring: boolean
+  first_on: string
+  last_on: string
 }
 
 interface SyncRunApi {
@@ -207,6 +211,10 @@ function toConflict(r: ConflictApi): CalendarConflict {
     reason: r.reason,
     status: r.status,
     createdAt: r.created_at,
+    instanceCount: r.instance_count,
+    recurring: r.recurring,
+    firstOn: r.first_on,
+    lastOn: r.last_on,
   }
 }
 
