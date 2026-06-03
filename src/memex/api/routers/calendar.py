@@ -10,6 +10,7 @@ NO expone secretos: de las cuentas de proveedor solo cruza `token_path_env` (el 
 var, ADR-001) y un booleano `sync_token_present`, nunca el token/cursor.
 """
 
+from datetime import date
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
@@ -226,32 +227,42 @@ def _cons_lite(prefix: str, r: Any) -> dict[str, Any]:
     }
 
 
+def _series_key(series: str | None, cons_id: int) -> str:
+    """Identidad de serie de un lado del conflicto: `recurring_event_id` si es recurrente; si no,
+    el consolidado es su propia "serie" única (`c<id>`), así un no-recurrente nunca agrupa."""
+    return series if series else f"c{cons_id}"
+
+
 @router.get("/conflicts", response_model=CalendarConflictList)
 async def list_conflicts(
     user_id: UserID,
     status: str | None = None,
-    limit: Annotated[int, Query(ge=1, le=500)] = 200,
-    cursor: int | None = Query(default=None, description="id > cursor for pagination"),
+    limit: Annotated[int, Query(ge=1, le=5000)] = 2000,
 ) -> dict[str, Any]:
-    """Conflictos (`mod_calendar_conflicts`): dos consolidados distintos de alta importancia que
-    se solapan en el tiempo. Trae ambas puntas (consolidado + prioridad de su ganador)."""
+    """Conflictos AGRUPADOS por par de series recurrentes.
+
+    Dos consolidados distintos de alta importancia que chocan en horario. Las instancias de un mismo
+    par de series (`recurring_event_id` de cada ganador) se colapsan en UN item: `a`/`b` son el
+    representante (la ocurrencia más próxima a hoy), `instance_count` cuántas veces se repite,
+    `first_on`/`last_on` el rango. Un evento no recurrente es su propia serie (no agrupa). No pagina
+    por cursor (los conflictos son pocos); `limit` es el tope de filas crudas a escanear.
+    """
     where: list[str] = ["cf.user_id = :uid"]
     params: dict[str, Any] = {"uid": user_id, "limit": limit}
     if status is not None:
         where.append("cf.status = :status")
         params["status"] = status
-    if cursor is not None:
-        where.append("cf.id > :cur")
-        params["cur"] = cursor
 
     sql = f"""
         SELECT cf.id, cf.reason, cf.status, cf.created_at,
                ca.id AS a_id, ca.title AS a_title, ca.starts_on AS a_starts_on,
                ca.ends_on AS a_ends_on, ca.start_time AS a_start_time, ca.end_time AS a_end_time,
                ca.location AS a_location, ea.priority_rank AS a_rank, ea.protected AS a_protected,
+               ea.recurring_event_id AS a_series,
                cb.id AS b_id, cb.title AS b_title, cb.starts_on AS b_starts_on,
                cb.ends_on AS b_ends_on, cb.start_time AS b_start_time, cb.end_time AS b_end_time,
-               cb.location AS b_location, eb.priority_rank AS b_rank, eb.protected AS b_protected
+               cb.location AS b_location, eb.priority_rank AS b_rank, eb.protected AS b_protected,
+               eb.recurring_event_id AS b_series
         FROM mod_calendar_conflicts cf
         JOIN mod_calendar_consolidated ca ON ca.id = cf.consolidated_a_id
         JOIN mod_calendar_consolidated cb ON cb.id = cf.consolidated_b_id
@@ -264,21 +275,40 @@ async def list_conflicts(
     with connection() as conn:
         rows = conn.execute(text(sql), params).mappings().all()
 
-    items: list[dict[str, Any]] = []
+    # Agrupar por (par-de-series no ordenado, status). El choque ocurre el mismo día → la fecha del
+    # conflicto es `a_starts_on` (== `b_starts_on`).
+    groups: dict[tuple[tuple[str, str], str], list[Any]] = {}
     for r in rows:
+        a_key = _series_key(r["a_series"], int(r["a_id"]))
+        b_key = _series_key(r["b_series"], int(r["b_id"]))
+        pair = (a_key, b_key) if a_key <= b_key else (b_key, a_key)
+        groups.setdefault((pair, str(r["status"])), []).append(r)
+
+    today = date.today()
+    items: list[dict[str, Any]] = []
+    for grp in groups.values():
+        dates = [r["a_starts_on"] for r in grp]
+        upcoming = sorted(
+            (r for r in grp if r["a_starts_on"] >= today), key=lambda r: r["a_starts_on"]
+        )
+        rep = upcoming[0] if upcoming else max(grp, key=lambda r: r["a_starts_on"])
         items.append(
             {
-                "id": int(r["id"]),
-                "a": _cons_lite("a", r),
-                "b": _cons_lite("b", r),
-                "reason": r["reason"],
-                "status": r["status"],
-                "created_at": r["created_at"],
+                "id": int(rep["id"]),
+                "a": _cons_lite("a", rep),
+                "b": _cons_lite("b", rep),
+                "reason": rep["reason"],
+                "status": rep["status"],
+                "created_at": rep["created_at"],
+                "instance_count": len(grp),
+                "recurring": len(grp) > 1,
+                "first_on": min(dates),
+                "last_on": max(dates),
             }
         )
-    next_cursor = items[-1]["id"] if len(items) == limit else None
-    _log.info("calendar.conflicts.listed", user_id=user_id, count=len(items))
-    return {"items": items, "next_cursor": next_cursor}
+    items.sort(key=lambda it: (it["first_on"], it["id"]))
+    _log.info("calendar.conflicts.listed", user_id=user_id, groups=len(items), raw=len(rows))
+    return {"items": items, "next_cursor": None}
 
 
 @router.get("/sync-runs", response_model=CalendarSyncRunList)

@@ -440,7 +440,13 @@ class CalendarConsolidatedLiteRow(BaseModel):
 
 
 class CalendarConflictRow(BaseModel):
-    """Dos consolidados DISTINTOS de alta importancia que se solapan (`mod_calendar_conflicts`)."""
+    """Un conflicto (o GRUPO de conflictos de un mismo par de series recurrentes).
+
+    Dos consolidados DISTINTOS de alta importancia que chocan en horario. Las instancias de un
+    mismo par de series recurrentes se agrupan en un item: `a`/`b` son el representante (la
+    ocurrencia más próxima), `instance_count` cuántas veces se repite, `first_on`/`last_on` el
+    rango, `recurring` = se repite (>1 instancia).
+    """
 
     id: int
     a: CalendarConsolidatedLiteRow
@@ -448,6 +454,10 @@ class CalendarConflictRow(BaseModel):
     reason: str
     status: str
     created_at: datetime
+    instance_count: int = 1
+    recurring: bool = False
+    first_on: date
+    last_on: date
 
 
 class CalendarConflictList(BaseModel):

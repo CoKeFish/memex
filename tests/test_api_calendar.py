@@ -29,6 +29,7 @@ def _seed_event(
     processing_outcome: str = "unique",
     source_inbox_ids: list[int] | None = None,
     evidence: str = "",
+    recurring_event_id: str | None = None,
 ) -> int:
     with connection() as c:
         return int(
@@ -37,10 +38,11 @@ def _seed_event(
                     """
                     INSERT INTO mod_calendar_events
                       (user_id, source_inbox_ids, title, starts_on, start_time, location, origin,
-                       provider, protected, priority_rank, processing_outcome, evidence)
+                       provider, protected, priority_rank, processing_outcome, evidence,
+                       recurring_event_id)
                     VALUES
                       (:uid, :ids, :title, :starts_on, :start_time, :location, :origin,
-                       :provider, :protected, :rank, :outcome, :evidence)
+                       :provider, :protected, :rank, :outcome, :evidence, :rec)
                     RETURNING id
                     """
                 ),
@@ -57,6 +59,7 @@ def _seed_event(
                     "rank": priority_rank,
                     "outcome": processing_outcome,
                     "evidence": evidence,
+                    "rec": recurring_event_id,
                 },
             ).scalar_one()
         )
@@ -284,6 +287,54 @@ def test_list_conflicts_filter_by_status(client: Any) -> None:
         )
     assert client.get("/calendar/conflicts?status=pending").json()["items"] == []
     assert len(client.get("/calendar/conflicts?status=resolved").json()["items"]) == 1
+
+
+def _seed_conflict(a_cons: int, b_cons: int, *, status: str = "pending") -> None:
+    lo, hi = sorted((a_cons, b_cons))
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_calendar_conflicts "
+                "(user_id, consolidated_a_id, consolidated_b_id, reason, status) "
+                "VALUES (1, :a, :b, 'time_overlap_high_priority', :st)"
+            ),
+            {"a": lo, "b": hi, "st": status},
+        )
+
+
+def test_list_conflicts_groups_recurring_series(client: Any) -> None:
+    # Dos series recurrentes que chocan en 2 instancias → UN solo item con instance_count=2.
+    d1, d2 = date(2026, 7, 1), date(2026, 8, 1)
+    cons = []
+    for d in (d1, d2):
+        a = _seed_event(1, priority_rank=100, starts_on=d, recurring_event_id="serA")
+        b = _seed_event(1, priority_rank=100, starts_on=d, recurring_event_id="serB")
+        ca = _seed_consolidated(1, winner_event_id=a, starts_on=d)
+        cb = _seed_consolidated(1, winner_event_id=b, starts_on=d)
+        _seed_conflict(ca, cb)
+        cons.append((ca, cb))
+
+    items = client.get("/calendar/conflicts").json()["items"]
+    assert len(items) == 1
+    it = items[0]
+    assert it["instance_count"] == 2
+    assert it["recurring"] is True
+    assert it["first_on"] == "2026-07-01"
+    assert it["last_on"] == "2026-08-01"
+
+
+def test_list_conflicts_oneoff_not_grouped(client: Any) -> None:
+    # Serie recurrente vs evento único: choca 1 vez → item suelto (instance_count=1).
+    rec = _seed_event(1, priority_rank=100, recurring_event_id="serA")
+    one = _seed_event(1, priority_rank=100)
+    _seed_conflict(
+        _seed_consolidated(1, winner_event_id=rec),
+        _seed_consolidated(1, winner_event_id=one),
+    )
+    items = client.get("/calendar/conflicts").json()["items"]
+    assert len(items) == 1
+    assert items[0]["instance_count"] == 1
+    assert items[0]["recurring"] is False
 
 
 # ---- /calendar/sync-runs -------------------------------------------------------------------------
