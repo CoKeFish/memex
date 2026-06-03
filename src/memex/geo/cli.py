@@ -95,7 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
     geo_p.add_argument("--address", required=True, help="Dirección o lugar a geocodificar.")
 
     trip_p = sub.add_parser(
-        "trip", parents=[common], help="Tiempo y distancia estimados de un viaje A→B."
+        "trip",
+        parents=[common],
+        help="Tiempo y distancia estimados de un viaje A→B.",
+        epilog="Una coordenada que empieza con '-' (lat/long negativa) se pasa con '=': "
+        "--from-point=-34.6,-58.4 o --to=-34.8,-58.5.",
     )
     trip_p.add_argument("--from", dest="from_addr", help="Origen (dirección o 'lat,lng').")
     trip_p.add_argument(

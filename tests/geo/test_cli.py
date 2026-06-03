@@ -63,7 +63,8 @@ def test_trip_from_point_uses_x(
     }
     with respx.mock(base_url=GOOGLE_BASE) as router:
         route = router.get(MATRIX).respond(json=body)
-        rc = main(["trip", "--from-point", "-34.60,-58.38", "--to", "-34.80,-58.50"])
+        # Coordenadas con '-' van con '=' (argparse en py3.12 las trata como opción si no).
+        rc = main(["trip", "--from-point=-34.60,-58.38", "--to=-34.80,-58.50"])
     assert rc == 0
     # --from-point gana: el origen del request es X (no se geocodifica nada).
     assert route.calls[0].request.url.params["origins"] == "-34.6,-58.38"
@@ -72,11 +73,11 @@ def test_trip_from_point_uses_x(
 
 def test_trip_invalid_from_point_exit2(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GMAPS_API_KEY", "GKEY")
-    rc = main(["trip", "--from-point", "not-a-point", "--to", "-34.8,-58.5"])
+    rc = main(["trip", "--from-point=not-a-point", "--to=-34.8,-58.5"])
     assert rc == 2
 
 
 def test_trip_requires_origin_exit2(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GMAPS_API_KEY", "GKEY")
-    rc = main(["trip", "--to", "-34.8,-58.5"])
+    rc = main(["trip", "--to=-34.8,-58.5"])
     assert rc == 2
