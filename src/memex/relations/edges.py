@@ -25,8 +25,12 @@ from memex.logging import get_logger
 
 _log = get_logger("memex.relations.edges")
 
-#: Estados de una arista. `None` = hecho determinista (no entra a la cola de revisión).
-VALID_STATUS: frozenset[str] = frozenset({"pending", "confirmed", "rejected"})
+# --- Nivel de la arista (dos tipos visibles + el descarte) --------------------------- #
+STATUS_PISTA = "pista"  #: señal determinista NO vouchada (co-ocurrencia): "quizás se relacionan"
+STATUS_CONFIRMED = "confirmed"  #: relación REAL, vouchada por dato/LLM/humano
+STATUS_REJECTED = "rejected"  #: pista evaluada y descartada
+#: Las pistas son los candidatos que el LLM evalúa → confirmed/rejected.
+VALID_STATUS: frozenset[str] = frozenset({STATUS_PISTA, STATUS_CONFIRMED, STATUS_REJECTED})
 
 # --- Productores (set ABIERTO; typo-safety, NO un gate de DB) ------------------------- #
 PRODUCER_INBOX = "inbox"  #: el vértice nació de este mensaje (procedencia de ingesta)
@@ -72,7 +76,7 @@ class RelationEdge:
     producer: str
     confidence: Decimal | None
     evidence: str
-    status: str | None
+    status: str
     seed_tag: str | None
 
 
@@ -86,7 +90,7 @@ def _row_to_edge(r: Any) -> RelationEdge:
         producer=str(r["producer"]),
         confidence=r["confidence"],
         evidence=str(r["evidence"]),
-        status=(str(r["status"]) if r["status"] is not None else None),
+        status=str(r["status"]),
         seed_tag=(str(r["seed_tag"]) if r["seed_tag"] is not None else None),
     )
 
@@ -99,20 +103,21 @@ def propose_edge(
     *,
     producer: str,
     relation_type: str = "",
-    status: str | None = None,
+    status: str = STATUS_PISTA,
     confidence: Decimal | None = None,
     evidence: str = "",
     seed_tag: str | None = None,
 ) -> int:
     """Materializa una arista (idempotente por la UNIQUE lógica) y devuelve su id.
 
-    `producer` es OBLIGATORIO (quién forma la arista). `status=None` = hecho determinista; una
-    inferencia pasa `status='pending'`. NO valida ontología (cualquier par es legal). NO pisa una
-    arista existente del mismo productor (idempotente); distintos productores sobre el mismo par
-    crean aristas independientes. `ValueError` si `producer` es vacío o `status` es inválido."""
+    `producer` es OBLIGATORIO (quién forma la arista). `status` por defecto `pista` (señal sin
+    vouchar, p.ej. co-ocurrencia); una relación REAL determinista (p.ej. persona↔org por dato) pasa
+    `status='confirmed'`. NO valida ontología (cualquier par es legal). NO pisa una arista existente
+    del mismo productor (idempotente); distintos productores del mismo par crean aristas
+    independientes. `ValueError` si `producer` es vacío o `status` es inválido."""
     if not producer:
         raise ValueError("producer es obligatorio (quién formó la arista)")
-    if status is not None and status not in VALID_STATUS:
+    if status not in VALID_STATUS:
         raise ValueError(f"status inválido: {status!r}")
 
     params = {
@@ -167,12 +172,12 @@ def resolve_edge(
     producer: str,
     confidence: Decimal | None = None,
 ) -> bool:
-    """Transiciona `pending` → `confirmed`/`rejected` (monótono); devuelve si cambió algo.
+    """Transiciona una PISTA → `confirmed`/`rejected` (monótono); devuelve si cambió algo.
 
-    Una arista terminal NO se re-evalúa (WHERE status='pending'); el LLM o el humano deciden una
-    sola vez. `producer` = quién resuelve (`llm`/`humano`). `confidence=None` deja el valor
-    existente. (Las aristas con `status=None` son hechos deterministas; no pasan por acá.)"""
-    if status not in {"confirmed", "rejected"}:
+    Una arista terminal NO se re-evalúa (WHERE status='pista'); el LLM o el humano deciden una sola
+    vez. `producer` = quién resuelve (`llm`/`humano`). `confidence=None` deja el valor existente.
+    (Las aristas ya `confirmed` por dato determinista no son pistas; no pasan por acá.)"""
+    if status not in {STATUS_CONFIRMED, STATUS_REJECTED}:
         raise ValueError(f"resolve_edge solo a confirmed/rejected, no {status!r}")
     if not producer:
         raise ValueError("producer es obligatorio (quién resuelve la arista)")
@@ -184,7 +189,7 @@ def resolve_edge(
                 producer = :pr,
                 decided_at = NOW(),
                 confidence = COALESCE(:conf, confidence)
-            WHERE id = :id AND status = 'pending'
+            WHERE id = :id AND status = 'pista'
             """
         ),
         {"id": edge_id, "st": status, "pr": producer, "conf": confidence},
@@ -253,6 +258,6 @@ def list_edges(
     return [_row_to_edge(r) for r in rows]
 
 
-def list_pending(conn: Connection, user_id: int) -> list[RelationEdge]:
-    """La cola de revisión: aristas `pending` del user (las inferencias por confirmar)."""
-    return list_edges(conn, user_id, status="pending")
+def list_pistas(conn: Connection, user_id: int) -> list[RelationEdge]:
+    """La cola de candidatos: las PISTAS del user (señales por validar / promover a reales)."""
+    return list_edges(conn, user_id, status=STATUS_PISTA)

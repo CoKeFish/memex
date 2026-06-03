@@ -13,9 +13,10 @@ tabla central de hechos). Adapta la tabla del substrato v1 (rama no mergeada) al
 - Lo OBLIGATORIO de cada arista es su `producer`: quién/qué la formó — `inbox`, `dedup`,
   `consolidacion`, `identidades`, `llm`, `humano`, ... Vocabulario ABIERTO (sin CHECK enum): se
   extiende sin migración (la typo-safety vive en Python, como `capabilities`/`CAP_*`).
-- `status` NULL = HECHO determinista (inbox/dedup/consolidación): no tiene cola de revisión. Las
-  INFERENCIAS (LLM cross-dominio, candidato de dedup) nacen `pending` y transicionan a
-  `confirmed`/`rejected` (monótono). El índice de `status` es PARCIAL (solo la cola).
+- `status` marca el NIVEL de la arista (dos tipos visibles + el descarte): `pista` (señal
+  determinista NO vouchada — p.ej. la co-ocurrencia "salieron del mismo correo, quizás se
+  relacionan") · `confirmed` (relación REAL, vouchada por dato/LLM/humano) · `rejected` (pista
+  descartada). Las pistas son los candidatos que el LLM evalúa → `confirmed`/`rejected` (monótono).
 - UNIQUE lógica INCLUYE `producer`: idempotencia por productor + dos procedencias del mismo par
   (p.ej. `inbox` y `llm`) coexisten como aristas independientes.
 - CHECK anti self-loop: un vértice no se enlaza consigo mismo.
@@ -51,7 +52,8 @@ def upgrade() -> None:
             producer      TEXT NOT NULL,
             confidence    NUMERIC(4,3),
             evidence      TEXT NOT NULL DEFAULT '',
-            status        TEXT CHECK (status IS NULL OR status IN ('pending','confirmed','rejected')),
+            status        TEXT NOT NULL DEFAULT 'pista'
+                            CHECK (status IN ('pista','confirmed','rejected')),
             decided_at    TIMESTAMPTZ,
             seed_tag      TEXT,
             created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -62,8 +64,7 @@ def upgrade() -> None:
         );
         CREATE INDEX relation_edges_src ON relation_edges (user_id, src_slug, src_id);
         CREATE INDEX relation_edges_dst ON relation_edges (user_id, dst_slug, dst_id);
-        CREATE INDEX relation_edges_user_status ON relation_edges (user_id, status)
-            WHERE status IS NOT NULL;
+        CREATE INDEX relation_edges_user_status ON relation_edges (user_id, status);
         CREATE INDEX relation_edges_seed_tag ON relation_edges (seed_tag) WHERE seed_tag IS NOT NULL;
         """
     )

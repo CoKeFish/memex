@@ -1,5 +1,6 @@
-"""Repositorio `relation_edges` (Fase 0 del grafo): idempotencia por productor, hechos vs.
-inferencias, resolución monótona, anti self-loop. Aristas = referencias (slug,id), sin ontología.
+"""Repositorio `relation_edges` (Fase 0 del grafo): idempotencia por productor, niveles
+pista/confirmed, resolución monótona, anti self-loop. Aristas = referencias (slug,id), sin
+ontología.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from memex.relations.edges import (
     PRODUCER_LLM,
     Ref,
     get_edge,
-    list_pending,
+    list_pistas,
     propose_edge,
     resolve_edge,
 )
@@ -45,9 +46,9 @@ def test_propose_es_idempotente_por_productor() -> None:
 
 
 def test_distinto_productor_coexiste() -> None:
-    # dos procedencias del MISMO par son aristas independientes (el productor está en la UNIQUE)
-    id_inbox = _propose(producer=PRODUCER_INBOX)
-    id_llm = _propose(producer=PRODUCER_LLM, status="pending")
+    # pista del inbox + real del LLM sobre el MISMO par conviven (el productor está en la UNIQUE)
+    id_inbox = _propose(producer=PRODUCER_INBOX)  # pista
+    id_llm = _propose(producer=PRODUCER_LLM, status="confirmed")  # real
     assert id_inbox != id_llm
     assert _count() == 2
 
@@ -57,24 +58,24 @@ def test_producer_es_obligatorio() -> None:
         _propose(producer="")
 
 
-def test_status_none_es_hecho_determinista() -> None:
-    # una arista de inbox nace como HECHO (sin cola de revisión): status NULL
+def test_status_por_defecto_es_pista() -> None:
+    # una arista de co-ocurrencia del inbox nace como PISTA (señal sin vouchar)
     _propose(producer=PRODUCER_INBOX)
     with connection() as c:
         edge = get_edge(c, 1, A, B, producer=PRODUCER_INBOX)
     assert edge is not None
-    assert edge.status is None
+    assert edge.status == "pista"
 
 
 def test_resolve_es_monotonico() -> None:
-    eid = _propose(producer=PRODUCER_LLM, status="pending")
+    eid = _propose(producer=PRODUCER_INBOX)  # nace pista
     with connection() as c:
         assert resolve_edge(c, eid, status="confirmed", producer=PRODUCER_LLM) is True
     # una arista terminal NO se re-evalúa → noop
     with connection() as c:
         assert resolve_edge(c, eid, status="rejected", producer=PRODUCER_LLM) is False
     with connection() as c:
-        edge = get_edge(c, 1, A, B, producer=PRODUCER_LLM)
+        edge = get_edge(c, 1, A, B, producer=PRODUCER_LLM)  # tras validar, el productor es llm
     assert edge is not None
     assert edge.status == "confirmed"
 
@@ -85,15 +86,15 @@ def test_anti_self_loop() -> None:
         _propose(src=A, dst=A, producer=PRODUCER_INBOX)
 
 
-def test_list_pending_solo_trae_inferencias() -> None:
-    _propose(producer=PRODUCER_INBOX)  # hecho determinista (status None)
+def test_list_pistas_solo_trae_pistas() -> None:
+    _propose(producer=PRODUCER_INBOX)  # pista (por defecto)
     _propose(
         src=Ref("finance", 3),
         dst=Ref("calendar", 4),
         producer=PRODUCER_LLM,
-        status="pending",
+        status="confirmed",  # real
     )
     with connection() as c:
-        pend = list_pending(c, 1)
-    assert len(pend) == 1
-    assert pend[0].status == "pending"
+        pistas = list_pistas(c, 1)
+    assert len(pistas) == 1
+    assert pistas[0].status == "pista"

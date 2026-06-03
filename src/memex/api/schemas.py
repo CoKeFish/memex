@@ -1383,3 +1383,47 @@ class BackfillAdvanceResponse(BaseModel):
     window: BackfillWindowResult | None
     state: BackfillState
     dry_run: bool
+
+
+# ---- Grafo de relaciones (vértices + aristas) ---------------------------------------------------
+# El front lee el grafo de SOLO LECTURA (GET /graph). Un vértice se direcciona por (slug, id); inbox
+# NO es vértice (es procedencia). Las aristas llevan su `producer` (quién las formó) y su `status`:
+# `pista` (señal determinista sin vouchar) vs `confirmed` (real) vs `rejected`.
+
+
+class GraphNode(BaseModel):
+    """Un vértice del grafo, proyectado uniformemente desde su tabla de dominio (`mod_*`)."""
+
+    slug: str
+    id: int
+    label: str
+    kind: str
+
+
+class GraphEdge(BaseModel):
+    """Una arista del grafo: referencia `src`→`dst` con su productor y nivel. `confidence` cruza
+    como `float` (la DB es NUMERIC) por convención del repo; NULL salvo en aristas del LLM."""
+
+    id: int
+    src_slug: str
+    src_id: int
+    dst_slug: str
+    dst_id: int
+    relation_type: str
+    producer: str
+    status: str
+    confidence: float | None
+    evidence: str
+
+
+class GraphResponse(BaseModel):
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+
+
+class GraphBuildResult(BaseModel):
+    """Resumen del paso determinista (POST /graph/build)."""
+
+    cooccurrence_pistas: int
+    afiliacion_reales: int
+    high_fanout_skipped: int
