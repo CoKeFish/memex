@@ -13,6 +13,7 @@ import { LogsPage } from "@/pages/logs"
 import { AccountPage } from "@/pages/account"
 import { FinancePage } from "@/pages/finance"
 import { CalendarPage } from "@/pages/calendar"
+import { IdentidadesPage } from "@/pages/identidades"
 import { IngestPage } from "@/pages/ingest"
 import { ProcessingPage } from "@/pages/processing"
 import { FiltersPage } from "@/pages/filters"
@@ -49,6 +50,7 @@ export default function App() {
         <Route path="datos" element={<DataPage />} />
         <Route path="datos/:id" element={<MessageDetailPage />} />
         <Route path="calendario" element={<CalendarPage />} />
+        <Route path="directorio" element={<IdentidadesPage />} />
         <Route path="finanzas" element={<FinancePage />} />
         <Route path="metricas" element={<MetricsPage />} />
         <Route path="logs" element={<LogsPage />} />

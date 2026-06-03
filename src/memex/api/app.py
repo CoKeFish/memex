@@ -14,6 +14,7 @@ from memex.api.routers import (
     finance,
     gateway,
     health,
+    identidades,
     inbox,
     ingest,
     ingest_scheduler,
@@ -76,6 +77,7 @@ app.include_router(filters.router)
 app.include_router(feedback.router)
 app.include_router(finance.router)
 app.include_router(calendar.router)
+app.include_router(identidades.router)
 app.include_router(metrics.router)
 app.include_router(logs.router)
 app.include_router(stats.router)
