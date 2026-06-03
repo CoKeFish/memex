@@ -3,7 +3,9 @@
 - finance/hackathones: dedup por business-key vía `upsert_unique` — el mismo pago/hackatón en dos
   mensajes (recibo + alerta del banco) colapsa a UNA fila con `source_inbox_ids` fusionados;
   re-extraer es idempotente. Cierra el fallo ER (entidades duplicadas) del barrido adversarial.
-- disciplina: todo módulo registrado declara `identity_fields`.
+
+(La disciplina «todo módulo declara `identity_fields`» la cubre mypy --strict: cada loader del
+registry está tipado `-> InterestModule`, así que un módulo sin el campo no compila.)
 """
 
 from __future__ import annotations
@@ -17,7 +19,6 @@ from sqlalchemy import text
 
 from memex.db import connection
 from memex.llm import LLMClient
-from memex.modules import known_modules, resolve
 from memex.modules.contract import ExtractionItem, ModuleContext
 from memex.modules.finance.module import FinanceModule
 from memex.modules.finance.schema import ExpenseItem
@@ -117,10 +118,3 @@ async def test_hackathones_same_event_two_announcements_merges() -> None:
     rows = _rows("mod_hackathones_events")
     assert len(rows) == 1
     assert sorted(rows[0]["source_inbox_ids"]) == [5, 6]
-
-
-def test_every_module_declares_identity_fields() -> None:
-    for slug in known_modules():
-        mod = resolve(slug)()
-        assert hasattr(mod, "identity_fields"), f"{slug} no declara identity_fields"
-        assert isinstance(mod.identity_fields, tuple), f"{slug}.identity_fields no es tuple"
