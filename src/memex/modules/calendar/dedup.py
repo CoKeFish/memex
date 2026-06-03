@@ -71,11 +71,21 @@ def _timed_interval(row: DedupRow, default_duration: timedelta) -> tuple[datetim
 
 
 def _temporal_overlap(
-    a: DedupRow, b: DedupRow, *, tolerance: timedelta, default_duration: timedelta
+    a: DedupRow,
+    b: DedupRow,
+    *,
+    tolerance: timedelta,
+    default_duration: timedelta,
+    timed_only: bool = False,
 ) -> bool:
     """¿Se solapan en el tiempo? Días disjuntos ⇒ no. Si ambos son de un solo día CON hora,
-    se refina con los intervalos horarios (± tolerancia); si alguno es todo-el-día o multi-día,
-    alcanza con que se toquen los rangos de fecha."""
+    se refina con los intervalos horarios (± tolerancia).
+
+    Para el caso todo-el-día / multi-día el comportamiento depende de `timed_only`:
+    - `False` (dedup): alcanza con que se toquen los rangos de FECHA (marca de más a propósito; el
+      dedup además exige similitud de texto, así que no genera ruido).
+    - `True` (conflictos): NO cuenta como solape. Un evento todo-el-día (cumpleaños, feriado) o
+      multi-día no bloquea un horario concreto, así que no "choca" con una reunión de las 10:00."""
     a_lo, a_hi = _date_range(a)
     b_lo, b_hi = _date_range(b)
     if a_lo > b_hi or b_lo > a_hi:  # rangos de fecha disjuntos
@@ -86,7 +96,7 @@ def _temporal_overlap(
         b_start, b_end = _timed_interval(b, default_duration)
         return a_start <= b_end + tolerance and b_start <= a_end + tolerance
 
-    return True  # todo-el-día o multi-día: alcanza el solape de fechas
+    return not timed_only  # todo-el-día / multi-día: solape de fechas salvo que se exija hora
 
 
 def temporal_overlap(
@@ -95,10 +105,14 @@ def temporal_overlap(
     *,
     tolerance: timedelta = DEFAULT_OVERLAP_TOLERANCE,
     default_duration: timedelta = DEFAULT_EVENT_DURATION,
+    timed_only: bool = False,
 ) -> bool:
     """Wrapper PÚBLICO de `_temporal_overlap` (lo reusa `conflicts.py` para detectar choques de
-    horario entre eventos consolidados, sin la similitud de texto del dedup)."""
-    return _temporal_overlap(a, b, tolerance=tolerance, default_duration=default_duration)
+    horario entre eventos consolidados, sin la similitud de texto del dedup). `timed_only=True`
+    excluye los eventos todo-el-día / multi-día (no bloquean un horario → no son un choque)."""
+    return _temporal_overlap(
+        a, b, tolerance=tolerance, default_duration=default_duration, timed_only=timed_only
+    )
 
 
 def _similarity(a: str, b: str) -> float:

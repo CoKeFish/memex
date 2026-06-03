@@ -289,9 +289,10 @@ def _link(conn: Connection, user_id: int, cons_id: int, event_id: int) -> None:
 
 
 def _detect_conflicts(conn: Connection, user_id: int) -> int:
-    """Detecta pares de eventos CONSOLIDADOS de alta importancia que se solapan en el tiempo y los
+    """Detecta pares de eventos CONSOLIDADOS de alta importancia que CHOCAN en el horario y los
     encola en `mod_calendar_conflicts` (pendiente de revisión). La importancia sale del ganador de
-    cada consolidado. Aditivo: `ON CONFLICT DO NOTHING` no re-crea ni pisa decisiones previas."""
+    cada consolidado. Reconcilia los 'pending' (borra los que ya no aplican); preserva las
+    decisiones humanas ('resolved'/'dismissed') con `ON CONFLICT DO NOTHING` al re-insertar."""
     rows = (
         conn.execute(
             text(
@@ -321,6 +322,28 @@ def _detect_conflicts(conn: Connection, user_id: int) -> int:
         for r in rows
     ]
     pairs = find_conflicts(events)
+    detected = set(pairs)
+    # Reconciliar los PENDIENTES: borrar los conflictos que ya no se detectan (el criterio cambió,
+    # o el solape desapareció al re-consolidar). Preserva 'resolved'/'dismissed' (decisiones
+    # humanas) — solo toca 'pending'. Así re-correr la consolidación auto-corrige el ruido viejo.
+    existing_pending = {
+        (int(a), int(b))
+        for a, b in conn.execute(
+            text(
+                "SELECT consolidated_a_id, consolidated_b_id FROM mod_calendar_conflicts "
+                "WHERE user_id = :uid AND status = 'pending'"
+            ),
+            {"uid": user_id},
+        ).all()
+    }
+    for a, b in existing_pending - detected:
+        conn.execute(
+            text(
+                "DELETE FROM mod_calendar_conflicts WHERE user_id = :uid "
+                "AND consolidated_a_id = :a AND consolidated_b_id = :b AND status = 'pending'"
+            ),
+            {"uid": user_id, "a": a, "b": b},
+        )
     for a, b in pairs:
         conn.execute(
             text(

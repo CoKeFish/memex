@@ -62,13 +62,46 @@ def test_protected_counts_as_high_even_rank_zero() -> None:
     assert find_conflicts([a, b]) == [(1, 2)]
 
 
+def test_all_day_event_does_not_conflict_with_timed() -> None:
+    # Un evento todo-el-día (cumpleaños/feriado) no bloquea un horario → no choca con una clase.
+    allday = _cf(1, start_time=None, protected=True)
+    clase = _cf(2, start_time=time(10, 0), protected=True)
+    assert find_conflicts([allday, clase]) == []
+
+
+def test_two_all_day_same_day_no_conflict() -> None:
+    a = _cf(1, start_time=None, protected=True)
+    b = _cf(2, start_time=None, protected=True)
+    assert find_conflicts([a, b]) == []
+
+
+def test_multi_day_event_does_not_conflict_with_timed() -> None:
+    # Multi-día (ends_on != None): no bloquea un horario puntual.
+    viaje = _cf(1, start_time=time(8, 0), ends_on=date(2026, 6, 5), protected=True)
+    clase = _cf(2, start_time=time(10, 0), starts_on=date(2026, 6, 4), protected=True)
+    assert find_conflicts([viaje, clase]) == []
+
+
+def test_timed_events_with_real_gap_no_conflict() -> None:
+    # 10:00-10:30 y 11:00-11:30 no se pisan; antes el margen difuso de 30 min los marcaba.
+    a = _cf(1, start_time=time(10, 0), end_time=time(10, 30), protected=True)
+    b = _cf(2, start_time=time(11, 0), end_time=time(11, 30), protected=True)
+    assert find_conflicts([a, b]) == []
+
+
+def test_timed_events_truly_overlapping_conflict() -> None:
+    a = _cf(1, start_time=time(10, 0), end_time=time(11, 0), protected=True)
+    b = _cf(2, start_time=time(10, 30), end_time=time(11, 30), protected=True)
+    assert find_conflicts([a, b]) == [(1, 2)]
+
+
 # ----- DB: detección dentro de run_consolidation --------------------------------- #
 
 
 def _seed(
     title: str,
     *,
-    start_time: time,
+    start_time: time | None,
     priority_rank: int = 0,
     protected: bool = False,
 ) -> int:
@@ -120,6 +153,16 @@ def _pending_conflicts() -> int:
         )
 
 
+def _consolidated_id(event_id: int) -> int:
+    with connection() as c:
+        return int(
+            c.execute(
+                text("SELECT consolidated_id FROM mod_calendar_event_links WHERE event_id = :e"),
+                {"e": event_id},
+            ).scalar_one()
+        )
+
+
 def test_consolidation_enqueues_high_priority_clash() -> None:
     _seed("Clase de Cálculo", start_time=time(10, 0), priority_rank=100)
     _seed("Turno médico", start_time=time(10, 20), priority_rank=100)  # distinto evento, choca
@@ -142,6 +185,53 @@ def test_consolidation_conflict_idempotent() -> None:
     run_consolidation(1)
     run_consolidation(1)  # re-run no duplica el conflicto
     assert _pending_conflicts() == 1
+
+
+def test_consolidation_excludes_all_day_clash() -> None:
+    # Cumpleaños todo-el-día (rank 100) + clase con hora (rank 100): ambos de alta importancia,
+    # pero el todo-el-día no bloquea horario → NO debe encolar conflicto.
+    _seed("Cumpleaños", start_time=None, priority_rank=100)
+    _seed("Clase de Cálculo", start_time=time(10, 0), priority_rank=100)
+    stats = run_consolidation(1)
+    assert stats.conflicts == 0
+    assert _pending_conflicts() == 0
+
+
+def test_conflict_reconcile_removes_stale_pending() -> None:
+    # Choque real → 1 pendiente. Luego un evento se mueve a un horario disjunto: re-consolidar
+    # debe BORRAR el conflicto pendiente que ya no aplica (reconciliación).
+    _seed("Clase", start_time=time(10, 0), priority_rank=100)
+    moved = _seed("Turno médico", start_time=time(10, 20), priority_rank=100)
+    run_consolidation(1)
+    assert _pending_conflicts() == 1
+    with connection() as c:
+        c.execute(
+            text("UPDATE mod_calendar_consolidated SET start_time = '18:00' WHERE id = :id"),
+            {"id": _consolidated_id(moved)},
+        )
+    run_consolidation(1)
+    assert _pending_conflicts() == 0
+
+
+def test_conflict_reconcile_preserves_human_decision() -> None:
+    # Un conflicto 'dismissed' (decisión humana) NO se borra ni se reabre al re-consolidar.
+    _seed("Clase", start_time=time(10, 0), protected=True)
+    _seed("Turno", start_time=time(10, 20), protected=True)
+    run_consolidation(1)
+    with connection() as c:
+        c.execute(text("UPDATE mod_calendar_conflicts SET status = 'dismissed' WHERE user_id = 1"))
+    run_consolidation(1)
+    assert _pending_conflicts() == 0
+    with connection() as c:
+        dismissed = int(
+            c.execute(
+                text(
+                    "SELECT COUNT(*) FROM mod_calendar_conflicts "
+                    "WHERE user_id = 1 AND status = 'dismissed'"
+                )
+            ).scalar_one()
+        )
+    assert dismissed == 1
 
 
 def test_protected_event_wins_consolidation() -> None:
