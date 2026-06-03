@@ -1,10 +1,11 @@
 import { useState } from "react"
-import { ChevronLeft, ChevronRight, Lock } from "lucide-react"
+import { ChevronLeft, ChevronRight, Loader2, Lock } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
+import { ErrorState } from "@/components/common/data-state"
 import { monthLongLabel } from "@/lib/format"
-import { getCalendarEvents, NOW } from "@/data"
+import { NOW } from "@/data"
 import type { ConsolidatedEvent } from "@/types/domain"
 
 const WEEKDAYS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
@@ -20,8 +21,17 @@ function dateKey(dt: Date): string {
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`
 }
 
-export function MonthGrid({ onSelect }: { onSelect: (e: ConsolidatedEvent) => void }) {
-  const events = getCalendarEvents()
+export function MonthGrid({
+  events,
+  onSelect,
+  loading,
+  error,
+}: {
+  events: ConsolidatedEvent[]
+  onSelect: (e: ConsolidatedEvent) => void
+  loading?: boolean
+  error?: string | null
+}) {
   const [cursor, setCursor] = useState(() => new Date(NOW.getFullYear(), NOW.getMonth(), 1))
   const year = cursor.getFullYear()
   const month = cursor.getMonth()
@@ -62,49 +72,57 @@ export function MonthGrid({ onSelect }: { onSelect: (e: ConsolidatedEvent) => vo
         }
       />
       <PanelBody className="p-2">
-        <div className="grid grid-cols-7 gap-1">
-          {WEEKDAYS.map((w) => (
-            <div key={w} className="eyebrow px-2 py-1 text-center">{w}</div>
-          ))}
-          {cells.map((dt, i) => {
-            const key = dateKey(dt)
-            const inMonth = dt.getMonth() === month
-            const evs = byDay.get(key) ?? []
-            return (
-              <div
-                key={i}
-                className={cn(
-                  "min-h-[4.75rem] rounded-md border border-border/60 p-1",
-                  !inMonth && "opacity-40",
-                  key === todayKey && "ring-1 ring-brand/60",
-                )}
-              >
-                <div className={cn("num mb-0.5 px-1 text-[11px]", key === todayKey ? "font-bold text-brand" : "text-muted-foreground")}>
-                  {dt.getDate()}
+        {error ? (
+          <ErrorState detail={error} />
+        ) : loading ? (
+          <div className="flex items-center justify-center gap-2 py-24 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" /> Cargando eventos…
+          </div>
+        ) : (
+          <div className="grid grid-cols-7 gap-1">
+            {WEEKDAYS.map((w) => (
+              <div key={w} className="eyebrow px-2 py-1 text-center">{w}</div>
+            ))}
+            {cells.map((dt, i) => {
+              const key = dateKey(dt)
+              const inMonth = dt.getMonth() === month
+              const evs = byDay.get(key) ?? []
+              return (
+                <div
+                  key={i}
+                  className={cn(
+                    "min-h-[4.75rem] rounded-md border border-border/60 p-1",
+                    !inMonth && "opacity-40",
+                    key === todayKey && "ring-1 ring-brand/60",
+                  )}
+                >
+                  <div className={cn("num mb-0.5 px-1 text-[11px]", key === todayKey ? "font-bold text-brand" : "text-muted-foreground")}>
+                    {dt.getDate()}
+                  </div>
+                  <div className="space-y-0.5">
+                    {evs.slice(0, 3).map((e) => (
+                      <button
+                        type="button"
+                        key={e.id}
+                        onClick={() => onSelect(e)}
+                        className="flex w-full items-center gap-1 truncate rounded px-1 py-0.5 text-left text-[10px] transition hover:brightness-125"
+                        style={{ background: `color-mix(in oklch, ${eventColor(e)} 16%, transparent)`, color: eventColor(e) }}
+                        title={`${e.startTime ? e.startTime + " " : ""}${e.title}`}
+                      >
+                        {e.protected && <Lock className="size-2.5 shrink-0" />}
+                        <span className="truncate">
+                          {e.startTime ? `${e.startTime} ` : ""}
+                          {e.title}
+                        </span>
+                      </button>
+                    ))}
+                    {evs.length > 3 && <div className="px-1 text-[10px] text-muted-foreground">+{evs.length - 3}</div>}
+                  </div>
                 </div>
-                <div className="space-y-0.5">
-                  {evs.slice(0, 3).map((e) => (
-                    <button
-                      type="button"
-                      key={e.id}
-                      onClick={() => onSelect(e)}
-                      className="flex w-full items-center gap-1 truncate rounded px-1 py-0.5 text-left text-[10px] transition hover:brightness-125"
-                      style={{ background: `color-mix(in oklch, ${eventColor(e)} 16%, transparent)`, color: eventColor(e) }}
-                      title={`${e.startTime ? e.startTime + " " : ""}${e.title}`}
-                    >
-                      {e.protected && <Lock className="size-2.5 shrink-0" />}
-                      <span className="truncate">
-                        {e.startTime ? `${e.startTime} ` : ""}
-                        {e.title}
-                      </span>
-                    </button>
-                  ))}
-                  {evs.length > 3 && <div className="px-1 text-[10px] text-muted-foreground">+{evs.length - 3}</div>}
-                </div>
-              </div>
-            )
-          })}
-        </div>
+              )
+            })}
+          </div>
+        )}
       </PanelBody>
     </Panel>
   )

@@ -1,15 +1,37 @@
-import { Bot, CalendarClock, Hand, Lock, MapPin } from "lucide-react"
+import { Bot, CalendarClock, Hand, Loader2, Lock, MapPin } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { StatusBadge } from "@/components/common/led"
-import { EmptyState } from "@/components/common/data-state"
+import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { RelativeTime } from "@/components/common/time"
 import { formatDate } from "@/lib/format"
 import { originChart, originLabel, type Tone } from "@/lib/status"
-import { getAccount, getCalendarConflicts, getCalendarEvents, getCalendarSyncRuns, getDedupDecisions, NOW } from "@/data"
-import type { CalendarOrigin, ConsolidatedEvent, DedupDecision } from "@/types/domain"
+import {
+  fetchCalendarConflicts,
+  fetchCalendarProviderAccounts,
+  fetchCalendarSyncRuns,
+  fetchDedupDecisions,
+  NOW,
+} from "@/data"
+import { useAsync } from "@/lib/use-async"
+import type {
+  CalendarConflict,
+  CalendarOrigin,
+  CalendarSyncRun,
+  ConsolidatedEvent,
+  DedupDecision,
+  ProviderAccount,
+} from "@/types/domain"
 
 const todayStr = `${NOW.getFullYear()}-${String(NOW.getMonth() + 1).padStart(2, "0")}-${String(NOW.getDate()).padStart(2, "0")}`
+
+function PanelLoader({ label }: { label: string }) {
+  return (
+    <div className="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+      <Loader2 className="size-4 animate-spin" /> {label}
+    </div>
+  )
+}
 
 function OriginDots({ origins }: { origins: CalendarOrigin[] }) {
   return (
@@ -21,19 +43,31 @@ function OriginDots({ origins }: { origins: CalendarOrigin[] }) {
   )
 }
 
-export function Agenda({ onSelect }: { onSelect: (e: ConsolidatedEvent) => void }) {
-  const events = getCalendarEvents()
-    .filter((e) => e.startsOn >= todayStr)
-    .slice(0, 12)
+export function Agenda({
+  events,
+  onSelect,
+  loading,
+  error,
+}: {
+  events: ConsolidatedEvent[]
+  onSelect: (e: ConsolidatedEvent) => void
+  loading?: boolean
+  error?: string | null
+}) {
+  const upcoming = events.filter((e) => e.startsOn >= todayStr).slice(0, 12)
   return (
     <Panel className="overflow-hidden">
       <PanelHeader eyebrow="calendario · agenda" title="Próximos eventos" sub="Capa consolidada (mod_calendar_consolidated)" />
       <PanelBody className="p-0">
-        {events.length === 0 ? (
+        {error ? (
+          <ErrorState detail={error} />
+        ) : loading ? (
+          <PanelLoader label="Cargando agenda…" />
+        ) : upcoming.length === 0 ? (
           <EmptyState title="Sin eventos próximos" />
         ) : (
           <ul className="max-h-[420px] divide-y divide-border overflow-y-auto">
-            {events.map((e) => (
+            {upcoming.map((e) => (
               <li key={e.id}>
                 <button
                   type="button"
@@ -77,7 +111,8 @@ const DECISION: Record<DedupDecision["status"], { label: string; tone: Tone }> =
 }
 
 export function DedupDecisions() {
-  const rows = getDedupDecisions()
+  const { data, loading, error } = useAsync<DedupDecision[]>(() => fetchDedupDecisions(), [])
+  const rows = data ?? []
   return (
     <Panel className="overflow-hidden">
       <PanelHeader
@@ -86,45 +121,53 @@ export function DedupDecisions() {
         sub="Pares duplicados y por qué se fusionaron o se mantuvieron — decisión automática (LLM) o manual"
       />
       <PanelBody className="p-0">
-        <ul className="divide-y divide-border">
-          {rows.map((dD) => {
-            const dec = DECISION[dD.status]
-            return (
-              <li key={dD.id} className="px-4 py-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 text-sm">
-                    <span className="font-medium">{dD.a.title}</span>
-                    <span className="mx-1.5 text-muted-foreground">↔</span>
-                    <span className="font-medium">{dD.b.title}</span>
+        {error ? (
+          <ErrorState detail={error} />
+        ) : loading && !data ? (
+          <PanelLoader label="Cargando dedup…" />
+        ) : rows.length === 0 ? (
+          <EmptyState title="Sin pares de dedup" hint="El dedup FASE 1 no marcó pares duplicados todavía." />
+        ) : (
+          <ul className="divide-y divide-border">
+            {rows.map((dD) => {
+              const dec = DECISION[dD.status]
+              return (
+                <li key={dD.id} className="px-4 py-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 text-sm">
+                      <span className="font-medium">{dD.a.title}</span>
+                      <span className="mx-1.5 text-muted-foreground">↔</span>
+                      <span className="font-medium">{dD.b.title}</span>
+                    </div>
+                    <StatusBadge tone={dec.tone} label={dec.label} />
                   </div>
-                  <StatusBadge tone={dec.tone} label={dec.label} />
-                </div>
-                <div className="mt-1 flex flex-wrap items-center gap-2">
-                  {dD.decidedBy === "llm" ? (
-                    <span className="inline-flex items-center gap-1 rounded border border-status-running/40 bg-status-running/10 px-1.5 py-0.5 text-[10px] font-medium text-status-running">
-                      <Bot className="size-3" /> auto · LLM{dD.confidence != null ? ` ${Math.round(dD.confidence * 100)}%` : ""}
-                    </span>
-                  ) : dD.decidedBy === "manual" ? (
-                    <span className="inline-flex items-center gap-1 rounded border border-brand/40 bg-brand/10 px-1.5 py-0.5 text-[10px] font-medium text-brand">
-                      <Hand className="size-3" /> manual
-                    </span>
-                  ) : (
-                    <span className="eyebrow">sin decidir</span>
-                  )}
-                  {dD.score != null && <span className="num text-[11px] text-muted-foreground">score {dD.score}</span>}
-                  {dD.decidedAt && (
-                    <span className="num text-[11px] text-muted-foreground">
-                      <RelativeTime date={dD.decidedAt} />
-                    </span>
-                  )}
-                </div>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  <span className="text-muted-foreground/70">{dD.reason}.</span> {dD.rationale ?? "Esperando decisión de la FASE 2 (LLM) o manual."}
-                </p>
-              </li>
-            )
-          })}
-        </ul>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    {dD.decidedBy === "llm" ? (
+                      <span className="inline-flex items-center gap-1 rounded border border-status-running/40 bg-status-running/10 px-1.5 py-0.5 text-[10px] font-medium text-status-running">
+                        <Bot className="size-3" /> auto · LLM{dD.confidence != null ? ` ${Math.round(dD.confidence * 100)}%` : ""}
+                      </span>
+                    ) : dD.decidedBy === "manual" ? (
+                      <span className="inline-flex items-center gap-1 rounded border border-brand/40 bg-brand/10 px-1.5 py-0.5 text-[10px] font-medium text-brand">
+                        <Hand className="size-3" /> manual
+                      </span>
+                    ) : (
+                      <span className="eyebrow">sin decidir</span>
+                    )}
+                    {dD.score != null && <span className="num text-[11px] text-muted-foreground">score {dD.score}</span>}
+                    {dD.decidedAt && (
+                      <span className="num text-[11px] text-muted-foreground">
+                        <RelativeTime date={dD.decidedAt} />
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    <span className="text-muted-foreground/70">{dD.reason}.</span> {dD.rationale ?? "Esperando decisión de la FASE 2 (LLM) o manual."}
+                  </p>
+                </li>
+              )
+            })}
+          </ul>
+        )}
       </PanelBody>
     </Panel>
   )
@@ -137,83 +180,119 @@ const CONFLICT_TONE: Record<string, { label: string; tone: Tone }> = {
 }
 
 export function ConflictsList() {
-  const rows = getCalendarConflicts()
+  const { data, loading, error } = useAsync<CalendarConflict[]>(() => fetchCalendarConflicts(), [])
+  const rows = data ?? []
   return (
     <Panel className="overflow-hidden">
       <PanelHeader eyebrow="calendario · conflictos" title="Conflictos" sub="Dos eventos distintos de alta importancia que se solapan (nunca se fusionan)" />
       <PanelBody className="p-0">
-        <ul className="divide-y divide-border">
-          {rows.map((c) => {
-            const t = CONFLICT_TONE[c.status]
-            return (
-              <li key={c.id} className="px-4 py-3">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-center gap-2 text-sm">
-                    <CalendarClock className="size-4 shrink-0 text-status-review" />
-                    <span>
-                      <span className="font-medium">{c.a.title}</span> <span className="text-muted-foreground">↔</span>{" "}
-                      <span className="font-medium">{c.b.title}</span>
-                    </span>
+        {error ? (
+          <ErrorState detail={error} />
+        ) : loading && !data ? (
+          <PanelLoader label="Cargando conflictos…" />
+        ) : rows.length === 0 ? (
+          <EmptyState title="Sin conflictos" hint="No hay choques de alta importancia pendientes de revisión." />
+        ) : (
+          <ul className="divide-y divide-border">
+            {rows.map((c) => {
+              const t = CONFLICT_TONE[c.status]
+              return (
+                <li key={c.id} className="px-4 py-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2 text-sm">
+                      <CalendarClock className="size-4 shrink-0 text-status-review" />
+                      <span>
+                        <span className="font-medium">{c.a.title}</span> <span className="text-muted-foreground">↔</span>{" "}
+                        <span className="font-medium">{c.b.title}</span>
+                      </span>
+                    </div>
+                    <StatusBadge tone={t.tone} label={t.label} />
                   </div>
-                  <StatusBadge tone={t.tone} label={t.label} />
-                </div>
-                <p className="num mt-1 text-xs text-muted-foreground">
-                  {formatDate(c.a.startsOn)} · {c.reason}
-                </p>
-              </li>
-            )
-          })}
-        </ul>
+                  <p className="num mt-1 text-xs text-muted-foreground">
+                    {formatDate(c.a.startsOn)} · {c.reason}
+                  </p>
+                </li>
+              )
+            })}
+          </ul>
+        )}
       </PanelBody>
     </Panel>
   )
 }
 
+const TOKEN_STATE: Record<ProviderAccount["tokenState"], { label: string; tone: Tone }> = {
+  delta: { label: "delta", tone: "ok" },
+  "full-resync": { label: "410", tone: "review" },
+  never: { label: "nuevo", tone: "neutral" },
+}
+
 export function SyncPanel() {
-  const providers = getAccount().providers
-  const runs = getCalendarSyncRuns()
+  const accountsState = useAsync<ProviderAccount[]>(() => fetchCalendarProviderAccounts(), [])
+  const runsState = useAsync<CalendarSyncRun[]>(() => fetchCalendarSyncRuns(), [])
+  const providers = accountsState.data ?? []
+  const runs = runsState.data ?? []
+  const loading = (accountsState.loading && !accountsState.data) || (runsState.loading && !runsState.data)
+  const error = accountsState.error ?? runsState.error
   return (
     <Panel className="overflow-hidden">
       <PanelHeader eyebrow="calendario · sync" title="Proveedores y sincronización" sub="Ingress/egress con Google (mod_calendar_sync_runs)" />
       <PanelBody className="space-y-3">
-        <div className="space-y-2">
-          {providers.map((p) => (
-            <div key={p.id} className="flex items-center justify-between gap-2 rounded-md border border-border bg-background/40 px-3 py-2">
-              <div className="text-sm">
-                <span className="font-medium capitalize">
-                  {p.provider} · {p.accountLabel}
-                </span>
-                <span className="num ml-2 text-[11px] text-muted-foreground">
-                  {p.lastSyncAt ? <RelativeTime date={p.lastSyncAt} /> : "sin sync"}
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <StatusBadge tone={p.tokenState === "delta" ? "ok" : "review"} label={p.tokenState === "delta" ? "delta" : "410"} />
-                {p.writeBack && <StatusBadge tone="ok" label="write-back" />}
-              </div>
+        {error ? (
+          <ErrorState detail={error} />
+        ) : loading ? (
+          <PanelLoader label="Cargando sincronización…" />
+        ) : providers.length === 0 && runs.length === 0 ? (
+          <EmptyState title="Sin cuentas de proveedor" hint="Conectá una cuenta con memex-calendar-sync." />
+        ) : (
+          <>
+            <div className="space-y-2">
+              {providers.map((p) => {
+                const ts = TOKEN_STATE[p.tokenState]
+                return (
+                  <div key={p.id} className="flex items-center justify-between gap-2 rounded-md border border-border bg-background/40 px-3 py-2">
+                    <div className="text-sm">
+                      <span className="font-medium capitalize">
+                        {p.provider} · {p.accountLabel}
+                      </span>
+                      <span className="num ml-2 text-[11px] text-muted-foreground">
+                        {p.lastSyncAt ? <RelativeTime date={p.lastSyncAt} /> : "sin sync"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <StatusBadge tone={ts.tone} label={ts.label} />
+                      {p.writeBack && <StatusBadge tone="ok" label="write-back" />}
+                    </div>
+                  </div>
+                )
+              })}
             </div>
-          ))}
-        </div>
-        <div>
-          <div className="eyebrow mb-1.5">corridas recientes</div>
-          <ul className="divide-y divide-border rounded-md border border-border">
-            {runs.map((r) => (
-              <li key={r.id} className="flex items-center justify-between gap-2 px-3 py-1.5 text-xs">
-                <span className="flex items-center gap-2">
-                  <span className={cn("num rounded px-1 py-0.5 text-[10px]", r.direction === "ingress" ? "bg-origin-provider/15 text-origin-provider" : "bg-brand/15 text-brand")}>
-                    {r.direction}
-                  </span>
-                  <span className="truncate">{r.account}</span>
-                </span>
-                <span className="num flex items-center gap-2 text-muted-foreground">
-                  <span title="created/modified/deleted">+{r.created}/~{r.modified}/-{r.deleted}</span>
-                  {r.errors > 0 && <span className="text-status-error">{r.errors} err</span>}
-                  <RelativeTime date={r.startedAt} />
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
+            <div>
+              <div className="eyebrow mb-1.5">corridas recientes</div>
+              {runs.length === 0 ? (
+                <p className="px-1 text-xs text-muted-foreground">Sin corridas de sync todavía.</p>
+              ) : (
+                <ul className="divide-y divide-border rounded-md border border-border">
+                  {runs.map((r) => (
+                    <li key={r.id} className="flex items-center justify-between gap-2 px-3 py-1.5 text-xs">
+                      <span className="flex items-center gap-2">
+                        <span className={cn("num rounded px-1 py-0.5 text-[10px]", r.direction === "ingress" ? "bg-origin-provider/15 text-origin-provider" : "bg-brand/15 text-brand")}>
+                          {r.direction}
+                        </span>
+                        <span className="truncate">{r.account}</span>
+                      </span>
+                      <span className="num flex items-center gap-2 text-muted-foreground">
+                        <span title="created/modified/deleted">+{r.created}/~{r.modified}/-{r.deleted}</span>
+                        {r.errors > 0 && <span className="text-status-error">{r.errors} err</span>}
+                        <RelativeTime date={r.startedAt} />
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </>
+        )}
       </PanelBody>
     </Panel>
   )

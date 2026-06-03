@@ -1,0 +1,337 @@
+"""Tests del router de SOLO LECTURA `/calendar` (espeja `test_api_finance.py`).
+
+Siembra filas en las tablas `mod_calendar_*` (limpiadas entre tests por el TRUNCATE ... users
+CASCADE de `_reset_tables`) y verifica el shape que consume el dashboard, el scoping por usuario
+y que NUNCA se filtra el token del proveedor.
+"""
+
+from __future__ import annotations
+
+from datetime import date, time
+from typing import Any
+
+from sqlalchemy import text
+
+from memex.db import connection
+
+
+def _seed_event(
+    user_id: int,
+    *,
+    title: str = "Evento",
+    starts_on: date = date(2026, 6, 12),
+    start_time: time | None = time(9, 0),
+    location: str = "",
+    origin: str = "extraction",
+    provider: str | None = None,
+    protected: bool = False,
+    priority_rank: int = 0,
+    processing_outcome: str = "unique",
+    source_inbox_ids: list[int] | None = None,
+    evidence: str = "",
+) -> int:
+    with connection() as c:
+        return int(
+            c.execute(
+                text(
+                    """
+                    INSERT INTO mod_calendar_events
+                      (user_id, source_inbox_ids, title, starts_on, start_time, location, origin,
+                       provider, protected, priority_rank, processing_outcome, evidence)
+                    VALUES
+                      (:uid, :ids, :title, :starts_on, :start_time, :location, :origin,
+                       :provider, :protected, :rank, :outcome, :evidence)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "ids": source_inbox_ids if source_inbox_ids is not None else [],
+                    "title": title,
+                    "starts_on": starts_on,
+                    "start_time": start_time,
+                    "location": location,
+                    "origin": origin,
+                    "provider": provider,
+                    "protected": protected,
+                    "rank": priority_rank,
+                    "outcome": processing_outcome,
+                    "evidence": evidence,
+                },
+            ).scalar_one()
+        )
+
+
+def _seed_consolidated(
+    user_id: int,
+    *,
+    winner_event_id: int | None = None,
+    title: str = "Evento",
+    starts_on: date = date(2026, 6, 12),
+    start_time: time | None = time(9, 0),
+    location: str = "",
+    deleted: bool = False,
+) -> int:
+    with connection() as c:
+        return int(
+            c.execute(
+                text(
+                    """
+                    INSERT INTO mod_calendar_consolidated
+                      (user_id, title, starts_on, start_time, location, winner_event_id, deleted)
+                    VALUES (:uid, :title, :starts_on, :start_time, :location, :winner, :deleted)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "title": title,
+                    "starts_on": starts_on,
+                    "start_time": start_time,
+                    "location": location,
+                    "winner": winner_event_id,
+                    "deleted": deleted,
+                },
+            ).scalar_one()
+        )
+
+
+def _link(user_id: int, consolidated_id: int, event_id: int) -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_calendar_event_links (user_id, consolidated_id, event_id) "
+                "VALUES (:uid, :cid, :eid)"
+            ),
+            {"uid": user_id, "cid": consolidated_id, "eid": event_id},
+        )
+
+
+def _seed_provider_account(
+    user_id: int,
+    *,
+    provider: str = "google",
+    account_label: str = "Personal",
+    token_path_env: str = "GOOGLE_CALENDAR_TOKEN_PATH",
+    sync_token: str | None = "CAES-cursor-opaco",
+    write_back: bool = True,
+) -> int:
+    with connection() as c:
+        return int(
+            c.execute(
+                text(
+                    """
+                    INSERT INTO mod_calendar_provider_accounts
+                      (user_id, provider, account_label, token_path_env, sync_token, write_back)
+                    VALUES (:uid, :provider, :label, :token_env, :sync_token, :wb)
+                    RETURNING id
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "provider": provider,
+                    "label": account_label,
+                    "token_env": token_path_env,
+                    "sync_token": sync_token,
+                    "wb": write_back,
+                },
+            ).scalar_one()
+        )
+
+
+# ---- /calendar/events ----------------------------------------------------------------------------
+
+
+def test_list_events_returns_consolidated_with_members(client: Any) -> None:
+    winner = _seed_event(1, origin="provider", provider="google", protected=True, priority_rank=100)
+    other = _seed_event(1, origin="extraction", source_inbox_ids=[7, 8])
+    cid = _seed_consolidated(1, winner_event_id=winner, title="Vuelo BOG → MEX")
+    _link(1, cid, winner)
+    _link(1, cid, other)
+
+    body = client.get("/calendar/events").json()
+    assert len(body["items"]) == 1
+    ev = body["items"][0]
+    assert ev["title"] == "Vuelo BOG → MEX"
+    assert ev["member_count"] == 2
+    assert ev["protected"] is True  # del ganador
+    assert ev["priority_rank"] == 100
+    assert set(ev["origins"]) == {"provider", "extraction"}
+    assert ev["start_time"] == "09:00:00"
+    winners = [m for m in ev["members"] if m["is_winner"]]
+    assert len(winners) == 1 and winners[0]["id"] == winner
+    extraction_member = next(m for m in ev["members"] if m["origin"] == "extraction")
+    assert extraction_member["source_inbox_ids"] == [7, 8]
+
+
+def test_list_events_excludes_deleted(client: Any) -> None:
+    e = _seed_event(1)
+    _seed_consolidated(1, winner_event_id=e, deleted=True)
+    assert client.get("/calendar/events").json()["items"] == []
+
+
+def test_list_events_cross_tenant_scoped(client: Any, seed_user2: int) -> None:
+    e1 = _seed_event(1, title="mío")
+    _seed_consolidated(1, winner_event_id=e1, title="mío")
+    e2 = _seed_event(seed_user2, title="ajeno")
+    _seed_consolidated(seed_user2, winner_event_id=e2, title="ajeno")
+    items = client.get("/calendar/events").json()["items"]
+    assert len(items) == 1 and items[0]["title"] == "mío"
+
+
+def test_list_events_pagination(client: Any) -> None:
+    for _ in range(5):
+        e = _seed_event(1)
+        _seed_consolidated(1, winner_event_id=e)
+    body1 = client.get("/calendar/events?limit=2").json()
+    assert len(body1["items"]) == 2
+    assert body1["next_cursor"] is not None
+    body2 = client.get(f"/calendar/events?limit=2&cursor={body1['next_cursor']}").json()
+    assert body2["items"][0]["id"] > body1["items"][-1]["id"]
+
+
+def test_list_events_empty(client: Any) -> None:
+    assert client.get("/calendar/events").json() == {"items": [], "next_cursor": None}
+
+
+# ---- /calendar/dedup-candidates ------------------------------------------------------------------
+
+
+def test_list_dedup_candidates_shape(client: Any) -> None:
+    a = _seed_event(1, title="Cena de fin de año", origin="extraction")
+    b = _seed_event(1, title="Cena fin de año 🎉", origin="provider", provider="google")
+    lo, hi = sorted((a, b))
+    with connection() as c:
+        c.execute(
+            text(
+                """
+                INSERT INTO mod_calendar_dedup_candidates
+                  (user_id, event_a_id, event_b_id, reason, score, status)
+                VALUES (1, :a, :b, 'titulo+fecha similares', 0.86, 'candidate')
+                """
+            ),
+            {"a": lo, "b": hi},
+        )
+    body = client.get("/calendar/dedup-candidates").json()
+    assert len(body["items"]) == 1
+    row = body["items"][0]
+    assert row["status"] == "candidate"
+    assert row["score"] == 0.86 and isinstance(row["score"], float)
+    assert row["decided_by"] is None and row["confidence"] is None
+    assert row["a"]["id"] == lo and row["b"]["id"] == hi
+    assert {row["a"]["origin"], row["b"]["origin"]} == {"extraction", "provider"}
+
+
+def test_list_dedup_filter_by_status(client: Any) -> None:
+    a, b = _seed_event(1, title="x"), _seed_event(1, title="y")
+    c, d = _seed_event(1, title="z"), _seed_event(1, title="w")
+    with connection() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO mod_calendar_dedup_candidates "
+                "(user_id, event_a_id, event_b_id, reason, status) VALUES "
+                "(1, :a, :b, 'r', 'candidate'), (1, :c, :d, 'r', 'confirmed')"
+            ),
+            {"a": min(a, b), "b": max(a, b), "c": min(c, d), "d": max(c, d)},
+        )
+    assert len(client.get("/calendar/dedup-candidates?status=confirmed").json()["items"]) == 1
+    assert len(client.get("/calendar/dedup-candidates").json()["items"]) == 2
+
+
+# ---- /calendar/conflicts -------------------------------------------------------------------------
+
+
+def test_list_conflicts_shape(client: Any) -> None:
+    ea = _seed_event(1, protected=True, priority_rank=100)
+    eb = _seed_event(1, protected=True, priority_rank=60)
+    ca = _seed_consolidated(1, winner_event_id=ea, title="Vuelo BOG → MEX")
+    cb = _seed_consolidated(1, winner_event_id=eb, title="Dentista")
+    lo, hi = sorted((ca, cb))
+    with connection() as c:
+        c.execute(
+            text(
+                """
+                INSERT INTO mod_calendar_conflicts
+                  (user_id, consolidated_a_id, consolidated_b_id, reason, status)
+                VALUES (1, :a, :b, 'time_overlap_high_priority', 'pending')
+                """
+            ),
+            {"a": lo, "b": hi},
+        )
+    body = client.get("/calendar/conflicts").json()
+    assert len(body["items"]) == 1
+    row = body["items"][0]
+    assert row["status"] == "pending"
+    assert row["a"]["id"] == lo and row["b"]["id"] == hi
+    # la prioridad/protección viene del ganador de cada consolidado
+    ranks = {row["a"]["priority_rank"], row["b"]["priority_rank"]}
+    assert ranks == {100, 60}
+    assert row["a"]["protected"] is True
+
+
+def test_list_conflicts_filter_by_status(client: Any) -> None:
+    ea, eb = _seed_event(1), _seed_event(1)
+    ca = _seed_consolidated(1, winner_event_id=ea)
+    cb = _seed_consolidated(1, winner_event_id=eb)
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_calendar_conflicts "
+                "(user_id, consolidated_a_id, consolidated_b_id, reason, status) "
+                "VALUES (1, :a, :b, 'r', 'resolved')"
+            ),
+            {"a": min(ca, cb), "b": max(ca, cb)},
+        )
+    assert client.get("/calendar/conflicts?status=pending").json()["items"] == []
+    assert len(client.get("/calendar/conflicts?status=resolved").json()["items"]) == 1
+
+
+# ---- /calendar/sync-runs -------------------------------------------------------------------------
+
+
+def test_list_sync_runs_account_label(client: Any) -> None:
+    acc = _seed_provider_account(1, provider="google", account_label="Personal")
+    with connection() as c:
+        c.execute(
+            text(
+                """
+                INSERT INTO mod_calendar_sync_runs
+                  (user_id, provider_account_id, direction, pulled, created, modified, deleted,
+                   unchanged, dedup_pairs, errors, status)
+                VALUES (1, :acc, 'ingress', 568, 12, 4, 1, 551, 3, 0, 'ok')
+                """
+            ),
+            {"acc": acc},
+        )
+    body = client.get("/calendar/sync-runs").json()
+    assert len(body["items"]) == 1
+    run = body["items"][0]
+    assert run["account"] == "google · Personal"
+    assert run["direction"] == "ingress"
+    assert run["pulled"] == 568 and run["dedup_pairs"] == 3
+
+
+# ---- /calendar/provider-accounts -----------------------------------------------------------------
+
+
+def test_list_provider_accounts_never_leaks_token(client: Any) -> None:
+    _seed_provider_account(
+        1, token_path_env="GOOGLE_CALENDAR_TOKEN_PATH", sync_token="CAES-secreto-opaco"
+    )
+    body = client.get("/calendar/provider-accounts").json()
+    assert len(body["items"]) == 1
+    acc = body["items"][0]
+    assert acc["provider"] == "google"
+    assert acc["token_path_env"] == "GOOGLE_CALENDAR_TOKEN_PATH"  # NOMBRE de env var, no el token
+    assert acc["sync_token_present"] is True
+    assert acc["write_back"] is True
+    # el cursor/token nunca cruza el wire
+    assert "sync_token" not in acc
+    assert "CAES-secreto-opaco" not in str(body)
+
+
+def test_list_provider_accounts_cross_tenant_scoped(client: Any, seed_user2: int) -> None:
+    _seed_provider_account(1, account_label="mío")
+    _seed_provider_account(seed_user2, account_label="ajeno")
+    items = client.get("/calendar/provider-accounts").json()["items"]
+    assert len(items) == 1 and items[0]["account_label"] == "mío"

@@ -46,6 +46,11 @@ export {
   workerLatest,
 } from "@/lib/selectors"
 
+// ---- Calendar (dominio bidireccional, datos reales contra la API: router /calendar) -----------
+// fetchCalendarEvents (capa consolidada + miembros), fetchDedupDecisions, fetchCalendarConflicts,
+// fetchCalendarSyncRuns, fetchCalendarProviderAccounts. Reemplazan los getters mock de calendario.
+export * from "./calendar"
+
 // ---- Finance (datos reales contra la API) -------------------------------------
 export * from "./finance"
 // Agregaciones puras (operan sobre los gastos que trae ./finance) + catálogo de categorías.
@@ -74,23 +79,8 @@ export * from "./logs"
 
 // ---- Getters mock síncronos sobre los seeds existentes ------------------------
 import { account } from "@/mocks/account"
-import {
-  calendarConflicts,
-  calendarSyncRuns,
-  consolidatedEvents,
-  dedupDecisions,
-} from "@/mocks/calendar"
 import { inbox, reviewItems, seedAlerts } from "@/mocks"
-import type {
-  Account,
-  AlertEvent,
-  CalendarConflict,
-  CalendarSyncRun,
-  ConsolidatedEvent,
-  DedupDecision,
-  InboxRow,
-  ReviewItem,
-} from "@/types/domain"
+import type { Account, AlertEvent, InboxRow, ReviewItem } from "@/types/domain"
 
 export function getInbox(): InboxRow[] {
   return inbox
@@ -106,20 +96,4 @@ export function getSeedAlerts(): AlertEvent[] {
 
 export function getAccount(): Account {
   return account
-}
-
-export function getCalendarEvents(): ConsolidatedEvent[] {
-  return consolidatedEvents
-}
-
-export function getCalendarConflicts(): CalendarConflict[] {
-  return calendarConflicts
-}
-
-export function getCalendarSyncRuns(): CalendarSyncRun[] {
-  return calendarSyncRuns
-}
-
-export function getDedupDecisions(): DedupDecision[] {
-  return dedupDecisions
 }

@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
@@ -340,6 +340,164 @@ class FinanceExpenseRow(BaseModel):
 class FinanceExpenseList(BaseModel):
     items: list[FinanceExpenseRow]
     next_cursor: int | None = None
+
+
+# ---- Módulo calendar (dominio bidireccional) ----------------------------------------------------
+# El dashboard lee la capa CONSOLIDADA (`mod_calendar_consolidated`) + sus miembros crudos
+# (`event_links` → `mod_calendar_events`), los pares de dedup, los conflictos, las corridas de sync
+# y las cuentas de proveedor. Todo de SOLO LECTURA (GET): la UI de calendario hoy no muta nada.
+# Convenciones: NUMERIC → float (igual que finance), TIME → "HH:MM:SS" (el front recorta a HH:MM),
+# DATE → "YYYY-MM-DD", TIMESTAMPTZ → ISO. NUNCA se expone el token del proveedor (ADR-001).
+
+
+class CalendarRawMemberRow(BaseModel):
+    """Un evento crudo (`mod_calendar_events`) que compone un consolidado vía `event_links`."""
+
+    id: int
+    origin: str
+    provider: str | None
+    source_inbox_ids: list[int]
+    evidence: str
+    processing_outcome: str
+    is_winner: bool
+
+
+class CalendarConsolidatedRow(BaseModel):
+    """Un evento consolidado (`mod_calendar_consolidated`) + sus miembros crudos.
+
+    `protected`/`priority_rank` salen del miembro GANADOR (`winner_event_id`, donde vive la
+    prioridad). `origins` son los orígenes distintos de los miembros (para los puntitos de color).
+    """
+
+    id: int
+    title: str
+    starts_on: date
+    ends_on: date | None
+    start_time: time | None
+    end_time: time | None
+    location: str
+    description: str
+    member_count: int
+    origins: list[str]
+    protected: bool
+    priority_rank: int
+    members: list[CalendarRawMemberRow]
+
+
+class CalendarEventList(BaseModel):
+    items: list[CalendarConsolidatedRow]
+    next_cursor: int | None = None
+
+
+class CalendarEventLiteRow(BaseModel):
+    """Una punta liviana de un par de dedup (fila de `mod_calendar_events`)."""
+
+    id: int
+    title: str
+    starts_on: date
+    start_time: time | None
+    location: str
+    origin: str
+    provider: str | None
+
+
+class CalendarDedupDecisionRow(BaseModel):
+    """Un par candidato de dedup (`mod_calendar_dedup_candidates`) + sus dos eventos.
+
+    `score`/`confidence` cruzan como float (DB NUMERIC). `decided_by` es 'llm'|'manual'|None
+    (FASE 2 LLM o decisión manual); None ⇒ aún `candidate` sin resolver.
+    """
+
+    id: int
+    a: CalendarEventLiteRow
+    b: CalendarEventLiteRow
+    reason: str
+    score: float | None
+    status: str
+    decided_by: str | None
+    confidence: float | None
+    rationale: str | None
+    decided_at: datetime | None
+
+
+class CalendarDedupList(BaseModel):
+    items: list[CalendarDedupDecisionRow]
+    next_cursor: int | None = None
+
+
+class CalendarConsolidatedLiteRow(BaseModel):
+    """Una punta liviana de un conflicto (consolidado + prioridad de su ganador)."""
+
+    id: int
+    title: str
+    starts_on: date
+    ends_on: date | None
+    start_time: time | None
+    end_time: time | None
+    location: str
+    priority_rank: int
+    protected: bool
+
+
+class CalendarConflictRow(BaseModel):
+    """Dos consolidados DISTINTOS de alta importancia que se solapan (`mod_calendar_conflicts`)."""
+
+    id: int
+    a: CalendarConsolidatedLiteRow
+    b: CalendarConsolidatedLiteRow
+    reason: str
+    status: str
+    created_at: datetime
+
+
+class CalendarConflictList(BaseModel):
+    items: list[CalendarConflictRow]
+    next_cursor: int | None = None
+
+
+class CalendarSyncRunRow(BaseModel):
+    """Una corrida de sync con un proveedor (`mod_calendar_sync_runs`)."""
+
+    id: int
+    account: str
+    direction: str
+    pulled: int
+    created: int
+    modified: int
+    deleted: int
+    unchanged: int
+    dedup_pairs: int
+    errors: int
+    status: str
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class CalendarSyncRunList(BaseModel):
+    items: list[CalendarSyncRunRow]
+    next_cursor: int | None = None
+
+
+class CalendarProviderAccountRow(BaseModel):
+    """Una cuenta de proveedor de calendario (`mod_calendar_provider_accounts`).
+
+    NO expone el token: `token_path_env` es el NOMBRE de la env var (ADR-001) y `sync_token_present`
+    solo dice si hay cursor delta (el front deriva 'delta' / 'full-resync' / 'never').
+    """
+
+    id: int
+    provider: str
+    account_label: str
+    calendar_id: str
+    last_sync_at: datetime | None
+    token_path_env: str
+    enabled: bool
+    write_back: bool
+    sync_token_present: bool
+
+
+class CalendarProviderAccountList(BaseModel):
+    items: list[CalendarProviderAccountRow]
 
 
 # ---- Métricas de costo LLM (tabla `llm_calls`) --------------------------------------------------
