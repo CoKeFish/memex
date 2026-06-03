@@ -71,9 +71,10 @@ def test_list_expenses_cross_tenant_scoped(client: Any, seed_user2: int) -> None
 
 
 def test_list_expenses_filter_by_currency(client: Any) -> None:
-    _seed_expense(1, currency="MXN")
-    _seed_expense(1, currency="USD")
-    _seed_expense(1, currency="USD")
+    # gastos distintos (monto distinto) → el dedup v2 no los colapsa
+    _seed_expense(1, currency="MXN", amount=1.0)
+    _seed_expense(1, currency="USD", amount=2.0)
+    _seed_expense(1, currency="USD", amount=3.0)
     assert len(client.get("/finance/expenses?currency=USD").json()["items"]) == 2
     assert len(client.get("/finance/expenses?currency=MXN").json()["items"]) == 1
 
@@ -89,8 +90,8 @@ def test_list_expenses_filter_by_date_range(client: Any) -> None:
 
 
 def test_list_expenses_pagination(client: Any) -> None:
-    for _ in range(5):
-        _seed_expense(1)
+    for i in range(5):  # montos distintos → 5 vértices distintos (no colapsan)
+        _seed_expense(1, amount=float(100 + i))
     body1 = client.get("/finance/expenses?limit=2").json()
     assert len(body1["items"]) == 2
     assert body1["next_cursor"] is not None

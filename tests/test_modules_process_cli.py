@@ -42,7 +42,7 @@ class FakeCombinedLLM:
             items = [
                 {
                     "source_inbox_ids": [m["id"]],
-                    "amount": "100.00",
+                    "amount": f"{m['id']}.00",  # distinto por mensaje → 2 vértices (no colapsan)
                     "currency": "ARS",
                     "merchant": "Test",
                     "occurred_on": None,
