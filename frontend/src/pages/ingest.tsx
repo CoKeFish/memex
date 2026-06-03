@@ -2,6 +2,10 @@ import { PageHeader } from "@/components/common/page-header"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { Led } from "@/components/common/led"
 import { AdHocIngest, FetchControl } from "@/components/features/control/fetch-control"
+import {
+  IngestRunsPanel,
+  IngestSchedulerPanel,
+} from "@/components/features/control/ingest-schedule-control"
 
 export function IngestPage() {
   return (
@@ -9,9 +13,11 @@ export function IngestPage() {
       <PageHeader
         eyebrow="vista · carga"
         title="Carga / ingesta"
-        description="Traer datos a demanda (correo, Telegram, redes): incremental para todas; por rango o cantidad solo para correo. Más ingesta puntual. El dry-run muestra cuántos serían nuevos: lo ya guardado se ignora, no se duplica."
+        description="Traer datos a demanda (correo, Telegram, redes): incremental para todas; por rango o cantidad solo para correo. Más ingesta puntual. El dry-run muestra cuántos serían nuevos: lo ya guardado se ignora, no se duplica. Prendé la ingesta automática y agendá cada cuánto se trae cada fuente; cada corrida queda en el historial con su origen."
       />
       <FetchControl />
+      <IngestSchedulerPanel />
+      <IngestRunsPanel />
       <Panel>
         <PanelHeader eyebrow="duplicados" title="¿Cómo evita guardar el mismo correo dos veces?" />
         <PanelBody>

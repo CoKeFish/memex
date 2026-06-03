@@ -31,6 +31,11 @@ export * from "./pipeline"
 // background + polling). Reemplaza los getters mock getSources/getModuleSettings/getScheduler*/dryRunRun.
 export * from "./processing"
 
+// ---- Ingesta agendada (datos reales: router /ingest, 0025) --------------------
+// Control del daemon de ingesta server-side (cada cuánto se trae cada fuente) + historial de
+// corridas con su origen (manual/daemon/backfill/agent) para linkear a /logs?run_id=.
+export * from "./ingest-scheduler"
+
 // ---- Selectores de agregación (mock) ------------------------------------------
 // Nota: los selectores de costo LLM (costKpis/costDaily/costBy*/callsInRange) se RETIRARON del
 // facade: la vista /metricas ahora consume `./metrics` (API real). Siguen viviendo en lib/selectors

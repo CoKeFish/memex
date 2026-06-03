@@ -177,6 +177,9 @@ export interface IngestionRun {
   filtered: number // columna agregada en migración 0004
   errorClass: string | null
   errorMessage: string | null
+  // Derivado por el backend (corrida 'running' colgada > 30 min). Opcional: las fuentes mock/pipeline
+  // no lo traen; /ingest/runs y /ingest/scheduler sí.
+  isStale?: boolean
 }
 
 export type WorkerJob = "classify" | "summarize" | "extract" | "calendar" | "ocr"

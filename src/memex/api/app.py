@@ -16,6 +16,7 @@ from memex.api.routers import (
     health,
     inbox,
     ingest,
+    ingest_scheduler,
     logs,
     media,
     metrics,
@@ -65,6 +66,7 @@ app.include_router(auth.router)
 app.include_router(accounts.router)
 app.include_router(oauth.router)
 app.include_router(ingest.router)
+app.include_router(ingest_scheduler.router)
 app.include_router(inbox.router)
 app.include_router(sources.router)
 app.include_router(backfill.router)

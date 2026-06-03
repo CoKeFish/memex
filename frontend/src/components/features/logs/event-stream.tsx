@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { useSearchParams } from "react-router-dom"
 import { Radio, Search, X } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Panel } from "@/components/common/panel"
@@ -69,6 +70,9 @@ export function EventStream() {
   const [loggerF, setLoggerF] = useState<Dim>(ALL)
   const [eventF, setEventF] = useState<Dim>(ALL)
   const [requestId, setRequestId] = useState<string | null>(null)
+  // Deep-link desde /carga ("Corridas de ingesta" → logs?run_id=…): aísla la traza de una corrida.
+  const [searchParams] = useSearchParams()
+  const [runId, setRunId] = useState<string | null>(() => searchParams.get("run_id"))
   const [live, setLive] = useState(false)
   const [page, setPage] = useState(0)
 
@@ -88,6 +92,7 @@ export function EventStream() {
     event: asList(eventF),
     eventMode: eventF.mode,
     requestId: requestId ?? undefined,
+    runId: runId ?? undefined,
     q: debouncedQuery || undefined,
   }
 
@@ -105,12 +110,13 @@ export function EventStream() {
       eventF.value,
       eventF.mode,
       requestId,
+      runId,
       debouncedQuery,
     ],
   )
 
   // Volver a la primera página al cambiar cualquier filtro (patrón "ajustar estado en render").
-  const filterKey = `${win.since ?? ""}|${win.until ?? ""}|${win.tz ?? ""}|${levelF.value}:${levelF.mode}|${loggerF.value}:${loggerF.mode}|${eventF.value}:${eventF.mode}|${requestId ?? ""}|${debouncedQuery}`
+  const filterKey = `${win.since ?? ""}|${win.until ?? ""}|${win.tz ?? ""}|${levelF.value}:${levelF.mode}|${loggerF.value}:${loggerF.mode}|${eventF.value}:${eventF.mode}|${requestId ?? ""}|${runId ?? ""}|${debouncedQuery}`
   const [prevKey, setPrevKey] = useState(filterKey)
   if (filterKey !== prevKey) {
     setPrevKey(filterKey)
@@ -130,6 +136,7 @@ export function EventStream() {
       eventF.value,
       eventF.mode,
       requestId,
+      runId,
       debouncedQuery,
       effectivePage,
       live,
@@ -191,6 +198,16 @@ export function EventStream() {
               title="Quitar el filtro por request_id"
             >
               req {requestId.slice(0, 8)}
+              <X className="size-3" />
+            </button>
+          )}
+          {runId && (
+            <button
+              onClick={() => setRunId(null)}
+              className="inline-flex items-center gap-1 rounded-md border border-brand/40 bg-brand/10 px-2 py-1 text-[11px] font-medium text-brand hover:bg-brand/20"
+              title="Quitar el filtro por run_id (corrida de ingesta)"
+            >
+              corrida {runId.slice(0, 8)}
               <X className="size-3" />
             </button>
           )}

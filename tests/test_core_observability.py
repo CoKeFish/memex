@@ -92,17 +92,20 @@ def test_ingestion_run_binds_and_unbinds_contextvars(seed_source: dict[str, Any]
     uid = int(seed_source["user_id"])
     clear_request_context()
 
-    with ingestion_run(user_id=uid, source_id=sid, trigger="test") as run:
+    with ingestion_run(user_id=uid, source_id=sid, trigger="daemon") as run:
         bound = structlog.contextvars.get_contextvars()
         assert bound.get("run_id") == run.id
         assert bound.get("source_id") == sid
         assert bound.get("user_id") == uid
+        # El origen también se bindea → cae en log_events.fields de TODA línea de la corrida.
+        assert bound.get("trigger") == "daemon"
         run.finalize(RunStats())
 
     bound_after = structlog.contextvars.get_contextvars()
     assert "run_id" not in bound_after
     assert "source_id" not in bound_after
     assert "user_id" not in bound_after
+    assert "trigger" not in bound_after
 
 
 def test_ingestion_run_double_settle_is_noop(seed_source: dict[str, Any]) -> None:

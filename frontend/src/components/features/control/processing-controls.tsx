@@ -36,7 +36,6 @@ import {
   runProcessing,
   setModule,
   setScheduler,
-  setSourceEnabled,
 } from "@/data"
 import type { Source } from "@/types/domain"
 
@@ -498,64 +497,6 @@ export function ManualRunPanel() {
               </div>
             ))}
           </div>
-        )}
-      </PanelBody>
-    </Panel>
-  )
-}
-
-// ---- Fuentes (toggle de ingesta) ---
-export function SourcesTogglePanel() {
-  const { data, loading, error, reload } = useAsync<Source[]>(() => fetchSources(), [])
-  // Overrides optimistas por id; el display deriva de `data` + estos cambios (sin seedear en effect).
-  const [overrides, setOverrides] = useState<Record<number, boolean>>({})
-  const [busy, setBusy] = useState<number | null>(null)
-
-  async function toggle(id: number, on: boolean) {
-    setOverrides((p) => ({ ...p, [id]: on })) // optimista
-    setBusy(id)
-    try {
-      await setSourceEnabled(id, on)
-    } catch (e) {
-      setOverrides((p) => ({ ...p, [id]: !on })) // revert
-      toast.error("No se pudo cambiar la fuente", { description: errMsg(e) })
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  return (
-    <Panel>
-      <PanelHeader
-        eyebrow="procesamiento · fuentes"
-        title="Fuentes"
-        sub="Habilitar/deshabilitar la ingesta por fuente (sources.enabled)"
-        right={<CapBadge level="existe" title="PATCH /sources/{id} — persiste en la DB" />}
-      />
-      <PanelBody className="space-y-1.5">
-        {error ? (
-          <ErrorState detail={error} onRetry={reload} />
-        ) : loading && !data ? (
-          <LoadingRow label="Cargando fuentes…" />
-        ) : !data || data.length === 0 ? (
-          <div className="px-2 py-6 text-sm text-muted-foreground">No hay fuentes.</div>
-        ) : (
-          data.map((s) => (
-            <div
-              key={s.id}
-              className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
-            >
-              <div>
-                <div className="text-sm font-medium">{s.name}</div>
-                <div className="eyebrow">{s.type}</div>
-              </div>
-              <Switch
-                checked={overrides[s.id] ?? s.enabled}
-                disabled={busy === s.id}
-                onCheckedChange={(c) => toggle(s.id, c)}
-              />
-            </div>
-          ))
         )}
       </PanelBody>
     </Panel>

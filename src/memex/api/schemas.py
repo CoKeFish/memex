@@ -811,6 +811,8 @@ class SourceRow(BaseModel):
     # Cuenta vinculada (0018). Optional/default para back-compat de SELECTs que no la traen.
     account_id: int | None = None
     account_alias: str | None = None
+    # Agenda de ingesta (0025): intervalo ISO-8601 (PT1H, P1D…) o None = no se agenda.
+    fetch_schedule: str | None = None
 
 
 class CheckpointBody(BaseModel):
@@ -835,10 +837,16 @@ class FetchResponse(BaseModel):
 
 
 class SourcePatch(BaseModel):
-    """Edición parcial de una source. Usar `model_fields_set` para saber qué se setea."""
+    """Edición parcial de una source. Usar `model_fields_set` para saber qué se setea.
+
+    `fetch_schedule`: intervalo ISO-8601 (PT15M, PT1H, P1D…) para la ingesta agendada, o `null`
+    explícito para quitar el agendado. Se valida con `parse_duration` en el router (422 si malo).
+    Mandarlo ausente (no en el JSON) lo deja como está; mandarlo `null` lo limpia.
+    """
 
     account_id: int | None = None
     enabled: bool | None = None
+    fetch_schedule: str | None = None
 
 
 class SocialAccountAdd(BaseModel):
@@ -1033,6 +1041,63 @@ class SchedulerState(BaseModel):
     daemon_enabled: bool
     enabled_jobs: list[str]  # CSV parseado
     jobs: list[SchedulerJobState]
+
+
+# --- Ingesta: control runtime del daemon de ingesta agendada (0025) ---
+class IngestionRunRow(BaseModel):
+    """Una corrida de ingesta (`ingestion_runs`) para el historial de /carga + deep-link a /logs.
+
+    `id` (UUID como string) es la clave del link `/logs?run_id=<id>`. `trigger` es el ORIGEN
+    (manual/daemon/backfill/agent/cli). Los contadores son `NOT NULL DEFAULT 0`; los
+    timestamps/error son nullable mientras la corrida está 'running'.
+    """
+
+    id: str
+    source_id: int
+    trigger: str
+    status: str  # running | ok | failed | aborted
+    started_at: datetime
+    ended_at: datetime | None = None
+    duration_ms: int | None = None
+    posted: int
+    inserted: int
+    duplicates: int
+    errors: int
+    filtered: int
+    error_class: str | None = None
+    error_message: str | None = None
+    is_stale: bool
+
+
+class IngestionRunList(BaseModel):
+    items: list[IngestionRunRow]
+
+
+class IngestScheduleSource(BaseModel):
+    """Una fuente en el panel de ingesta agendada: su schedule + su última corrida.
+
+    `config` viaja para que el front derive icono/etiqueta de proveedor (`sourceMeta` distingue
+    Gmail/Outlook por `config.host/server`) — coherencia visual con el resto del dashboard.
+    """
+
+    source_id: int
+    name: str
+    type: str
+    enabled: bool
+    config: dict[str, Any] = Field(default_factory=dict)
+    fetch_schedule: str | None = None  # ISO-8601 o None = no agendada
+    latest: IngestionRunRow | None = None
+
+
+class IngestSchedulerState(BaseModel):
+    daemon_enabled: bool
+    sources: list[IngestScheduleSource]
+
+
+class IngestSchedulerPatch(BaseModel):
+    """Cambio en runtime del master toggle del daemon de ingesta. El daemon lo relee cada tick."""
+
+    daemon_enabled: bool | None = None
 
 
 # --- Backfill segmentado (importación masiva por ventanas) ----------------------------------------

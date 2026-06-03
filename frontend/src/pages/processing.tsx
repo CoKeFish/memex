@@ -3,7 +3,6 @@ import {
   ManualRunPanel,
   ModulesTogglePanel,
   SchedulerPanel,
-  SourcesTogglePanel,
 } from "@/components/features/control/processing-controls"
 
 export function ProcessingPage() {
@@ -12,16 +11,13 @@ export function ProcessingPage() {
       <PageHeader
         eyebrow="vista · procesamiento"
         title="Procesamiento"
-        description="Decidí qué procesar: elegí etapas y acotá por fuente, fecha o cantidad, con dry-run previo; las corridas van en background. Prendé/apagá el procesamiento automático (off por defecto, nada corre solo), la ingesta por fuente y los módulos de extracción. Las reglas de filtro persistentes viven en la sección Filtros."
+        description="Decidí qué procesar: elegí etapas y acotá por fuente, fecha o cantidad, con dry-run previo; las corridas van en background. Prendé/apagá el procesamiento automático (off por defecto, nada corre solo) y los módulos de extracción. El control de la ingesta por fuente (habilitar + cada cuánto) vive en Carga. Las reglas de filtro persistentes viven en Filtros."
       />
       <div className="grid gap-5 xl:grid-cols-2">
         <SchedulerPanel />
         <ManualRunPanel />
       </div>
-      <div className="grid gap-5 xl:grid-cols-2">
-        <SourcesTogglePanel />
-        <ModulesTogglePanel />
-      </div>
+      <ModulesTogglePanel />
     </div>
   )
 }

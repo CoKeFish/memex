@@ -15,12 +15,16 @@ import { formatDate, formatInt } from "@/lib/format"
 import { sourceFullLabel, sourceMeta } from "@/lib/inbox-format"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
-import { fetchPullableSources, fetchSourceCheckpoint, fetchSources, ingestAdHoc, triggerFetch } from "@/data"
+import {
+  fetchPullableSources,
+  fetchSourceCheckpoint,
+  fetchSources,
+  ingestAdHoc,
+  PAID_API_TYPES,
+  triggerFetch,
+} from "@/data"
 import type { FetchPreview, Source } from "@/types/domain"
 import { BackfillSection } from "./backfill-control"
-
-// Tipos de fuente cuya ingesta pega contra una API de paga (Apify) → mostramos aviso de costo.
-const PAID_API_TYPES = new Set(["instagram", "facebook", "x", "social"])
 
 type Mode = "incremental" | "range" | "last"
 const MODES: { v: Mode; label: string; cap: CapLevel }[] = [

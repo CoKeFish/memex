@@ -72,6 +72,9 @@ export async function fetchEmailSources(): Promise<Source[]> {
  * cliente local, no se puede pull-ear desde el dashboard). */
 export const PULLABLE_SOURCE_TYPES = new Set(["imap", "telegram", "instagram", "facebook", "x"])
 
+/** Tipos de fuente cuya ingesta pega contra una API de paga (Apify) → la UI avisa del costo. */
+export const PAID_API_TYPES = new Set(["instagram", "facebook", "x", "social"])
+
 /** Fuentes que se pueden traer a demanda (cualquier tipo con ingestor), no solo correo. */
 export async function fetchPullableSources(): Promise<Source[]> {
   return (await fetchSources()).filter((s) => PULLABLE_SOURCE_TYPES.has(s.type))

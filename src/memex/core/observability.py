@@ -176,6 +176,7 @@ def ingestion_run(
         run_id=run_id,
         source_id=source_id,
         user_id=user_id,
+        trigger=trigger,
     )
     _log.info("ingestor.run.start", trigger=trigger)
 
@@ -190,7 +191,7 @@ def ingestion_run(
     finally:
         if not handle._settled:
             handle._abort()
-        structlog.contextvars.unbind_contextvars("run_id", "source_id", "user_id")
+        structlog.contextvars.unbind_contextvars("run_id", "source_id", "user_id", "trigger")
 
 
 def record_llm_call(

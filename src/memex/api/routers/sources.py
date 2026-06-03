@@ -16,6 +16,7 @@ from memex.api.schemas import (
     SourceRow,
 )
 from memex.core import checkpoint
+from memex.core.schedule import parse_duration
 from memex.core.source import SourceKind
 from memex.db import connection
 from memex.ingestors.runner import RunStats
@@ -31,7 +32,7 @@ _log = get_logger("memex.sources")
 
 _SOURCE_SELECT = """
     SELECT s.id, s.user_id, s.name, s.type, s.enabled, s.config, s.created_at,
-           s.account_id, a.alias AS account_alias
+           s.account_id, s.fetch_schedule, a.alias AS account_alias
     FROM sources s LEFT JOIN accounts a ON a.id = s.account_id
     WHERE s.id = :sid
 """
@@ -76,7 +77,7 @@ async def list_sources(user_id: UserID) -> list[dict[str, Any]]:
                 text(
                     """
                     SELECT s.id, s.user_id, s.name, s.type, s.enabled, s.config, s.created_at,
-                           s.account_id, a.alias AS account_alias
+                           s.account_id, s.fetch_schedule, a.alias AS account_alias
                     FROM sources s LEFT JOIN accounts a ON a.id = s.account_id
                     WHERE s.user_id = :uid ORDER BY s.id
                     """
@@ -191,7 +192,12 @@ async def ensure_source(body: SourceCreate, user_id: UserID) -> dict[str, Any]:
 
 @router.patch("/{source_id}", response_model=SourceRow)
 async def patch_source(source_id: int, body: SourcePatch, user_id: UserID) -> dict[str, Any]:
-    """Edición parcial: vincular/desvincular a una cuenta (`account_id`) y/o togglear `enabled`."""
+    """Edición parcial: cuenta (`account_id`), toggle `enabled` y/o `fetch_schedule`.
+
+    `fetch_schedule` como string se valida con `parse_duration` (422 si es ISO-8601 inválido);
+    `null` limpia el agendado; ausente no lo toca. El daemon `memex-ingest-scheduler` relee esta
+    columna cada tick.
+    """
     fields = body.model_dump(exclude_unset=True)
     sets: list[str] = []
     params: dict[str, Any] = {"sid": source_id}
@@ -210,6 +216,18 @@ async def patch_source(source_id: int, body: SourcePatch, user_id: UserID) -> di
         if "enabled" in fields:
             sets.append("enabled = :enabled")
             params["enabled"] = fields["enabled"]
+        if "fetch_schedule" in fields:
+            schedule = fields["fetch_schedule"]
+            if schedule is not None:
+                try:
+                    parse_duration(str(schedule))
+                except ValueError as e:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"fetch_schedule inválido (ISO-8601, ej. PT1H): {schedule!r}",
+                    ) from e
+            sets.append("fetch_schedule = :fetch_schedule")
+            params["fetch_schedule"] = schedule
         if sets:
             conn.execute(text(f"UPDATE sources SET {', '.join(sets)} WHERE id = :sid"), params)
         row = _source_row(conn, source_id)
@@ -358,6 +376,6 @@ async def fetch_source(
         until=until,
         limit=limit,
         dry_run=dry_run,
-        trigger="dashboard",
+        trigger="manual",
     )
     return _stats_response(stats, dry_run=dry_run)

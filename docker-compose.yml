@@ -150,6 +150,30 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Daemon de INGESTA agendada (memex-ingest-scheduler). IMPLEMENTADO pero APAGADO: bajo el profile
+  # "ingest-scheduler", así que `docker compose up` NO lo arranca. Para desplegarlo:
+  # `docker compose --profile ingest-scheduler up -d ingest-scheduler`. Aun corriendo no trae nada
+  # hasta que el toggle de /carga (tabla ingest_scheduler_settings) lo arme y haya fuentes con
+  # `fetch_schedule`; relee esa config cada tick. Comparte el env del API porque resuelve secretos del
+  # vault y corre los ingestors reales (IMAP/social/telegram). Apagado por default.
+  ingest-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: memex-ingest-scheduler
+    profiles: ["ingest-scheduler"]
+    command: ["memex-ingest-scheduler", "daemon", "start"]
+    environment: *api_env
+    volumes:
+      - memex_telegram_sessions:/var/lib/memex/telegram
+      - ./secrets:/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   memex_pgdata:
   memex_telegram_sessions:
