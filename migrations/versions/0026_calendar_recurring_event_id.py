@@ -1,7 +1,7 @@
 """calendar: recurring_event_id en mod_calendar_events (serie recurrente del proveedor)
 
 Revision ID: 0026
-Revises: 0024
+Revises: 0025
 Create Date: 2026-06-03
 
 Captura el `recurringEventId` que la API de Google entrega por instancia (sync con
@@ -9,9 +9,9 @@ Captura el `recurringEventId` que la API de Google entrega por instancia (sync c
 las instancias de una misma serie — p.ej. un choque entre dos series recurrentes se muestra como UN
 conflicto, no uno por instancia. Aditivo (columna nullable + índice parcial); no rompe nada.
 
-Numeración (migration-numbering-worktrees): chainea sobre 0024 (cabeza de `main` al crear el
-worktree). 0025 lo tomó otro worktree (`ingest_scheduler`) sin mergear aún → al mergear a `main` se
-re-apunta `down_revision` a la cabeza vigente para mantener la cadena lineal.
+Numeración (migration-numbering-worktrees): se creó chaineando sobre 0024 (cabeza de `main` al
+crear el worktree); tras mergear `ingest_scheduler` (0025) a `main`, se re-apunta `down_revision` a
+0025 para mantener la cadena lineal (única cabeza), igual que 0021 sobre 0020.
 """
 
 from collections.abc import Sequence
@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from alembic import op
 
 revision: str = "0026"
-down_revision: str | None = "0024"
+down_revision: str | None = "0025"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
