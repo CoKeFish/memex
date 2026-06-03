@@ -63,6 +63,11 @@ export * from "./hackathones"
 // fetchIdentityPersons/Orgs/Mentions/ProviderAccounts/SyncRuns + mutaciones (CRUD de orgs, sync).
 export * from "./identidades"
 
+// ---- Grafo de relaciones (vértices + aristas, datos reales: router /graph) ----
+// fetchGraph (vértices proyectados + aristas con productor y nivel pista/confirmed) + buildGraph
+// (corre el paso determinista on-demand).
+export * from "./graph"
+
 // ---- Finance (datos reales contra la API) -------------------------------------
 export * from "./finance"
 // Agregaciones puras (operan sobre los gastos que trae ./finance) + catálogo de categorías.

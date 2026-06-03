@@ -15,6 +15,7 @@ import { FinancePage } from "@/pages/finance"
 import { HackathonesPage } from "@/pages/hackathones"
 import { CalendarPage } from "@/pages/calendar"
 import { IdentidadesPage } from "@/pages/identidades"
+import { GraphPage } from "@/pages/graph"
 import { IngestPage } from "@/pages/ingest"
 import { ProcessingPage } from "@/pages/processing"
 import { FiltersPage } from "@/pages/filters"
@@ -52,6 +53,7 @@ export default function App() {
         <Route path="datos/:id" element={<MessageDetailPage />} />
         <Route path="calendario" element={<CalendarPage />} />
         <Route path="directorio" element={<IdentidadesPage />} />
+        <Route path="grafo" element={<GraphPage />} />
         <Route path="finanzas" element={<FinancePage />} />
         <Route path="hackathones" element={<HackathonesPage />} />
         <Route path="metricas" element={<MetricsPage />} />
