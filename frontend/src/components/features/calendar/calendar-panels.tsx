@@ -173,7 +173,30 @@ export function DedupDecisions() {
           <StatusBadge tone={dec.tone} label={dec.label} />
         </button>
         {open && (
-          <div className="space-y-1.5 bg-background/40 px-4 pb-3 pt-1">
+          <div className="space-y-2 bg-background/40 px-4 pb-3 pt-2">
+            <div className="space-y-1.5">
+              {[dD.a, dD.b].map((e, i) => (
+                <div key={e.id} className="rounded border border-border/60 p-2">
+                  <div className="flex items-start gap-1.5">
+                    <span
+                      className="mt-1 size-2 shrink-0 rounded-full"
+                      style={{ background: originChart[e.origin] }}
+                      title={originLabel[e.origin]}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-medium text-foreground">{e.title}</div>
+                      <div className="num mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+                        <span>{formatDate(e.startsOn)}</span>
+                        {e.startTime && <span>{e.startTime}</span>}
+                        {e.location && <span>· {e.location}</span>}
+                        {e.provider && <span>· {e.provider}</span>}
+                      </div>
+                    </div>
+                    <span className="eyebrow shrink-0">{i === 0 ? "A" : "B"}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
             <div className="flex flex-wrap items-center gap-2">
               {dD.decidedBy === "llm" ? (
                 <span className="inline-flex items-center gap-1 rounded border border-status-running/40 bg-status-running/10 px-1.5 py-0.5 text-[10px] font-medium text-status-running">
