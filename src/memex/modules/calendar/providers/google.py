@@ -108,6 +108,11 @@ def _parse_event(item: dict[str, Any], provider_event_id: str) -> ProviderEvent 
     private = ext.get("private") if isinstance(ext, dict) else None
     mcid = private.get("memex_consolidated_id") if isinstance(private, dict) else None
 
+    # `recurringEventId`: id de la serie a la que pertenece esta instancia (solo en instancias de
+    # eventos recurrentes; ausente en los no-recurrentes). Señal autoritativa de la API, NO se
+    # deriva parseando el `provider_event_id`.
+    rec = item.get("recurringEventId")
+
     return ProviderEvent(
         provider_event_id=provider_event_id,
         title=str(item.get("summary") or ""),
@@ -121,6 +126,7 @@ def _parse_event(item: dict[str, Any], provider_event_id: str) -> ProviderEvent 
         etag=etag,
         updated=updated,
         memex_consolidated_id=mcid if isinstance(mcid, str) else None,
+        recurring_event_id=rec if isinstance(rec, str) else None,
     )
 
 

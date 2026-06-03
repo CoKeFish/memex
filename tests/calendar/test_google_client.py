@@ -45,6 +45,7 @@ def _events_body() -> dict[str, Any]:
                 "location": "Sala 2",
                 "description": "sync semanal",
                 "updated": "2026-05-20T10:00:00Z",
+                "recurringEventId": "series-xyz",  # instancia de una serie recurrente
                 "start": {"dateTime": "2026-06-03T15:30:00-03:00"},
                 "end": {"dateTime": "2026-06-03T16:30:00-03:00"},
             },
@@ -87,11 +88,13 @@ async def test_list_delta_parses_events_and_captures_sync_token() -> None:
     assert ev1.ends_on is None
     assert ev1.location == "Sala 2"
     assert ev1.etag == '"123"'
+    assert ev1.recurring_event_id == "series-xyz"  # capturado de recurringEventId
 
     ev2 = page.events[1]
     assert ev2.starts_on == date(2026, 6, 5)
     assert ev2.start_time is None  # all-day
     assert ev2.ends_on is None  # un solo día (end.date es exclusivo)
+    assert ev2.recurring_event_id is None  # no recurrente → sin recurringEventId
 
     req = route.calls[0].request
     assert req.headers["Authorization"] == "Bearer TKN"  # bearer en header, no en URL

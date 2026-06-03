@@ -65,6 +65,7 @@ def _ev(
     etag: str = "e1",
     location: str = "",
     memex_consolidated_id: str | None = None,
+    recurring_event_id: str | None = None,
 ) -> ProviderEvent:
     return ProviderEvent(
         provider_event_id=pid,
@@ -74,6 +75,7 @@ def _ev(
         etag=etag,
         location=location,
         memex_consolidated_id=memex_consolidated_id,
+        recurring_event_id=recurring_event_id,
     )
 
 
@@ -248,6 +250,48 @@ async def test_pull_echo_event_is_not_manual() -> None:
     row = _events(aid)[0]
     assert row["manual"] is False
     assert row["priority_rank"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pull_captures_recurring_event_id() -> None:
+    aid = _seed_account()
+    fake = FakeProvider(
+        ProviderPage(
+            events=(
+                _ev("series-1_20260603T", "Cortar cabello", recurring_event_id="series-1"),
+                _ev("oneoff", "Cita puntual"),  # no recurrente → NULL
+            ),
+            next_sync_token="T",
+        )
+    )
+
+    await run_pull(1, aid, client=fake)
+
+    by_pid = {r["provider_event_id"]: r for r in _events(aid)}
+    assert by_pid["series-1_20260603T"]["recurring_event_id"] == "series-1"
+    assert by_pid["oneoff"]["recurring_event_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_pull_backfills_recurring_event_id_on_resync() -> None:
+    # Evento ya en la DB con recurring_event_id NULL (sincronizado antes del feature). Un resync con
+    # el MISMO etag pero recurringEventId presente debe ACTUALIZAR (backfill), no quedar unchanged.
+    aid = _seed_account()
+    await run_pull(
+        1, aid, client=FakeProvider(ProviderPage(events=(_ev("a", "Clase", etag="e1"),)))
+    )
+    assert _events(aid)[0]["recurring_event_id"] is None
+
+    stats = await run_pull(
+        1,
+        aid,
+        client=FakeProvider(
+            ProviderPage(events=(_ev("a", "Clase", etag="e1", recurring_event_id="serie-clase"),))
+        ),
+    )
+
+    assert (stats.created, stats.modified, stats.unchanged) == (0, 1, 0)
+    assert _events(aid)[0]["recurring_event_id"] == "serie-clase"
 
 
 @pytest.mark.asyncio

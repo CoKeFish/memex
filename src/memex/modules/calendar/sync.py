@@ -202,7 +202,7 @@ def _upsert_event(
     existing = conn.execute(
         text(
             """
-            SELECT id, provider_etag FROM mod_calendar_events
+            SELECT id, provider_etag, recurring_event_id FROM mod_calendar_events
             WHERE provider = :provider AND provider_account_id = :aid
               AND provider_event_id = :peid
             """
@@ -228,6 +228,7 @@ def _upsert_event(
         "manual": manual,
         "rank": _MANUAL_PRIORITY_RANK if manual else 0,
         "metadata": json.dumps(meta),
+        "recurring": ev.recurring_event_id,
     }
 
     if existing is None:
@@ -239,11 +240,12 @@ def _upsert_event(
                       (user_id, source_inbox_ids, title, starts_on, ends_on, start_time, end_time,
                        location, description, origin, provider, provider_account_id,
                        provider_event_id, provider_etag, provider_updated, provider_status,
-                       manual, priority_rank, metadata)
+                       manual, priority_rank, metadata, recurring_event_id)
                     VALUES
                       (:uid, ARRAY[]::bigint[], :title, :starts_on, :ends_on, :start_time,
                        :end_time, :location, :description, 'provider', :provider, :aid, :peid,
-                       :etag, :updated, :status, :manual, :rank, CAST(:metadata AS JSONB))
+                       :etag, :updated, :status, :manual, :rank, CAST(:metadata AS JSONB),
+                       :recurring)
                     RETURNING id
                     """
                 ),
@@ -272,7 +274,15 @@ def _upsert_event(
 
     event_id = int(existing[0])
     current_etag = existing[1]
-    if ev.etag is not None and current_etag == ev.etag:
+    current_recurring = existing[2]
+    # "Sin cambios" exige también que `recurring_event_id` ya coincida: así un full resync
+    # backfillea la columna en eventos viejos (mismo etag, columna NULL) desde la API, sin
+    # re-parsear el id.
+    if (
+        ev.etag is not None
+        and current_etag == ev.etag
+        and current_recurring == ev.recurring_event_id
+    ):
         return "unchanged", None
 
     conn.execute(
@@ -282,7 +292,8 @@ def _upsert_event(
               title = :title, starts_on = :starts_on, ends_on = :ends_on,
               start_time = :start_time, end_time = :end_time, location = :location,
               description = :description, provider_etag = :etag, provider_updated = :updated,
-              provider_status = :status, manual = :manual, priority_rank = :rank
+              provider_status = :status, manual = :manual, priority_rank = :rank,
+              recurring_event_id = :recurring
             WHERE id = :id
             """
         ),

@@ -58,6 +58,11 @@ class ProviderEvent:
     `etag` detecta cambios (si no cambió, el upsert no toca la fila). `memex_consolidated_id` viene
     de las propiedades privadas del evento: si está, ese evento lo CREÓ memex (write-back) y se
     reconoce como eco, no como un evento manual nuevo.
+
+    `recurring_event_id` es el id de la SERIE recurrente a la que pertenece esta instancia (Google:
+    `recurringEventId`, lo da la API por instancia cuando `singleEvents=true`); None si el evento no
+    es recurrente. Es la señal autoritativa para agrupar las instancias de una misma serie (p.ej.
+    para que un choque recurrente se muestre como UN conflicto, no uno por instancia).
     """
 
     provider_event_id: str
@@ -72,6 +77,7 @@ class ProviderEvent:
     etag: str | None = None
     updated: datetime | None = None
     memex_consolidated_id: str | None = None
+    recurring_event_id: str | None = None
 
 
 @dataclass(frozen=True)
