@@ -28,6 +28,7 @@ from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, ModuleContext
 from memex.modules.dedup import forget_inbox_rows
+from memex.modules.identidades.domain import IdentidadesDomainReader
 from memex.modules.identidades.fuzzy import HIGH_THRESHOLD, LOW_THRESHOLD, find_fuzzy_candidates
 from memex.modules.identidades.normalize import is_role_email, norm_identifier
 from memex.modules.identidades.prompt import IDENTIDADES_SYSTEM_PROMPT
@@ -118,6 +119,13 @@ class IdentidadesModule:
         return HealthResult(
             status="healthy", detail="identidades module ready", checked_at=datetime.now(UTC)
         )
+
+    def provide_domain(self, conn: Connection, user_id: int) -> IdentidadesDomainReader:
+        """Capacidad `provide_domain`: handle de LECTURA del directorio. Lo reciben (vía
+        `ctx.deps['identidades']`) los módulos que declaran `'identidades'` en `depends_on`:
+        resuelve referencias (nombre/email/handle) a la identidad canónica con la lógica del
+        dedup."""
+        return IdentidadesDomainReader(conn, user_id)
 
     def read_for_inbox(
         self, conn: Connection, user_id: int, inbox_ids: Sequence[int]

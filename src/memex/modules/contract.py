@@ -66,7 +66,9 @@ class ModuleContext:
     - `conn`: conexión con tx ABIERTA por el orquestador; `persist` escribe acá (NO abre otra),
       para que filas + cursor de idempotencia sean atómicos por ventana.
     - `llm`: el Protocol `LLMClient` (inyectable en tests), nunca el cliente concreto.
-    - `deps`: handles tipados de las dependencias del módulo. VACÍO ({}) en este slice (seam).
+    - `deps`: handles tipados de las dependencias del módulo. El orquestador lo arma desde
+      `depends_on`: por cada slug dependido cuyo proveedor declara `provide_domain`, inyecta su
+      handle (`ctx.deps[slug]`). Vacío si el módulo no declara dependencias con dominio.
     - `summary_id`: None en este slice (la extracción no depende del resumen; ADR-015 §9).
     - `inbox_ids`: los ids del lote — base de la atribución (`source_inbox_ids ⊆ inbox_ids`).
     """
@@ -152,6 +154,18 @@ class InterestModule(Protocol):
         mensaje (el directorio de identidades, el consolidado de calendar). Devuelve cuántas filas
         borró. Read-write sobre `conn`; NO abre tx propia. La usa el force re-extract iterando el
         registry — sin hardcodear tablas por módulo."""
+        ...
+
+
+@runtime_checkable
+class DomainProvider(Protocol):
+    """Capacidad `provide_domain`: un módulo expone un handle TIPADO de su dominio para que los
+    módulos que lo declaran en `depends_on` lo reciban vía `ctx.deps[slug]` — sin leer sus tablas
+    con SQL crudo. El handle se liga a la conexión + user de la ventana (lectura consistente con lo
+    que el proveedor ya persistió en esa tx). Los módulos sin esta capacidad no implementan esto."""
+
+    def provide_domain(self, conn: Connection, user_id: int) -> object:
+        """Construye el handle de dominio del módulo ligado a `(conn, user_id)`."""
         ...
 
 
