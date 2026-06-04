@@ -297,6 +297,121 @@ export function DirectoryPanel({
   )
 }
 
+// ---- Jerarquía de pertenencia (vista de evaluación del organizador) ---------------------------
+
+function TreeNode({
+  node,
+  childrenOf,
+  depth,
+  onSelect,
+}: {
+  node: Identity
+  childrenOf: Map<number, Identity[]>
+  depth: number
+  onSelect: (id: number) => void
+}) {
+  const kids = (childrenOf.get(node.id) ?? [])
+    .slice()
+    .sort((a, b) => a.displayName.localeCompare(b.displayName))
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onSelect(node.id)}
+        className="flex w-full items-center gap-2 px-4 py-1.5 text-left text-sm hover:bg-muted/40"
+        style={{ paddingLeft: 16 + depth * 18 }}
+      >
+        {depth > 0 && <span className="shrink-0 text-muted-foreground">└─</span>}
+        <Building2 className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="truncate">{node.displayName}</span>
+        {node.mentionCount > 0 && (
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            · {node.mentionCount} menc.
+          </span>
+        )}
+      </button>
+      {kids.length > 0 && (
+        <ul>
+          {kids.map((k) => (
+            <TreeNode
+              key={k.id}
+              node={k}
+              childrenOf={childrenOf}
+              depth={depth + 1}
+              onSelect={onSelect}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
+  )
+}
+
+export function HierarchyPanel({
+  refresh,
+  onSelect,
+}: {
+  refresh: number
+  onSelect: (id: number) => void
+}) {
+  const { data, loading, error } = useAsync(() => fetchIdentities({ kind: "organizacion" }), [refresh])
+  const orgs = data ?? []
+
+  const childrenOf = new Map<number, Identity[]>()
+  for (const o of orgs) {
+    if (o.parentId != null) {
+      const arr = childrenOf.get(o.parentId) ?? []
+      arr.push(o)
+      childrenOf.set(o.parentId, arr)
+    }
+  }
+  const linked = orgs.filter((o) => o.parentId != null).length
+  // Raíces (sin padre): primero las que tienen hijos (jerarquías reales), luego las sueltas.
+  const roots = orgs
+    .filter((o) => o.parentId == null)
+    .sort((a, b) => {
+      const ak = childrenOf.get(a.id)?.length ?? 0
+      const bk = childrenOf.get(b.id)?.length ?? 0
+      if (ak !== bk) return bk - ak
+      return a.displayName.localeCompare(b.displayName)
+    })
+  const rootsWithKids = roots.filter((r) => (childrenOf.get(r.id)?.length ?? 0) > 0).length
+
+  return (
+    <Panel className="overflow-hidden">
+      <PanelHeader
+        eyebrow="directorio · jerarquía"
+        title="Jerarquía de pertenencia"
+        sub="Evaluá el organizador: cada «sub» debería colgar de su contenedora correcta"
+        right={
+          <span className="eyebrow">
+            {linked}/{orgs.length} con padre · {rootsWithKids} jerarquías
+          </span>
+        }
+      />
+      <PanelBody className="p-0">
+        {error ? (
+          <ErrorState detail={error} />
+        ) : loading && !data ? (
+          <PanelLoader label="Cargando jerarquía…" />
+        ) : orgs.length === 0 ? (
+          <EmptyState
+            icon={<Building2 className="size-5" />}
+            title="Sin organizaciones"
+            hint="Cuando haya organizaciones, acá vas a ver el árbol de pertenencia."
+          />
+        ) : (
+          <ul className="max-h-[420px] overflow-y-auto py-1">
+            {roots.map((r) => (
+              <TreeNode key={r.id} node={r} childrenOf={childrenOf} depth={0} onSelect={onSelect} />
+            ))}
+          </ul>
+        )}
+      </PanelBody>
+    </Panel>
+  )
+}
+
 // ---- Detalle de una identidad (identificadores, sedes, afiliaciones, menciones, edición) ------
 
 function IdentifierRow({
@@ -335,10 +450,7 @@ function ParentPicker({
 
   useEffect(() => {
     const term = q.trim()
-    if (!term) {
-      setResults([])
-      return
-    }
+    if (!term) return // sin término: no buscamos; el dropdown se oculta por el gate del render
     let cancel = false
     void fetchIdentities({ kind: "organizacion", q: term }).then((rows) => {
       if (!cancel) setResults(rows.filter((r) => r.id !== identity.id).slice(0, 6))
@@ -356,7 +468,7 @@ function ParentPicker({
         placeholder="Buscar organización padre…"
         className={inputCls}
       />
-      {results.length > 0 && (
+      {q.trim() !== "" && results.length > 0 && (
         <ul className="mt-1 divide-y divide-border rounded-md border border-border">
           {results.map((r) => (
             <li key={r.id}>

@@ -2,6 +2,7 @@ import { useState } from "react"
 import { PageHeader } from "@/components/common/page-header"
 import {
   DirectoryPanel,
+  HierarchyPanel,
   IdentityDetailPanel,
   MergeReviewPanel,
   SyncPanel,
@@ -22,6 +23,7 @@ export function IdentidadesPage() {
         description="Identidades unificadas: personas y organizaciones, cada una con sus identificadores por-fuente (email, handles por red, dominios) y, para empresas, sus sedes. Lo que el sistema detecta en tus correos/chats/social entra como «Detectada» y la promovés a interés con un clic. Los posibles duplicados que el dedup difuso no fusiona solo quedan para tu revisión."
       />
       <MergeReviewPanel refresh={version} onChanged={bump} />
+      <HierarchyPanel refresh={version} onSelect={setSelectedId} />
       <div className="grid gap-5 xl:grid-cols-2">
         <DirectoryPanel
           selectedId={selectedId}

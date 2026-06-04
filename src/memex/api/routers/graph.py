@@ -63,10 +63,12 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         user_id=user_id,
         pistas=stats.cooccurrence_pistas,
         reales=stats.afiliacion_reales,
+        pertenencia=stats.pertenencia_reales,
         skipped=stats.high_fanout_skipped,
     )
     return {
         "cooccurrence_pistas": stats.cooccurrence_pistas,
         "afiliacion_reales": stats.afiliacion_reales,
+        "pertenencia_reales": stats.pertenencia_reales,
         "high_fanout_skipped": stats.high_fanout_skipped,
     }
