@@ -23,6 +23,7 @@ from sqlalchemy.engine import Connection
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, ModuleContext
+from memex.modules.dedup import forget_inbox_rows
 from memex.modules.identidades.prompt import IDENTIDADES_SYSTEM_PROMPT
 from memex.modules.identidades.resolve import KnownIndex, KnownOrg, KnownPerson, Resolution
 from memex.modules.identidades.schema import IdentityItem
@@ -102,18 +103,11 @@ class IdentidadesModule:
         return [dict(r) for r in rows]
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
-        """Borra las menciones atribuidas a `inbox_ids` (re-extracción en limpio). NO toca el
-        directorio (personas/orgs), que trasciende al mensaje — solo se borra la mención."""
-        result = conn.execute(
-            text(
-                """
-                DELETE FROM mod_identidades_mentions
-                WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
-                """
-            ),
-            {"uid": user_id, "ids": list(inbox_ids)},
+        """Olvida lo aportado por `inbox_ids`: saca la referencia y borra la mención solo si queda
+        huérfana. NO toca el directorio (personas/orgs), que trasciende al mensaje."""
+        return forget_inbox_rows(
+            conn, "mod_identidades_mentions", user_id=user_id, inbox_ids=inbox_ids
         )
-        return result.rowcount
 
 
 def _create_entity(

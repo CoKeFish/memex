@@ -25,6 +25,7 @@ from memex.modules.calendar.dedup import DedupRow, mark_duplicates
 from memex.modules.calendar.prompt import CALENDAR_SYSTEM_PROMPT
 from memex.modules.calendar.schema import CalendarEventItem
 from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, ModuleContext
+from memex.modules.dedup import forget_inbox_rows
 
 _log = get_logger("memex.modules.calendar")
 
@@ -233,15 +234,7 @@ class CalendarModule:
         return [dict(r) for r in rows]
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
-        """Borra los eventos (fila cruda) atribuidos a `inbox_ids` (re-extracción en limpio). NO
-        toca el consolidado ni los candidatos de dedup (estado que trasciende al mensaje)."""
-        result = conn.execute(
-            text(
-                """
-                DELETE FROM mod_calendar_events
-                WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
-                """
-            ),
-            {"uid": user_id, "ids": list(inbox_ids)},
-        )
-        return result.rowcount
+        """Olvida lo aportado por `inbox_ids` a los eventos (fila cruda): les saca la referencia y
+        borra solo la fila huérfana. NO toca el consolidado ni los candidatos de dedup (estado que
+        trasciende al mensaje)."""
+        return forget_inbox_rows(conn, "mod_calendar_events", user_id=user_id, inbox_ids=inbox_ids)

@@ -24,7 +24,7 @@ from sqlalchemy.engine import Connection
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_EXTRACT, ExtractionItem, ModuleContext
-from memex.modules.dedup import upsert_unique
+from memex.modules.dedup import forget_inbox_rows, upsert_unique
 from memex.modules.hackathones.prompt import HACKATHON_SYSTEM_PROMPT
 from memex.modules.hackathones.schema import HackathonItem
 
@@ -121,14 +121,8 @@ class HackathonModule:
         return [dict(r) for r in rows]
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
-        """Borra los hackatones atribuidos a `inbox_ids` (re-extracción en limpio)."""
-        result = conn.execute(
-            text(
-                """
-                DELETE FROM mod_hackathones_events
-                WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
-                """
-            ),
-            {"uid": user_id, "ids": list(inbox_ids)},
+        """Olvida lo aportado por `inbox_ids`: les saca la referencia y borra solo la fila que queda
+        huérfana (un hackatón re-anunciado por varios mensajes se preserva)."""
+        return forget_inbox_rows(
+            conn, "mod_hackathones_events", user_id=user_id, inbox_ids=inbox_ids
         )
-        return result.rowcount

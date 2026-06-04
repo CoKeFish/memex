@@ -145,11 +145,13 @@ class InterestModule(Protocol):
         ...
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
-        """Contraparte de ESCRITURA de `read_for_inbox`: borra las filas del módulo atribuidas a
-        `inbox_ids` para re-extraer en limpio. Borra de las MISMAS tablas públicas; NO toca estado
-        compartido que trasciende al mensaje (el directorio de identidades, el consolidado de
-        calendar). Devuelve cuántas filas borró. Read-write sobre `conn`; NO abre tx propia. La usa
-        el force re-extract iterando el registry — sin hardcodear tablas por módulo."""
+        """Contraparte de ESCRITURA de `read_for_inbox`: OLVIDA lo aportado por `inbox_ids` para
+        re-extraer en limpio — saca esos mensajes de `source_inbox_ids` y borra SOLO las filas que
+        quedan huérfanas. Una fila COMPARTIDA por varios mensajes (fusionada por dedup) se PRESERVA
+        con los restantes; reprocesar uno no se la lleva entera. NO toca estado que trasciende al
+        mensaje (el directorio de identidades, el consolidado de calendar). Devuelve cuántas filas
+        borró. Read-write sobre `conn`; NO abre tx propia. La usa el force re-extract iterando el
+        registry — sin hardcodear tablas por módulo."""
         ...
 
 

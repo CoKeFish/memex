@@ -179,6 +179,40 @@ def test_force_re_extract_clears_all_modules_via_registry(
     assert ide == 0  # identidades AHORA se limpia (antes el borrado hardcodeado lo omitía)
 
 
+def test_force_re_extract_preserves_shared_rows(client: Any, seed_source: dict[str, Any]) -> None:
+    """Una fila COMPARTIDA por varios mensajes (fusionada por dedup) NO se borra al reprocesar uno:
+    se le saca solo esa referencia y sobrevive con los mensajes restantes."""
+    from memex.modules.orchestrator import extract_inbox
+
+    _enable_modules()
+    a = _seed_classified(seed_source["id"], "shA")
+    b = _seed_classified(seed_source["id"], "shB")
+    with connection() as c:
+        c.execute(
+            text(
+                """
+                INSERT INTO mod_finance_expenses
+                  (user_id, source_inbox_ids, amount, currency, merchant)
+                VALUES (1, ARRAY[:a, :b]::bigint[], 150.0, 'MXN', 'OXXO')
+                """
+            ),
+            {"a": a, "b": b},
+        )
+
+    # Reprocesar SOLO el mensaje `a` (routing vacío → no re-extrae): la fila debe quedar con `b`.
+    asyncio.run(extract_inbox(1, a, force=True, client=FakeLLM('{"modules": []}')))
+
+    with connection() as c:
+        row = c.execute(
+            text(
+                "SELECT source_inbox_ids FROM mod_finance_expenses "
+                "WHERE user_id = 1 AND merchant = 'OXXO'"
+            )
+        ).first()
+    assert row is not None  # la fila compartida sobrevive
+    assert list(row[0]) == [b]  # se le sacó `a`, queda `b`
+
+
 def test_summarize_endpoint_409_when_not_classified(
     client: Any, seed_source: dict[str, Any]
 ) -> None:

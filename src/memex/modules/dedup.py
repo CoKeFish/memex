@@ -79,3 +79,38 @@ def upsert_unique(
         dict(row),
     ).scalar_one()
     return int(new_id), True
+
+
+def forget_inbox_rows(
+    conn: Connection, table: str, *, user_id: int, inbox_ids: Sequence[int]
+) -> int:
+    """Olvida lo aportado por `inbox_ids` a `table` (re-extracción en limpio): les saca esos ids a
+    `source_inbox_ids` y borra SOLO las filas que quedan huérfanas (sin ningún mensaje). Una fila
+    COMPARTIDA por varios mensajes se PRESERVA con los restantes: reprocesar uno no se la lleva
+    entera (inverso de la fusión de `upsert_unique`). Devuelve cuántas filas borró. `table` es
+    literal interno (NO input de usuario); los ids van por bind."""
+    ids = list(inbox_ids)
+    if not ids:
+        return 0
+    # 1) Sacar los ids reprocesados de source_inbox_ids (queda [] si era su único mensaje).
+    conn.execute(
+        text(
+            f"""
+            UPDATE {table}
+            SET source_inbox_ids = ARRAY(
+                SELECT x FROM unnest(source_inbox_ids) AS x
+                WHERE NOT (x = ANY(CAST(:ids AS BIGINT[])))
+            )
+            WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
+            """
+        ),
+        {"uid": user_id, "ids": ids},
+    )
+    # 2) Borrar las filas que quedaron huérfanas (sin mensaje de origen). Una fila nunca queda
+    #    legítimamente en [] fuera de este paso, así que `cardinality = 0` apunta solo a lo recién
+    #    vaciado.
+    result = conn.execute(
+        text(f"DELETE FROM {table} WHERE user_id = :uid AND cardinality(source_inbox_ids) = 0"),
+        {"uid": user_id},
+    )
+    return result.rowcount

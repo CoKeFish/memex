@@ -17,7 +17,7 @@ from sqlalchemy.engine import Connection
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_EXTRACT, ExtractionItem, ModuleContext
-from memex.modules.dedup import upsert_unique
+from memex.modules.dedup import forget_inbox_rows, upsert_unique
 from memex.modules.finance.prompt import FINANCE_SYSTEM_PROMPT
 from memex.modules.finance.schema import ExpenseItem
 
@@ -111,14 +111,6 @@ class FinanceModule:
         return [dict(r) for r in rows]
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
-        """Borra los gastos atribuidos a `inbox_ids` (re-extracción en limpio)."""
-        result = conn.execute(
-            text(
-                """
-                DELETE FROM mod_finance_expenses
-                WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
-                """
-            ),
-            {"uid": user_id, "ids": list(inbox_ids)},
-        )
-        return result.rowcount
+        """Olvida lo aportado por `inbox_ids`: les saca la referencia y borra solo la fila que queda
+        huérfana (una fila compartida por varios mensajes se preserva)."""
+        return forget_inbox_rows(conn, "mod_finance_expenses", user_id=user_id, inbox_ids=inbox_ids)
