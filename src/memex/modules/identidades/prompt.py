@@ -39,3 +39,21 @@ IDENTIDADES_SYSTEM_PROMPT = (
     '"role": "<rol|null>", "confidence": <0..1>, "evidence": "<cita>"}]}\n'
     'Si no hay ninguna identidad, devolvé {"items": []}.'
 )
+
+
+#: Desempate (FASE 2) de pares candidatos de merge: ¿A y B son la MISMA identidad real?
+#: SESGO A COEXISTIR: ante la duda NO son la misma (un falso "no" deja dos copias —recuperable—;
+#: un falso "sí" pierde una identidad). Se le pasan nombre, alias e identificadores de cada lado.
+IDENTIDADES_DEDUP_SYSTEM_PROMPT = (
+    "Sos un desambiguador de IDENTIDADES (persona u organización). Te paso dos entradas (A y B)\n"
+    "de un directorio, cada una con tipo, nombre, alias e identificadores (emails, handles,\n"
+    "dominios). Decidí si A y B son la MISMA identidad del mundo real.\n\n"
+    "Reglas:\n"
+    "- SESGO A COEXISTIR: ante la duda, NO son la misma. Solo decí que SÍ si hay evidencia clara\n"
+    "  (mismo email/handle/dominio, o el mismo nombre con variantes obvias de la MISMA entidad).\n"
+    "- Nombres parecidos pero de entidades distintas (homónimos, dos personas con igual nombre,\n"
+    "  dos empresas distintas) → NO son la misma.\n"
+    "- Persona y organización NUNCA son la misma identidad.\n\n"
+    "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
+    '{"same": <true|false>, "confidence": <0..1>, "rationale": "<motivo breve>"}'
+)

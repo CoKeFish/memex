@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import date
 from typing import ClassVar, Protocol, runtime_checkable
 
 from memex.core.source import HealthResult
@@ -43,6 +44,24 @@ class ContactsSyncTokenExpired(ContactsProviderError):
 
 
 @dataclass(frozen=True)
+class ProviderAddress:
+    """Una dirección de un contacto (persona → `metadata.addresses`; organización → sedes)."""
+
+    label: str = ""
+    address: str = ""
+    country: str | None = None
+
+
+@dataclass(frozen=True)
+class ProviderIdentifier:
+    """Un identificador por-fuente que el proveedor expone (handle de red, URL de perfil, …)."""
+
+    platform: str  # 'x', 'instagram', 'linkedin', 'skype', 'url', ...
+    kind: str  # 'handle' | 'url'
+    value: str
+
+
+@dataclass(frozen=True)
 class ProviderContact:
     """Un contacto tal como lo devuelve un proveedor externo (ya estructurado).
 
@@ -51,6 +70,9 @@ class ProviderContact:
     marca el proveedor en el delta (`PersonMetadata.deleted`): el contacto se borró desde
     el último sync; conserva el `resource_name` (por eso el borrado NO va en una lista aparte, a
     diferencia de calendar, donde el borrado llega sin fecha mapeable).
+
+    `birthday` solo se setea si el proveedor da fecha COMPLETA (año+mes+día). `nicknames` alimenta
+    los alias de la identidad; `addresses` e `identifiers` (handles/urls) los identificadores/sedes.
     """
 
     resource_name: str
@@ -63,6 +85,10 @@ class ProviderContact:
     org_name: str | None = None
     role: str | None = None
     photo_url: str | None = None
+    birthday: date | None = None
+    nicknames: Sequence[str] = field(default_factory=tuple)
+    addresses: Sequence[ProviderAddress] = field(default_factory=tuple)
+    identifiers: Sequence[ProviderIdentifier] = field(default_factory=tuple)
     deleted: bool = False
 
 

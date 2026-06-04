@@ -1,138 +1,168 @@
-"""Resolución DETERMINISTA de una mención a una identidad canónica (persona u org conocida).
+"""Resolución DETERMINISTA de una mención a una identidad canónica (persona u organización).
 
-Determinismo primero (ADR / filosofía del proyecto): sin LLM en este slice. Una mención se ata a una
-identidad conocida por señales fuertes, en orden de prioridad:
+Señales FUERTES, en orden de prioridad (sin LLM; el difuso y el desempate LLM viven en `fuzzy.py` /
+`dedup_llm.py`):
 
-  1. email exacto      → persona
-  2. dominio del email → org   (p. ej. `@unity.com` → la org Unity)
-  3. handle exacto     → persona
-  4. nombre normalizado→ persona (nombre exacto)
-  5. nombre normalizado→ org     (nombre exacto u alias)
-  6. nada matchea      → unresolved (coexiste; un slice futuro podría desambiguar con LLM atómico)
+  1. remitente del mensaje (email del `from`) → identidad   (señal de contexto fuerte)
+  2. email exacto del item                    → identidad
+  3. dominio del email                         → org
+  4. handle exacto ACOTADO POR PLATAFORMA      → identidad   (el handle de X ≠ Instagram ≠ ...)
+  5. nombre normalizado exacto                 → identidad
+  6. alias normalizado                         → identidad
+  7. nada matchea                              → unresolved
 
-`KnownIndex` es puro (se arma desde listas en memoria) → testeable sin DB. El módulo lo alimenta con
-lo que lee de `mod_identidades_persons` / `mod_identidades_orgs`.
+`KnownIndex` es puro (se arma desde una lista de `KnownIdentity` en memoria) → testeable sin DB. El
+módulo lo alimenta con lo que lee de `mod_identidades` + `mod_identidades_identifiers`. La
+normalización de nombre/alias usa `normalize_match` (espejo de `memex_norm`); los identificadores
+ya vienen normalizados (`value_norm`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from memex.modules.contract import normalize
+from memex.modules.identidades.normalize import norm_identifier, normalize_match
 from memex.modules.identidades.schema import IdentityItem
 
+#: Discriminador de identidad (espejo del CHECK `kind` en mod_identidades).
+KIND_PERSONA = "persona"
+KIND_ORG = "organizacion"
+
 
 @dataclass(frozen=True)
-class KnownPerson:
-    """Una persona conocida, reducida a las llaves de match."""
+class KnownIdentifier:
+    """Un identificador por-fuente de una identidad, reducido a las llaves de match."""
+
+    platform: str
+    kind: str  # 'email'|'phone'|'handle'|'domain'|'url'
+    value_norm: str
+
+
+@dataclass(frozen=True)
+class KnownIdentity:
+    """Una identidad conocida, reducida a las llaves de match (nombre, alias, identificadores)."""
 
     id: int
+    kind: str  # 'persona' | 'organizacion'
     display_name: str
-    emails: Sequence[str] = ()
-    handles: Sequence[str] = ()
-
-
-@dataclass(frozen=True)
-class KnownOrg:
-    """Una org conocida, reducida a las llaves de match."""
-
-    id: int
-    name: str
     aliases: Sequence[str] = ()
-    domains: Sequence[str] = ()
+    identifiers: Sequence[KnownIdentifier] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
 class Resolution:
-    """Resultado de atar una mención a una entidad canónica (o no)."""
+    """Resultado de atar una mención a una identidad canónica (o no)."""
 
-    kind: str | None  # 'person' | 'org' | None
-    person_id: int | None
-    org_id: int | None
-    method: str  # 'email'|'domain'|'handle'|'exact_name'|'alias'|'unresolved'
+    kind: str | None  # 'persona' | 'organizacion' | None
+    identity_id: int | None
+    #: email/domain/handle/exact_name/alias/sender_email/fuzzy/llm/created/unresolved
+    method: str
 
     @classmethod
     def unresolved(cls) -> Resolution:
-        return cls(kind=None, person_id=None, org_id=None, method="unresolved")
-
-
-def _norm_handle(h: str) -> str:
-    return h.strip().lower().lstrip("@")
+        return cls(kind=None, identity_id=None, method="unresolved")
 
 
 class KnownIndex:
-    """Índices en memoria para resolución determinista O(1) por mención. El primer match gana
-    (`setdefault`), así el orden de inserción es estable y predecible."""
+    """Índices en memoria para resolución determinista O(1). El primer match gana (`setdefault`),
+    así el orden de inserción es estable. Los handles se indexan ACOTADOS por plataforma (y también
+    sin plataforma, para resolver solo cuando el valor es único entre plataformas)."""
 
-    def __init__(self, persons: Sequence[KnownPerson] = (), orgs: Sequence[KnownOrg] = ()) -> None:
-        self._email_person: dict[str, int] = {}
-        self._handle_person: dict[str, int] = {}
-        self._name_person: dict[str, int] = {}
-        self._name_org: dict[str, int] = {}
-        self._alias_org: dict[str, int] = {}
-        self._domain_org: dict[str, int] = {}
-        for p in persons:
-            self.add_person(p)
-        for o in orgs:
-            self.add_org(o)
+    def __init__(self, identities: Sequence[KnownIdentity] = ()) -> None:
+        self._kind: dict[int, str] = {}
+        self._email: dict[str, int] = {}
+        self._domain: dict[str, int] = {}
+        self._handle_by_platform: dict[tuple[str, str], int] = {}
+        self._handle_any: dict[str, set[int]] = {}
+        self._name: dict[str, int] = {}
+        self._alias: dict[str, int] = {}
+        for ident in identities:
+            self.add(ident)
 
-    def add_person(self, p: KnownPerson) -> None:
-        """Registra una persona en el índice (primer match gana). Permite que el dedup vea las
-        identidades creadas dentro de la MISMA corrida de extracción."""
-        for e in p.emails:
-            key = e.strip().lower()
-            if key:
-                self._email_person.setdefault(key, p.id)
-        for h in p.handles:
-            key = _norm_handle(h)
-            if key:
-                self._handle_person.setdefault(key, p.id)
-        name_key = normalize(p.display_name)
+    def add(self, ident: KnownIdentity) -> None:
+        """Registra una identidad (primer match gana). Permite que el dedup vea identidades creadas
+        dentro de la MISMA corrida de extracción."""
+        self._kind.setdefault(ident.id, ident.kind)
+        name_key = normalize_match(ident.display_name)
         if name_key:
-            self._name_person.setdefault(name_key, p.id)
-
-    def add_org(self, o: KnownOrg) -> None:
-        """Registra una org en el índice (primer match gana)."""
-        name_key = normalize(o.name)
-        if name_key:
-            self._name_org.setdefault(name_key, o.id)
-        for a in o.aliases:
-            ak = normalize(a)
+            self._name.setdefault(name_key, ident.id)
+        for a in ident.aliases:
+            ak = normalize_match(a)
             if ak:
-                self._alias_org.setdefault(ak, o.id)
-        for d in o.domains:
-            dk = d.strip().lower()
-            if dk:
-                self._domain_org.setdefault(dk, o.id)
+                self._alias.setdefault(ak, ident.id)
+        for idf in ident.identifiers:
+            if not idf.value_norm:
+                continue
+            if idf.kind == "email":
+                self._email.setdefault(idf.value_norm, ident.id)
+            elif idf.kind == "domain":
+                self._domain.setdefault(idf.value_norm, ident.id)
+            elif idf.kind == "handle":
+                self._handle_by_platform.setdefault((idf.platform, idf.value_norm), ident.id)
+                self._handle_any.setdefault(idf.value_norm, set()).add(ident.id)
 
-    def resolve(self, item: IdentityItem) -> Resolution:
+    def add_alias(self, alias: str, identity_id: int) -> None:
+        """Registra un alias nuevo (p. ej. tras un auto-merge que suma el nombre variante)."""
+        ak = normalize_match(alias)
+        if ak:
+            self._alias.setdefault(ak, identity_id)
+
+    def _res(self, identity_id: int, method: str) -> Resolution:
+        return Resolution(self._kind.get(identity_id), identity_id, method)
+
+    def _by_email(self, raw: str, method: str) -> Resolution | None:
+        """email exacto → identidad; si no, dominio del email → org."""
+        key = norm_identifier("email", raw)
+        if not key:
+            return None
+        iid = self._email.get(key)
+        if iid is not None:
+            return self._res(iid, method)
+        domain = key.rpartition("@")[2]
+        if domain:
+            oid = self._domain.get(domain)
+            if oid is not None:
+                # el método del dominio es 'domain' salvo que venga del remitente.
+                return self._res(oid, "domain" if method == "email" else method)
+        return None
+
+    def resolve(
+        self,
+        item: IdentityItem,
+        *,
+        sender_email: str | None = None,
+        source_platform: str | None = None,
+    ) -> Resolution:
+        # 1. remitente del mensaje (señal fuerte de contexto).
+        if sender_email:
+            res = self._by_email(sender_email, "sender_email")
+            if res is not None:
+                return res
+        # 2/3. email del item → identidad; dominio → org.
         if item.email:
-            email = item.email.strip().lower()
-            pid = self._email_person.get(email)
-            if pid is not None:
-                return Resolution("person", pid, None, "email")
-            domain = email.rpartition("@")[2]
-            if domain:
-                oid = self._domain_org.get(domain)
-                if oid is not None:
-                    return Resolution("org", None, oid, "domain")
-
+            res = self._by_email(item.email, "email")
+            if res is not None:
+                return res
+        # 4. handle exacto acotado por plataforma (o único entre plataformas si no se conoce).
         if item.handle:
-            pid = self._handle_person.get(_norm_handle(item.handle))
-            if pid is not None:
-                return Resolution("person", pid, None, "handle")
-
-        name_key = normalize(item.name)
+            hk = norm_identifier("handle", item.handle)
+            if hk:
+                if source_platform is not None:
+                    iid = self._handle_by_platform.get((source_platform, hk))
+                    if iid is not None:
+                        return self._res(iid, "handle")
+                else:
+                    ids = self._handle_any.get(hk)
+                    if ids and len(ids) == 1:
+                        return self._res(next(iter(ids)), "handle")
+        # 5/6. nombre exacto / alias.
+        name_key = normalize_match(item.name)
         if name_key:
-            pid = self._name_person.get(name_key)
-            if pid is not None:
-                return Resolution("person", pid, None, "exact_name")
-            oid = self._name_org.get(name_key)
-            if oid is not None:
-                return Resolution("org", None, oid, "exact_name")
-            oid = self._alias_org.get(name_key)
-            if oid is not None:
-                return Resolution("org", None, oid, "alias")
-
+            iid = self._name.get(name_key)
+            if iid is not None:
+                return self._res(iid, "exact_name")
+            iid = self._alias.get(name_key)
+            if iid is not None:
+                return self._res(iid, "alias")
         return Resolution.unresolved()

@@ -1,14 +1,13 @@
-"""Worker `run_sync` contra la DB de test con un proveedor FALSO (sin red).
+"""Worker `run_sync` contra la DB de test con un proveedor FALSO (sin red), modelo unificado.
 
-Cubre el corazón del slice 1: upsert idempotente por `provider_resource_name`, detección
-created/modified/unchanged por `etag`, marca SUAVE de borrados, creación de org + asociación desde
-`org_name`, paginación, y la observabilidad (`mod_identidades_sync_runs`).
-"""
+Cubre: upsert idempotente por `provider_resource_name`, created/modified/unchanged por `etag`,
+marca SUAVE de borrados, org + asociación desde `org_name`, paginación, observabilidad
+(`mod_identidades_sync_runs`) y el mapeo enriquecido (cumpleaños/apodos/identificadores)."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, ClassVar
 
 import pytest
@@ -16,7 +15,11 @@ from sqlalchemy import text
 
 from memex.core.source import HealthResult
 from memex.db import connection
-from memex.modules.identidades.providers.base import ProviderContact, ProviderContactsPage
+from memex.modules.identidades.providers.base import (
+    ProviderContact,
+    ProviderContactsPage,
+    ProviderIdentifier,
+)
 from memex.modules.identidades.sync import run_sync
 
 
@@ -49,6 +52,9 @@ def _pc(
     phones: Sequence[str] = (),
     org_name: str | None = None,
     role: str | None = None,
+    birthday: date | None = None,
+    nicknames: Sequence[str] = (),
+    identifiers: Sequence[ProviderIdentifier] = (),
     deleted: bool = False,
 ) -> ProviderContact:
     return ProviderContact(
@@ -59,6 +65,9 @@ def _pc(
         phones=tuple(phones),
         org_name=org_name,
         role=role,
+        birthday=birthday,
+        nicknames=tuple(nicknames),
+        identifiers=tuple(identifiers),
         deleted=deleted,
     )
 
@@ -85,8 +94,8 @@ def _persons(account_id: int) -> list[dict[str, Any]]:
             dict(r)
             for r in c.execute(
                 text(
-                    "SELECT * FROM mod_identidades_persons "
-                    "WHERE provider_account_id = :a ORDER BY id"
+                    "SELECT * FROM mod_identidades "
+                    "WHERE provider_account_id = :a AND kind = 'persona' ORDER BY id"
                 ),
                 {"a": account_id},
             )
@@ -95,12 +104,24 @@ def _persons(account_id: int) -> list[dict[str, Any]]:
         ]
 
 
+def _identifiers(identity_id: int, kind: str | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM mod_identidades_identifiers WHERE identity_id = :i"
+    if kind:
+        sql += f" AND kind = '{kind}'"
+    with connection() as c:
+        rows = c.execute(text(sql + " ORDER BY id"), {"i": identity_id}).mappings()
+        return [dict(r) for r in rows]
+
+
 def _orgs(user_id: int = 1) -> list[dict[str, Any]]:
     with connection() as c:
         return [
             dict(r)
             for r in c.execute(
-                text("SELECT * FROM mod_identidades_orgs WHERE user_id = :u ORDER BY id"),
+                text(
+                    "SELECT * FROM mod_identidades "
+                    "WHERE user_id = :u AND kind = 'organizacion' ORDER BY id"
+                ),
                 {"u": user_id},
             )
             .mappings()
@@ -165,7 +186,8 @@ async def test_sync_inserts_persons_and_records_run() -> None:
     rows = _persons(aid)
     assert len(rows) == 2
     assert all(r["source"] == "google_contacts" for r in rows)
-    assert rows[0]["emails"] == ["ada@x.com"]
+    ada = next(r for r in rows if r["display_name"] == "Ada Lovelace")
+    assert [i["value"] for i in _identifiers(ada["id"], "email")] == ["ada@x.com"]
     assert _sync_token(aid) == "T1"
 
     runs = _sync_runs(aid)
@@ -226,7 +248,7 @@ async def test_sync_creates_org_and_association() -> None:
 
     orgs = _orgs()
     assert len(orgs) == 1
-    assert orgs[0]["name"] == "Unity"
+    assert orgs[0]["display_name"] == "Unity"
     assert orgs[0]["kind"] == "organizacion"
     assert orgs[0]["interest"] is False  # descubierta, no de la lista curada
     assert orgs[0]["source"] == "google_contacts"
@@ -235,6 +257,33 @@ async def test_sync_creates_org_and_association() -> None:
     assert len(links) == 1
     assert links[0]["org_id"] == orgs[0]["id"]
     assert links[0]["role"] == "Engineer"
+
+
+@pytest.mark.asyncio
+async def test_sync_maps_birthday_nicknames_identifiers() -> None:
+    aid = _seed_account()
+    fake = FakeProvider(
+        ProviderContactsPage(
+            contacts=(
+                _pc(
+                    "people/c1",
+                    "Ada Lovelace",
+                    birthday=date(1990, 6, 15),
+                    nicknames=("Ada",),
+                    identifiers=(ProviderIdentifier("x", "handle", "adalove"),),
+                ),
+            )
+        )
+    )
+
+    await run_sync(1, aid, client=fake)
+
+    row = _persons(aid)[0]
+    assert row["birthday"] == date(1990, 6, 15)
+    assert "Ada" in row["aliases"]
+    handles = _identifiers(row["id"], "handle")
+    assert len(handles) == 1 and handles[0]["platform"] == "x"
+    assert handles[0]["value_norm"] == "adalove"
 
 
 @pytest.mark.asyncio

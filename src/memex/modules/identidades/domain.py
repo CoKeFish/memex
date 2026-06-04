@@ -23,9 +23,9 @@ from memex.modules.identidades.schema import IdentityItem
 class ResolvedIdentity:
     """Una referencia (nombre/email/handle) resuelta a una identidad canónica."""
 
-    kind: str  # 'person' | 'org'
+    kind: str  # 'persona' | 'organizacion'
     id: int
-    method: str  # cómo matcheó: 'email'|'domain'|'handle'|'exact_name'|'alias'
+    method: str  # cómo matcheó: 'email'|'domain'|'handle'|'exact_name'|'alias'|'sender_email'
 
 
 @runtime_checkable
@@ -64,8 +64,6 @@ class IdentidadesDomainReader:
         # Reusa la MISMA resolución determinista que la extracción, vía un `IdentityItem` mínimo.
         probe = IdentityItem(source_inbox_ids=(), name=name, email=email, handle=handle)
         res = self._ensure_index().resolve(probe)
-        if res.kind == "person" and res.person_id is not None:
-            return ResolvedIdentity("person", res.person_id, res.method)
-        if res.kind == "org" and res.org_id is not None:
-            return ResolvedIdentity("org", res.org_id, res.method)
+        if res.kind is not None and res.identity_id is not None:
+            return ResolvedIdentity(res.kind, res.identity_id, res.method)
         return None

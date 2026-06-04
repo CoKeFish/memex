@@ -1,8 +1,9 @@
 """Worker de sincronización de contactos externos (slice 1 = ingress read-only idempotente).
 
 `memex-identidades sync` trae el delta de contactos de un proveedor (Google People) y los escribe
-DIRECTO a `mod_identidades_persons` (las personas del proveedor ya vienen estructuradas; NO pasan
-por inbox/classifier/LLM — el sync vive dentro del módulo, calca `calendar.sync`).
+DIRECTO al directorio unificado `mod_identidades` (kind='persona') + sus identificadores/sedes (las
+personas del proveedor ya vienen estructuradas; NO pasan por inbox/classifier/LLM — el sync vive
+dentro del módulo, calca `calendar.sync`).
 
 Idempotencia: un `provider_resource_name` no se duplica entre corridas (UNIQUE parcial + upsert por
 SELECT-then-INSERT/UPDATE comparando `etag`). El cursor incremental (`sync_token` de la People API)
@@ -10,8 +11,11 @@ se persiste en la cuenta; el próximo `sync` solo trae el delta. 410 GONE (token
 resync transparente. Los borrados llegan en el delta (`deleted=True`) y se marcan SUAVE
 (`metadata.deleted`) sin borrar la fila (coexistencia / auditoría, calca calendar).
 
-Si un contacto trae organización (`org_name`), se asegura una fila en `mod_identidades_orgs`
-(`source='google_contacts'`, `interest=FALSE`: descubierta, no curada) + la asociación persona↔org.
+Mapeo al modelo unificado: emails/teléfonos/handles/urls → `mod_identidades_identifiers` (por
+plataforma); cumpleaños (fecha completa) → `birthday`; apodos → `aliases`; direcciones →
+`metadata.addresses` (una persona no tiene "sedes"). Si un contacto trae organización (`org_name`),
+se asegura una org en `mod_identidades` (`source='google_contacts'`, `interest=FALSE`) + la
+asociación persona↔org.
 
 Token OAuth: resuelto desde el VAULT de la cuenta del dashboard (Decisión 6), no de disco. Cliente
 del proveedor inyectable (tests con fake, sin red), igual que el worker de calendar.
@@ -19,6 +23,7 @@ del proveedor inyectable (tests con fake, sin red), igual que el worker de calen
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -26,6 +31,7 @@ from sqlalchemy.engine import Connection
 
 from memex.db import connection
 from memex.logging import get_logger
+from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.providers import oauth, resolve
 from memex.modules.identidades.providers.base import (
     ContactsProvider,
@@ -126,11 +132,12 @@ def _finish_run(conn: Connection, run_id: int, stats: ContactsSyncStats, *, stat
 
 
 def _ensure_org(conn: Connection, user_id: int, name: str) -> int:
-    """Asegura una org descubierta desde un contacto (idempotente por nombre case-insensitive).
+    """Asegura una org descubierta desde un contacto (idempotente por nombre normalizado).
     `interest=FALSE` (descubierta, no de la lista curada). Devuelve el id."""
     existing = conn.execute(
         text(
-            "SELECT id FROM mod_identidades_orgs WHERE user_id = :uid AND lower(name) = lower(:n)"
+            "SELECT id FROM mod_identidades WHERE user_id = :uid AND kind = 'organizacion' "
+            "AND name_norm = memex_norm(:n)"
         ),
         {"uid": user_id, "n": name},
     ).first()
@@ -140,8 +147,8 @@ def _ensure_org(conn: Connection, user_id: int, name: str) -> int:
         conn.execute(
             text(
                 """
-                INSERT INTO mod_identidades_orgs (user_id, name, kind, interest, source)
-                VALUES (:uid, :n, 'organizacion', FALSE, 'google_contacts')
+                INSERT INTO mod_identidades (user_id, kind, display_name, interest, source)
+                VALUES (:uid, 'organizacion', :n, FALSE, 'google_contacts')
                 RETURNING id
                 """
             ),
@@ -174,13 +181,62 @@ def _link_org(
     _ensure_person_org(conn, account.user_id, person_id, org_id, contact.role)
 
 
-def _upsert_person(conn: Connection, account: _Account, contact: ProviderContact) -> str:
-    """Inserta o actualiza una persona por su `provider_resource_name`. Devuelve la acción
-    ('created'/'modified'/'unchanged'). Asegura org + asociación si el contacto trae org."""
+def _addresses_meta(contact: ProviderContact) -> str:
+    """JSON para `metadata` con las direcciones del contacto (una persona NO tiene sedes; van a
+    metadata). `{}` si no hay, para no pisar otras llaves de metadata al hacer `||`."""
+    if not contact.addresses:
+        return "{}"
+    return json.dumps(
+        {
+            "addresses": [
+                {"label": a.label, "address": a.address, "country": a.country}
+                for a in contact.addresses
+            ]
+        }
+    )
+
+
+def _sync_identifiers(
+    conn: Connection, account: _Account, identity_id: int, contact: ProviderContact
+) -> None:
+    """Vuelca emails/teléfonos/handles/urls del contacto a `mod_identidades_identifiers`
+    (idempotente por la UNIQUE). No borra los que ya no estén (drift tolerado en este slice)."""
+    triples = (
+        [("email", "email", e) for e in contact.emails]
+        + [("phone", "phone", p) for p in contact.phones]
+        + [(i.platform, i.kind, i.value) for i in contact.identifiers]
+    )
+    for platform, kind, value in triples:
+        vn = norm_identifier(kind, value)
+        if not vn:
+            continue
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_identidades_identifiers
+                  (user_id, identity_id, platform, kind, value, value_norm, source)
+                VALUES (:u, :iid, :p, :k, :v, :vn, 'google_contacts')
+                ON CONFLICT (identity_id, platform, kind, value_norm) DO NOTHING
+                """
+            ),
+            {
+                "u": account.user_id,
+                "iid": identity_id,
+                "p": platform,
+                "k": kind,
+                "v": value,
+                "vn": vn,
+            },
+        )
+
+
+def _upsert_identity(conn: Connection, account: _Account, contact: ProviderContact) -> str:
+    """Inserta o actualiza una PERSONA (kind='persona') por su `provider_resource_name`. Devuelve la
+    acción ('created'/'modified'/'unchanged'). Vuelca identificadores + org si el contacto trae."""
     existing = conn.execute(
         text(
             """
-            SELECT id, provider_etag FROM mod_identidades_persons
+            SELECT id, provider_etag FROM mod_identidades
             WHERE provider = :provider AND provider_account_id = :aid
               AND provider_resource_name = :rn
             """
@@ -193,39 +249,40 @@ def _upsert_person(conn: Connection, account: _Account, contact: ProviderContact
         "display_name": contact.display_name,
         "given_name": contact.given_name,
         "family_name": contact.family_name,
-        "emails": list(contact.emails),
-        "phones": list(contact.phones),
-        "org_name": contact.org_name,
-        "role": contact.role,
+        "birthday": contact.birthday,
+        "aliases": list(contact.nicknames),
         "provider": account.provider,
         "aid": account.id,
         "rn": contact.resource_name,
         "etag": contact.etag,
         "photo_url": contact.photo_url,
+        "meta": _addresses_meta(contact),
     }
 
     if existing is None:
-        person_id = int(
+        identity_id = int(
             conn.execute(
                 text(
                     """
-                    INSERT INTO mod_identidades_persons
-                      (user_id, display_name, given_name, family_name, emails, phones, org_name,
-                       role, source, interest, provider, provider_account_id,
-                       provider_resource_name, provider_etag, photo_url)
+                    INSERT INTO mod_identidades
+                      (user_id, kind, display_name, given_name, family_name, birthday, aliases,
+                       source, interest, provider, provider_account_id, provider_resource_name,
+                       provider_etag, photo_url, metadata)
                     VALUES
-                      (:uid, :display_name, :given_name, :family_name, :emails, :phones, :org_name,
-                       :role, 'google_contacts', TRUE, :provider, :aid, :rn, :etag, :photo_url)
+                      (:uid, 'persona', :display_name, :given_name, :family_name, :birthday,
+                       CAST(:aliases AS TEXT[]), 'google_contacts', TRUE, :provider, :aid, :rn,
+                       :etag, :photo_url, CAST(:meta AS JSONB))
                     RETURNING id
                     """
                 ),
                 params,
             ).scalar_one()
         )
-        _link_org(conn, account, person_id, contact)
+        _sync_identifiers(conn, account, identity_id, contact)
+        _link_org(conn, account, identity_id, contact)
         return "created"
 
-    person_id = int(existing[0])
+    identity_id = int(existing[0])
     current_etag = existing[1]
     if contact.etag is not None and current_etag == contact.etag:
         return "unchanged"
@@ -233,26 +290,32 @@ def _upsert_person(conn: Connection, account: _Account, contact: ProviderContact
     conn.execute(
         text(
             """
-            UPDATE mod_identidades_persons SET
+            UPDATE mod_identidades SET
               display_name = :display_name, given_name = :given_name, family_name = :family_name,
-              emails = :emails, phones = :phones, org_name = :org_name, role = :role,
-              provider_etag = :etag, photo_url = :photo_url, updated_at = NOW()
+              birthday = :birthday,
+              aliases = (
+                SELECT COALESCE(array_agg(DISTINCT x), '{}')
+                FROM unnest(aliases || CAST(:aliases AS TEXT[])) AS x
+              ),
+              provider_etag = :etag, photo_url = :photo_url,
+              metadata = metadata || CAST(:meta AS JSONB), updated_at = NOW()
             WHERE id = :id
             """
         ),
-        {**params, "id": person_id},
+        {**params, "id": identity_id},
     )
-    _link_org(conn, account, person_id, contact)
+    _sync_identifiers(conn, account, identity_id, contact)
+    _link_org(conn, account, identity_id, contact)
     return "modified"
 
 
 def _mark_deleted(conn: Connection, account: _Account, resource_name: str) -> bool:
-    """Marca SUAVE (`metadata.deleted=true`) la persona borrada en el proveedor. NO borra la fila
+    """Marca SUAVE (`metadata.deleted=true`) la identidad borrada en el proveedor. NO borra la fila
     (coexistencia / auditoría). Devuelve True si existía una fila para marcar."""
     row = conn.execute(
         text(
             """
-            UPDATE mod_identidades_persons
+            UPDATE mod_identidades
             SET metadata = metadata || '{"deleted": true}'::jsonb, updated_at = NOW()
             WHERE provider = :provider AND provider_account_id = :aid
               AND provider_resource_name = :rn
@@ -392,7 +455,7 @@ async def run_sync(
                 if _mark_deleted(conn, account, contact.resource_name):
                     stats.deleted += 1
                 continue
-            action = _upsert_person(conn, account, contact)
+            action = _upsert_identity(conn, account, contact)
             if action == "created":
                 stats.created += 1
             elif action == "modified":

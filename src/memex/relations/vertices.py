@@ -52,8 +52,16 @@ NODE_SOURCES: tuple[NodeSource, ...] = (
     NodeSource("finance", "mod_finance_expenses", "merchant", "gasto"),
     NodeSource("hackathones", "mod_hackathones_events", "name", "hackaton"),
     NodeSource("calendar", "mod_calendar_consolidated", "title", "evento", where="NOT deleted"),
-    NodeSource("identidades:person", "mod_identidades_persons", "display_name", "persona"),
-    NodeSource("identidades:org", "mod_identidades_orgs", "name", "organizacion"),
+    NodeSource(
+        "identidades:person", "mod_identidades", "display_name", "persona", where="kind = 'persona'"
+    ),
+    NodeSource(
+        "identidades:org",
+        "mod_identidades",
+        "display_name",
+        "organizacion",
+        where="kind = 'organizacion'",
+    ),
 )
 
 _BY_SLUG: dict[str, NodeSource] = {s.slug: s for s in NODE_SOURCES}

@@ -21,7 +21,7 @@ Sync incremental por `syncToken` (People API): full sync con `requestSyncToken=t
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, ClassVar
 
 import httpx
@@ -31,15 +31,20 @@ from memex.logging import get_logger
 from memex.modules.identidades.providers.base import (
     ContactsProviderError,
     ContactsSyncTokenExpired,
+    ProviderAddress,
     ProviderContact,
     ProviderContactsPage,
+    ProviderIdentifier,
 )
 from memex.modules.identidades.providers.config import ContactsSyncConfig
 
 _BODY_PREVIEW_MAX = 500
-#: Campos pedidos por contacto. `metadata` trae `deleted` (delta) + el etag de fuentes; el resto son
-#: los datos que `mod_identidades_persons` necesita.
-_PERSON_FIELDS = "metadata,names,emailAddresses,phoneNumbers,organizations,photos"
+#: Campos pedidos por contacto. `metadata` trae `deleted` (delta) + el etag; el resto alimenta el
+#: directorio unificado (nombre/contacto/cumpleaños/identificadores por-fuente/direcciones).
+_PERSON_FIELDS = (
+    "metadata,names,nicknames,emailAddresses,phoneNumbers,organizations,photos,"
+    "birthdays,addresses,urls,imClients"
+)
 
 
 def _primary_or_first(items: Any) -> dict[str, Any] | None:
@@ -80,6 +85,61 @@ def _str_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
+def _parse_birthday(item: dict[str, Any]) -> date | None:
+    """Solo fecha COMPLETA (año+mes+día); parcial (sin año) → None (no rompe el DATE)."""
+    cand = _primary_or_first(item.get("birthdays"))
+    d = cand.get("date") if cand else None
+    if not isinstance(d, dict):
+        return None
+    y, m, day = d.get("year"), d.get("month"), d.get("day")
+    if isinstance(y, int) and isinstance(m, int) and isinstance(day, int):
+        try:
+            return date(y, m, day)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_addresses(item: dict[str, Any]) -> tuple[ProviderAddress, ...]:
+    raw = item.get("addresses")
+    if not isinstance(raw, list):
+        return ()
+    out: list[ProviderAddress] = []
+    for a in raw:
+        if not isinstance(a, dict):
+            continue
+        formatted = _str_or_none(a.get("formattedValue"))
+        country = _str_or_none(a.get("country"))
+        label = _str_or_none(a.get("formattedType")) or _str_or_none(a.get("type")) or ""
+        if formatted or country:
+            out.append(ProviderAddress(label=label, address=formatted or "", country=country))
+    return tuple(out)
+
+
+def _parse_identifiers(item: dict[str, Any]) -> tuple[ProviderIdentifier, ...]:
+    """URLs de perfil (`urls`) + cuentas de mensajería (`imClients`) como identificadores."""
+    out: list[ProviderIdentifier] = []
+    urls = item.get("urls")
+    if isinstance(urls, list):
+        for u in urls:
+            if isinstance(u, dict):
+                v = _str_or_none(u.get("value"))
+                if v:
+                    label = _str_or_none(u.get("type")) or "url"
+                    out.append(ProviderIdentifier(platform=label.lower(), kind="url", value=v))
+    ims = item.get("imClients")
+    if isinstance(ims, list):
+        for im in ims:
+            if isinstance(im, dict):
+                user = _str_or_none(im.get("username"))
+                if user:
+                    proto = _str_or_none(im.get("protocol")) or "im"
+                    out.append(
+                        ProviderIdentifier(platform=proto.lower(), kind="handle", value=user)
+                    )
+    return tuple(out)
+
+
 def _parse_contact(item: dict[str, Any]) -> ProviderContact | None:
     """Construye un `ProviderContact` desde un `Person` de la People API. None si no tiene
     `resourceName` (sin él no hay clave de idempotencia)."""
@@ -114,6 +174,10 @@ def _parse_contact(item: dict[str, Any]) -> ProviderContact | None:
         org_name=org_name,
         role=role,
         photo_url=photo_url,
+        birthday=_parse_birthday(item),
+        nicknames=_all_values(item.get("nicknames"), "value"),
+        addresses=_parse_addresses(item),
+        identifiers=_parse_identifiers(item),
         deleted=deleted,
     )
 

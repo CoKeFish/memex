@@ -45,8 +45,8 @@ def _hack(name: str, inbox_ids: list[int]) -> int:
 def _person(name: str) -> int:
     return int(
         _exec(
-            "INSERT INTO mod_identidades_persons (user_id, display_name) "
-            "VALUES (1, :n) RETURNING id",
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'persona', :n) RETURNING id",
             n=name,
         )
     )
@@ -55,7 +55,9 @@ def _person(name: str) -> int:
 def _org(name: str) -> int:
     return int(
         _exec(
-            "INSERT INTO mod_identidades_orgs (user_id, name) VALUES (1, :n) RETURNING id", n=name
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'organizacion', :n) RETURNING id",
+            n=name,
         )
     )
 
@@ -71,8 +73,8 @@ def _link_person_org(person_id: int, org_id: int) -> None:
 def _mention(person_id: int, inbox_ids: list[int]) -> None:
     _exec(
         "INSERT INTO mod_identidades_mentions "
-        "(user_id, source_inbox_ids, mentioned_name, resolved_person_id) "
-        "VALUES (1, :ids, 'X', :p)",
+        "(user_id, source_inbox_ids, mentioned_name, resolved_kind, resolved_identity_id) "
+        "VALUES (1, :ids, 'X', 'persona', :p)",
         ids=inbox_ids,
         p=person_id,
     )

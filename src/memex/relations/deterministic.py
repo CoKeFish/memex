@@ -80,17 +80,17 @@ def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
     for r in conn.execute(
         text(
             """
-            SELECT resolved_person_id AS pid, resolved_org_id AS oid, source_inbox_ids AS ids
-            FROM mod_identidades_mentions WHERE user_id = :u
+            SELECT m.resolved_identity_id AS iid, i.kind AS kind, m.source_inbox_ids AS ids
+            FROM mod_identidades_mentions m
+            JOIN mod_identidades i ON i.id = m.resolved_identity_id
+            WHERE m.user_id = :u AND m.resolved_identity_id IS NOT NULL
             """
         ),
         {"u": user_id},
     ).mappings():
         ids = [int(x) for x in (r["ids"] or [])]
-        if r["pid"] is not None:
-            prov[Ref("identidades:person", int(r["pid"]))].update(ids)
-        if r["oid"] is not None:
-            prov[Ref("identidades:org", int(r["oid"]))].update(ids)
+        slug = "identidades:person" if r["kind"] == "persona" else "identidades:org"
+        prov[Ref(slug, int(r["iid"]))].update(ids)
 
     return dict(prov)
 

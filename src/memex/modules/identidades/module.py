@@ -1,18 +1,22 @@
 """`IdentidadesModule` — extractor de identidades (personas y organizaciones) al directorio.
 
-Satisface `InterestModule` estructuralmente. Por cada identidad detectada en un mensaje:
-  - si DEDUPLICA contra una identidad que ya está en el directorio (por email/dominio/handle/nombre/
-    alias) → le suma el mensaje como evidencia (no la duplica);
-  - si es nueva → la CREA en el directorio en estado `interest=FALSE` (source='extraction', la
-    "Detectada"); el usuario después la promueve a interés.
+Satisface `InterestModule` estructuralmente. Por cada identidad detectada en un mensaje, `dedup`
+la resuelve contra el directorio (`mod_identidades`) por SEÑALES FUERTES deterministas (incluido el
+REMITENTE del mensaje) y, si no hay match exacto, por SIMILITUD DE TRIGRAMAS:
+
+  - similitud ≥ `HIGH_THRESHOLD` → AUTO-MERGE: ata a la identidad existente y suma el nombre
+    variante como ALIAS (para que el próximo match sea exacto);
+  - zona gris `[LOW, HIGH)` → crea la identidad provisional (no-interés) y encola un CANDIDATO de
+    merge (`mod_identidades_merge_candidates`) que el desempate LLM (`dedup_llm`) resuelve después;
+  - < `LOW_THRESHOLD` → identidad NUEVA (no-interés, source='extraction').
 
 Cada avistamiento queda en `mod_identidades_mentions` (la evidencia: qué mensaje nombró a quién),
-SIEMPRE ligado a una identidad. El dedup es determinista (sin LLM). Declara `provide_domain`.
+SIEMPRE ligado a una identidad (`resolved_identity_id`). El dedup inline es DETERMINISTA (sin LLM);
+el desempate LLM corre en una fase aparte. Declara `provide_domain`.
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, ClassVar
@@ -24,18 +28,32 @@ from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, ModuleContext
 from memex.modules.dedup import forget_inbox_rows
+from memex.modules.identidades.fuzzy import HIGH_THRESHOLD, LOW_THRESHOLD, find_fuzzy_candidates
+from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.prompt import IDENTIDADES_SYSTEM_PROMPT
-from memex.modules.identidades.resolve import KnownIndex, KnownOrg, KnownPerson, Resolution
+from memex.modules.identidades.resolve import (
+    KIND_ORG,
+    KIND_PERSONA,
+    KnownIdentifier,
+    KnownIdentity,
+    KnownIndex,
+    Resolution,
+)
 from memex.modules.identidades.schema import IdentityItem
 
 _log = get_logger("memex.modules.identidades")
 
-#: kinds que viven en `mod_identidades_orgs` (el resto — persona/unknown — va a personas).
-_ORG_KINDS = frozenset({"organizacion", "producto", "agente"})
+#: kinds de mención que mapean a una ORGANIZACIÓN (el resto — persona/unknown — a PERSONA).
+_ORG_MENTION_KINDS = frozenset({"organizacion", "producto", "agente"})
+
+
+def _identity_kind(mention_kind: str) -> str:
+    """Mapea el `kind` de la mención al `kind` de la identidad unificada (persona|organizacion)."""
+    return KIND_ORG if mention_kind in _ORG_MENTION_KINDS else KIND_PERSONA
 
 
 class IdentidadesModule:
-    """Extrae identidades al directorio (`mod_identidades_persons`/`_orgs`) + su evidencia."""
+    """Extrae identidades al directorio (`mod_identidades`) + su evidencia (`_mentions`)."""
 
     slug: ClassVar[str] = "identidades"
     interest: ClassVar[str] = (
@@ -50,9 +68,8 @@ class IdentidadesModule:
         {SourceKind.EMAIL, SourceKind.CHAT, SourceKind.SOCIAL}
     )
     depends_on: ClassVar[tuple[str, ...]] = ()
-    #: `()` = dedup por MECANISMO PROPIO: `KnownIndex.resolve` (email→dominio→handle→nombre→alias) +
-    #: SELECT-first + UNIQUE(user_id, lower(name)) en orgs. La identidad es multi-señal, no una
-    #: clave simple.
+    #: `()` = dedup por MECANISMO PROPIO: señales fuertes (`KnownIndex`) + difuso (`pg_trgm`) +
+    #: auto-merge/candidato. La identidad es multi-señal, no una clave simple.
     identity_fields: ClassVar[tuple[str, ...]] = ()
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
@@ -60,19 +77,42 @@ class IdentidadesModule:
         return await self.dedup(ctx, items)
 
     async def dedup(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
-        """Mecanismo propio (`()` en `identity_fields`): por cada mención dedup contra el directorio
-        (`KnownIndex.resolve`); si es nueva la crea (no-interés); registra el avistamiento como
-        evidencia. Todo en `ctx.conn` (atómico con el cursor)."""
+        """Mecanismo propio (`()` en `identity_fields`): por cada mención resuelve contra el
+        directorio (señales fuertes + difuso); auto-mergea, encola candidato o crea. Registra el
+        avistamiento como evidencia. Todo en `ctx.conn` (atómico con el cursor)."""
         mentions = [i for i in items if isinstance(i, IdentityItem)]
         if not mentions:
             return 0
         index = load_known_index(ctx.conn, ctx.user_id)
+        senders = _sender_emails(ctx.conn, ctx.inbox_ids)
         for m in mentions:
-            res = index.resolve(m)
-            if res.kind is None:  # nueva identidad → entra al directorio en no-interés
-                res = _create_entity(ctx.conn, ctx.user_id, m, index)
+            sender = next((senders[i] for i in m.source_inbox_ids if i in senders), None)
+            res = index.resolve(m, sender_email=sender)
+            if res.kind is None:
+                res = self._resolve_fuzzy_or_create(ctx, m, index)
             _insert_mention(ctx.conn, ctx.user_id, m, res)
         return len(mentions)
+
+    def _resolve_fuzzy_or_create(
+        self, ctx: ModuleContext, m: IdentityItem, index: KnownIndex
+    ) -> Resolution:
+        """Sin match exacto: difuso. ≥HIGH auto-merge (+alias); zona gris crea provisional + encola
+        candidato; <LOW crea nueva."""
+        kind = _identity_kind(m.kind)
+        candidates = find_fuzzy_candidates(ctx.conn, ctx.user_id, kind=kind, probe=m.name)
+        best = candidates[0] if candidates else None
+        if best is not None and best.score >= HIGH_THRESHOLD:
+            _add_alias(ctx.conn, ctx.user_id, best.identity_id, m.name)
+            index.add_alias(m.name, best.identity_id)
+            return Resolution(kind, best.identity_id, "fuzzy")
+        new_id = _create_entity(ctx.conn, ctx.user_id, m, kind, index)
+        if best is not None and best.score >= LOW_THRESHOLD:
+            # zona gris: candidato para el desempate LLM (par canónico a<b).
+            _propose_merge_candidate(
+                ctx.conn, ctx.user_id, new_id, best.identity_id, "trgm_name", best.score
+            )
+            return Resolution(kind, new_id, "fuzzy")
+        return Resolution(kind, new_id, "created")
 
     async def health_check(self) -> HealthResult:
         return HealthResult(
@@ -83,7 +123,7 @@ class IdentidadesModule:
         self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
     ) -> list[dict[str, Any]]:
         """Menciones públicas atribuidas a `inbox_ids` (quién se nombró + cómo resolvió). NO expone
-        ids internos de resolución (`resolved_person_id`/`resolved_org_id`) ni el directorio."""
+        el id interno de resolución (`resolved_identity_id`) ni el directorio."""
         rows = (
             conn.execute(
                 text(
@@ -104,66 +144,112 @@ class IdentidadesModule:
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
         """Olvida lo aportado por `inbox_ids`: saca la referencia y borra la mención solo si queda
-        huérfana. NO toca el directorio (personas/orgs), que trasciende al mensaje."""
+        huérfana. NO toca el directorio (identidades), que trasciende al mensaje."""
         return forget_inbox_rows(
             conn, "mod_identidades_mentions", user_id=user_id, inbox_ids=inbox_ids
         )
 
 
-def _create_entity(
-    conn: Connection, user_id: int, item: IdentityItem, index: KnownIndex
-) -> Resolution:
-    """Crea una identidad NUEVA en el directorio (source='extraction', interest=FALSE) y la registra
-    en el índice para que el resto de la corrida deduplique contra ella."""
-    if item.kind in _ORG_KINDS:
-        # SELECT-first por si el nombre ya existe con otra grafía (evita chocar el UNIQUE).
-        row = conn.execute(
-            text("SELECT id FROM mod_identidades_orgs WHERE user_id=:u AND lower(name)=lower(:n)"),
-            {"u": user_id, "n": item.name},
-        ).first()
-        org_id = (
-            int(row[0])
-            if row is not None
-            else int(
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO mod_identidades_orgs (user_id, name, kind, interest, source)
-                        VALUES (:u, :n, :k, FALSE, 'extraction')
-                        RETURNING id
-                        """
-                    ),
-                    {"u": user_id, "n": item.name, "k": item.kind},
-                ).scalar_one()
-            )
-        )
-        index.add_org(KnownOrg(id=org_id, name=item.name))
-        return Resolution("org", None, org_id, "created")
+# --- helpers -------------------------------------------------------------------------- #
 
-    handles = {"social": item.handle} if item.handle else {}
-    emails = [item.email] if item.email else []
-    person_id = int(
+
+def _sender_emails(conn: Connection, inbox_ids: Sequence[int]) -> dict[int, str]:
+    """Email del remitente (`payload->'from'->>'email'`) por inbox id, para la señal de contexto.
+    Chat/social sin `from` → simplemente no aparecen en el mapa."""
+    if not inbox_ids:
+        return {}
+    rows = conn.execute(
+        text(
+            "SELECT id, payload->'from'->>'email' AS sender FROM inbox "
+            "WHERE id = ANY(CAST(:ids AS BIGINT[]))"
+        ),
+        {"ids": list(inbox_ids)},
+    ).all()
+    return {int(r[0]): str(r[1]) for r in rows if r[1]}
+
+
+def _create_entity(
+    conn: Connection, user_id: int, item: IdentityItem, kind: str, index: KnownIndex
+) -> int:
+    """Crea una identidad NUEVA (source='extraction', interest=FALSE), vuelca email/handle a
+    identificadores, y la registra en el índice para el dedup intra-corrida. Devuelve el id."""
+    new_id = int(
         conn.execute(
             text(
                 """
-                INSERT INTO mod_identidades_persons
-                  (user_id, display_name, emails, handles, source, interest)
-                VALUES (:u, :n, :em, CAST(:h AS JSONB), 'extraction', FALSE)
+                INSERT INTO mod_identidades (user_id, kind, display_name, source, interest)
+                VALUES (:u, :k, :n, 'extraction', FALSE)
                 RETURNING id
                 """
             ),
-            {"u": user_id, "n": item.name, "em": emails, "h": json.dumps(handles)},
+            {"u": user_id, "k": kind, "n": item.name},
         ).scalar_one()
     )
-    index.add_person(
-        KnownPerson(
-            id=person_id,
-            display_name=item.name,
-            emails=emails,
-            handles=[item.handle] if item.handle else [],
-        )
+    identifiers: list[KnownIdentifier] = []
+    if item.email:
+        vn = norm_identifier("email", item.email)
+        _insert_identifier(conn, user_id, new_id, "email", "email", item.email, vn)
+        identifiers.append(KnownIdentifier("email", "email", vn))
+    if item.handle:
+        vn = norm_identifier("handle", item.handle)
+        _insert_identifier(conn, user_id, new_id, "unknown", "handle", item.handle, vn)
+        identifiers.append(KnownIdentifier("unknown", "handle", vn))
+    index.add(
+        KnownIdentity(id=new_id, kind=kind, display_name=item.name, identifiers=tuple(identifiers))
     )
-    return Resolution("person", person_id, None, "created")
+    return new_id
+
+
+def _insert_identifier(
+    conn: Connection, user_id: int, identity_id: int, platform: str, kind: str, value: str, vn: str
+) -> None:
+    conn.execute(
+        text(
+            """
+            INSERT INTO mod_identidades_identifiers
+              (user_id, identity_id, platform, kind, value, value_norm, source)
+            VALUES (:u, :iid, :p, :k, :v, :vn, 'extraction')
+            ON CONFLICT (identity_id, platform, kind, value_norm) DO NOTHING
+            """
+        ),
+        {"u": user_id, "iid": identity_id, "p": platform, "k": kind, "v": value, "vn": vn},
+    )
+
+
+def _add_alias(conn: Connection, user_id: int, identity_id: int, name: str) -> None:
+    """Suma `name` a los alias de la identidad (sin duplicar el display_name ni un alias ya
+    presente). Lo usa el auto-merge para que el próximo match sea exacto."""
+    conn.execute(
+        text(
+            """
+            UPDATE mod_identidades
+            SET aliases = (
+                  SELECT array_agg(DISTINCT x) FROM unnest(aliases || ARRAY[:name]) AS x
+                ),
+                updated_at = NOW()
+            WHERE id = :id AND user_id = :u AND display_name <> :name AND NOT (:name = ANY(aliases))
+            """
+        ),
+        {"id": identity_id, "u": user_id, "name": name},
+    )
+
+
+def _propose_merge_candidate(
+    conn: Connection, user_id: int, a_id: int, b_id: int, reason: str, score: float
+) -> None:
+    """Encola un par (canónico a<b) como candidato de merge para el desempate LLM (idempotente)."""
+    lo, hi = (a_id, b_id) if a_id < b_id else (b_id, a_id)
+    conn.execute(
+        text(
+            """
+            INSERT INTO mod_identidades_merge_candidates
+              (user_id, identity_a_id, identity_b_id, reason, score)
+            VALUES (:u, :a, :b, :reason, :score)
+            ON CONFLICT (identity_a_id, identity_b_id) DO NOTHING
+            """
+        ),
+        {"u": user_id, "a": lo, "b": hi, "reason": reason, "score": score},
+    )
 
 
 def _insert_mention(conn: Connection, user_id: int, item: IdentityItem, res: Resolution) -> None:
@@ -172,10 +258,10 @@ def _insert_mention(conn: Connection, user_id: int, item: IdentityItem, res: Res
             """
             INSERT INTO mod_identidades_mentions
               (user_id, source_inbox_ids, evidence, mentioned_name, mentioned_kind, email, handle,
-               org_hint, role_hint, confidence, resolved_kind, resolved_person_id, resolved_org_id,
+               org_hint, role_hint, confidence, resolved_kind, resolved_identity_id,
                resolution_method)
             VALUES (:uid, :ids, :evidence, :name, :kind, :email, :handle, :org, :role, :confidence,
-                    :rkind, :rperson, :rorg, :method)
+                    :rkind, :rid, :method)
             """
         ),
         {
@@ -190,54 +276,53 @@ def _insert_mention(conn: Connection, user_id: int, item: IdentityItem, res: Res
             "role": item.role,
             "confidence": item.confidence,
             "rkind": res.kind,
-            "rperson": res.person_id,
-            "rorg": res.org_id,
+            "rid": res.identity_id,
             "method": res.method,
         },
     )
 
 
-def _handle_values(handles: object) -> list[str]:
-    """`handles` es JSONB ({plataforma: handle}); para la resolución usamos los VALORES."""
-    if isinstance(handles, dict):
-        return [str(v) for v in handles.values() if v]
-    return []
-
-
 def load_known_index(conn: Connection, user_id: int) -> KnownIndex:
-    """Arma el `KnownIndex` del user desde `mod_identidades_persons` / `mod_identidades_orgs`.
-    Compartido por `persist` (extracción) y el handle `provide_domain` (`domain.py`)."""
-    persons = [
-        KnownPerson(
-            id=int(r["id"]),
-            display_name=str(r["display_name"]),
-            emails=tuple(r["emails"] or ()),
-            handles=tuple(_handle_values(r["handles"])),
-        )
+    """Arma el `KnownIndex` del user desde `mod_identidades` + `mod_identidades_identifiers`.
+    Compartido por `dedup` (extracción) y el handle `provide_domain` (`domain.py`)."""
+    base = {
+        int(r["id"]): (str(r["kind"]), str(r["display_name"]), tuple(r["aliases"] or ()))
         for r in conn.execute(
             text(
-                "SELECT id, display_name, emails, handles FROM mod_identidades_persons "
-                "WHERE user_id = :uid"
+                "SELECT id, kind, display_name, aliases FROM mod_identidades WHERE user_id = :uid"
             ),
             {"uid": user_id},
         )
         .mappings()
         .all()
-    ]
-    orgs = [
-        KnownOrg(
-            id=int(r["id"]),
-            name=str(r["name"]),
-            aliases=tuple(r["aliases"] or ()),
-            domains=tuple(r["domains"] or ()),
-        )
-        for r in conn.execute(
+    }
+    by_identity: dict[int, list[KnownIdentifier]] = {}
+    for r in (
+        conn.execute(
             text(
-                "SELECT id, name, aliases, domains FROM mod_identidades_orgs WHERE user_id = :uid"
+                "SELECT identity_id, platform, kind, value_norm "
+                "FROM mod_identidades_identifiers WHERE user_id = :uid"
             ),
             {"uid": user_id},
         )
         .mappings()
         .all()
-    ]
-    return KnownIndex(persons, orgs)
+    ):
+        by_identity.setdefault(int(r["identity_id"]), []).append(
+            KnownIdentifier(str(r["platform"]), str(r["kind"]), str(r["value_norm"]))
+        )
+    return KnownIndex(
+        [
+            KnownIdentity(
+                id=iid,
+                kind=kind,
+                display_name=display_name,
+                aliases=aliases,
+                identifiers=tuple(by_identity.get(iid, ())),
+            )
+            for iid, (kind, display_name, aliases) in base.items()
+        ]
+    )
+
+
+__all__ = ["IdentidadesModule", "load_known_index"]

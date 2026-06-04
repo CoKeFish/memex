@@ -1,5 +1,6 @@
-"""`IdentidadesModule.persist`: dedup contra el directorio. Lo conocido se ata; lo NUEVO entra al
-directorio como no-interés (source='extraction', method='created') con su evidencia."""
+"""`IdentidadesModule.dedup` (v2) sobre el directorio unificado: lo conocido se ata por señal
+fuerte; lo similar-alto se AUTO-MERGEA (+alias); la zona gris crea provisional + encola candidato;
+lo nuevo entra como no-interés (source='extraction'). Dedup determinista (sin LLM)."""
 
 from __future__ import annotations
 
@@ -16,22 +17,33 @@ from memex.modules.identidades.schema import IdentityItem
 
 
 def _seed_known() -> tuple[int, int]:
-    """Ada (persona conocida, interés) + Unity (org de interés). Devuelve (person_id, org_id)."""
+    """Ada (persona, email ada@x.com) + Unity (org de interés). Devuelve (person_id, org_id)."""
     with connection() as c:
-        pid = c.execute(
+        pid = int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_identidades (user_id, kind, display_name, interest, source) "
+                    "VALUES (1,'persona','Ada Lovelace',TRUE,'google_contacts') RETURNING id"
+                )
+            ).scalar_one()
+        )
+        c.execute(
             text(
-                "INSERT INTO mod_identidades_persons "
-                "(user_id, display_name, emails, source, interest) VALUES "
-                "(1, 'Ada Lovelace', ARRAY['ada@x.com'], 'google_contacts', TRUE) RETURNING id"
-            )
-        ).scalar_one()
-        oid = c.execute(
-            text(
-                "INSERT INTO mod_identidades_orgs (user_id, name, source, interest) "
-                "VALUES (1, 'Unity', 'manual', TRUE) RETURNING id"
-            )
-        ).scalar_one()
-    return int(pid), int(oid)
+                "INSERT INTO mod_identidades_identifiers "
+                "(user_id, identity_id, platform, kind, value, value_norm) "
+                "VALUES (1,:i,'email','email','ada@x.com','ada@x.com')"
+            ),
+            {"i": pid},
+        )
+        oid = int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_identidades (user_id, kind, display_name, interest, source) "
+                    "VALUES (1,'organizacion','Unity',TRUE,'manual') RETURNING id"
+                )
+            ).scalar_one()
+        )
+    return pid, oid
 
 
 def _mentions() -> dict[str, dict[str, Any]]:
@@ -44,28 +56,12 @@ def _mentions() -> dict[str, dict[str, Any]]:
     return {str(r["mentioned_name"]): dict(r) for r in rows}
 
 
-def _persons() -> list[dict[str, Any]]:
+def _identities(kind: str | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM mod_identidades WHERE user_id=1"
+    if kind:
+        sql += f" AND kind='{kind}'"
     with connection() as c:
-        return [
-            dict(r)
-            for r in c.execute(
-                text("SELECT * FROM mod_identidades_persons WHERE user_id=1 ORDER BY id")
-            )
-            .mappings()
-            .all()
-        ]
-
-
-def _orgs() -> list[dict[str, Any]]:
-    with connection() as c:
-        return [
-            dict(r)
-            for r in c.execute(
-                text("SELECT * FROM mod_identidades_orgs WHERE user_id=1 ORDER BY id")
-            )
-            .mappings()
-            .all()
-        ]
+        return [dict(r) for r in c.execute(text(sql + " ORDER BY id")).mappings().all()]
 
 
 async def _persist(items: list[IdentityItem]) -> int:
@@ -74,7 +70,7 @@ async def _persist(items: list[IdentityItem]) -> int:
         ctx = ModuleContext(
             user_id=1,
             conn=conn,
-            llm=cast(LLMClient, None),  # persist no usa el LLM (dedup determinista)
+            llm=cast(LLMClient, None),  # dedup determinista, no usa el LLM
             deps={},
             summary_id=None,
             inbox_ids=(5, 6),
@@ -83,45 +79,96 @@ async def _persist(items: list[IdentityItem]) -> int:
 
 
 @pytest.mark.asyncio
-async def test_known_resolves_unknown_enters_directory() -> None:
+async def test_known_resolves_unknown_creates() -> None:
     pid, oid = _seed_known()
     items = [
         IdentityItem(source_inbox_ids=(5,), name="Ada L.", email="ada@x.com", evidence="con Ada"),
         IdentityItem(source_inbox_ids=(5,), name="Unity", kind="organizacion"),
-        IdentityItem(source_inbox_ids=(6,), name="Globex S.A.", kind="organizacion"),
+        IdentityItem(source_inbox_ids=(6,), name="Zentriva Pharma", kind="organizacion"),
         IdentityItem(source_inbox_ids=(6,), name="Juan Perez", kind="persona"),
     ]
     assert await _persist(items) == 4
-
     m = _mentions()
-    # conocidas → atadas
-    assert (m["Ada L."]["resolved_kind"], m["Ada L."]["resolved_person_id"]) == ("person", pid)
+    # conocidas → atadas por señal fuerte
+    assert (m["Ada L."]["resolved_kind"], m["Ada L."]["resolved_identity_id"]) == ("persona", pid)
     assert m["Ada L."]["resolution_method"] == "email"
-    assert (m["Unity"]["resolved_kind"], m["Unity"]["resolved_org_id"]) == ("org", oid)
-    # nuevas → creadas (method='created') y atadas a su propia ficha
-    assert m["Globex S.A."]["resolution_method"] == "created"
-    assert m["Globex S.A."]["resolved_kind"] == "org"
+    assert m["Unity"]["resolved_kind"] == "organizacion"
+    assert m["Unity"]["resolved_identity_id"] == oid
+    assert m["Unity"]["resolution_method"] == "exact_name"
+    # nuevas → creadas (no similares a nada existente)
+    assert m["Zentriva Pharma"]["resolution_method"] == "created"
     assert m["Juan Perez"]["resolution_method"] == "created"
-    assert m["Juan Perez"]["resolved_kind"] == "person"
+    # el directorio creció en no-interés / source=extraction; las conocidas no se duplicaron
+    juan = next(p for p in _identities("persona") if p["display_name"] == "Juan Perez")
+    assert juan["interest"] is False and juan["source"] == "extraction"
+    assert m["Juan Perez"]["resolved_identity_id"] == juan["id"]
+    assert sum(1 for p in _identities("persona") if p["display_name"] == "Ada Lovelace") == 1
 
-    # el directorio CRECIÓ con lo detectado, en no-interés / source=extraction
-    new_org = next(o for o in _orgs() if o["name"] == "Globex S.A.")
-    assert new_org["interest"] is False and new_org["source"] == "extraction"
-    new_person = next(p for p in _persons() if p["display_name"] == "Juan Perez")
-    assert new_person["interest"] is False and new_person["source"] == "extraction"
-    assert m["Juan Perez"]["resolved_person_id"] == new_person["id"]
-    # las conocidas NO se duplicaron
-    assert sum(1 for p in _persons() if p["display_name"] == "Ada Lovelace") == 1
+
+@pytest.mark.asyncio
+async def test_fuzzy_auto_merge_adds_alias() -> None:
+    with connection() as c:
+        oid = int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_identidades (user_id, kind, display_name, interest, source) "
+                    "VALUES (1,'organizacion','Globex Corporation',TRUE,'manual') RETURNING id"
+                )
+            ).scalar_one()
+        )
+    # 'Globex Corp' tiene el MISMO núcleo ('globex') → similitud alta → auto-merge a la existente
+    await _persist([IdentityItem(source_inbox_ids=(5,), name="Globex Corp", kind="organizacion")])
+    m = _mentions()
+    assert m["Globex Corp"]["resolution_method"] == "fuzzy"
+    assert m["Globex Corp"]["resolved_identity_id"] == oid
+    # NO se creó una org nueva; el nombre variante quedó como alias
+    assert len([o for o in _identities("organizacion")]) == 1
+    aliases = _identities("organizacion")[0]["aliases"]
+    assert "Globex Corp" in aliases
+
+
+@pytest.mark.asyncio
+async def test_fuzzy_gray_zone_creates_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    # subimos el umbral ALTO para forzar la zona gris en un candidato que el query SÍ devuelve
+    monkeypatch.setattr("memex.modules.identidades.module.HIGH_THRESHOLD", 0.999)
+    with connection() as c:
+        existing = int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_identidades (user_id, kind, display_name, interest, source) "
+                    "VALUES (1,'organizacion','Globex',TRUE,'manual') RETURNING id"
+                )
+            ).scalar_one()
+        )
+    await _persist([IdentityItem(source_inbox_ids=(5,), name="Globexx", kind="organizacion")])
+    m = _mentions()
+    assert m["Globexx"]["resolution_method"] == "fuzzy"
+    # se creó la provisional + se encoló un candidato de merge contra la existente
+    new_org = next(o for o in _identities("organizacion") if o["display_name"] == "Globexx")
+    with connection() as c:
+        cand = (
+            c.execute(
+                text(
+                    "SELECT identity_a_id, identity_b_id, status "
+                    "FROM mod_identidades_merge_candidates"
+                )
+            )
+            .mappings()
+            .first()
+        )
+    assert cand is not None and cand["status"] == "candidate"
+    assert {cand["identity_a_id"], cand["identity_b_id"]} == {existing, new_org["id"]}
 
 
 @pytest.mark.asyncio
 async def test_dedup_within_batch_creates_once() -> None:
     items = [
-        IdentityItem(source_inbox_ids=(5,), name="Globex", kind="organizacion"),
-        IdentityItem(source_inbox_ids=(6,), name="globex", kind="organizacion"),  # otra grafía
+        IdentityItem(source_inbox_ids=(5,), name="Initech", kind="organizacion"),
+        IdentityItem(source_inbox_ids=(6,), name="initech", kind="organizacion"),  # otra grafía
     ]
     await _persist(items)
-    assert sum(1 for o in _orgs() if o["name"].lower() == "globex") == 1  # una sola ficha
+    matches = [o for o in _identities("organizacion") if o["display_name"].lower() == "initech"]
+    assert len(matches) == 1
 
 
 @pytest.mark.asyncio

@@ -76,12 +76,15 @@ def test_status_filtra_aristas(client: Any) -> None:
     _hack("Hack", [5])
     p = int(
         _exec(
-            "INSERT INTO mod_identidades_persons (user_id, display_name) "
-            "VALUES (1, 'Juan') RETURNING id"
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'persona', 'Juan') RETURNING id"
         )
     )
     o = int(
-        _exec("INSERT INTO mod_identidades_orgs (user_id, name) VALUES (1, 'Acme') RETURNING id")
+        _exec(
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'organizacion', 'Acme') RETURNING id"
+        )
     )
     _exec(
         "INSERT INTO mod_identidades_person_orgs (user_id, person_id, org_id) VALUES (1, :p, :o)",
