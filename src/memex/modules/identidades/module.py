@@ -49,6 +49,10 @@ class IdentidadesModule:
         {SourceKind.EMAIL, SourceKind.CHAT, SourceKind.SOCIAL}
     )
     depends_on: ClassVar[tuple[str, ...]] = ()
+    #: `()` = dedup por MECANISMO PROPIO: `KnownIndex.resolve` (email→dominio→handle→nombre→alias) +
+    #: SELECT-first + UNIQUE(user_id, lower(name)) en orgs. La identidad es multi-señal, no una
+    #: clave simple.
+    identity_fields: ClassVar[tuple[str, ...]] = ()
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
         """Por cada mención: dedup contra el directorio; si es nueva la crea (no-interés); registra

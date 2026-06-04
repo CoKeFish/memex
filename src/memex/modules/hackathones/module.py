@@ -18,11 +18,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import ClassVar
 
-from sqlalchemy import text
-
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_EXTRACT, ExtractionItem, ModuleContext
+from memex.modules.dedup import upsert_unique
 from memex.modules.hackathones.prompt import HACKATHON_SYSTEM_PROMPT
 from memex.modules.hackathones.schema import HackathonItem
 
@@ -45,46 +44,45 @@ class HackathonModule:
         {SourceKind.EMAIL, SourceKind.CHAT, SourceKind.SOCIAL}
     )
     depends_on: ClassVar[tuple[str, ...]] = ()
+    #: business-key del vértice hackatón. `name` se compara normalizado (lower + colapso de
+    #: whitespace) por la DB; el UNIQUE de negocio (índice funcional) vive en la migración 0030
+    #: (con `starts_on` NULL = centinela, para anuncios sin fecha del evento).
+    identity_fields: ClassVar[tuple[str, ...]] = ("name", "starts_on")
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
-        """Inserta los hackatones validados en `mod_hackathones_events` usando `ctx.conn`."""
+        """Materializa cada hackatón como VÉRTICE ÚNICO (dedup por nombre normalizado + fecha):
+        re-anunciar el mismo hackatón fusiona `source_inbox_ids` en vez de duplicar. Atómico en
+        `ctx.conn`. Devuelve cuántos hackatones procesó."""
         hackathons = [i for i in items if isinstance(i, HackathonItem)]
         if not hackathons:
             return 0
-        ctx.conn.execute(
-            text(
-                """
-                INSERT INTO mod_hackathones_events
-                  (user_id, source_inbox_ids, name, starts_on, ends_on, registration_deadline,
-                   modality, location, url, organizer, technologies, prizes, requirements,
-                   description, evidence)
-                VALUES
-                  (:uid, :ids, :name, :starts_on, :ends_on, :registration_deadline,
-                   :modality, :location, :url, :organizer, :technologies, :prizes, :requirements,
-                   :description, :evidence)
-                """
-            ),
-            [
-                {
-                    "uid": ctx.user_id,
-                    "ids": list(h.source_inbox_ids),
-                    "name": h.name,
-                    "starts_on": h.starts_on,
-                    "ends_on": h.ends_on,
-                    "registration_deadline": h.registration_deadline,
-                    "modality": h.modality,
-                    "location": h.location,
-                    "url": h.url,
-                    "organizer": h.organizer,
-                    "technologies": h.technologies,
-                    "prizes": h.prizes,
-                    "requirements": h.requirements,
-                    "description": h.description,
-                    "evidence": h.evidence,
-                }
-                for h in hackathons
-            ],
-        )
+        for h in hackathons:
+            row = {
+                "user_id": ctx.user_id,
+                "source_inbox_ids": list(h.source_inbox_ids),
+                "name": h.name,
+                "starts_on": h.starts_on,
+                "ends_on": h.ends_on,
+                "registration_deadline": h.registration_deadline,
+                "modality": h.modality,
+                "location": h.location,
+                "url": h.url,
+                "organizer": h.organizer,
+                "technologies": h.technologies,
+                "prizes": h.prizes,
+                "requirements": h.requirements,
+                "description": h.description,
+                "evidence": h.evidence,
+            }
+            identity = {"user_id": ctx.user_id, "name": h.name, "starts_on": h.starts_on}
+            upsert_unique(
+                ctx.conn,
+                "mod_hackathones_events",
+                identity=identity,
+                row=row,
+                merge_arrays=("source_inbox_ids",),
+                norm_text=("name",),
+            )
         return len(hackathons)
 
     async def health_check(self) -> HealthResult:

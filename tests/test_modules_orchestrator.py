@@ -47,7 +47,7 @@ def _item(slug: str, msg: dict[str, Any], bogus: int | None) -> dict[str, Any]:
         }
     return {
         "source_inbox_ids": [sid],
-        "amount": "100.00",
+        "amount": f"{sid}.00",  # distinto por mensaje → vértices distintos (v2 no los colapsa)
         "currency": "ARS",
         "merchant": "Test",
         "occurred_on": None,

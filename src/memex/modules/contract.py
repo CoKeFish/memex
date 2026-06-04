@@ -106,9 +106,19 @@ class InterestModule(Protocol):
     depends_on: ClassVar[tuple[str, ...]]
     """Slugs requeridos; el orquestador hace cierre + topo-sort. finance: ()."""
 
+    identity_fields: ClassVar[tuple[str, ...]]
+    """Business-key del VÉRTICE del módulo: los campos de la fila `mod_*` que lo hacen ÚNICO (v2).
+    Con una clave simple, el módulo deduplica con `memex.modules.dedup.upsert_unique` (las columnas
+    de texto se comparan normalizadas). `()` señala que el módulo deduplica con un MECANISMO PROPIO
+    (identidades por `KnownIndex`, calendar por consolidación): garantiza la unicidad él mismo."""
+
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
         """Escribe `items` (ya validados contra `extraction_schema`) en SUS tablas `mod_<slug>_*`
-        usando `ctx.conn`. Devuelve cuántas filas insertó. NO abre conexión propia."""
+        usando `ctx.conn`. Devuelve cuántas filas insertó/actualizó. NO abre conexión propia.
+
+        OBLIGACIÓN (v2): produce VÉRTICES ÚNICOS — re-extraer la misma entidad NO debe duplicar.
+        El módulo deduplica su unidad: por business-key (`identity_fields` + `upsert_unique`,
+        fusionando `source_inbox_ids`) o por un mecanismo propio (KnownIndex, consolidación)."""
         ...
 
     async def health_check(self) -> HealthResult:

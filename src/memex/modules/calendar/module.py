@@ -184,6 +184,10 @@ class CalendarModule:
     capabilities: ClassVar[frozenset[str]] = frozenset({CAP_EXTRACT, CAP_PROVIDE_DOMAIN})
     consumes_kinds: ClassVar[frozenset[SourceKind]] = frozenset({SourceKind.EMAIL, SourceKind.CHAT})
     depends_on: ClassVar[tuple[str, ...]] = ()
+    #: `()` = dedup por MECANISMO PROPIO: la unicidad del vértice-evento la da la CONSOLIDACIÓN
+    #: (`mod_calendar_consolidated`, ADR-018), no un UNIQUE sobre la fila cruda — los crudos
+    #: coexisten; la FASE 1 solo marca pares candidatos.
+    identity_fields: ClassVar[tuple[str, ...]] = ()
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
         """Inserta los eventos validados y marca pares candidatos de duplicado, todo en

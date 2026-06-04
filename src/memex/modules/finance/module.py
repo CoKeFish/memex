@@ -11,11 +11,10 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import ClassVar
 
-from sqlalchemy import text
-
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_EXTRACT, ExtractionItem, ModuleContext
+from memex.modules.dedup import upsert_unique
 from memex.modules.finance.prompt import FINANCE_SYSTEM_PROMPT
 from memex.modules.finance.schema import ExpenseItem
 
@@ -36,38 +35,46 @@ class FinanceModule:
     capabilities: ClassVar[frozenset[str]] = frozenset({CAP_EXTRACT})
     consumes_kinds: ClassVar[frozenset[SourceKind]] = frozenset({SourceKind.EMAIL, SourceKind.CHAT})
     depends_on: ClassVar[tuple[str, ...]] = ()
+    #: business-key del vértice gasto. `merchant` se compara normalizado (lower + colapso de
+    #: whitespace) por la DB; el UNIQUE de negocio (índice funcional) vive en la migración 0030
+    #: (con `occurred_on` NULL = centinela).
+    identity_fields: ClassVar[tuple[str, ...]] = ("currency", "amount", "merchant", "occurred_on")
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
-        """Inserta los gastos validados en `mod_finance_expenses` usando `ctx.conn`."""
+        """Materializa cada gasto como VÉRTICE ÚNICO (dedup por business-key): si el mismo gasto ya
+        existe (mismo monto/moneda/comercio-normalizado/fecha) fusiona `source_inbox_ids` (recibo +
+        alerta del banco → un solo vértice con ambos documentos); si no, lo inserta. Atómico en
+        `ctx.conn`. Devuelve cuántos gastos procesó."""
         expenses = [i for i in items if isinstance(i, ExpenseItem)]
         if not expenses:
             return 0
-        ctx.conn.execute(
-            text(
-                """
-                INSERT INTO mod_finance_expenses
-                  (user_id, source_inbox_ids, amount, currency, category, merchant,
-                   occurred_on, description, evidence)
-                VALUES
-                  (:uid, :ids, :amount, :currency, :category, :merchant,
-                   :occurred_on, :description, :evidence)
-                """
-            ),
-            [
-                {
-                    "uid": ctx.user_id,
-                    "ids": list(e.source_inbox_ids),
-                    "amount": e.amount,
-                    "currency": e.currency,
-                    "category": e.category,
-                    "merchant": e.merchant,
-                    "occurred_on": e.occurred_on,
-                    "description": e.description,
-                    "evidence": e.evidence,
-                }
-                for e in expenses
-            ],
-        )
+        for e in expenses:
+            row = {
+                "user_id": ctx.user_id,
+                "source_inbox_ids": list(e.source_inbox_ids),
+                "amount": e.amount,
+                "currency": e.currency,
+                "category": e.category,
+                "merchant": e.merchant,
+                "occurred_on": e.occurred_on,
+                "description": e.description,
+                "evidence": e.evidence,
+            }
+            identity = {
+                "user_id": ctx.user_id,
+                "currency": e.currency,
+                "amount": e.amount,
+                "merchant": e.merchant,
+                "occurred_on": e.occurred_on,
+            }
+            upsert_unique(
+                ctx.conn,
+                "mod_finance_expenses",
+                identity=identity,
+                row=row,
+                merge_arrays=("source_inbox_ids",),
+                norm_text=("merchant",),
+            )
         return len(expenses)
 
     async def health_check(self) -> HealthResult:
