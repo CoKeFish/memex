@@ -71,8 +71,8 @@ async def test_complete_parses_content_usage_and_cost() -> None:
         assert r.usage.completion_tokens == 20
         assert r.usage.cache_hit_tokens == 60
         assert r.usage.cache_miss_tokens == 40
-        # (0.028*60 + 0.28*40 + 0.42*20)/1e6 = 0.00002128 → 0.000021
-        assert r.cost_usd == Decimal("0.000021")
+        # deepseek-chat = v4-flash: (0.0028*60 + 0.14*40 + 0.28*20)/1e6 = 11.368e-6 → 0.000011
+        assert r.cost_usd == Decimal("0.000011")
         assert r.latency_ms >= 0
 
 

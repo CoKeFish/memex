@@ -5,15 +5,16 @@ Apify) → el costo se calcula acá desde una tabla por modelo, distinguiendo to
 de prompt servidos desde cache (`cache_hit`, más baratos) de los no-cacheados
 (`cache_miss`) y los de salida (`output`).
 
-⚠ PRECIOS VOLÁTILES — verificados 2026-05-31 (USD por 1M de tokens):
-  - deepseek-chat      cache_hit 0.028 / cache_miss 0.28 / output 0.42
-        OFICIAL (DeepSeek-V3.2-Exp; es el modelo default de memex). Confianza ALTA.
-  - deepseek-reasoner  cache_hit 0.028 / cache_miss 0.28 / output 0.42
-        OFICIAL (V3.2-Exp). Confianza ALTA.
+⚠ PRECIOS VOLÁTILES — verificados 2026-06-03 contra la doc oficial
+(https://api-docs.deepseek.com/quick_start/pricing), USD por 1M de tokens:
+  - deepseek-chat / deepseek-reasoner: identificadores DEPRECADOS (se retiran 2026-07-24).
+        Hoy son ALIAS de deepseek-v4-flash (non-thinking / thinking) → se cobran a tarifa flash.
   - deepseek-v4-flash  cache_hit 0.0028 / cache_miss 0.14 / output 0.28
-        Reportado por agregadores (no doc oficial). Confianza BAJA.
-  - deepseek-v4-pro    cache_hit 0.0145 / cache_miss 1.74 / output 3.48
-        Agregador, tarifa regular/post-promo. Confianza BAJA.
+        (= deepseek-chat) — contexto 1M, salida 384K. OFICIAL.
+  - deepseek-v4-pro    cache_hit 0.003625 / cache_miss 0.435 / output 0.87
+        contexto 1M, salida 384K. OFICIAL.
+  Histórico: V3.2-Exp valía 0.028 / 0.28 / 0.42; deepseek-chat ya NO mapea ahí (DeepSeek lo
+  remapeó a v4-flash, ~10x más barato en hit, ~2x en miss).
 
 Notas:
 - Una promo -75% sobre v4-pro venció 2026-05-31; ya no se aplica.
@@ -92,16 +93,18 @@ class ModelPricing:
     off_peak_discount: Decimal = Decimal(0)
 
 
-# Defaults verificados 2026-05-31 (ver docstring del módulo). `deepseek-chat` es el
-# modelo default de memex (V3.2-Exp). flash/pro son tarifas de agregador (confianza baja).
-_V32 = ModelPricing(Decimal("0.028"), Decimal("0.28"), Decimal("0.42"))
+# Defaults verificados 2026-06-03 vs doc oficial de DeepSeek. `deepseek-chat`/`deepseek-reasoner`
+# son alias DEPRECADOS (retiro 2026-07-24) de deepseek-v4-flash → se cobran a tarifa flash.
+_V32 = ModelPricing(
+    Decimal("0.028"), Decimal("0.28"), Decimal("0.42")
+)  # histórico V3.2-Exp; deepseek-chat ya NO mapea acá
 _FLASH = ModelPricing(Decimal("0.0028"), Decimal("0.14"), Decimal("0.28"))
-_PRO = ModelPricing(Decimal("0.0145"), Decimal("1.74"), Decimal("3.48"))
+_PRO = ModelPricing(Decimal("0.003625"), Decimal("0.435"), Decimal("0.87"))
 
 #: Tabla de precios pública por default (fallback si no hay overrides de entorno).
 MODEL_PRICING: dict[str, ModelPricing] = {
-    "deepseek-chat": _V32,
-    "deepseek-reasoner": _V32,
+    "deepseek-chat": _FLASH,
+    "deepseek-reasoner": _FLASH,
     "deepseek-v4-flash": _FLASH,
     "deepseek-v4-pro": _PRO,
 }

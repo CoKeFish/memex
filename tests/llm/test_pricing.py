@@ -38,17 +38,17 @@ def _usage(*, prompt: int = 0, completion: int = 0, hit: int = 0, miss: int = 0)
 # --- compute_cost: math con defaults ----------------------------------------------- #
 
 
-def test_v32_default_model_full_million_each_bucket() -> None:
-    # 1M hit + 1M miss + 1M output, V3.2 = 0.028 + 0.28 + 0.42 = 0.728
+def test_default_model_full_million_each_bucket() -> None:
+    # deepseek-chat = v4-flash: 1M hit + 1M miss + 1M output = 0.0028 + 0.14 + 0.28 = 0.4228
     u = _usage(prompt=2_000_000, completion=1_000_000, hit=1_000_000, miss=1_000_000)
-    assert compute_cost("deepseek-chat", u) == Decimal("0.728000")
+    assert compute_cost("deepseek-chat", u) == Decimal("0.422800")
 
 
 def test_cache_hit_cheaper_than_miss() -> None:
     hit_only = compute_cost("deepseek-chat", _usage(prompt=1_000_000, hit=1_000_000))
     miss_only = compute_cost("deepseek-chat", _usage(prompt=1_000_000, miss=1_000_000))
-    assert hit_only == Decimal("0.028000")
-    assert miss_only == Decimal("0.280000")
+    assert hit_only == Decimal("0.002800")  # deepseek-chat = v4-flash
+    assert miss_only == Decimal("0.140000")
     assert hit_only < miss_only
 
 
@@ -57,7 +57,7 @@ def test_pro_more_expensive_than_flash() -> None:
     assert compute_cost("deepseek-v4-pro", u) > compute_cost("deepseek-v4-flash", u)
 
 
-def test_chat_and_reasoner_share_v32_pricing() -> None:
+def test_chat_and_reasoner_share_flash_pricing() -> None:
     u = _usage(prompt=1000, completion=1000, miss=1000)
     chat = compute_cost("deepseek-chat", u)
     assert compute_cost("deepseek-reasoner", u) == chat
