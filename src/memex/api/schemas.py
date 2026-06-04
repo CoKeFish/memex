@@ -101,10 +101,13 @@ class SummaryInfo(BaseModel):
 
 class ExtractionInfo(BaseModel):
     # `done` puede ser True con listas vacías: el cursor marca "procesado, sin datos relevantes".
+    # Una clave por slug de módulo (la arma `read_extractions` iterando el registry).
     done: bool = False
     modules: list[str] = Field(default_factory=list)
     finance: list[dict[str, Any]] = Field(default_factory=list)
     calendar: list[dict[str, Any]] = Field(default_factory=list)
+    hackathones: list[dict[str, Any]] = Field(default_factory=list)
+    identidades: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class LlmCallInfo(BaseModel):
@@ -820,6 +823,13 @@ class LlmCallRow(BaseModel):
     source_name: str | None = None
     # Decisión de la fase: extracción {items, discarded, n, ...}; ruteo {slugs_in, chosen, ...}.
     metadata: dict[str, Any] | None = None
+
+
+class LlmCallDetail(LlmCallRow):
+    """Detalle de UNA llamada (auditoría): una fila del list endpoint MÁS el texto crudo del LLM
+    (`response_text`), que el list omite para no inflarse. NULL = no capturado."""
+
+    response_text: str | None = None
 
 
 class LlmCallList(BaseModel):

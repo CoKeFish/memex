@@ -169,66 +169,6 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
             .mappings()
             .first()
         )
-        finance = (
-            conn.execute(
-                text(
-                    """
-                    SELECT amount, currency, category, merchant, occurred_on,
-                           description, evidence
-                    FROM mod_finance_expenses
-                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
-                    ORDER BY id
-                    """
-                ),
-                {"uid": user_id, "id": inbox_id},
-            )
-            .mappings()
-            .all()
-        )
-        calendar = (
-            conn.execute(
-                text(
-                    """
-                    SELECT title, starts_on, ends_on, start_time, end_time, location, evidence
-                    FROM mod_calendar_events
-                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
-                    ORDER BY id
-                    """
-                ),
-                {"uid": user_id, "id": inbox_id},
-            )
-            .mappings()
-            .all()
-        )
-        hackathones = (
-            conn.execute(
-                text(
-                    """
-                    SELECT name, starts_on, ends_on, registration_deadline, modality,
-                           location, url, organizer, technologies, prizes, requirements,
-                           description, evidence
-                    FROM mod_hackathones_events
-                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
-                    ORDER BY id
-                    """
-                ),
-                {"uid": user_id, "id": inbox_id},
-            )
-            .mappings()
-            .all()
-        )
-        # Estado de extracción: el cursor marca "procesado" aunque no haya filas (sin datos).
-        ext_modules = (
-            conn.execute(
-                text(
-                    "SELECT DISTINCT module_slug FROM module_extractions "
-                    "WHERE inbox_id = :id ORDER BY module_slug"
-                ),
-                {"id": inbox_id},
-            )
-            .scalars()
-            .all()
-        )
         # Traza de llamadas LLM atribuidas a este mensaje (auditoría/costo por correo).
         llm_calls = (
             conn.execute(
@@ -264,14 +204,12 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
             .all()
         )
         feedback = get_feedback(conn, inbox_id)
+    # Extracciones: única fuente = read_extractions (de-hardcodeado, itera el registry). Antes este
+    # router duplicaba el SQL por módulo y ya había divergido (le faltaba identidades).
+    from memex.modules.orchestrator import read_extractions
+
     data["summary"] = dict(summary) if summary else None
-    data["extraction"] = {
-        "done": len(ext_modules) > 0,
-        "modules": [str(m) for m in ext_modules],
-        "finance": [dict(r) for r in finance],
-        "calendar": [dict(r) for r in calendar],
-        "hackathones": [dict(r) for r in hackathones],
-    }
+    data["extraction"] = read_extractions(user_id, inbox_id)
     calls = [dict(c) for c in llm_calls]
     data["llm"] = {
         "calls": len(calls),
@@ -283,7 +221,7 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
     data["media"] = [dict(m) for m in media]
     data["feedback"] = feedback
     data["summarized"] = summary is not None
-    data["extracted"] = len(ext_modules) > 0
+    data["extracted"] = bool(data["extraction"]["done"])
     return data
 
 

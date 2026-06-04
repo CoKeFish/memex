@@ -5,7 +5,7 @@
 El orquestador SIEMPRE tipa contra `InterestModule`, nunca contra la clase concreta (mismo
 test de disciplina que con `Source`). Un módulo concreto vive en `memex/modules/<slug>/`.
 
-Aislamiento (ADR-001): un módulo NUNCA importa db/llm/observability directo. El core le
+Aislamiento (como `Source`): un módulo NUNCA importa db/llm/observability directo. El core le
 inyecta lo que necesita vía `ModuleContext` (igual que un ingestor solo conoce
 `memex.core.source`).
 
@@ -114,15 +114,34 @@ class InterestModule(Protocol):
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
         """Escribe `items` (ya validados contra `extraction_schema`) en SUS tablas `mod_<slug>_*`
-        usando `ctx.conn`. Devuelve cuántas filas insertó/actualizó. NO abre conexión propia.
+        usando `ctx.conn`. Devuelve cuántas filas procesó. NO abre conexión propia.
 
-        OBLIGACIÓN (v2): produce VÉRTICES ÚNICOS — re-extraer la misma entidad NO debe duplicar.
-        El módulo deduplica su unidad: por business-key (`identity_fields` + `upsert_unique`,
-        fusionando `source_inbox_ids`) o por un mecanismo propio (KnownIndex, consolidación)."""
+        DELEGA su unicidad a `self.dedup`: `persist` es el entrypoint del orquestador; el cómo se
+        garantizan los VÉRTICES ÚNICOS vive en `dedup`."""
+        ...
+
+    async def dedup(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
+        """Paso de UNICIDAD del módulo: materializa `items` como VÉRTICES ÚNICOS en `ctx.conn` —
+        re-extraer la misma entidad NO debe duplicar. Devuelve cuántos procesó.
+
+        Miembro OBLIGATORIO del contrato con NOMBRE UNIFORME en todos los módulos; el contrato NO
+        dicta el mecanismo: por business-key (`identity_fields` + `upsert_unique`, fusionando
+        `source_inbox_ids`), por consolidación (calendar) o por resolución contra un directorio
+        (identidades). NO abre conexión propia."""
         ...
 
     async def health_check(self) -> HealthResult:
         """Igual que `Source.health_check`: nunca lanza; error → HealthResult unhealthy."""
+        ...
+
+    def read_for_inbox(
+        self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
+    ) -> list[dict[str, Any]]:
+        """PUERTA PÚBLICA del módulo: filas públicas atribuidas a `inbox_ids` (reverse overlap sobre
+        `source_inbox_ids`). Cada módulo es DUEÑO de su SELECT y de su lista de columnas públicas
+        (espeja `Source.fetch`): el estado INTERNO (p. ej. `mod_calendar_dedup_candidates`, columnas
+        de control) NO se devuelve. Read-only; NO abre tx propia. La consume `read_extractions`
+        iterando el registry — sin hardcodear tablas por módulo."""
         ...
 
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -55,8 +55,13 @@ class IdentidadesModule:
     identity_fields: ClassVar[tuple[str, ...]] = ()
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
-        """Por cada mención: dedup contra el directorio; si es nueva la crea (no-interés); registra
-        el avistamiento como evidencia. Todo en `ctx.conn` (atómico con el cursor)."""
+        """Entrypoint del orquestador; delega la unicidad a `self.dedup`."""
+        return await self.dedup(ctx, items)
+
+    async def dedup(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
+        """Mecanismo propio (`()` en `identity_fields`): por cada mención dedup contra el directorio
+        (`KnownIndex.resolve`); si es nueva la crea (no-interés); registra el avistamiento como
+        evidencia. Todo en `ctx.conn` (atómico con el cursor)."""
         mentions = [i for i in items if isinstance(i, IdentityItem)]
         if not mentions:
             return 0
@@ -72,6 +77,29 @@ class IdentidadesModule:
         return HealthResult(
             status="healthy", detail="identidades module ready", checked_at=datetime.now(UTC)
         )
+
+    def read_for_inbox(
+        self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
+    ) -> list[dict[str, Any]]:
+        """Menciones públicas atribuidas a `inbox_ids` (quién se nombró + cómo resolvió). NO expone
+        ids internos de resolución (`resolved_person_id`/`resolved_org_id`) ni el directorio."""
+        rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT mentioned_name, mentioned_kind, evidence, resolved_kind,
+                           resolution_method
+                    FROM mod_identidades_mentions
+                    WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "ids": list(inbox_ids)},
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(r) for r in rows]
 
 
 def _create_entity(

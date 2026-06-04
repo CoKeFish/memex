@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import Any, ClassVar
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
@@ -41,6 +44,10 @@ class FinanceModule:
     identity_fields: ClassVar[tuple[str, ...]] = ("currency", "amount", "merchant", "occurred_on")
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
+        """Entrypoint del orquestador; delega la unicidad a `self.dedup`."""
+        return await self.dedup(ctx, items)
+
+    async def dedup(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
         """Materializa cada gasto como VÉRTICE ÚNICO (dedup por business-key): si el mismo gasto ya
         existe (mismo monto/moneda/comercio-normalizado/fecha) fusiona `source_inbox_ids` (recibo +
         alerta del banco → un solo vértice con ambos documentos); si no, lo inserta. Atómico en
@@ -81,3 +88,24 @@ class FinanceModule:
         return HealthResult(
             status="healthy", detail="finance module ready", checked_at=datetime.now(UTC)
         )
+
+    def read_for_inbox(
+        self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
+    ) -> list[dict[str, Any]]:
+        """Gastos públicos atribuidos a `inbox_ids` (reverse `source_inbox_ids`)."""
+        rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT amount, currency, category, merchant, occurred_on, description, evidence
+                    FROM mod_finance_expenses
+                    WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "ids": list(inbox_ids)},
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(r) for r in rows]

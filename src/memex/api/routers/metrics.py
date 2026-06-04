@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from memex.api.auth import current_user_id
-from memex.api.schemas import LlmCallList, LlmRollup
+from memex.api.schemas import LlmCallDetail, LlmCallList, LlmRollup
 from memex.db import connection
 from memex.logging import get_logger
 
@@ -428,3 +428,43 @@ async def llm_calls(
         for r in rows
     ]
     return {"items": items, "total": total}
+
+
+@router.get("/llm/calls/{call_id}", response_model=LlmCallDetail)
+async def llm_call_detail(call_id: int, user_id: UserID) -> dict[str, Any]:
+    """Detalle de UNA llamada `llm_calls` (auditoría por-llamada): igual que una fila del list
+    endpoint MÁS `response_text` (el texto crudo que devolvió el LLM). 404 si no existe / no es del
+    usuario."""
+    sql = f"""
+        SELECT lc.id, lc.created_at, lc.purpose, {_MODULE_CASE} AS module, lc.model,
+               lc.prompt_tokens, lc.completion_tokens, lc.cache_hit_tokens, lc.cost_usd,
+               lc.latency_ms, lc.status, lc.error_message, lc.inbox_id, lc.source_id,
+               {_SOURCE_LABEL} AS source_name, lc.metadata, lc.response_text
+        FROM llm_calls lc
+        LEFT JOIN sources s ON s.id = lc.source_id
+        WHERE lc.id = :id AND lc.user_id = :uid
+    """
+    with connection() as conn:
+        row = conn.execute(text(sql), {"id": call_id, "uid": user_id}).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="llm_call not found")
+    _log.info("metrics.llm.call_detail", user_id=user_id, call_id=call_id)
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"],
+        "purpose": row["purpose"],
+        "module": row["module"],
+        "model": row["model"],
+        "prompt_tokens": int(row["prompt_tokens"]),
+        "completion_tokens": int(row["completion_tokens"]),
+        "cache_hit_tokens": int(row["cache_hit_tokens"]),
+        "cost_usd": float(row["cost_usd"]),
+        "latency_ms": int(row["latency_ms"]),
+        "status": row["status"],
+        "error_message": row["error_message"],
+        "inbox_id": row["inbox_id"],
+        "source_id": row["source_id"],
+        "source_name": row["source_name"],
+        "metadata": row["metadata"],
+        "response_text": row["response_text"],
+    }

@@ -209,6 +209,7 @@ def record_llm_call(
     cache_hit_tokens: int = 0,
     error_message: str | None = None,
     metadata: dict[str, Any] | None = None,
+    response_text: str | None = None,
 ) -> int:
     """Persist a single LLM call to `llm_calls` and log `llm.call`.
 
@@ -247,11 +248,11 @@ def record_llm_call(
                 INSERT INTO llm_calls
                   (user_id, request_id, inbox_id, source_id, purpose, model,
                    prompt_tokens, completion_tokens, cache_hit_tokens, cost_usd,
-                   latency_ms, status, error_message, metadata)
+                   latency_ms, status, error_message, metadata, response_text)
                 VALUES
                   (:user_id, :request_id, :inbox_id, :source_id, :purpose, :model,
                    :prompt_tokens, :completion_tokens, :cache_hit_tokens, :cost_usd,
-                   :latency_ms, :status, :error_message, CAST(:metadata AS JSONB))
+                   :latency_ms, :status, :error_message, CAST(:metadata AS JSONB), :response_text)
                 RETURNING id
                 """
             ),
@@ -270,6 +271,7 @@ def record_llm_call(
                 "status": status,
                 "error_message": error_message[:_ERROR_MESSAGE_MAX] if error_message else None,
                 "metadata": json.dumps(metadata or {}),
+                "response_text": response_text,
             },
         ).scalar_one()
 

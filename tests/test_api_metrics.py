@@ -328,3 +328,33 @@ def test_audit_pagination(client: Any) -> None:
 def test_audit_empty(client: Any) -> None:
     body = client.get("/metrics/llm/calls").json()
     assert body == {"items": [], "total": 0}
+
+
+def test_llm_call_detail_includes_response_text(client: Any) -> None:
+    """El detalle por-llamada devuelve `response_text` (texto crudo del LLM) — que el list omite — y
+    deriva `module` de `purpose`."""
+    with connection() as c:
+        call_id = int(
+            c.execute(
+                text(
+                    """
+                    INSERT INTO llm_calls
+                      (user_id, purpose, model, prompt_tokens, completion_tokens, cache_hit_tokens,
+                       cost_usd, latency_ms, status, metadata, response_text)
+                    VALUES (1, 'extract_finance', 'deepseek-chat', 10, 5, 0, 0.001, 100, 'ok',
+                            '{}'::jsonb, :rt)
+                    RETURNING id
+                    """
+                ),
+                {"rt": '{"items": []}'},
+            ).scalar_one()
+        )
+
+    body = client.get(f"/metrics/llm/calls/{call_id}").json()
+    assert body["id"] == call_id
+    assert body["response_text"] == '{"items": []}'
+    assert body["module"] == "finance"  # derivado de purpose
+
+
+def test_llm_call_detail_missing_returns_404(client: Any) -> None:
+    assert client.get("/metrics/llm/calls/999999").status_code == 404

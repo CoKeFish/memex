@@ -41,7 +41,7 @@ from memex.core.observability import (
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
 from memex.logging import get_logger
-from memex.modules import resolve
+from memex.modules import known_modules, resolve
 from memex.modules.contract import (
     ExtractionItem,
     InterestModule,
@@ -210,6 +210,7 @@ async def _route_chunk(
             "chunk": chunk_idx,
             "chunks": n_chunks,
         },
+        response_text=result.content,
     )
     stats.cost.record(
         window.source_id,
@@ -294,6 +295,7 @@ def _record_cost(
     items: int = 0,
     discarded: int = 0,
     error_message: str | None = None,
+    response_text: str | None = None,
 ) -> None:
     record_llm_call(
         user_id=user_id,
@@ -314,6 +316,7 @@ def _record_cost(
             "items": items,
             "discarded": discarded,
         },
+        response_text=response_text,
     )
     stats.cost.record(
         source_id,
@@ -366,6 +369,7 @@ async def _extract_module(
             n=len(rows),
             source_id=window.source_id,
             error_message="empty content",
+            response_text=result.content,
         )
         _log.warning("extract.module.empty_content", slug=module.slug, n=len(rows))
         return  # sin cursor → reintentable
@@ -388,6 +392,7 @@ async def _extract_module(
             n=len(rows),
             source_id=window.source_id,
             error_message=f"truncated ({result.finish_reason})",
+            response_text=result.content,
         )
         _log.warning(
             "extract.module.truncated",
@@ -435,6 +440,7 @@ async def _extract_module(
         source_id=window.source_id,
         items=persisted,
         discarded=discarded,
+        response_text=result.content,
     )
     stats.items += persisted
     stats.discarded += discarded
@@ -501,6 +507,7 @@ async def _extract_group(
             source_id=window.source_id,  # atribución first-class por source
             error_message="empty content",
             metadata={"policy": policy, "group_size": group_size, "slugs": slugs, "n": len(rows)},
+            response_text=result.content,
         )
         stats.cost.record(
             window.source_id,
@@ -527,6 +534,7 @@ async def _extract_group(
             source_id=window.source_id,  # atribución first-class por source
             error_message=f"truncated ({result.finish_reason})",
             metadata={"policy": policy, "group_size": group_size, "slugs": slugs, "n": len(rows)},
+            response_text=result.content,
         )
         stats.cost.record(
             window.source_id,
@@ -589,6 +597,7 @@ async def _extract_group(
             "discarded_by_slug": discarded_by_slug,
             "n": len(rows),
         },
+        response_text=result.content,
     )
     stats.cost.record(
         window.source_id,
@@ -846,10 +855,16 @@ def _load_one_workrow(user_id: int, inbox_id: int) -> WorkRow:
 
 
 def read_extractions(user_id: int, inbox_id: int) -> dict[str, Any]:
-    """Estado de extracción de un inbox: módulos ya corridos (cursor) + filas por módulo.
+    """Estado de extracción de un inbox: módulos ya corridos (cursor) + filas PÚBLICAS por módulo.
 
     `done`=True aunque NO haya filas: el cursor en `module_extractions` marca "ya procesado, 0 datos
-    relevantes" — clave para que la UI distinga "sin extraer" de "extraído sin resultados"."""
+    relevantes" — clave para que la UI distinga "sin extraer" de "extraído sin resultados".
+
+    De-hardcodeado: itera el registry y le pide a cada módulo su `read_for_inbox` (su puerta
+    pública), en vez de hardcodear un SELECT por tabla. Un módulo nuevo aparece acá solo. Se iteran
+    TODOS los registrados (no solo los activos): uno deshabilitado puede tener filas históricas y no
+    se debe soltar su clave. Las claves por slug preservan finance/calendar/hackathones (que lee el
+    front) y suman las nuevas (identidades)."""
     with connection() as conn:
         modules = (
             conn.execute(
@@ -862,61 +877,13 @@ def read_extractions(user_id: int, inbox_id: int) -> dict[str, Any]:
             .scalars()
             .all()
         )
-        finance = (
-            conn.execute(
-                text(
-                    """
-                    SELECT amount, currency, category, merchant, occurred_on,
-                           description, evidence
-                    FROM mod_finance_expenses
-                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
-                    ORDER BY id
-                    """
-                ),
-                {"uid": user_id, "id": inbox_id},
-            )
-            .mappings()
-            .all()
-        )
-        calendar = (
-            conn.execute(
-                text(
-                    """
-                    SELECT title, starts_on, ends_on, start_time, end_time, location, evidence
-                    FROM mod_calendar_events
-                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
-                    ORDER BY id
-                    """
-                ),
-                {"uid": user_id, "id": inbox_id},
-            )
-            .mappings()
-            .all()
-        )
-        hackathones = (
-            conn.execute(
-                text(
-                    """
-                    SELECT name, starts_on, ends_on, registration_deadline, modality,
-                           location, url, organizer, technologies, prizes, requirements,
-                           description, evidence
-                    FROM mod_hackathones_events
-                    WHERE user_id = :uid AND :id = ANY(source_inbox_ids)
-                    ORDER BY id
-                    """
-                ),
-                {"uid": user_id, "id": inbox_id},
-            )
-            .mappings()
-            .all()
-        )
-    return {
-        "done": len(modules) > 0,
-        "modules": [str(m) for m in modules],
-        "finance": [dict(r) for r in finance],
-        "calendar": [dict(r) for r in calendar],
-        "hackathones": [dict(r) for r in hackathones],
-    }
+        result: dict[str, Any] = {
+            "done": len(modules) > 0,
+            "modules": [str(m) for m in modules],
+        }
+        for slug in known_modules():
+            result[slug] = resolve(slug)().read_for_inbox(conn, user_id, [inbox_id])
+    return result
 
 
 def _coerce_payload(raw: Any) -> dict[str, Any]:

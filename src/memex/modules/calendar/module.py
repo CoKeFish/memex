@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -190,8 +190,14 @@ class CalendarModule:
     identity_fields: ClassVar[tuple[str, ...]] = ()
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
-        """Inserta los eventos validados y marca pares candidatos de duplicado, todo en
-        `ctx.conn` (atómico con el cursor de extracción). Devuelve cuántos eventos insertó."""
+        """Entrypoint del orquestador; delega la unicidad a `self.dedup`."""
+        return await self.dedup(ctx, items)
+
+    async def dedup(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
+        """Mecanismo propio (`()` en `identity_fields`): inserta los eventos validados y marca pares
+        candidatos de duplicado (FASE 1), todo en `ctx.conn` (atómico con el cursor de extracción).
+        La unicidad del vértice la da la CONSOLIDACIÓN, no un UNIQUE sobre la fila cruda. Devuelve
+        cuántos eventos insertó."""
         events = [i for i in items if isinstance(i, CalendarEventItem)]
         if not events:
             return 0
@@ -203,3 +209,25 @@ class CalendarModule:
         return HealthResult(
             status="healthy", detail="calendar module ready", checked_at=datetime.now(UTC)
         )
+
+    def read_for_inbox(
+        self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
+    ) -> list[dict[str, Any]]:
+        """Eventos públicos (fila cruda) atribuidos a `inbox_ids`. NO expone el estado interno de
+        dedup (`mod_calendar_dedup_candidates`, columnas de control de la FASE 1)."""
+        rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT title, starts_on, ends_on, start_time, end_time, location, evidence
+                    FROM mod_calendar_events
+                    WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "ids": list(inbox_ids)},
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(r) for r in rows]

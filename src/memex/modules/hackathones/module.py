@@ -16,7 +16,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import Any, ClassVar
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
@@ -50,6 +53,10 @@ class HackathonModule:
     identity_fields: ClassVar[tuple[str, ...]] = ("name", "starts_on")
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
+        """Entrypoint del orquestador; delega la unicidad a `self.dedup`."""
+        return await self.dedup(ctx, items)
+
+    async def dedup(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
         """Materializa cada hackatón como VÉRTICE ÚNICO (dedup por nombre normalizado + fecha):
         re-anunciar el mismo hackatón fusiona `source_inbox_ids` en vez de duplicar. Atómico en
         `ctx.conn`. Devuelve cuántos hackatones procesó."""
@@ -89,3 +96,26 @@ class HackathonModule:
         return HealthResult(
             status="healthy", detail="hackathones module ready", checked_at=datetime.now(UTC)
         )
+
+    def read_for_inbox(
+        self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
+    ) -> list[dict[str, Any]]:
+        """Hackatones públicos atribuidos a `inbox_ids` (reverse `source_inbox_ids`)."""
+        rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT name, starts_on, ends_on, registration_deadline, modality,
+                           location, url, organizer, technologies, prizes, requirements,
+                           description, evidence
+                    FROM mod_hackathones_events
+                    WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "ids": list(inbox_ids)},
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(r) for r in rows]

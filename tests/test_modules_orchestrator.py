@@ -542,3 +542,19 @@ def test_truncated_grouped_retryable(seed_source: dict[str, Any]) -> None:
     assert _count("mod_finance_expenses") == 0
     assert _count("mod_calendar_events") == 0
     assert _count("module_extractions") == 0  # sin cursor → reintentable
+
+
+def test_read_extractions_de_hardcoded_returns_all_module_keys() -> None:
+    """read_extractions itera el registry (de-hardcodeado): TODAS las claves de módulo presentes
+    —incluida identidades, que antes no aparecía— aun sin datos, para no soltar una clave que el
+    front lee. `done=False` cuando ningún módulo corrió sobre el mensaje."""
+    from memex.modules import known_modules
+    from memex.modules.orchestrator import read_extractions
+
+    ext = read_extractions(1, 999_999)
+
+    assert ext["done"] is False
+    assert ext["modules"] == []
+    for slug in known_modules():
+        assert ext[slug] == [], f"la clave {slug} debe existir y venir vacía"
+    assert {"finance", "calendar", "hackathones", "identidades"} <= set(ext)
