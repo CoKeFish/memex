@@ -41,3 +41,10 @@ def test_module_has_public_read_door(slug: str) -> None:
     """`read_for_inbox` (la puerta pública del módulo) existe y es invocable."""
     mod = resolve(slug)()
     assert callable(mod.read_for_inbox)
+
+
+@pytest.mark.parametrize("slug", _SLUGS, ids=lambda s: s)
+def test_module_has_forget_door(slug: str) -> None:
+    """`forget_inbox` (la puerta de borrado, contraparte del re-extract) existe y es invocable."""
+    mod = resolve(slug)()
+    assert callable(mod.forget_inbox)

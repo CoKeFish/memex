@@ -101,6 +101,20 @@ class IdentidadesModule:
         )
         return [dict(r) for r in rows]
 
+    def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
+        """Borra las menciones atribuidas a `inbox_ids` (re-extracción en limpio). NO toca el
+        directorio (personas/orgs), que trasciende al mensaje — solo se borra la mención."""
+        result = conn.execute(
+            text(
+                """
+                DELETE FROM mod_identidades_mentions
+                WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
+                """
+            ),
+            {"uid": user_id, "ids": list(inbox_ids)},
+        )
+        return result.rowcount
+
 
 def _create_entity(
     conn: Connection, user_id: int, item: IdentityItem, index: KnownIndex

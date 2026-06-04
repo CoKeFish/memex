@@ -130,6 +130,55 @@ def test_extract_individual_routes_nothing(client: Any, seed_source: dict[str, A
     assert out["calendar"] == []
 
 
+def test_force_re_extract_clears_all_modules_via_registry(
+    client: Any, seed_source: dict[str, Any]
+) -> None:
+    """force=True borra las filas de TODOS los módulos registrados por la puerta `forget_inbox`
+    (iterando el registry) — incluido identidades, que el borrado hardcodeado viejo NO limpiaba."""
+    from memex.modules.orchestrator import extract_inbox
+
+    _enable_modules()  # ≥1 módulo activo para no cortar por 'no_modules'
+    iid = _seed_classified(seed_source["id"], "fx1")
+    with connection() as c:
+        c.execute(
+            text(
+                """
+                INSERT INTO mod_finance_expenses
+                  (user_id, source_inbox_ids, amount, currency, merchant)
+                VALUES (1, ARRAY[:iid]::bigint[], 10.0, 'USD', 'OXXO')
+                """
+            ),
+            {"iid": iid},
+        )
+        c.execute(
+            text(
+                """
+                INSERT INTO mod_identidades_mentions
+                  (user_id, source_inbox_ids, mentioned_name, mentioned_kind)
+                VALUES (1, ARRAY[:iid]::bigint[], 'Ana', 'persona')
+                """
+            ),
+            {"iid": iid},
+        )
+
+    # Routing devuelve [] → no re-extrae; solo nos importa el borrado previo.
+    asyncio.run(extract_inbox(1, iid, force=True, client=FakeLLM('{"modules": []}')))
+
+    with connection() as c:
+        fin = c.execute(
+            text("SELECT count(*) FROM mod_finance_expenses WHERE :iid = ANY(source_inbox_ids)"),
+            {"iid": iid},
+        ).scalar()
+        ide = c.execute(
+            text(
+                "SELECT count(*) FROM mod_identidades_mentions WHERE :iid = ANY(source_inbox_ids)"
+            ),
+            {"iid": iid},
+        ).scalar()
+    assert fin == 0
+    assert ide == 0  # identidades AHORA se limpia (antes el borrado hardcodeado lo omitía)
+
+
 def test_summarize_endpoint_409_when_not_classified(
     client: Any, seed_source: dict[str, Any]
 ) -> None:

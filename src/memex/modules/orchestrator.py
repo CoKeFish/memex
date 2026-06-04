@@ -911,9 +911,8 @@ async def extract_inbox(
             **_NO_COST,
             "done": False,
             "modules": [],
-            "finance": [],
-            "calendar": [],
-            "hackathones": [],
+            # Una clave vacía por módulo registrado (sin hardcodear; incluye identidades).
+            **{slug: [] for slug in known_modules()},
         }
     active_by_slug = {m.slug: m for m in active}
 
@@ -929,27 +928,11 @@ async def extract_inbox(
                 conn.execute(
                     text("DELETE FROM module_extractions WHERE inbox_id = :id"), {"id": inbox_id}
                 )
-                conn.execute(
-                    text(
-                        "DELETE FROM mod_finance_expenses "
-                        "WHERE user_id = :uid AND :id = ANY(source_inbox_ids)"
-                    ),
-                    {"uid": user_id, "id": inbox_id},
-                )
-                conn.execute(
-                    text(
-                        "DELETE FROM mod_calendar_events "
-                        "WHERE user_id = :uid AND :id = ANY(source_inbox_ids)"
-                    ),
-                    {"uid": user_id, "id": inbox_id},
-                )
-                conn.execute(
-                    text(
-                        "DELETE FROM mod_hackathones_events "
-                        "WHERE user_id = :uid AND :id = ANY(source_inbox_ids)"
-                    ),
-                    {"uid": user_id, "id": inbox_id},
-                )
+                # Borrado de-hardcodeado: cada módulo borra sus filas por su puerta `forget_inbox`
+                # (contraparte de `read_for_inbox`). Se iteran TODOS los registrados para que un
+                # módulo nuevo se limpie solo, sin tocar este código.
+                for slug in known_modules():
+                    resolve(slug)().forget_inbox(conn, user_id, [inbox_id])
 
         window: Window | None = None
         if scope == "window" and row.tier in ("batch", "individual"):

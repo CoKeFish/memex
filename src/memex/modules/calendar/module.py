@@ -231,3 +231,17 @@ class CalendarModule:
             .all()
         )
         return [dict(r) for r in rows]
+
+    def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
+        """Borra los eventos (fila cruda) atribuidos a `inbox_ids` (re-extracción en limpio). NO
+        toca el consolidado ni los candidatos de dedup (estado que trasciende al mensaje)."""
+        result = conn.execute(
+            text(
+                """
+                DELETE FROM mod_calendar_events
+                WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
+                """
+            ),
+            {"uid": user_id, "ids": list(inbox_ids)},
+        )
+        return result.rowcount

@@ -109,3 +109,16 @@ class FinanceModule:
             .all()
         )
         return [dict(r) for r in rows]
+
+    def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
+        """Borra los gastos atribuidos a `inbox_ids` (re-extracción en limpio)."""
+        result = conn.execute(
+            text(
+                """
+                DELETE FROM mod_finance_expenses
+                WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
+                """
+            ),
+            {"uid": user_id, "ids": list(inbox_ids)},
+        )
+        return result.rowcount
