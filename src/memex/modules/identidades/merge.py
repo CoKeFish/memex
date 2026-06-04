@@ -8,8 +8,11 @@ identidad, esta primitiva las colapsa en la superviviente y borra la absorbida, 
   3. re-apunta las menciones (`resolved_identity_id`);
   4. re-apunta las aristas del grafo (`relation_edges`, src y dst del slug del kind), colapsando las
      que violarían `relation_edges_logical_uq` y las que quedarían self-loop;
+  4b. re-apunta la jerarquía de pertenencia: los hijos del absorbido cuelgan del superviviente y se
+     limpia el self-loop si el superviviente colgaba del absorbido (el padre final se decide abajo);
   5. agrega el nombre + alias de la absorbida a los alias de la superviviente;
-  6. fill-only de columnas NULL de la superviviente (given/family/birthday/foto/provider*/notes);
+  6. fill-only de columnas NULL de la superviviente (given/family/birthday/foto/provider*/notes y el
+     `parent_identity_id`, sin crear self-parent);
   7. deja auditoría en `metadata.merged_from` y borra la absorbida.
 
 Solo funde identidades del MISMO `user_id` y MISMO `kind` (persona con persona, org con org).
@@ -169,6 +172,24 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
         p,
     )
 
+    # 4b. jerarquía de pertenencia: los hijos del absorbido cuelgan del superviviente; si el
+    #     superviviente colgaba del absorbido, ese link queda self-loop → se limpia (el fill-only de
+    #     abajo decide el padre final del superviviente con la guarda anti self-parent).
+    conn.execute(
+        text(
+            "UPDATE mod_identidades SET parent_identity_id = :surv "
+            "WHERE parent_identity_id = :absb AND user_id = :u AND id <> :surv"
+        ),
+        p,
+    )
+    conn.execute(
+        text(
+            "UPDATE mod_identidades SET parent_identity_id = NULL "
+            "WHERE id = :surv AND parent_identity_id = :absb AND user_id = :u"
+        ),
+        p,
+    )
+
     # 5/6/7. alias (nombre + alias de la absorbida), fill-only de columnas NULL, auditoría.
     conn.execute(
         text(
@@ -194,6 +215,11 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
               provider_etag          = CASE WHEN surv.provider_resource_name IS NULL
                                             THEN absb.provider_etag ELSE surv.provider_etag END,
               interest    = surv.interest OR absb.interest,
+              parent_identity_id = CASE
+                              WHEN surv.parent_identity_id IS NOT NULL
+                                   THEN surv.parent_identity_id
+                              WHEN absb.parent_identity_id = surv.id THEN NULL
+                              ELSE absb.parent_identity_id END,
               metadata    = jsonb_set(
                               surv.metadata, '{merged_from}',
                               COALESCE(surv.metadata->'merged_from', '[]'::jsonb)

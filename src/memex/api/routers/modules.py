@@ -1,6 +1,7 @@
 """Módulos de extracción para /procesamiento: estado (toggle + perillas) + cobertura.
 
-Solo expone los slugs resolubles del registry (`known_modules()` → finance, calendar). Para cada
+Solo expone los slugs resolubles del registry (`known_modules()`: finance, calendar, hackathones,
+identidades). Para cada
 uno combina:
 - `module_settings` (LEFT JOIN: `enabled`/`batching_policy`/`group_size`, con defaults coherentes
   con el orquestador si el usuario nunca tocó el módulo), y
@@ -38,6 +39,8 @@ _log = get_logger("memex.api.modules")
 _LABELS: dict[str, str] = {
     "finance": "Finanzas (gastos)",
     "calendar": "Calendario (eventos)",
+    "identidades": "Identidades (directorio)",
+    "hackathones": "Hackathones (eventos)",
 }
 
 #: Defaults coherentes con el esquema (0008/0023) cuando el usuario no tiene fila de settings.

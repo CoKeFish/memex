@@ -35,7 +35,9 @@ from memex.api.schemas import (
     IdentityUpdate,
 )
 from memex.db import connection
+from memex.llm.client import LLMQuotaError
 from memex.logging import get_logger
+from memex.modules.identidades.hierarchy import run_organize, would_create_cycle
 from memex.modules.identidades.merge import merge_identities
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.sync import run_sync
@@ -51,7 +53,7 @@ _IDENTIFIER_KINDS = frozenset({"email", "phone", "handle", "domain", "url"})
 
 _IDENTITY_COLS = (
     "id, kind, display_name, aliases, interest, source, notes, given_name, family_name, birthday, "
-    "photo_url, metadata, created_at, updated_at"
+    "photo_url, parent_identity_id, metadata, created_at, updated_at"
 )
 _MENTION_COLS = (
     "id, source_inbox_ids, evidence, mentioned_name, mentioned_kind, email, handle, org_hint, "
@@ -74,6 +76,11 @@ def _identity_row(r: Any) -> dict[str, Any]:
         "birthday": r["birthday"],
         "photo_url": r["photo_url"],
         "deleted": bool(meta.get("deleted")),
+        "parent_id": r["parent_identity_id"],
+        # parent_name / mention_count solo vienen en la lista (JOIN) y el detalle (enriquecido);
+        # en los SELECT de una sola tabla quedan None/0.
+        "parent_name": r.get("parent_name"),
+        "mention_count": int(r["mention_count"]) if r.get("mention_count") is not None else 0,
         "created_at": r["created_at"],
         "updated_at": r["updated_at"],
     }
@@ -111,24 +118,33 @@ async def list_identities(
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     cursor: int | None = Query(default=None, description="id > cursor for pagination"),
 ) -> dict[str, Any]:
-    """Directorio del usuario, paginado por cursor ascendente."""
-    where = ["user_id = :uid"]
+    """Directorio del usuario, paginado por cursor ascendente. Cada fila trae el padre
+    (`parent_name`) y el `mention_count` por LEFT JOIN (no subquery por-fila)."""
+    where = ["i.user_id = :uid"]
     params: dict[str, Any] = {"uid": user_id, "limit": limit}
     if cursor is not None:
-        where.append("id > :cur")
+        where.append("i.id > :cur")
         params["cur"] = cursor
     if kind in _KINDS:
-        where.append("kind = :kind")
+        where.append("i.kind = :kind")
         params["kind"] = kind
     if interest is not None:
-        where.append("interest = :interest")
+        where.append("i.interest = :interest")
         params["interest"] = interest
     if q:
-        where.append("(display_name ILIKE :q OR array_to_string(aliases, ' ') ILIKE :q)")
+        where.append("(i.display_name ILIKE :q OR array_to_string(i.aliases, ' ') ILIKE :q)")
         params["q"] = f"%{q}%"
     sql = (
-        f"SELECT {_IDENTITY_COLS} FROM mod_identidades "
-        f"WHERE {' AND '.join(where)} ORDER BY id LIMIT :limit"
+        "SELECT i.id, i.kind, i.display_name, i.aliases, i.interest, i.source, i.notes, "
+        "i.given_name, i.family_name, i.birthday, i.photo_url, i.parent_identity_id, i.metadata, "
+        "i.created_at, i.updated_at, p.display_name AS parent_name, "
+        "COALESCE(mc.n, 0) AS mention_count "
+        "FROM mod_identidades i "
+        "LEFT JOIN mod_identidades p ON p.id = i.parent_identity_id "
+        "LEFT JOIN (SELECT resolved_identity_id, count(*) AS n FROM mod_identidades_mentions "
+        "           WHERE user_id = :uid GROUP BY resolved_identity_id) mc "
+        "       ON mc.resolved_identity_id = i.id "
+        f"WHERE {' AND '.join(where)} ORDER BY i.id LIMIT :limit"
     )
     with connection() as conn:
         rows = conn.execute(text(sql), params).mappings().all()
@@ -267,6 +283,23 @@ async def reject_merge_candidate(cand_id: int, user_id: UserID) -> dict[str, boo
     return {"rejected": True}
 
 
+@router.post("/organize")
+async def organize_hierarchy(user_id: UserID) -> dict[str, int]:
+    """Organiza la jerarquía de pertenencia («sub») con el LLM y la aplica directo (sin cola de
+    confirmación). Una sola llamada holística sobre todas las organizaciones del directorio."""
+    try:
+        stats = await run_organize(user_id)
+    except LLMQuotaError:
+        raise HTTPException(status_code=503, detail="sin cuota de LLM disponible") from None
+    return {
+        "orgs": stats.orgs,
+        "linked": stats.linked,
+        "created": stats.created,
+        "cleaned": stats.cleaned,
+        "skipped": stats.skipped,
+    }
+
+
 @router.post("", response_model=IdentityRow)
 async def create_identity(user_id: UserID, body: IdentityCreate) -> dict[str, Any]:
     if body.kind not in _KINDS:
@@ -367,12 +400,39 @@ async def get_identity(identity_id: int, user_id: UserID) -> dict[str, Any]:
             .mappings()
             .all()
         )
+        # Sub-identidades que cuelgan de esta (sus «partes»: programas, productos, filiales, …).
+        children = (
+            conn.execute(
+                text(
+                    "SELECT id, kind, display_name FROM mod_identidades "
+                    "WHERE parent_identity_id = :id AND user_id = :uid ORDER BY display_name"
+                ),
+                {"id": identity_id, "uid": user_id},
+            )
+            .mappings()
+            .all()
+        )
+        identity = _identity_row(irow)
+        mc = conn.execute(
+            text(
+                "SELECT count(*) FROM mod_identidades_mentions "
+                "WHERE resolved_identity_id = :id AND user_id = :uid"
+            ),
+            {"id": identity_id, "uid": user_id},
+        ).scalar()
+        identity["mention_count"] = int(mc or 0)
+        if identity["parent_id"] is not None:
+            identity["parent_name"] = conn.execute(
+                text("SELECT display_name FROM mod_identidades WHERE id = :p AND user_id = :uid"),
+                {"p": identity["parent_id"], "uid": user_id},
+            ).scalar()
     return {
-        "identity": _identity_row(irow),
+        "identity": identity,
         "identifiers": [dict(r) for r in identifiers],
         "sites": [dict(r) for r in sites],
         "affiliations": [dict(r) for r in affiliations],
         "mentions": [_mention_row(m) for m in mentions],
+        "children": [dict(r) for r in children],
     }
 
 
@@ -380,7 +440,8 @@ async def get_identity(identity_id: int, user_id: UserID) -> dict[str, Any]:
 async def update_identity(
     identity_id: int, user_id: UserID, body: IdentityUpdate
 ) -> dict[str, Any]:
-    """Actualiza una identidad ('promover' = `interest=true`; editar notas/cumpleaños/nombre)."""
+    """Actualiza una identidad ('promover' = `interest=true`; editar notas/cumpleaños/nombre/alias;
+    setear o quitar el padre de pertenencia)."""
     if body.kind is not None and body.kind not in _KINDS:
         raise HTTPException(status_code=422, detail=f"kind inválido: {body.kind!r}")
     sets: list[str] = []
@@ -401,10 +462,33 @@ async def update_identity(
     if body.aliases is not None:
         sets.append("aliases = :aliases")
         params["aliases"] = [a.strip() for a in body.aliases if a.strip()]
-    if not sets:
-        raise HTTPException(status_code=422, detail="sin campos para actualizar")
-    sets.append("updated_at = NOW()")
+    # `parent_id` distingue "no enviado" (no tocar) de `null` (quitar el padre) vía exclude_unset.
+    set_parent = "parent_id" in body.model_dump(exclude_unset=True)
     with connection() as conn:
+        if set_parent:
+            pval = body.parent_id
+            if pval is None:
+                sets.append("parent_identity_id = NULL")
+            else:
+                if pval == identity_id:
+                    raise HTTPException(422, detail="una identidad no puede ser su propio padre")
+                owns = conn.execute(
+                    text("SELECT 1 FROM mod_identidades WHERE id = :p AND user_id = :uid"),
+                    {"p": pval, "uid": user_id},
+                ).first()
+                if owns is None:
+                    raise HTTPException(422, detail="padre no encontrado")
+                if would_create_cycle(conn, user_id, identity_id, pval):
+                    raise HTTPException(422, detail="el padre crearía un ciclo de pertenencia")
+                sets.append("parent_identity_id = :parent_id")
+                params["parent_id"] = pval
+                sets.append(
+                    "metadata = jsonb_set(metadata, '{parent_source}', "
+                    "to_jsonb(CAST('manual' AS TEXT)))"
+                )
+        if not sets:
+            raise HTTPException(status_code=422, detail="sin campos para actualizar")
+        sets.append("updated_at = NOW()")
         row = (
             conn.execute(
                 text(

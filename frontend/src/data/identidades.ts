@@ -23,8 +23,18 @@ export interface Identity {
   birthday: string | null
   photoUrl: string | null
   deleted: boolean
+  // Pertenencia («sub»): de qué identidad cuelga esta. mentionCount = nº de menciones resueltas acá.
+  parentId: number | null
+  parentName: string | null
+  mentionCount: number
   createdAt: string
   updatedAt: string
+}
+
+export interface IdentityChild {
+  id: number
+  kind: IdentityKind
+  displayName: string
 }
 
 export interface IdentityIdentifier {
@@ -71,6 +81,7 @@ export interface IdentityDetail {
   sites: IdentitySite[]
   affiliations: IdentityAffiliation[]
   mentions: IdentityMention[]
+  children: IdentityChild[]
 }
 
 export interface IdentityMergeCandidate {
@@ -133,6 +144,8 @@ export interface IdentityUpdateInput {
   notes?: string
   birthday?: string | null
   aliases?: string[]
+  // null = quitar el padre; number = setearlo; undefined = no tocar.
+  parentId?: number | null
 }
 
 // ---- Shapes crudos del API (snake_case) -------------------------------------------------------
@@ -150,8 +163,17 @@ interface IdentityApi {
   birthday: string | null
   photo_url: string | null
   deleted: boolean
+  parent_id: number | null
+  parent_name: string | null
+  mention_count: number
   created_at: string
   updated_at: string
+}
+
+interface ChildApi {
+  id: number
+  kind: IdentityKind
+  display_name: string
 }
 
 interface IdentifierApi {
@@ -198,6 +220,7 @@ interface DetailApi {
   sites: SiteApi[]
   affiliations: AffiliationApi[]
   mentions: MentionApi[]
+  children: ChildApi[]
 }
 
 interface MergeCandidateApi {
@@ -257,9 +280,16 @@ function toIdentity(i: IdentityApi): Identity {
     birthday: i.birthday,
     photoUrl: i.photo_url,
     deleted: i.deleted,
+    parentId: i.parent_id,
+    parentName: i.parent_name,
+    mentionCount: i.mention_count,
     createdAt: i.created_at,
     updatedAt: i.updated_at,
   }
+}
+
+function toChild(c: ChildApi): IdentityChild {
+  return { id: c.id, kind: c.kind, displayName: c.display_name }
 }
 
 function toIdentifier(i: IdentifierApi): IdentityIdentifier {
@@ -364,6 +394,7 @@ export async function fetchIdentity(id: number): Promise<IdentityDetail> {
     sites: d.sites.map(toSite),
     affiliations: d.affiliations.map(toAffiliation),
     mentions: d.mentions.map(toMention),
+    children: d.children.map(toChild),
   }
 }
 
@@ -410,7 +441,21 @@ export async function updateIdentity(id: number, input: IdentityUpdateInput): Pr
   if (input.notes !== undefined) body.notes = input.notes
   if (input.birthday !== undefined) body.birthday = input.birthday
   if (input.aliases !== undefined) body.aliases = input.aliases
+  if (input.parentId !== undefined) body.parent_id = input.parentId
   return toIdentity(await apiPatch<IdentityApi>(`/identidades/${id}`, body))
+}
+
+export interface OrganizeResult {
+  orgs: number
+  linked: number
+  created: number
+  cleaned: number
+  skipped: number
+}
+
+/** Organiza la jerarquía de pertenencia con el LLM (sin confirmación manual). */
+export async function organizeHierarchy(): Promise<OrganizeResult> {
+  return apiPost<OrganizeResult>("/identidades/organize", {})
 }
 
 export async function deleteIdentity(id: number): Promise<void> {
@@ -467,6 +512,7 @@ export async function affiliate(
     sites: d.sites.map(toSite),
     affiliations: d.affiliations.map(toAffiliation),
     mentions: d.mentions.map(toMention),
+    children: d.children.map(toChild),
   }
 }
 

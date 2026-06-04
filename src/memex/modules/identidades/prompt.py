@@ -57,3 +57,36 @@ IDENTIDADES_DEDUP_SYSTEM_PROMPT = (
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
     '{"same": <true|false>, "confidence": <0..1>, "rationale": "<motivo breve>"}'
 )
+
+
+#: Organizador de PERTENENCIA («sub»): recibe la lista COMPLETA de organizaciones del directorio
+#: (id interno + nombre + alias) y arma la jerarquía «pertenece a» (programa→universidad,
+#: producto→empresa, filial→matriz, área→org). UNA sola llamada holística, SESGO A PRECISIÓN
+#: (ante la duda queda sin padre). El resultado se aplica solo (sin confirmación manual).
+IDENTIDADES_HIERARCHY_SYSTEM_PROMPT = (
+    "Sos un organizador de la JERARQUÍA de un directorio de ORGANIZACIONES. Te paso la lista\n"
+    "completa de organizaciones, cada una con un `id` numérico, su nombre y sus alias. Tu tarea\n"
+    "es detectar relaciones de PERTENENCIA: cuando una organización es una SUB-PARTE de otra y\n"
+    "debería colgar de ella («pertenece a»).\n\n"
+    "Casos de pertenencia (ejemplos):\n"
+    "- un PROGRAMA/carrera/facultad/escuela pertenece a su UNIVERSIDAD\n"
+    "  (ej. 'Ingeniería Mecánica - Universidad del Norte' pertenece a 'Universidad del Norte');\n"
+    "- un PRODUCTO/marca pertenece a su EMPRESA (ej. 'Steam' pertenece a 'Valve Corporation');\n"
+    "- una FILIAL pertenece a su MATRIZ; un ÁREA/equipo pertenece a su organización.\n\n"
+    "Reglas estrictas:\n"
+    "- `child_id`: el `id` EXACTO de la organización sub (de la lista). Cada `child_id` UNA vez.\n"
+    "- El padre se indica de UNA de dos formas (exactamente una, nunca ambas):\n"
+    "  • `parent_id`: el `id` de la organización padre, SI está en la lista; o\n"
+    "  • `parent_name`: el nombre del padre cuando DEBERÍA existir pero NO está en la lista\n"
+    "    (ej. el nombre del sub trae la universidad pero esa universidad no figura como entrada).\n"
+    "- `cleaned_name` (opcional): el nombre del sub SIN el padre, si el nombre los junta\n"
+    "  (ej. 'Ingeniería Mecánica - Universidad del Norte' → 'Ingeniería Mecánica').\n"
+    "- SESGO A PRECISIÓN: incluí una entrada SOLO si estás seguro de la pertenencia. Ante la\n"
+    "  duda, NO la incluyas (mejor que quede sin padre a inventar una jerarquía falsa).\n"
+    "- NO relaciones organizaciones que son PARES o del mismo rubro; solo sub→contenedora.\n"
+    "- NO inventes pertenencias para llenar; muchas orgs no tienen padre y eso está bien.\n\n"
+    "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
+    '{"links": [{"child_id": <id>, "parent_id": <id|null>, "parent_name": "<nombre|null>", '
+    '"cleaned_name": "<nombre|null>"}]}\n'
+    'Si no hay ninguna pertenencia clara, devolvé {"links": []}.'
+)

@@ -34,6 +34,7 @@ export function IdentidadesPage() {
           refresh={version}
           onChanged={bump}
           onDeleted={() => setSelectedId(null)}
+          onSelect={setSelectedId}
         />
       </div>
       <SyncPanel />

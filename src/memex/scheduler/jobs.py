@@ -26,6 +26,7 @@ from memex.modules.calendar.dedup_llm import run_dedup_phase2
 from memex.modules.calendar.merge_llm import run_merge
 from memex.modules.calendar.sync import run_pull, run_push
 from memex.modules.identidades.dedup_llm import run_merge_phase2
+from memex.modules.identidades.hierarchy import run_organize
 from memex.modules.identidades.sync import run_sync as run_identidades_sync
 from memex.modules.orchestrator import run_extraction
 from memex.ocr.worker import run_ocr
@@ -210,6 +211,7 @@ class IdentidadesCycleStats:
     accounts: int = 0
     synced: int = 0
     merged: int = 0
+    linked: int = 0  # pertenencias («sub») seteadas por el organizador LLM
     errors: int = 0
     steps_failed: list[str] = field(default_factory=list)
 
@@ -259,6 +261,18 @@ async def run_identidades_cycle(user_id: int) -> IdentidadesCycleStats:
         cycle.errors += 1
         cycle.steps_failed.append("merge")
         _log.warning("scheduler.identidades.step_failed", step="merge", error=str(e))
+    # Organizar la jerarquía de pertenencia DESPUÉS del dedup (no linkear orgs que se van a fundir).
+    try:
+        organize_stats = await run_organize(user_id)
+        cycle.linked += organize_stats.linked
+        cycle.errors += organize_stats.errors
+    except LLMQuotaError:
+        cycle.steps_failed.append("organize:no_quota")
+        _log.error("scheduler.identidades.aborted_no_quota", step="organize")
+    except Exception as e:
+        cycle.errors += 1
+        cycle.steps_failed.append("organize")
+        _log.warning("scheduler.identidades.step_failed", step="organize", error=str(e))
     return cycle
 
 

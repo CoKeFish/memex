@@ -103,6 +103,47 @@ def test_merge_collapses_self_loop(conn: Any) -> None:
     )
 
 
+def _set_parent(conn: Any, child: int, parent: int | None) -> None:
+    conn.execute(
+        text("UPDATE mod_identidades SET parent_identity_id = :p WHERE id = :c"),
+        {"p": parent, "c": child},
+    )
+
+
+def _parent_of(conn: Any, identity_id: int) -> int | None:
+    row = conn.execute(
+        text("SELECT parent_identity_id FROM mod_identidades WHERE id = :i"), {"i": identity_id}
+    ).scalar()
+    return int(row) if row is not None else None
+
+
+def test_merge_reparents_children(conn: Any) -> None:
+    surv = _mk_person(conn, "A")
+    absb = _mk_person(conn, "B")
+    child = _mk_person(conn, "Hijo")
+    _set_parent(conn, child, absb)
+    assert merge_identities(conn, 1, surv, absb) is True
+    assert _parent_of(conn, child) == surv  # el hijo del absorbido cuelga del superviviente
+
+
+def test_merge_inherits_parent_fill_only(conn: Any) -> None:
+    surv = _mk_person(conn, "A")  # sin padre
+    absb = _mk_person(conn, "B")
+    grandparent = _mk_person(conn, "P")
+    _set_parent(conn, absb, grandparent)
+    assert merge_identities(conn, 1, surv, absb) is True
+    assert _parent_of(conn, surv) == grandparent  # hereda el padre del absorbido (fill-only)
+
+
+def test_merge_child_and_parent_no_self_parent(conn: Any) -> None:
+    # superviviente colgaba del absorbido → tras fundirlos NO debe quedar self-parent.
+    surv = _mk_person(conn, "A")
+    absb = _mk_person(conn, "B")
+    _set_parent(conn, surv, absb)
+    assert merge_identities(conn, 1, surv, absb) is True
+    assert _parent_of(conn, surv) is None
+
+
 def test_merge_dedups_logical_edge(conn: Any) -> None:
     surv = _mk_person(conn, "A")
     absb = _mk_person(conn, "B")

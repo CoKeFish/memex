@@ -1,9 +1,10 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import {
   Building2,
   Check,
   GitMerge,
   Loader2,
+  Network,
   Plus,
   RefreshCw,
   Star,
@@ -29,6 +30,7 @@ import {
   fetchIdentityProviderAccounts,
   fetchIdentitySyncRuns,
   fetchMergeCandidates,
+  organizeHierarchy,
   rejectMergeCandidate,
   triggerIdentitySync,
   updateIdentity,
@@ -101,7 +103,15 @@ function IdentityRow({
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{i.displayName || "(sin nombre)"}</span>
           <EstadoBadge interest={i.interest} />
+          {i.mentionCount > 0 && (
+            <span className="shrink-0 text-[11px] text-muted-foreground" title="menciones">
+              {i.mentionCount} menc.
+            </span>
+          )}
         </div>
+        {i.parentName && (
+          <div className="truncate text-[11px] text-muted-foreground">parte de {i.parentName}</div>
+        )}
         {i.aliases.length > 0 && (
           <div className="truncate text-xs text-muted-foreground">{i.aliases.join(", ")}</div>
         )}
@@ -143,6 +153,7 @@ export function DirectoryPanel({
   const [newName, setNewName] = useState("")
   const [newKind, setNewKind] = useState<IdentityKind>("organizacion")
   const [creating, setCreating] = useState(false)
+  const [organizing, setOrganizing] = useState(false)
 
   const interest = estado === "" ? undefined : estado === "interes"
   const { data, loading, error } = useAsync(
@@ -170,13 +181,38 @@ export function DirectoryPanel({
       .finally(() => setCreating(false))
   }
 
+  function organize(): void {
+    setOrganizing(true)
+    organizeHierarchy()
+      .then(onChanged)
+      .finally(() => setOrganizing(false))
+  }
+
   return (
     <Panel className="overflow-hidden">
       <PanelHeader
         eyebrow="directorio · identidades"
         title="Directorio"
         sub="Personas y organizaciones — interés o Detectada"
-        right={<span className="eyebrow">{items.length}</span>}
+        right={
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={organizing}
+              onClick={organize}
+              title="Organizar la jerarquía de pertenencia con el LLM (sub → contenedora)"
+            >
+              {organizing ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Network className="size-3.5" />
+              )}
+              Organizar
+            </Button>
+            <span className="eyebrow">{items.length}</span>
+          </div>
+        }
       />
       <div className="space-y-2 border-b border-border px-4 py-2.5">
         <input
@@ -287,16 +323,74 @@ function IdentifierRow({
   )
 }
 
+function ParentPicker({
+  identity,
+  onSet,
+}: {
+  identity: Identity
+  onSet: (parentId: number) => void
+}) {
+  const [q, setQ] = useState("")
+  const [results, setResults] = useState<Identity[]>([])
+
+  useEffect(() => {
+    const term = q.trim()
+    if (!term) {
+      setResults([])
+      return
+    }
+    let cancel = false
+    void fetchIdentities({ kind: "organizacion", q: term }).then((rows) => {
+      if (!cancel) setResults(rows.filter((r) => r.id !== identity.id).slice(0, 6))
+    })
+    return () => {
+      cancel = true
+    }
+  }, [q, identity.id])
+
+  return (
+    <div className="mt-1">
+      <input
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        placeholder="Buscar organización padre…"
+        className={inputCls}
+      />
+      {results.length > 0 && (
+        <ul className="mt-1 divide-y divide-border rounded-md border border-border">
+          {results.map((r) => (
+            <li key={r.id}>
+              <button
+                type="button"
+                className="block w-full truncate px-2.5 py-1.5 text-left text-sm hover:bg-muted/40"
+                onClick={() => {
+                  onSet(r.id)
+                  setQ("")
+                  setResults([])
+                }}
+              >
+                {r.displayName}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 export function IdentityDetailPanel({
   id,
   refresh,
   onChanged,
   onDeleted,
+  onSelect,
 }: {
   id: number | null
   refresh: number
   onChanged: () => void
   onDeleted: () => void
+  onSelect?: (id: number) => void
 }) {
   const { data, loading, error } = useAsync(
     () => (id == null ? Promise.resolve(null) : fetchIdentity(id)),
@@ -304,6 +398,8 @@ export function IdentityDetailPanel({
   )
   const [notes, setNotes] = useState<string | null>(null)
   const [savingNotes, setSavingNotes] = useState(false)
+  const [aliasText, setAliasText] = useState<string | null>(null)
+  const [savingAlias, setSavingAlias] = useState(false)
   const [idfPlatform, setIdfPlatform] = useState("")
   const [idfKind, setIdfKind] = useState<IdentityIdentifier["kind"]>("email")
   const [idfValue, setIdfValue] = useState("")
@@ -343,8 +439,9 @@ export function IdentityDetailPanel({
     )
   }
 
-  const { identity, identifiers, sites, affiliations, mentions } = detail
+  const { identity, identifiers, sites, affiliations, mentions, children } = detail
   const notesValue = notes ?? identity.notes
+  const aliasValue = aliasText ?? identity.aliases.join(", ")
   const Icon = KIND_ICON[identity.kind]
 
   function saveNotes(): void {
@@ -355,6 +452,24 @@ export function IdentityDetailPanel({
         onChanged()
       })
       .finally(() => setSavingNotes(false))
+  }
+
+  function saveAliases(): void {
+    setSavingAlias(true)
+    const aliases = aliasValue
+      .split(",")
+      .map((a) => a.trim())
+      .filter(Boolean)
+    updateIdentity(identity.id, { aliases })
+      .then(() => {
+        setAliasText(null)
+        onChanged()
+      })
+      .finally(() => setSavingAlias(false))
+  }
+
+  function setParent(parentId: number | null): void {
+    void updateIdentity(identity.id, { parentId }).then(onChanged)
   }
 
   function addIdf(): void {
@@ -405,10 +520,77 @@ export function IdentityDetailPanel({
               <Star className="size-3.5" /> Promover
             </Button>
           )}
-          {identity.aliases.length > 0 && (
-            <span className="truncate text-xs text-muted-foreground">
-              alias: {identity.aliases.join(", ")}
+          {identity.mentionCount > 0 && (
+            <span className="text-[11px] text-muted-foreground">
+              {identity.mentionCount} menciones
             </span>
+          )}
+        </div>
+
+        {/* Pertenece a (solo orgs): de qué identidad cuelga + selector para cambiarlo */}
+        {identity.kind === "organizacion" && (
+          <div>
+            <div className="eyebrow mb-1">Pertenece a</div>
+            {identity.parentName && identity.parentId != null ? (
+              <div className="flex items-center gap-2 text-sm">
+                <button
+                  type="button"
+                  className="truncate text-left text-brand hover:underline"
+                  onClick={() => onSelect?.(identity.parentId as number)}
+                >
+                  {identity.parentName}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setParent(null)}
+                  className="shrink-0 rounded p-1 text-muted-foreground hover:bg-status-error/10 hover:text-status-error"
+                  title="Quitar padre"
+                >
+                  <X className="size-3.5" />
+                </button>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">Sin padre (no cuelga de ninguna).</p>
+            )}
+            <ParentPicker identity={identity} onSet={(pid) => setParent(pid)} />
+          </div>
+        )}
+
+        {/* Partes (sub-identidades que cuelgan de esta) */}
+        {children.length > 0 && (
+          <div>
+            <div className="eyebrow mb-1">Partes ({children.length})</div>
+            <ul className="text-sm">
+              {children.map((c) => (
+                <li key={c.id} className="py-0.5">
+                  <button
+                    type="button"
+                    className="text-left text-brand hover:underline"
+                    onClick={() => onSelect?.(c.id)}
+                  >
+                    {c.displayName}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* Alias (editable, separados por coma) */}
+        <div>
+          <div className="eyebrow mb-1">Alias</div>
+          <input
+            value={aliasValue}
+            onChange={(e) => setAliasText(e.target.value)}
+            placeholder="alias separados por coma…"
+            className={inputCls}
+          />
+          {aliasText !== null && aliasText !== identity.aliases.join(", ") && (
+            <div className="mt-1 flex justify-end">
+              <Button size="sm" disabled={savingAlias} onClick={saveAliases}>
+                {savingAlias ? <Loader2 className="size-3.5 animate-spin" /> : null} Guardar
+              </Button>
+            </div>
           )}
         </div>
 

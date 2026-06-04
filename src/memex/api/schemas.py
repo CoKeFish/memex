@@ -587,6 +587,11 @@ class IdentityRow(BaseModel):
     birthday: date | None = None
     photo_url: str | None = None
     deleted: bool = False
+    #: Pertenencia («sub»): de qué identidad cuelga esta (None = sin padre). `parent_name` se
+    #: rellena en lista/detalle (JOIN); `mention_count` es el nº de menciones resueltas a esta.
+    parent_id: int | None = None
+    parent_name: str | None = None
+    mention_count: int = 0
     created_at: datetime
     updated_at: datetime
 
@@ -629,14 +634,24 @@ class IdentityAffiliationRow(BaseModel):
     role: str | None = None
 
 
+class IdentityChildRow(BaseModel):
+    """Una sub-identidad que cuelga de esta (su `parent_identity_id` apunta acá)."""
+
+    id: int
+    kind: str
+    display_name: str
+
+
 class IdentityDetail(BaseModel):
-    """Una identidad + sus identificadores, sedes, afiliaciones y menciones recientes."""
+    """Una identidad + sus identificadores, sedes, afiliaciones, menciones y sub-identidades."""
 
     identity: IdentityRow
     identifiers: list[IdentityIdentifierRow] = []
     sites: list[IdentitySiteRow] = []
     affiliations: list[IdentityAffiliationRow] = []
     mentions: list[IdentityMentionRow] = []
+    #: Las identidades que pertenecen a esta (sus «partes»: programas, productos, filiales, …).
+    children: list[IdentityChildRow] = []
 
 
 class IdentityProviderAccountRow(BaseModel):
@@ -701,6 +716,9 @@ class IdentityUpdate(BaseModel):
     family_name: str | None = None
     birthday: date | None = None
     aliases: list[str] | None = None
+    #: Pertenencia: setear el padre (int) o limpiarlo (null). Se distingue "no enviado" de "null"
+    #: con `model_dump(exclude_unset=True)` en el router (None explícito = quitar el padre).
+    parent_id: int | None = None
 
 
 class IdentityIdentifierCreate(BaseModel):

@@ -168,6 +168,74 @@ def test_merge_candidate_confirm_and_reject(client: Any) -> None:
     assert client.get("/identidades/merge-candidates").json()["items"] == []
 
 
+def test_parent_set_clear_and_children(client: Any) -> None:
+    parent = _create(client, kind="organizacion", display_name="Universidad del Norte")["id"]
+    child = _create(client, kind="organizacion", display_name="Ingeniería Mecánica")["id"]
+
+    # setear el padre
+    r = client.patch(f"/identidades/{child}", json={"parent_id": parent})
+    assert r.status_code == 200, r.text
+
+    cd = client.get(f"/identidades/{child}").json()
+    assert cd["identity"]["parent_id"] == parent
+    assert cd["identity"]["parent_name"] == "Universidad del Norte"
+
+    # el padre lista al hijo en "children"
+    pd = client.get(f"/identidades/{parent}").json()
+    assert [c["id"] for c in pd["children"]] == [child]
+
+    # la lista trae parent_name del hijo
+    listed = client.get("/identidades?kind=organizacion").json()["items"]
+    row = next(o for o in listed if o["id"] == child)
+    assert row["parent_id"] == parent and row["parent_name"] == "Universidad del Norte"
+
+    # limpiar el padre (null explícito)
+    assert client.patch(f"/identidades/{child}", json={"parent_id": None}).status_code == 200
+    assert client.get(f"/identidades/{child}").json()["identity"]["parent_id"] is None
+
+
+def test_parent_validations(client: Any) -> None:
+    a = _create(client, kind="organizacion", display_name="A")["id"]
+    b = _create(client, kind="organizacion", display_name="B")["id"]
+
+    # propio padre
+    assert client.patch(f"/identidades/{a}", json={"parent_id": a}).status_code == 422
+    # padre inexistente
+    assert client.patch(f"/identidades/{a}", json={"parent_id": 99999}).status_code == 422
+    # ciclo: B cuelga de A, luego intentar colgar A de B
+    assert client.patch(f"/identidades/{b}", json={"parent_id": a}).status_code == 200
+    assert client.patch(f"/identidades/{a}", json={"parent_id": b}).status_code == 422
+
+
+def test_mention_count(client: Any) -> None:
+    oid = _create(client, kind="organizacion", display_name="Acme")["id"]
+    with connection() as c:
+        for _ in range(3):
+            c.execute(
+                text(
+                    "INSERT INTO mod_identidades_mentions "
+                    "(user_id, source_inbox_ids, mentioned_name, resolved_kind, "
+                    " resolved_identity_id) VALUES (1, ARRAY[1], 'Acme', 'organizacion', :o)"
+                ),
+                {"o": oid},
+            )
+    assert client.get(f"/identidades/{oid}").json()["identity"]["mention_count"] == 3
+    listed = client.get("/identidades").json()["items"]
+    assert next(o for o in listed if o["id"] == oid)["mention_count"] == 3
+
+
+def test_organize_endpoint(client: Any, monkeypatch: Any) -> None:
+    from memex.modules.identidades.hierarchy import OrganizeStats
+
+    async def fake_organize(user_id: int, **kwargs: Any) -> OrganizeStats:
+        return OrganizeStats(orgs=3, linked=2, created=1, cleaned=0, skipped=0)
+
+    monkeypatch.setattr("memex.api.routers.identidades.run_organize", fake_organize)
+    r = client.post("/identidades/organize")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"orgs": 3, "linked": 2, "created": 1, "cleaned": 0, "skipped": 0}
+
+
 def test_sync_missing_account_returns_errors(client: Any) -> None:
     r = client.post("/identidades/sync", json={"account_id": 9999})
     assert r.status_code == 200

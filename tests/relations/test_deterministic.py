@@ -173,6 +173,26 @@ def test_afiliacion_real_persona_org() -> None:
     assert (e.dst.slug, e.dst.id) == ("identidades:org", o)
 
 
+def _set_parent(child: int, parent: int) -> None:
+    _exec("UPDATE mod_identidades SET parent_identity_id = :p WHERE id = :c", p=parent, c=child)
+
+
+def test_pertenencia_real_sub_padre() -> None:
+    parent = _org("Valve Corporation")
+    child = _org("Steam")
+    _set_parent(child, parent)
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="identidades")
+    assert stats.pertenencia_reales == 1
+    assert len(edges) == 1
+    e = edges[0]
+    assert e.status == "confirmed"
+    assert e.relation_type == "pertenece_a"
+    assert (e.src.slug, e.src.id) == ("identidades:org", child)  # dirigida: hijo → padre
+    assert (e.dst.slug, e.dst.id) == ("identidades:org", parent)
+
+
 def test_idempotente() -> None:
     _finance("Rappi", [5])
     _hack("Hack", [5])
