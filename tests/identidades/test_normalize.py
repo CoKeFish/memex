@@ -9,7 +9,12 @@ from typing import Any
 
 from sqlalchemy import text
 
-from memex.modules.identidades.normalize import norm_identifier, normalize_match, org_core
+from memex.modules.identidades.normalize import (
+    is_role_email,
+    norm_identifier,
+    normalize_match,
+    org_core,
+)
 
 _NAMES = ["Café Ñoño", "  Ada   Lovelace  ", "JOSÉ", "naïve façade", "Müller", "Bogotá D.C."]
 _ORGS = ["Acme S.A.S.", "Unity Technologies", "Grupo Bolívar S.A.", "OpenAI, Inc.", "Ñandú Ltda"]
@@ -32,6 +37,18 @@ def test_org_core_strips_legal_suffixes() -> None:
     assert org_core("Unity Technologies") == "unity"
     assert org_core("Grupo Bolívar S.A.") == "bolivar"
     assert org_core("OpenAI, Inc.") == "openai"
+
+
+def test_is_role_email() -> None:
+    # relay/role: NO son clave de identidad (las comparte mucha gente)
+    assert is_role_email("notifications@github.com")
+    assert is_role_email("messages-noreply@linkedin.com")
+    assert is_role_email("no-reply@x.com")
+    assert is_role_email("mailer-daemon@host.com")
+    # personales / de org: SÍ identifican
+    assert not is_role_email("ada@gmail.com")
+    assert not is_role_email("info@acme.com")
+    assert not is_role_email("juan.perez@empresa.co")
 
 
 def test_norm_identifier() -> None:

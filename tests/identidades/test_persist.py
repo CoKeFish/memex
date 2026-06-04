@@ -172,6 +172,29 @@ async def test_dedup_within_batch_creates_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_role_email_not_used_as_key() -> None:
+    # dos remitentes distintos que comparten un From relay (notifications@github.com) NO se
+    # fusionan: la dirección role no es clave de identidad → cada uno se resuelve por nombre.
+    items = [
+        IdentityItem(
+            source_inbox_ids=(5,),
+            name="ardalis",
+            email="notifications@github.com",
+            kind="organizacion",
+        ),
+        IdentityItem(
+            source_inbox_ids=(6,),
+            name="dependabot",
+            email="notifications@github.com",
+            kind="organizacion",
+        ),
+    ]
+    await _persist(items)
+    names = {o["display_name"] for o in _identities("organizacion")}
+    assert {"ardalis", "dependabot"} <= names  # dos identidades distintas, no una fusionada
+
+
+@pytest.mark.asyncio
 async def test_persist_empty_is_noop() -> None:
     assert await _persist([]) == 0
     assert _mentions() == {}

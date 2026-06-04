@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from memex.modules.identidades.normalize import norm_identifier, normalize_match
+from memex.modules.identidades.normalize import is_role_email, norm_identifier, normalize_match
 from memex.modules.identidades.schema import IdentityItem
 
 #: Discriminador de identidad (espejo del CHECK `kind` en mod_identidades).
@@ -112,9 +112,10 @@ class KnownIndex:
         return Resolution(self._kind.get(identity_id), identity_id, method)
 
     def _by_email(self, raw: str, method: str) -> Resolution | None:
-        """email exacto → identidad; si no, dominio del email → org."""
+        """email exacto → identidad; si no, dominio → org. Una dirección ROLE/RELAY (noreply,
+        notifications, …) NO es clave de identidad → no matchea (se resuelve por nombre)."""
         key = norm_identifier("email", raw)
-        if not key:
+        if not key or is_role_email(key):
             return None
         iid = self._email.get(key)
         if iid is not None:

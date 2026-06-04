@@ -67,6 +67,36 @@ _ORG_SUFFIX_RE = re.compile(r"\b(?:" + "|".join(_ORG_SUFFIXES) + r")\b")
 _WS_RE = re.compile(r"\s+")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 
+#: Tokens de local-part role/relay: la dirección NO identifica a una persona/entidad única.
+_ROLE_TOKENS = frozenset(
+    {
+        "notification",
+        "notifications",
+        "notify",
+        "noreply",
+        "donotreply",
+        "mailer",
+        "daemon",
+        "postmaster",
+        "bounce",
+        "bounces",
+    }
+)
+
+
+def is_role_email(email: str) -> bool:
+    """True si `email` es una dirección ROLE/RELAY (noreply, notifications, mailer-daemon, …).
+
+    Estas direcciones NO identifican a una persona/entidad única: las comparte mucha gente (el relay
+    `notifications@github.com` reenvía a nombre de muchos usuarios distintos; `*-noreply@linkedin`
+    igual). Por eso NO se usan como clave de identidad: una mención con un email role se resuelve
+    por NOMBRE, no por email (si no, fusionaría remitentes distintos)."""
+    local = email.split("@", 1)[0].lower()
+    flat = re.sub(r"[^a-z]", "", local)  # no-reply / no.reply / no_reply → noreply
+    if "noreply" in flat or "donotreply" in flat:
+        return True
+    return any(tok in _ROLE_TOKENS for tok in re.split(r"[._+-]", local))
+
 
 def _strip_accents(text: str) -> str:
     """Quita diacríticos por descomposición NFKD (≈ `unaccent` de Postgres para latín acentuado)."""

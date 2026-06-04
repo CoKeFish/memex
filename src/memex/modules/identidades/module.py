@@ -29,7 +29,7 @@ from memex.logging import get_logger
 from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, ModuleContext
 from memex.modules.dedup import forget_inbox_rows
 from memex.modules.identidades.fuzzy import HIGH_THRESHOLD, LOW_THRESHOLD, find_fuzzy_candidates
-from memex.modules.identidades.normalize import norm_identifier
+from memex.modules.identidades.normalize import is_role_email, norm_identifier
 from memex.modules.identidades.prompt import IDENTIDADES_SYSTEM_PROMPT
 from memex.modules.identidades.resolve import (
     KIND_ORG,
@@ -186,7 +186,9 @@ def _create_entity(
         ).scalar_one()
     )
     identifiers: list[KnownIdentifier] = []
-    if item.email:
+    # Una dirección role/relay (noreply, notifications, …) NO es clave de identidad → no se guarda
+    # como identificador (si no, fusionaría remitentes distintos que comparten el relay).
+    if item.email and not is_role_email(item.email):
         vn = norm_identifier("email", item.email)
         _insert_identifier(conn, user_id, new_id, "email", "email", item.email, vn)
         identifiers.append(KnownIdentifier("email", "email", vn))
