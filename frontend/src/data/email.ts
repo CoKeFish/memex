@@ -3,6 +3,7 @@
 
 import { apiGet, apiGetBlob, ApiError, apiPost } from "@/lib/api"
 import type {
+  ExtractionDebug,
   FeedbackKind,
   InboxExtraction,
   InboxFeedback,
@@ -175,6 +176,7 @@ interface InboxApiRow {
   extracted?: boolean
   summary?: { id?: number | null; tier: string; content: string; created_at?: string | null } | null
   extraction?: InboxExtraction | null
+  extraction_debug?: ExtractionDebug | null
   llm?: {
     calls: number
     cost_usd: number
@@ -278,6 +280,7 @@ function toInboxRow(r: InboxApiRow): InboxRow {
       ? { id: r.summary.id ?? null, tier: r.summary.tier, content: r.summary.content, createdAt: r.summary.created_at ?? null }
       : null,
     extraction: r.extraction ?? null,
+    extractionDebug: r.extraction_debug ?? null,
     llm: toLlmUsage(r.llm),
     media,
     feedback: r.feedback ? toFeedback(r.feedback) : null,

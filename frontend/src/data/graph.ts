@@ -84,10 +84,14 @@ function toEdge(e: EdgeApiRow): GraphEdge {
   }
 }
 
-/** El grafo del usuario (GET /graph). `status` opcional filtra aristas: pista|confirmed|rejected. */
-export async function fetchGraph(status?: string): Promise<GraphData> {
-  const qs = status ? `?status=${encodeURIComponent(status)}` : ""
-  const g = await apiGet<GraphApi>(`/graph${qs}`)
+/** El grafo del usuario (GET /graph). `status` filtra aristas (pista|confirmed|rejected);
+ *  `sourceInboxId` ENFOCA el subgrafo en lo que produjo ese correo (sus vértices + vecinos). */
+export async function fetchGraph(status?: string, sourceInboxId?: number): Promise<GraphData> {
+  const qs = new URLSearchParams()
+  if (status) qs.set("status", status)
+  if (sourceInboxId != null) qs.set("source_inbox_id", String(sourceInboxId))
+  const suffix = qs.toString() ? `?${qs.toString()}` : ""
+  const g = await apiGet<GraphApi>(`/graph${suffix}`)
   return { nodes: g.nodes.map(toNode), edges: g.edges.map(toEdge) }
 }
 

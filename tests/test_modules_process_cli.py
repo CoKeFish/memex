@@ -200,8 +200,8 @@ def test_extract_cli_defaults(monkeypatch: Any) -> None:
     assert captured["max_window_size"] == 40
     assert captured["max_gap_seconds"] == 21600  # 6 h por defecto
     assert captured["route_chunk_size"] == 0  # sin split
-    assert captured["batching_policy"] == "per_module"
-    assert captured["group_size"] == 3
+    assert captured["batching_policy"] == "grouped"  # default: una llamada para todos
+    assert captured["group_size"] == 8  # _GROUP_SIZE_DEFAULT (headroom sobre los módulos actuales)
 
 
 def test_process_cli_threads_tuning(monkeypatch: Any) -> None:

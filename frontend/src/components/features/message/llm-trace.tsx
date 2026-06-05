@@ -31,6 +31,8 @@ const PURPOSE_LABEL: Record<string, string> = {
   module_route: "Ruteo de módulos",
   extract_finance: "Extracción · finanzas",
   extract_calendar: "Extracción · calendario",
+  extract_hackathones: "Extracción · hackatones",
+  extract_identidades: "Extracción · identidades",
   extract_grouped: "Extracción agrupada",
   calendar_merge: "Calendario · consolidación",
   calendar_dedup: "Calendario · dedup",

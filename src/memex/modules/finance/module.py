@@ -32,8 +32,8 @@ from sqlalchemy.engine import Connection
 
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
-from memex.modules.contract import CAP_EXTRACT, ExtractionItem, ModuleContext
-from memex.modules.dedup import forget_inbox_rows
+from memex.modules.contract import CAP_DEBUG_INBOX, CAP_EXTRACT, ExtractionItem, ModuleContext
+from memex.modules.dedup import fetch_internal_calls, forget_inbox_rows
 from memex.modules.finance.dedup import (
     PRECISION_DATE,
     PRECISION_DATETIME,
@@ -288,7 +288,7 @@ class FinanceModule:
     )
     extraction_schema: ClassVar[type[ExtractionItem]] = TransactionItem
     extraction_prompt: ClassVar[str] = FINANCE_SYSTEM_PROMPT
-    capabilities: ClassVar[frozenset[str]] = frozenset({CAP_EXTRACT})
+    capabilities: ClassVar[frozenset[str]] = frozenset({CAP_EXTRACT, CAP_DEBUG_INBOX})
     consumes_kinds: ClassVar[frozenset[SourceKind]] = frozenset({SourceKind.EMAIL, SourceKind.CHAT})
     depends_on: ClassVar[tuple[str, ...]] = ()
     #: Dependencia BLANDA de identidades: si está activa, su handle resuelve la contraparte
@@ -347,6 +347,100 @@ class FinanceModule:
             .all()
         )
         return [dict(r) for r in rows]
+
+    def debug_for_inbox(
+        self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
+    ) -> dict[str, Any]:
+        """Estado INTERNO de finance para `inbox_ids` (capacidad `debug_inbox`, vista `/datos/:id`):
+        `{"rows", "internal_calls"}`. `rows` = por transacción: identidad de contraparte resuelta
+        (seam), outcome de dedup + consolidado, y los pares candidatos que la tocan.
+        `internal_calls` = las llamadas `finance_dedup` que decidieron esos pares, con costo."""
+        rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT t.id, t.direction, t.amount, t.currency, t.counterparty,
+                           t.counterparty_identity_id,
+                           ci.display_name AS counterparty_identity_name,
+                           t.occurred_at, t.processing_outcome, t.processed_at, t.created_at,
+                           link.consolidated_id,
+                           (cons.winner_transaction_id = t.id) AS is_winner
+                    FROM mod_finance_transactions t
+                    LEFT JOIN mod_identidades ci ON ci.id = t.counterparty_identity_id
+                    LEFT JOIN mod_finance_transaction_links link ON link.transaction_id = t.id
+                    LEFT JOIN mod_finance_consolidated cons ON cons.id = link.consolidated_id
+                    WHERE t.user_id = :uid AND CAST(:ids AS BIGINT[]) && t.source_inbox_ids
+                    ORDER BY t.id
+                    """
+                ),
+                {"uid": user_id, "ids": list(inbox_ids)},
+            )
+            .mappings()
+            .all()
+        )
+        if not rows:
+            return {"rows": [], "internal_calls": []}
+        tx_ids = [int(r["id"]) for r in rows]
+        cands = (
+            conn.execute(
+                text(
+                    """
+                    SELECT id, transaction_a_id, transaction_b_id, reason, score, status,
+                           decided_by, confidence, rationale, created_at, decided_at
+                    FROM mod_finance_dedup_candidates
+                    WHERE user_id = :uid AND (
+                        transaction_a_id = ANY(CAST(:ids AS BIGINT[]))
+                        OR transaction_b_id = ANY(CAST(:ids AS BIGINT[]))
+                    )
+                    ORDER BY id
+                    """
+                ),
+                {"uid": user_id, "ids": tx_ids},
+            )
+            .mappings()
+            .all()
+        )
+        by_tx: dict[int, list[dict[str, Any]]] = {tid: [] for tid in tx_ids}
+        for c in cands:
+            a, b = int(c["transaction_a_id"]), int(c["transaction_b_id"])
+            pair = {
+                "reason": c["reason"],
+                "score": float(c["score"]) if c["score"] is not None else None,
+                "status": c["status"],
+                "decided_by": c["decided_by"],
+                "confidence": float(c["confidence"]) if c["confidence"] is not None else None,
+                "rationale": c["rationale"],
+                "created_at": c["created_at"],
+                "decided_at": c["decided_at"],
+            }
+            if a in by_tx:
+                by_tx[a].append({**pair, "other_transaction_id": b})
+            if b in by_tx:
+                by_tx[b].append({**pair, "other_transaction_id": a})
+        # Llamadas LLM de dedup fase-2 que decidieron estos pares (batch, inbox_id=NULL): se
+        # correlacionan por `metadata.pair_id` = id del candidato. Traen su costo real.
+        internal_calls = fetch_internal_calls(
+            conn, user_id, purpose="finance_dedup", pair_ids=[int(c["id"]) for c in cands]
+        )
+        debug_rows = [
+            {
+                "transaction_id": int(r["id"]),
+                "direction": r["direction"],
+                "amount": float(r["amount"]),
+                "currency": r["currency"],
+                "counterparty": r["counterparty"],
+                "counterparty_identity_id": r["counterparty_identity_id"],
+                "counterparty_identity_name": r["counterparty_identity_name"],
+                "occurred_at": r["occurred_at"],
+                "processing_outcome": r["processing_outcome"],
+                "processed_at": r["processed_at"],
+                "consolidated_id": r["consolidated_id"],
+                "is_winner": r["is_winner"],
+                "dedup_candidates": by_tx[int(r["id"])],
+            }
+            for r in rows
+        ]
+        return {"rows": debug_rows, "internal_calls": internal_calls}
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
         """Olvida lo aportado por `inbox_ids` a las transacciones (fila cruda): les saca la

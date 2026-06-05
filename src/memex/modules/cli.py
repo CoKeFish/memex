@@ -24,7 +24,7 @@ from memex.db import connection
 from memex.llm import LLMError, LLMQuotaError
 from memex.logging import get_logger, setup_logging
 from memex.modules import known_modules
-from memex.modules.orchestrator import run_extraction
+from memex.modules.orchestrator import _GROUP_SIZE_DEFAULT, run_extraction
 from memex.modules.process import run_combined
 from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
 
@@ -79,14 +79,15 @@ def _add_run_tuning_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--batching-policy",
         choices=["per_module", "grouped", "all"],
-        default="per_module",
-        help="Cómo agrupar módulos por llamada de extracción (default per_module).",
+        default="grouped",
+        help="Cómo agrupar módulos por llamada de extracción (default grouped: una llamada para "
+        "todos; per_module = una por módulo).",
     )
     parser.add_argument(
         "--group-size",
         type=_positive_int,
-        default=3,
-        help="Módulos por llamada con --batching-policy grouped (default 3).",
+        default=_GROUP_SIZE_DEFAULT,
+        help=f"Módulos por llamada con --batching-policy grouped (default {_GROUP_SIZE_DEFAULT}).",
     )
 
 

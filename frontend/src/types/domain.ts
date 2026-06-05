@@ -67,12 +67,87 @@ export interface InboxSummary {
 }
 
 export interface InboxExtraction {
-  /** True aunque finance/calendar/hackathones estén vacíos: el cursor marca "procesado, sin datos". */
+  /** True aunque las listas estén vacías: el cursor marca "procesado, sin datos relevantes". */
   done: boolean
+  /** Módulos CONSIDERADOS (con cursor en module_extractions): incluye los ruteados-FUERA. Qué módulos
+   *  realmente EXTRAJERON se deriva de la traza (extract_grouped.slugs / extract_<slug>). */
   modules: string[]
   finance: Record<string, unknown>[]
   calendar: Record<string, unknown>[]
   hackathones: Record<string, unknown>[]
+  identidades: Record<string, unknown>[]
+}
+
+/** Un par candidato de dedup (finance o identidades) con su decisión proc/LLM. Capacidad debug_inbox. */
+export interface DedupCandidateDebug {
+  reason: string
+  score: number | null
+  status: string // candidate | confirmed | rejected
+  decided_by: string | null // null=proc (FASE 1) · 'llm'=desempate (FASE 2)
+  confidence: number | null
+  rationale: string | null
+  created_at: string | null
+  decided_at: string | null
+}
+
+/** Estado interno por transacción de finance (seam contraparte→identidad + dedup + consolidación). */
+export interface FinanceDebugRow {
+  transaction_id: number
+  direction: string
+  amount: number
+  currency: string
+  counterparty: string
+  counterparty_identity_id: number | null
+  counterparty_identity_name: string | null
+  occurred_at: string | null
+  processing_outcome: string // pending | unique | duplicate
+  processed_at: string | null
+  consolidated_id: number | null
+  is_winner: boolean | null
+  dedup_candidates: (DedupCandidateDebug & { other_transaction_id: number })[]
+}
+
+/** Estado interno por mención de identidades (resolución + candidatos de merge). */
+export interface IdentidadesDebugRow {
+  mention_id: number
+  mentioned_name: string
+  mentioned_kind: string
+  resolved_kind: string | null
+  resolution_method: string | null
+  resolved_identity_id: number | null
+  resolved_identity_name: string | null
+  confidence: number | null
+  created_at: string | null
+  merge_candidates: (DedupCandidateDebug & {
+    other_identity_id: number
+    other_identity_name: string | null
+  })[]
+}
+
+/** Una llamada LLM INTERNA (dedup fase-2 / co-ocurrencia) correlacionada al mensaje, con su costo
+ *  real — estas ops corren en batch con inbox_id=NULL, así que no salen en la traza por-correo. */
+export interface InternalLlmCall {
+  purpose: string
+  model: string
+  prompt_tokens: number
+  completion_tokens: number
+  cost_usd: number
+  latency_ms: number
+  status: string
+  created_at: string | null
+  metadata: Record<string, unknown> | null
+}
+
+/** Estado interno de un módulo: filas por-entidad + las llamadas LLM internas correlacionadas. */
+export interface ModuleDebugData<TRow> {
+  rows: TRow[]
+  internal_calls: InternalLlmCall[]
+}
+
+/** Estado INTERNO por-módulo para la vista de debug (slug → {rows, internal_calls}). debug_inbox. */
+export interface ExtractionDebug {
+  finance?: ModuleDebugData<FinanceDebugRow>
+  identidades?: ModuleDebugData<IdentidadesDebugRow>
 }
 
 export interface InboxLlmCall {
@@ -150,6 +225,8 @@ export interface InboxRow {
   /** Objetos completos de cada fase (solo en el detalle, GET /inbox/{id}). */
   summary?: InboxSummary | null
   extraction?: InboxExtraction | null
+  /** Estado interno por-módulo (dedup, seam contraparte→identidad, consolidación) — vista debug. */
+  extractionDebug?: ExtractionDebug | null
   llm?: InboxLlmUsage | null
   /** Adjuntos del mensaje (media_assets) — solo en el detalle (GET /inbox/{id}). */
   media?: MediaAsset[]

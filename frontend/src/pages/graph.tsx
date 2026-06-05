@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Link } from "react-router-dom"
+import { Link, useSearchParams } from "react-router-dom"
 import { Hammer, Loader2, Maximize2 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/common/page-header"
@@ -421,13 +421,17 @@ function Legend() {
 }
 
 export function GraphPage() {
+  // `?inbox_id=` enfoca el grafo en lo que produjo ese correo (botón "ver en grafo" desde /datos/:id).
+  const [searchParams] = useSearchParams()
+  const inboxParam = searchParams.get("inbox_id")
+  const inboxId = inboxParam ? Number(inboxParam) : undefined
   const [status, setStatus] = useState<string>("todas")
   const [onlyConnected, setOnlyConnected] = useState(true)
   const [selected, setSelected] = useState<string | null>(null)
   const [building, setBuilding] = useState(false)
   const { data, loading, error, reload } = useAsync<GraphData>(
-    () => fetchGraph(status === "todas" ? undefined : status),
-    [status],
+    () => fetchGraph(status === "todas" ? undefined : status, inboxId),
+    [status, inboxId],
   )
   const full = data ?? { nodes: [], edges: [] }
 
@@ -474,6 +478,15 @@ export function GraphPage() {
         description="Cada vértice es una entidad única (cobro/pago, evento, hackatón, persona, organización). Las aristas las forman el inbox (co-ocurrencia = PISTA, sin vouchar) y los datos reales (afiliación/pertenencia del directorio y la contraparte de cada cobro→identidad = REAL); el LLM valida las pistas después. Filtrá «Reales» para ver solo lo confirmado. Rueda = zoom · arrastrá = mover · click en un nodo = ver sus relaciones."
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            {inboxId != null && (
+              <Link
+                to="/grafo"
+                className="num inline-flex items-center gap-1 rounded-full border border-brand/40 bg-brand/10 px-2 py-0.5 text-[11px] text-brand hover:bg-brand/20"
+                title="Quitar el filtro y ver el grafo completo"
+              >
+                correo #{inboxId} · quitar filtro ✕
+              </Link>
+            )}
             <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Switch checked={onlyConnected} onCheckedChange={setOnlyConnected} aria-label="Solo conectados" />
               Solo conectados

@@ -43,6 +43,9 @@ CAP_EXTRACT = "extract"
 #: Futuras, declaradas pero SIN flujo en este slice (las ejercitan calendar/hackathones):
 CAP_PROVIDE_DOMAIN = "provide_domain"
 CAP_CONTRIBUTE_DOMAIN = "contribute_domain"
+#: Expone su ESTADO INTERNO por-mensaje (dedup, resolución del seam, consolidación) para la vista de
+#: DEBUG `/datos/:id` — lo que `read_for_inbox` deliberadamente oculta. Vía `InboxDebugProvider`.
+CAP_DEBUG_INBOX = "debug_inbox"
 
 
 class ExtractionItem(BaseModel):
@@ -174,6 +177,27 @@ class DomainProvider(Protocol):
 
     def provide_domain(self, conn: Connection, user_id: int) -> object:
         """Construye el handle de dominio del módulo ligado a `(conn, user_id)`."""
+        ...
+
+
+@runtime_checkable
+class InboxDebugProvider(Protocol):
+    """Capacidad `debug_inbox`: expone el ESTADO INTERNO por-mensaje que `read_for_inbox` oculta —
+    para la vista de DEBUG `/datos/:id`. Cada fila de debug describe una entidad que el módulo
+    materializó desde el mensaje, con sus señales internas: resolución del seam (p. ej.
+    contraparte→identidad), dedup (pares candidatos, decisión proc/LLM, score, timestamps) y
+    consolidación. Read-only; NO abre tx propia. La consume `read_extractions_debug` iterando el
+    registry; los módulos sin estado interno interesante (calendar/hackathones) no la declaran."""
+
+    def debug_for_inbox(
+        self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
+    ) -> dict[str, Any]:
+        """Estado interno del módulo para `inbox_ids`: `{"rows": [...], "internal_calls": [...]}`.
+        `rows` = una fila por entidad materializada (sus señales internas). `internal_calls` = las
+        llamadas LLM INTERNAS (dedup fase-2, co-ocurrencia, …) que tocaron esas entidades —
+        correlacionadas por metadata (`pair_id`/`inbox_id`) porque corren en batch con
+        `inbox_id=NULL`; cada una con su costo real, para que el costo del LLM sea visible aquí.
+        Read-only; NO abre tx propia."""
         ...
 
 

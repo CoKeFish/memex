@@ -22,18 +22,34 @@ _log = get_logger("memex.api.graph")
 async def get_graph(
     user_id: UserID,
     status: Annotated[str | None, Query(description="pista|confirmed|rejected")] = None,
+    source_inbox_id: Annotated[
+        int | None,
+        Query(description="enfoca: solo los vértices producidos por este correo + sus vecinos"),
+    ] = None,
 ) -> dict[str, Any]:
     """El grafo del user: vértices (proyectados de las tablas `mod_*`) + aristas (`relation_edges`).
 
     Un vértice se direcciona por `(slug, id)`; inbox NO es vértice (es procedencia, drill-down):
     cada nodo lleva sus `source_inbox_ids` (los mensajes de los que salió) para abrir el correo
     original desde el grafo. Las aristas llevan su `producer` y su `status` (`pista`/`confirmed`);
-    el front filtra por `status`. Solo LECTURA: no dispara el armado (POST /graph/build).
+    el front filtra por `status`. Con `source_inbox_id` el grafo se ENFOCA en lo que produjo ese
+    correo (sentido inverso del drill-down nodo→correo): sus vértices + los vecinos a un salto. Solo
+    LECTURA: no dispara el armado (POST /graph/build).
     """
     with connection() as conn:
         verts = list_vertices(conn, user_id)
         edges = list_edges(conn, user_id, status=status)
         prov = vertex_inbox_ids(conn, user_id)
+    if source_inbox_id is not None:
+        # Vértices producidos por ESE correo (semilla) + las aristas que los tocan; se conservan los
+        # vecinos al otro extremo para no dejar aristas colgando. Correo sin nada → grafo vacío.
+        seed = {ref for ref, ids in prov.items() if source_inbox_id in ids}
+        edges = [e for e in edges if e.src in seed or e.dst in seed]
+        keep = set(seed)
+        for e in edges:
+            keep.add(e.src)
+            keep.add(e.dst)
+        verts = [v for v in verts if v.ref in keep]
     nodes = [
         {
             "slug": v.slug,
