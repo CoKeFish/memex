@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import GraphBuildResult, GraphResponse
+from memex.config import settings
 from memex.db import connection
 from memex.logging import get_logger
 from memex.relations.deterministic import build_relations
@@ -55,9 +56,10 @@ async def get_graph(
 async def build_graph(user_id: UserID) -> dict[str, Any]:
     """Corre el paso de relaciones DETERMINISTAS (on-demand, explícito): materializa pistas de
     co-ocurrencia + afiliaciones reales sobre lo ya guardado. Idempotente y sin LLM. NO dispara
-    extracción/consolidación (consume lo disponible)."""
+    extracción/consolidación (consume lo disponible). El tope de fan-out es configurable
+    (`MEMEX_COOCCURRENCE_CAP`)."""
     with connection() as conn:
-        stats = build_relations(conn, user_id)
+        stats = build_relations(conn, user_id, cooccurrence_cap=settings.cooccurrence_cap)
     _log.info(
         "graph.build.api",
         user_id=user_id,

@@ -25,6 +25,13 @@ class Settings(BaseSettings):
     log_persist_queue_max: int = 10000
     log_persist_retention_days: int = 30
 
+    # --- Grafo de relaciones: tope de fan-out de la co-ocurrencia (ver relations/deterministic) ---
+    # Un correo con MÁS de `cooccurrence_cap` vértices se salta en el paso DETERMINISTA (ahí la
+    # co-ocurrencia todos-contra-todos es ruido, C(n,2)). Configurable porque las identidades son
+    # el tipo que más rompe el tope (hilos densos de gente): subirlo conserva esos hilos. El mismo
+    # valor es el umbral por encima del cual el handler LLM de identidades (relations_llm) releva.
+    cooccurrence_cap: int = 8
+
     # --- Vault de credenciales (ver credentials-vault-architecture / ADR auth+vault) ---
     # Llave maestra ÚNICA del servidor, global, configurada una sola vez (Doppler:
     # MEMEX_SECRET_KEY). Envuelve un DEK por-usuario que cifra los secretos de los ingestors.
