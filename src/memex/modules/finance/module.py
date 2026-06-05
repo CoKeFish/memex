@@ -1,14 +1,27 @@
-"""`FinanceModule` — extractor puro de gastos. Satisface `InterestModule` estructuralmente.
+"""`FinanceModule` — extractor de TRANSACCIONES (ingresos/egresos) con dedup en dos fases.
 
-Sin dependencias, sin dominio consolidador, sin servicios externos: el módulo más simple, que
-valida el contrato completo (ADR-015 §11). `consumes_kinds` excluye SOCIAL a propósito — los
-gastos viven en correos (banco/recibos) y chats; excluir social ejercita el pre-filtro.
+Satisface `InterestModule` estructuralmente y calca el patrón de calendar (ADR-015 §4, §11): la
+extracción inserta la fila CRUDA (coexistencia, nunca fusiona) y corre el dedup determinista FASE 1
+dentro de `persist` —marca pares candidatos y auto-confirma los procedimentalmente seguros— en
+`ctx.conn` (la tx que abre el orquestador), atómico con el cursor de extracción. La FASE 2 (LLM por
+par ambiguo) y la consolidación (fusión por componentes conexos) son workers aparte
+(`dedup_llm.py` / `consolidate.py`). `identity_fields=()`: la unicidad del vértice la da la
+CONSOLIDACIÓN, no un UNIQUE sobre la fila cruda.
+
+La FECHA del cobro es obligatoria: si el mensaje no la trae (`occurred_on=None`), el módulo infiere
+la de RECEPCIÓN (el `inbox.occurred_at` del mensaje citado) — `occurred_at_precision` registra si la
+hora es del cobro (`datetime`), solo la fecha (`date`) o inferida de la recepción (`inferred`). El
+dedup usa esa precisión para comparar por hora o por día.
+
+`consumes_kinds` excluye SOCIAL a propósito — los movimientos de plata viven en correos (banco,
+recibos) y chats. La identidad de la contraparte se guarda como TEXTO (`counterparty`): el enganche
+al directorio de identidades es un seam diferido en `dedup._same_responsible` (en refactor).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from typing import Any, ClassVar
 
 from sqlalchemy import text
@@ -17,72 +30,268 @@ from sqlalchemy.engine import Connection
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_EXTRACT, ExtractionItem, ModuleContext
-from memex.modules.dedup import forget_inbox_rows, upsert_unique
+from memex.modules.dedup import forget_inbox_rows
+from memex.modules.finance.dedup import (
+    PRECISION_DATE,
+    PRECISION_DATETIME,
+    PRECISION_INFERRED,
+    DedupRow,
+    mark_duplicates,
+)
 from memex.modules.finance.prompt import FINANCE_SYSTEM_PROMPT
-from memex.modules.finance.schema import ExpenseItem
+from memex.modules.finance.schema import TransactionItem
 
 _log = get_logger("memex.modules.finance")
 
+#: Margen alrededor del lote para traer transacciones existentes comparables en el dedup. Mayor que
+#: la ventana de día (`DEFAULT_DAY_WINDOW`, 30h) para no perder pares por el borde.
+_EXISTING_MARGIN = timedelta(days=2)
+
+
+def _resolve_instant(
+    item: TransactionItem, reception_by_id: dict[int, datetime]
+) -> tuple[datetime, str]:
+    """Mejor instante conocido del cobro + su precisión. Fecha+hora → `datetime`; solo fecha →
+    `date` (medianoche placeholder); sin fecha → la RECEPCIÓN más tardía de los mensajes citados
+    (`inferred`). Todo tz-aware (UTC) para comparar sin chocar naive/aware con la DB."""
+    if item.occurred_on is not None:
+        if item.occurred_time is not None:
+            return (
+                datetime.combine(item.occurred_on, item.occurred_time, tzinfo=UTC),
+                PRECISION_DATETIME,
+            )
+        return datetime.combine(item.occurred_on, time.min, tzinfo=UTC), PRECISION_DATE
+    receptions = [reception_by_id[i] for i in item.source_inbox_ids if i in reception_by_id]
+    if receptions:
+        return max(receptions), PRECISION_INFERRED
+    # Defensivo: no debería pasar (validate_item garantiza source_inbox_ids ⊆ lote). Loguea y now.
+    _log.warning("finance.reception_missing", source_inbox_ids=list(item.source_inbox_ids))
+    return datetime.now(UTC), PRECISION_INFERRED
+
+
+def _reception_by_id(
+    conn: Connection, user_id: int, inbox_ids: Sequence[int]
+) -> dict[int, datetime]:
+    """`inbox.occurred_at` (recepción, TIMESTAMPTZ) de los mensajes del lote — fallback de fecha."""
+    ids = list(inbox_ids)
+    if not ids:
+        return {}
+    rows = conn.execute(
+        text("SELECT id, occurred_at FROM inbox WHERE user_id = :uid AND id = ANY(:ids)"),
+        {"uid": user_id, "ids": ids},
+    ).all()
+    return {int(r[0]): r[1] for r in rows}
+
+
+def _insert_transactions(
+    conn: Connection,
+    user_id: int,
+    items: Sequence[TransactionItem],
+    reception_by_id: dict[int, datetime],
+) -> list[DedupRow]:
+    """Inserta cada transacción y devuelve un `DedupRow` por cada una (con su `id` nuevo)."""
+    rows: list[DedupRow] = []
+    for it in items:
+        occurred_at, precision = _resolve_instant(it, reception_by_id)
+        tid = conn.execute(
+            text(
+                """
+                INSERT INTO mod_finance_transactions
+                  (user_id, source_inbox_ids, direction, amount, currency, category, counterparty,
+                   place, occurred_at, occurred_at_precision, description, evidence)
+                VALUES
+                  (:uid, :ids, :direction, :amount, :currency, :category, :counterparty,
+                   :place, :occurred_at, :precision, :description, :evidence)
+                RETURNING id
+                """
+            ),
+            {
+                "uid": user_id,
+                "ids": list(it.source_inbox_ids),
+                "direction": it.direction,
+                "amount": it.amount,
+                "currency": it.currency,
+                "category": it.category,
+                "counterparty": it.counterparty,
+                "place": it.place,
+                "occurred_at": occurred_at,
+                "precision": precision,
+                "description": it.description,
+                "evidence": it.evidence,
+            },
+        ).scalar_one()
+        rows.append(
+            DedupRow(
+                transaction_id=int(tid),
+                direction=it.direction,
+                amount=it.amount,
+                currency=it.currency,
+                category=it.category,
+                counterparty=it.counterparty,
+                place=it.place,
+                occurred_at=occurred_at,
+                precision=precision,
+            )
+        )
+    return rows
+
+
+def _existing_rows(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> list[DedupRow]:
+    """Transacciones ya persistidas del user comparables con el lote: mismo monto+moneda (la
+    compuerta del dedup los exige exactos) dentro de la ventana temporal ± margen, excluyendo las
+    recién insertadas. El prefiltro por monto/moneda achica el set sin cambiar el resultado."""
+    new_ids = [r.transaction_id for r in new_rows]
+    amounts = list({r.amount for r in new_rows})
+    currencies = list({r.currency for r in new_rows})
+    instants = [r.occurred_at for r in new_rows]
+    lo = min(instants) - _EXISTING_MARGIN
+    hi = max(instants) + _EXISTING_MARGIN
+    rows = (
+        conn.execute(
+            text(
+                """
+                SELECT id, direction, amount, currency, category, counterparty, place,
+                       occurred_at, occurred_at_precision
+                FROM mod_finance_transactions
+                WHERE user_id = :uid
+                  AND occurred_at BETWEEN :lo AND :hi
+                  AND amount = ANY(CAST(:amounts AS NUMERIC[]))
+                  AND currency = ANY(CAST(:currencies AS TEXT[]))
+                  AND NOT (id = ANY(CAST(:new_ids AS BIGINT[])))
+                """
+            ),
+            {
+                "uid": user_id,
+                "lo": lo,
+                "hi": hi,
+                "amounts": amounts,
+                "currencies": currencies,
+                "new_ids": new_ids,
+            },
+        )
+        .mappings()
+        .all()
+    )
+    return [
+        DedupRow(
+            transaction_id=int(r["id"]),
+            direction=str(r["direction"]),
+            amount=r["amount"],
+            currency=str(r["currency"]),
+            category=str(r["category"]),
+            counterparty=str(r["counterparty"]),
+            place=str(r["place"]),
+            occurred_at=r["occurred_at"],
+            precision=str(r["occurred_at_precision"]),
+        )
+        for r in rows
+    ]
+
+
+def _mark_processed(conn: Connection, new_ids: list[int], in_pair: set[int]) -> None:
+    """Tras la FASE 1, marca `processed_at` + `processing_outcome`. Los que quedaron en un par
+    (nuevos o existentes) → `'pending'` (la consolidación da el outcome final unique/duplicate); los
+    nuevos SIN par → `'unique'`."""
+    pending = sorted(in_pair)
+    unique = [i for i in new_ids if i not in in_pair]
+    if pending:
+        conn.execute(
+            text(
+                "UPDATE mod_finance_transactions SET processed_at = NOW(), "
+                "processing_outcome = 'pending' WHERE id = ANY(:ids)"
+            ),
+            {"ids": pending},
+        )
+    if unique:
+        conn.execute(
+            text(
+                "UPDATE mod_finance_transactions SET processed_at = NOW(), "
+                "processing_outcome = 'unique' WHERE id = ANY(:ids)"
+            ),
+            {"ids": unique},
+        )
+
+
+def _mark_dedup(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> int:
+    """Corre la FASE 1 determinista, registra los pares (candidatos + auto-confirmados) y marca el
+    estado de procesamiento. Devuelve cuántos pares marcó."""
+    existing = _existing_rows(conn, user_id, new_rows)
+    pairs = mark_duplicates(new_rows, existing)
+    in_pair: set[int] = set()
+    for p in pairs:
+        in_pair.update((p.a_id, p.b_id))
+    if pairs:
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_finance_dedup_candidates
+                  (user_id, transaction_a_id, transaction_b_id, reason, score, status, decided_by,
+                   decided_at)
+                VALUES (:uid, :a, :b, :reason, :score, :status, :decided_by,
+                        CASE WHEN CAST(:decided_by AS TEXT) IS NULL THEN NULL ELSE NOW() END)
+                ON CONFLICT (transaction_a_id, transaction_b_id) DO NOTHING
+                """
+            ),
+            [
+                {
+                    "uid": user_id,
+                    "a": p.a_id,
+                    "b": p.b_id,
+                    "reason": p.reason,
+                    "score": p.score,
+                    "status": "confirmed" if p.decision == "confirmed" else "candidate",
+                    # auto-confirmados procedimentalmente quedan auditados como 'procedural'.
+                    "decided_by": "procedural" if p.decision == "confirmed" else None,
+                }
+                for p in pairs
+            ],
+        )
+    _mark_processed(conn, [r.transaction_id for r in new_rows], in_pair)
+    if pairs:
+        _log.info(
+            "finance.dedup.marked",
+            pairs=len(pairs),
+            confirmed=sum(1 for p in pairs if p.decision == "confirmed"),
+        )
+    return len(pairs)
+
 
 class FinanceModule:
-    """Extrae gastos a `mod_finance_expenses`."""
+    """Extrae transacciones y marca duplicados FASE 1 (sin fusionar; mecanismo propio)."""
 
     slug: ClassVar[str] = "finance"
     interest: ClassVar[str] = (
-        "Gastos y pagos de la persona: dinero que pagó o le cobraron — servicios (luz, agua, "
-        "internet), compras, consumos de tarjeta, transferencias, restaurantes, transporte. "
-        "NO publicidad ni promociones."
+        "Movimientos de plata de la persona (ingresos y egresos): dinero que pagó o le cobraron y "
+        "dinero que recibió o le acreditaron — servicios (luz, agua, internet), compras, consumos "
+        "de tarjeta, transferencias, sueldos, reembolsos, restaurantes, transporte. NO publicidad "
+        "ni promociones."
     )
-    extraction_schema: ClassVar[type[ExtractionItem]] = ExpenseItem
+    extraction_schema: ClassVar[type[ExtractionItem]] = TransactionItem
     extraction_prompt: ClassVar[str] = FINANCE_SYSTEM_PROMPT
     capabilities: ClassVar[frozenset[str]] = frozenset({CAP_EXTRACT})
     consumes_kinds: ClassVar[frozenset[SourceKind]] = frozenset({SourceKind.EMAIL, SourceKind.CHAT})
     depends_on: ClassVar[tuple[str, ...]] = ()
-    #: business-key del vértice gasto. `merchant` se compara normalizado (lower + colapso de
-    #: whitespace) por la DB; el UNIQUE de negocio (índice funcional) vive en la migración 0030
-    #: (con `occurred_on` NULL = centinela).
-    identity_fields: ClassVar[tuple[str, ...]] = ("currency", "amount", "merchant", "occurred_on")
+    #: `()` = dedup por MECANISMO PROPIO: la unicidad del vértice-transacción la da la CONSOLIDACIÓN
+    #: (`mod_finance_consolidated`), no un UNIQUE sobre la fila cruda — las crudas coexisten; la
+    #: FASE 1 solo marca pares (candidatos para el LLM o auto-confirmados procedimentalmente).
+    identity_fields: ClassVar[tuple[str, ...]] = ()
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
         """Entrypoint del orquestador; delega la unicidad a `self.dedup`."""
         return await self.dedup(ctx, items)
 
     async def dedup(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
-        """Materializa cada gasto como VÉRTICE ÚNICO (dedup por business-key): si el mismo gasto ya
-        existe (mismo monto/moneda/comercio-normalizado/fecha) fusiona `source_inbox_ids` (recibo +
-        alerta del banco → un solo vértice con ambos documentos); si no, lo inserta. Atómico en
-        `ctx.conn`. Devuelve cuántos gastos procesó."""
-        expenses = [i for i in items if isinstance(i, ExpenseItem)]
-        if not expenses:
+        """Mecanismo propio (`()` en `identity_fields`): inserta las transacciones validadas (con la
+        fecha de cobro resuelta: la del mensaje o, si falta, la de recepción) y marca pares de
+        duplicado FASE 1 (candidatos + auto-confirmados), todo en `ctx.conn` (atómico con el cursor
+        de extracción). La unicidad la da la consolidación. Devuelve cuántas insertó."""
+        txs = [i for i in items if isinstance(i, TransactionItem)]
+        if not txs:
             return 0
-        for e in expenses:
-            row = {
-                "user_id": ctx.user_id,
-                "source_inbox_ids": list(e.source_inbox_ids),
-                "amount": e.amount,
-                "currency": e.currency,
-                "category": e.category,
-                "merchant": e.merchant,
-                "occurred_on": e.occurred_on,
-                "description": e.description,
-                "evidence": e.evidence,
-            }
-            identity = {
-                "user_id": ctx.user_id,
-                "currency": e.currency,
-                "amount": e.amount,
-                "merchant": e.merchant,
-                "occurred_on": e.occurred_on,
-            }
-            upsert_unique(
-                ctx.conn,
-                "mod_finance_expenses",
-                identity=identity,
-                row=row,
-                merge_arrays=("source_inbox_ids",),
-                norm_text=("merchant",),
-            )
-        return len(expenses)
+        reception_by_id = _reception_by_id(ctx.conn, ctx.user_id, ctx.inbox_ids)
+        new_rows = _insert_transactions(ctx.conn, ctx.user_id, txs, reception_by_id)
+        _mark_dedup(ctx.conn, ctx.user_id, new_rows)
+        return len(txs)
 
     async def health_check(self) -> HealthResult:
         return HealthResult(
@@ -92,13 +301,15 @@ class FinanceModule:
     def read_for_inbox(
         self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
     ) -> list[dict[str, Any]]:
-        """Gastos públicos atribuidos a `inbox_ids` (reverse `source_inbox_ids`)."""
+        """Transacciones públicas (fila cruda) atribuidas a `inbox_ids` (reverse overlap); NO expone
+        el estado interno de dedup (candidatos, columnas de control)."""
         rows = (
             conn.execute(
                 text(
                     """
-                    SELECT amount, currency, category, merchant, occurred_on, description, evidence
-                    FROM mod_finance_expenses
+                    SELECT direction, amount, currency, category, counterparty, place,
+                           occurred_at, occurred_at_precision, description, evidence
+                    FROM mod_finance_transactions
                     WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
                     ORDER BY id
                     """
@@ -111,6 +322,9 @@ class FinanceModule:
         return [dict(r) for r in rows]
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
-        """Olvida lo aportado por `inbox_ids`: les saca la referencia y borra solo la fila que queda
-        huérfana (una fila compartida por varios mensajes se preserva)."""
-        return forget_inbox_rows(conn, "mod_finance_expenses", user_id=user_id, inbox_ids=inbox_ids)
+        """Olvida lo aportado por `inbox_ids` a las transacciones (fila cruda): les saca la
+        referencia y borra solo la fila huérfana (los candidatos/links/consolidado cuelgan por FK
+        CASCADE). NO toca el consolidado de las que sobreviven (es idempotente, se reconstruye)."""
+        return forget_inbox_rows(
+            conn, "mod_finance_transactions", user_id=user_id, inbox_ids=inbox_ids
+        )

@@ -320,28 +320,31 @@ class InboxStats(BaseModel):
     sources: dict[int, StatsBySource]
 
 
-class FinanceExpenseRow(BaseModel):
-    """Un gasto extraído (fila de `mod_finance_expenses`).
+class FinanceTransactionRow(BaseModel):
+    """Una transacción CONSOLIDADA (fila de `mod_finance_consolidated` — la vista deduplicada que
+    lee el dashboard).
 
-    Espeja `memex.modules.finance.schema.ExpenseItem` más las columnas de la tabla. `amount` cruza
-    como `float` (la DB es NUMERIC(14,2)) siguiendo la convención del repo para dinero en respuestas
-    (cf. `cost_usd`). `occurred_on` puede ser NULL cuando el LLM no pudo fechar el cargo.
+    `amount` cruza como `float` (la DB es NUMERIC(14,2)) siguiendo la convención del repo para
+    dinero en respuestas (cf. `cost_usd`). `occurred_at` es el mejor instante conocido del cobro;
+    `occurred_at_precision` ('datetime'|'date'|'inferred') dice si la hora es del cobro, solo la
+    fecha, o inferida de la recepción del mensaje. `direction` es 'ingreso' | 'egreso'.
     """
 
     id: int
+    direction: str
     amount: float
     currency: str
     category: str
-    merchant: str
-    occurred_on: date | None
+    counterparty: str
+    place: str
+    occurred_at: datetime
+    occurred_at_precision: str
     description: str
-    evidence: str
-    source_inbox_ids: list[int]
     created_at: datetime
 
 
-class FinanceExpenseList(BaseModel):
-    items: list[FinanceExpenseRow]
+class FinanceTransactionList(BaseModel):
+    items: list[FinanceTransactionRow]
     next_cursor: int | None = None
 
 

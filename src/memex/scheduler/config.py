@@ -33,6 +33,7 @@ class SchedulerSettings(BaseSettings):
     interval_extract: str = "PT1H"  # LLM
     interval_ocr: str = "PT1H"  # visión, opt-in
     interval_calendar: str = "PT30M"
+    interval_finance: str = "PT1H"  # dedup F2 (LLM) + consolidación, post-extracción
     interval_log_purge: str = "P1D"  # retención de log_events, diario
 
     def interval_for(self, job_name: str) -> str | None:

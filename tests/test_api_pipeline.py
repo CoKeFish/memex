@@ -143,9 +143,10 @@ def test_force_re_extract_clears_all_modules_via_registry(
         c.execute(
             text(
                 """
-                INSERT INTO mod_finance_expenses
-                  (user_id, source_inbox_ids, amount, currency, merchant)
-                VALUES (1, ARRAY[:iid]::bigint[], 10.0, 'USD', 'OXXO')
+                INSERT INTO mod_finance_transactions
+                  (user_id, source_inbox_ids, direction, amount, currency, occurred_at,
+                   counterparty)
+                VALUES (1, ARRAY[:iid]::bigint[], 'egreso', 10.0, 'USD', NOW(), 'OXXO')
                 """
             ),
             {"iid": iid},
@@ -166,7 +167,9 @@ def test_force_re_extract_clears_all_modules_via_registry(
 
     with connection() as c:
         fin = c.execute(
-            text("SELECT count(*) FROM mod_finance_expenses WHERE :iid = ANY(source_inbox_ids)"),
+            text(
+                "SELECT count(*) FROM mod_finance_transactions WHERE :iid = ANY(source_inbox_ids)"
+            ),
             {"iid": iid},
         ).scalar()
         ide = c.execute(
@@ -191,9 +194,10 @@ def test_force_re_extract_preserves_shared_rows(client: Any, seed_source: dict[s
         c.execute(
             text(
                 """
-                INSERT INTO mod_finance_expenses
-                  (user_id, source_inbox_ids, amount, currency, merchant)
-                VALUES (1, ARRAY[:a, :b]::bigint[], 150.0, 'MXN', 'OXXO')
+                INSERT INTO mod_finance_transactions
+                  (user_id, source_inbox_ids, direction, amount, currency, occurred_at,
+                   counterparty)
+                VALUES (1, ARRAY[:a, :b]::bigint[], 'egreso', 150.0, 'MXN', NOW(), 'OXXO')
                 """
             ),
             {"a": a, "b": b},
@@ -205,8 +209,8 @@ def test_force_re_extract_preserves_shared_rows(client: Any, seed_source: dict[s
     with connection() as c:
         row = c.execute(
             text(
-                "SELECT source_inbox_ids FROM mod_finance_expenses "
-                "WHERE user_id = 1 AND merchant = 'OXXO'"
+                "SELECT source_inbox_ids FROM mod_finance_transactions "
+                "WHERE user_id = 1 AND counterparty = 'OXXO'"
             )
         ).first()
     assert row is not None  # la fila compartida sobrevive

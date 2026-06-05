@@ -49,7 +49,7 @@ class NodeSource:
 #: input de usuario) → seguro interpolarlos en el SQL; `user_id`/`id` van por bind. calendar apunta
 #: al consolidado; identidades proyecta DOS slugs; inbox NO está (es atributo, no vértice).
 NODE_SOURCES: tuple[NodeSource, ...] = (
-    NodeSource("finance", "mod_finance_expenses", "merchant", "gasto"),
+    NodeSource("finance", "mod_finance_transactions", "counterparty", "transaccion"),
     NodeSource("hackathones", "mod_hackathones_events", "name", "hackaton"),
     NodeSource("calendar", "mod_calendar_consolidated", "title", "evento", where="NOT deleted"),
     NodeSource("identidades:person", "mod_identidades_persons", "display_name", "persona"),

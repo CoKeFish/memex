@@ -10,7 +10,7 @@ from typing import cast
 
 from memex.core.source import HealthResult, SourceKind
 from memex.modules.contract import CAP_EXTRACT, ExtractionItem, InterestModule, ModuleContext
-from memex.modules.finance.schema import ExpenseItem
+from memex.modules.finance.schema import TransactionItem
 from memex.modules.grouping import (
     _transitive_deps,
     build_grouped_user_content,
@@ -26,7 +26,7 @@ class _FakeModule:
     def __init__(self, slug: str, depends_on: tuple[str, ...] = ()) -> None:
         self.slug = slug
         self.interest = f"interés de {slug}"
-        self.extraction_schema: type[ExtractionItem] = ExpenseItem
+        self.extraction_schema: type[ExtractionItem] = TransactionItem
         self.extraction_prompt = f"prompt de {slug}"
         self.capabilities = frozenset({CAP_EXTRACT})
         self.consumes_kinds = frozenset({SourceKind.EMAIL})

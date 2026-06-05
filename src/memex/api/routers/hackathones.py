@@ -28,7 +28,7 @@ async def list_hackathones(
     """Lista los hackatones extraídos por el módulo hackathones (tabla `mod_hackathones_events`).
 
     Devuelve filas crudas; el dashboard agrega/ordena en el cliente. La paginación es por cursor
-    (`id > :cur`) igual que `/inbox` y `/finance/expenses`. Los filtros `modality`/`since`/`until`
+    (`id > :cur`) igual que `/inbox` y finance. Los filtros `modality`/`since`/`until`
     (sobre `starts_on`) espejan el patrón de finance; las filas sin fecha quedan fuera al filtrar
     por rango (es el comportamiento esperado: filtrar por fecha pide tener fecha).
     """

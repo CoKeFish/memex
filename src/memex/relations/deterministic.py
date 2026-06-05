@@ -37,7 +37,7 @@ DEFAULT_COOCCURRENCE_CAP = 8
 
 #: Vértices cuyo enlace a inbox es DIRECTO (columna `source_inbox_ids`): slug → tabla.
 _DIRECT_SOURCES: tuple[tuple[str, str], ...] = (
-    ("finance", "mod_finance_expenses"),
+    ("finance", "mod_finance_transactions"),
     ("hackathones", "mod_hackathones_events"),
 )
 

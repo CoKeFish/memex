@@ -181,10 +181,10 @@ def test_module_extractions_cascade_on_inbox_delete(seed_source: dict[str, Any])
     assert remaining == 0
 
 
-# ----- mod_finance_expenses ------------------------------------------------------ #
+# ----- mod_finance_transactions (atribución por-mensaje + cascada) ---------------- #
 
 
-def test_finance_expense_insert_and_read_back(seed_source: dict[str, Any]) -> None:
+def test_finance_transaction_insert_and_read_back(seed_source: dict[str, Any]) -> None:
     i1 = _seed_inbox(seed_source["id"], "m1")
     i2 = _seed_inbox(seed_source["id"], "m2")
     with connection() as c:
@@ -192,12 +192,12 @@ def test_finance_expense_insert_and_read_back(seed_source: dict[str, Any]) -> No
             c.execute(
                 text(
                     """
-                    INSERT INTO mod_finance_expenses
-                      (user_id, source_inbox_ids, amount, currency, merchant, occurred_on,
-                       description, evidence)
-                    VALUES (1, :ids, 4500.00, 'ARS', 'Edenor', DATE '2026-05-20',
+                    INSERT INTO mod_finance_transactions
+                      (user_id, source_inbox_ids, direction, amount, currency, counterparty,
+                       occurred_at, description, evidence)
+                    VALUES (1, :ids, 'egreso', 4500.00, 'ARS', 'Edenor', NOW(),
                             'pago de luz', 'pagué los $4.500 de la luz')
-                    RETURNING amount, currency, merchant, source_inbox_ids
+                    RETURNING amount, currency, counterparty, source_inbox_ids
                     """
                 ),
                 {"ids": [i1, i2]},
@@ -207,23 +207,25 @@ def test_finance_expense_insert_and_read_back(seed_source: dict[str, Any]) -> No
         )
     assert row is not None
     assert row["currency"] == "ARS"
-    assert row["merchant"] == "Edenor"
+    assert row["counterparty"] == "Edenor"
     assert list(row["source_inbox_ids"]) == [i1, i2]
 
 
-def test_finance_expense_cascade_on_user_delete(
+def test_finance_transaction_cascade_on_user_delete(
     seed_user2: int, seed_source: dict[str, Any]
 ) -> None:
     with connection() as c:
         c.execute(
             text(
-                "INSERT INTO mod_finance_expenses (user_id, source_inbox_ids, amount, currency, "
-                "merchant) VALUES (:u, ARRAY[]::bigint[], 1.00, 'USD', 'x')"
+                "INSERT INTO mod_finance_transactions (user_id, source_inbox_ids, direction, "
+                "amount, currency, occurred_at) "
+                "VALUES (:u, ARRAY[]::bigint[], 'egreso', 1.00, 'USD', NOW())"
             ),
             {"u": seed_user2},
         )
         c.execute(text("DELETE FROM users WHERE id = :u"), {"u": seed_user2})
         remaining = c.execute(
-            text("SELECT count(*) FROM mod_finance_expenses WHERE user_id = :u"), {"u": seed_user2}
+            text("SELECT count(*) FROM mod_finance_transactions WHERE user_id = :u"),
+            {"u": seed_user2},
         ).scalar()
     assert remaining == 0

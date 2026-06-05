@@ -48,7 +48,7 @@ CAP_CONTRIBUTE_DOMAIN = "contribute_domain"
 class ExtractionItem(BaseModel):
     """Base de TODO item extraído: atribución por-mensaje + evidencia (ADR-015 §10).
 
-    Las subclases (ej. `ExpenseItem` de finance) agregan sus campos de dominio. `source_inbox_ids`
+    Las subclases (ej. `TransactionItem` de finance) agregan sus campos. `source_inbox_ids`
     deben existir en el lote de la ventana (lo verifica `validate_item`); `evidence` es una cita
     textual del mensaje original (chequeo substring barato, solo log).
     """

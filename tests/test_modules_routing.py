@@ -8,7 +8,7 @@ import pytest
 
 from memex.core.source import SourceKind
 from memex.modules.contract import CAP_EXTRACT, InterestModule
-from memex.modules.finance.schema import ExpenseItem
+from memex.modules.finance.schema import TransactionItem
 from memex.modules.routing import (
     candidates_for_kind,
     parse_routing,
@@ -28,7 +28,7 @@ def _mod(
         {
             "slug": slug,
             "interest": f"interest of {slug}",
-            "extraction_schema": ExpenseItem,
+            "extraction_schema": TransactionItem,
             "extraction_prompt": "x",
             "capabilities": frozenset({CAP_EXTRACT}),
             "consumes_kinds": kinds,

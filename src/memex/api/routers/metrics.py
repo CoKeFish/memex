@@ -3,7 +3,7 @@
 Dos endpoints para la vista /metricas:
 - `GET /metrics/llm/rollup` — agregaciones server-side (GROUP BY): KPIs, costo por fuente, por
   módulo (de `purpose`), por modelo, matriz fuente x módulo y serie diaria. A diferencia de
-  `/finance/expenses` (filas crudas + agregación en cliente), `llm_calls` es denso y append-only,
+  finance (filas consolidadas + agregación en cliente), `llm_calls` es denso y append-only,
   así que agregar en SQL evita traer todo al browser.
 - `GET /metrics/llm/calls` — auditoría: filas crudas con filtros incluir/excluir multi-valor, orden
   por columna (whitelist) y paginación offset (necesita total para el pager "X-Y de N").

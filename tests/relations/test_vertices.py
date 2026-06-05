@@ -22,8 +22,9 @@ def _exec(sql: str, **params: Any) -> Any:
 
 def _seed_all(user_id: int = 1) -> dict[str, int]:
     fin = _exec(
-        "INSERT INTO mod_finance_expenses (user_id, source_inbox_ids, amount, currency, merchant) "
-        "VALUES (:u, ARRAY[5]::bigint[], 100, 'COP', 'Rappi') RETURNING id",
+        "INSERT INTO mod_finance_transactions "
+        "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, counterparty) "
+        "VALUES (:u, ARRAY[5]::bigint[], 'egreso', 100, 'COP', NOW(), 'Rappi') RETURNING id",
         u=user_id,
     )
     hack = _exec(
@@ -60,7 +61,7 @@ def test_proyecta_los_cinco_tipos() -> None:
         verts = list_vertices(c, 1)
     by_slug = {v.slug: v for v in verts}
     assert set(by_slug) == set(known_slugs())
-    assert by_slug["finance"].kind == "gasto"
+    assert by_slug["finance"].kind == "transaccion"
     assert by_slug["finance"].label == "Rappi"
     assert by_slug["finance"].id == ids["finance"]
     assert by_slug["calendar"].label == "Reunión"
@@ -94,8 +95,9 @@ def test_get_vertex_y_no_vertices() -> None:
 def test_scoped_por_usuario() -> None:
     _exec("INSERT INTO users (id, email, display_name) VALUES (2, 'u2@local', 'u2')")
     _exec(
-        "INSERT INTO mod_finance_expenses (user_id, source_inbox_ids, amount, currency, merchant) "
-        "VALUES (2, ARRAY[5]::bigint[], 50, 'COP', 'Otro')"
+        "INSERT INTO mod_finance_transactions "
+        "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, counterparty) "
+        "VALUES (2, ARRAY[5]::bigint[], 'egreso', 50, 'COP', NOW(), 'Otro')"
     )
     _seed_all(1)
     with connection() as c:

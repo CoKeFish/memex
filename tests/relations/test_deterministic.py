@@ -22,9 +22,9 @@ def _exec(sql: str, **params: Any) -> Any:
 def _finance(merchant: str, inbox_ids: list[int]) -> int:
     return int(
         _exec(
-            "INSERT INTO mod_finance_expenses "
-            "(user_id, source_inbox_ids, amount, currency, merchant) "
-            "VALUES (1, :ids, 100, 'COP', :m) RETURNING id",
+            "INSERT INTO mod_finance_transactions "
+            "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, counterparty) "
+            "VALUES (1, :ids, 'egreso', 100, 'COP', NOW(), :m) RETURNING id",
             ids=inbox_ids,
             m=merchant,
         )

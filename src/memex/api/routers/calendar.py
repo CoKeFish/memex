@@ -45,7 +45,7 @@ async def list_events(
     Es la capa que pintan el calendario mensual, la agenda y el inspector. Cada consolidado trae
     sus eventos crudos (`event_links` → `mod_calendar_events`), de donde se derivan `origins`,
     `member_count` y la prioridad/protección del ganador. El front trae todo paginando por cursor
-    (igual que `/finance/expenses`) y filtra por mes en el cliente. Excluye los tombstone
+    (igual que `/finance/transactions`) y filtra por mes en el cliente. Excluye los tombstone
     (`deleted`).
     """
     where: list[str] = ["user_id = :uid", "NOT deleted"]

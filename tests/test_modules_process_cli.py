@@ -44,7 +44,7 @@ class FakeCombinedLLM:
                     "source_inbox_ids": [m["id"]],
                     "amount": f"{m['id']}.00",  # distinto por mensaje → 2 vértices (no colapsan)
                     "currency": "ARS",
-                    "merchant": "Test",
+                    "counterparty": "Test",
                     "occurred_on": None,
                     "description": "gasto",
                     "evidence": m["text"],
@@ -116,7 +116,7 @@ def test_combined_produces_summary_and_expenses(seed_source: dict[str, Any]) -> 
     assert stats.summarize.summaries == 1  # una ventana batch resumida
     assert stats.extract.items == 2  # y dos gastos extraídos
     assert _count("summaries") == 1
-    assert _count("mod_finance_expenses") == 2
+    assert _count("mod_finance_transactions") == 2
 
 
 # ----- CLIs enable / modules (sin LLM) ------------------------------------------- #

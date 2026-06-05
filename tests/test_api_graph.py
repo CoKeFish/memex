@@ -20,9 +20,9 @@ def _exec(sql: str, **p: Any) -> Any:
 def _finance(merchant: str, inbox_ids: list[int]) -> int:
     return int(
         _exec(
-            "INSERT INTO mod_finance_expenses "
-            "(user_id, source_inbox_ids, amount, currency, merchant) "
-            "VALUES (1, :ids, 100, 'COP', :m) RETURNING id",
+            "INSERT INTO mod_finance_transactions "
+            "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, counterparty) "
+            "VALUES (1, :ids, 'egreso', 100, 'COP', NOW(), :m) RETURNING id",
             ids=inbox_ids,
             m=merchant,
         )
@@ -54,7 +54,7 @@ def test_build_y_lectura(client: Any) -> None:
 
     body = client.get("/graph").json()
     assert len(body["nodes"]) == 2
-    assert {n["kind"] for n in body["nodes"]} == {"gasto", "hackaton"}
+    assert {n["kind"] for n in body["nodes"]} == {"transaccion", "hackaton"}
     assert len(body["edges"]) == 1
     e = body["edges"][0]
     assert e["producer"] == "inbox"

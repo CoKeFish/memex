@@ -49,7 +49,7 @@ def _item(slug: str, msg: dict[str, Any], bogus: int | None) -> dict[str, Any]:
         "source_inbox_ids": [sid],
         "amount": f"{sid}.00",  # distinto por mensaje → vértices distintos (v2 no los colapsa)
         "currency": "ARS",
-        "merchant": "Test",
+        "counterparty": "Test",
         "occurred_on": None,
         "description": "gasto de prueba",
         "evidence": msg["text"],
@@ -232,7 +232,7 @@ def test_extracts_expenses_from_batch_window(seed_source: dict[str, Any]) -> Non
 
     assert fake.calls == 1  # una ventana batch → una llamada de extracción
     assert stats.items == 2  # un gasto por mensaje
-    assert _count("mod_finance_expenses") == 2
+    assert _count("mod_finance_transactions") == 2
     assert _count("module_extractions") == 2
 
 
@@ -270,7 +270,7 @@ def test_idempotent(seed_source: dict[str, Any]) -> None:
     second = asyncio.run(run_extraction(1, client=FakeExtractLLM()))
 
     assert second.items == 0
-    assert _count("mod_finance_expenses") == 1
+    assert _count("mod_finance_transactions") == 1
 
 
 # ----- atribución alucinada ------------------------------------------------------ #
@@ -284,7 +284,7 @@ def test_attribution_miss_discarded(seed_source: dict[str, Any]) -> None:
 
     assert stats.items == 0
     assert stats.discarded == 1
-    assert _count("mod_finance_expenses") == 0
+    assert _count("mod_finance_transactions") == 0
     # el mensaje igual quedó marcado (considerado) → no se reprocesa en loop
     assert _count("module_extractions") == 1
 
@@ -303,7 +303,7 @@ def test_social_source_excluded(seed_source: dict[str, Any]) -> None:
 
     assert fake.calls == 0
     assert stats.items == 0
-    assert _count("mod_finance_expenses") == 0
+    assert _count("mod_finance_transactions") == 0
 
 
 # ----- módulo deshabilitado ------------------------------------------------------ #
@@ -344,11 +344,11 @@ def test_error_mid_run_is_best_effort(seed_source: dict[str, Any]) -> None:
 
     assert stats.items == 1
     assert stats.errors == 1
-    assert _count("mod_finance_expenses") == 1
+    assert _count("mod_finance_transactions") == 1
     # la ventana que falló sigue pendiente → otra corrida la procesa, sin duplicar la 1ra
     second = asyncio.run(run_extraction(1, client=FakeExtractLLM()))
     assert second.items == 1
-    assert _count("mod_finance_expenses") == 2
+    assert _count("mod_finance_transactions") == 2
 
 
 def test_quota_error_aborts_run(seed_source: dict[str, Any]) -> None:
@@ -364,7 +364,7 @@ def test_quota_error_aborts_run(seed_source: dict[str, Any]) -> None:
         asyncio.run(run_extraction(1, client=fake))
 
     assert fake.calls == 2  # abortó en la 2da, no siguió de largo
-    assert _count("mod_finance_expenses") == 1  # la 1ra ventana sí persistió
+    assert _count("mod_finance_transactions") == 1  # la 1ra ventana sí persistió
 
 
 # ----- dead-letter (gap c): veneno → 'pendiente de revisión' tras N fallos ------------- #
@@ -389,7 +389,7 @@ def test_poison_window_dead_lettered_after_max_attempts(seed_source: dict[str, A
     assert requeue(1, STAGE_EXTRACT, iid) is True
     recovered = asyncio.run(run_extraction(1, client=FakeExtractLLM()))
     assert recovered.items == 1
-    assert _count("mod_finance_expenses") == 1
+    assert _count("mod_finance_transactions") == 1
 
 
 def test_quota_abort_does_not_dead_letter(seed_source: dict[str, Any]) -> None:
@@ -420,7 +420,7 @@ def test_route_chunking_one_call_per_chunk(seed_source: dict[str, Any]) -> None:
 
     assert _count_purpose("module_route") == 2  # un chunk por módulo
     assert stats.items == 4  # finance 2 + calendar 2 (per_module por defecto)
-    assert _count("mod_finance_expenses") == 2
+    assert _count("mod_finance_transactions") == 2
     assert _count("mod_calendar_events") == 2
 
 
@@ -454,7 +454,7 @@ def test_grouped_single_extraction_call(seed_source: dict[str, Any]) -> None:
     assert _count_purpose("extract_grouped") == 1
     assert _count_purpose("extract_finance") == 0
     assert _count_purpose("extract_calendar") == 0
-    assert _count("mod_finance_expenses") == 2
+    assert _count("mod_finance_transactions") == 2
     assert _count("mod_calendar_events") == 2
     assert _count("module_extractions") == 4  # 2 mensajes x 2 módulos
     assert set(stats.by_module) == {"finance", "calendar"}
@@ -468,7 +468,7 @@ def test_all_policy_single_group(seed_source: dict[str, Any]) -> None:
     asyncio.run(run_extraction(1, batching_policy="all", client=FakeExtractLLM()))
 
     assert _count_purpose("extract_grouped") == 1
-    assert _count("mod_finance_expenses") == 1
+    assert _count("mod_finance_transactions") == 1
     assert _count("mod_calendar_events") == 1
 
 
@@ -483,7 +483,7 @@ def test_grouped_idempotent(seed_source: dict[str, Any]) -> None:
     )
 
     assert second.items == 0
-    assert _count("mod_finance_expenses") == 1
+    assert _count("mod_finance_transactions") == 1
     assert _count("mod_calendar_events") == 1
 
 
@@ -500,7 +500,7 @@ def test_grouped_empty_content_retryable(seed_source: dict[str, Any]) -> None:
     )
 
     assert stats.errors == 1
-    assert _count("mod_finance_expenses") == 0
+    assert _count("mod_finance_transactions") == 0
     assert _count("module_extractions") == 0  # sin cursor → reintentable
 
 
@@ -517,13 +517,13 @@ def test_truncated_extract_retryable(seed_source: dict[str, Any]) -> None:
 
     assert stats.errors == 1
     assert stats.items == 0
-    assert _count("mod_finance_expenses") == 0
+    assert _count("mod_finance_transactions") == 0
     assert _count("module_extractions") == 0  # sin cursor → reintentable
 
     # Segunda corrida con respuesta completa → se extrae (prueba que NO se perdió el mensaje).
     second = asyncio.run(run_extraction(1, client=FakeExtractLLM()))
     assert second.items == 1
-    assert _count("mod_finance_expenses") == 1
+    assert _count("mod_finance_transactions") == 1
 
 
 def test_truncated_grouped_retryable(seed_source: dict[str, Any]) -> None:
@@ -539,7 +539,7 @@ def test_truncated_grouped_retryable(seed_source: dict[str, Any]) -> None:
     )
 
     assert stats.errors == 1
-    assert _count("mod_finance_expenses") == 0
+    assert _count("mod_finance_transactions") == 0
     assert _count("mod_calendar_events") == 0
     assert _count("module_extractions") == 0  # sin cursor → reintentable
 

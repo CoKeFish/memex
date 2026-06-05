@@ -25,6 +25,8 @@ from memex.modules.calendar.consolidate import run_consolidation
 from memex.modules.calendar.dedup_llm import run_dedup_phase2
 from memex.modules.calendar.merge_llm import run_merge
 from memex.modules.calendar.sync import run_pull, run_push
+from memex.modules.finance.consolidate import run_consolidation as run_finance_consolidation
+from memex.modules.finance.dedup_llm import run_dedup_phase2 as run_finance_dedup_phase2
 from memex.modules.orchestrator import run_extraction
 from memex.ocr.worker import run_ocr
 from memex.summarizer.worker import run_summarization
@@ -201,6 +203,50 @@ async def run_calendar_cycle(user_id: int) -> CalendarCycleStats:
     return cycle
 
 
+@dataclass
+class FinanceCycleStats:
+    """Roll-up de un ciclo de finance: dedup FASE 2 (LLM) + consolidación (determinista)."""
+
+    confirmed: int = 0
+    consolidated: int = 0
+    errors: int = 0
+    steps_failed: list[str] = field(default_factory=list)
+
+
+async def run_finance_cycle(user_id: int) -> FinanceCycleStats:
+    """Ciclo post-extracción de finance: dedup FASE 2 (LLM) → consolidación (determinista, sync).
+
+    Corre DESPUÉS de `extract` (que ya resolvió identidad en la misma pasada): así el dedup de
+    finanzas tiene la identidad disponible sin un `depends_on` duro (que lo apagaría cuando
+    identidades esté off). Best-effort por PASO: un paso que falla se loguea y no frena el resto.
+    `LLMQuotaError` (saldo agotado) corta el dedup pero la consolidación igual corre (no es LLM).
+    """
+    cycle = FinanceCycleStats()
+
+    # 1. dedup FASE 2 (LLM), user-level
+    try:
+        dedup_stats = await run_finance_dedup_phase2(user_id)
+        cycle.confirmed += dedup_stats.confirmed
+    except LLMQuotaError:
+        cycle.steps_failed.append("dedup:no_quota")
+        _log.error("scheduler.finance.aborted_no_quota", step="dedup")
+    except Exception as e:
+        cycle.errors += 1
+        cycle.steps_failed.append("dedup")
+        _log.warning("scheduler.finance.step_failed", step="dedup", error=str(e))
+
+    # 2. consolidación (determinista, sync), user-level
+    try:
+        cons_stats = await asyncio.to_thread(run_finance_consolidation, user_id)
+        cycle.consolidated += cons_stats.consolidated
+    except Exception as e:
+        cycle.errors += 1
+        cycle.steps_failed.append("consolidate")
+        _log.warning("scheduler.finance.step_failed", step="consolidate", error=str(e))
+
+    return cycle
+
+
 # Registry de jobs. NOTA OCR: su claim de `media_assets` NO usa FOR UPDATE SKIP LOCKED → es seguro
 # solo porque el scheduler corre los jobs EN SERIE. Si algún día se corren en paralelo, agregar
 # SKIP LOCKED al worker de OCR antes de habilitar esa concurrencia.
@@ -210,6 +256,7 @@ _REGISTRY: dict[str, Job] = {
     "extract": Job("extract", "PT1H", run_extraction),
     "ocr": Job("ocr", "PT1H", run_ocr),
     "calendar": Job("calendar", "PT30M", run_calendar_cycle),
+    "finance": Job("finance", "PT1H", run_finance_cycle),
     "log_purge": Job("log_purge", "P1D", _sync(run_log_purge)),
 }
 

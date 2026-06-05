@@ -36,7 +36,7 @@ _log = get_logger("memex.api.modules")
 #: Etiquetas "lindas" para la UI (alineadas con el mock previo `@/mocks/control`). El módulo solo
 #: expone `slug`; el label de presentación vive acá.
 _LABELS: dict[str, str] = {
-    "finance": "Finanzas (gastos)",
+    "finance": "Finanzas",
     "calendar": "Calendario (eventos)",
 }
 
