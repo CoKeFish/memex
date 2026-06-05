@@ -43,6 +43,8 @@ from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuot
 from memex.logging import get_logger
 from memex.modules import known_modules, resolve
 from memex.modules.contract import (
+    CAP_PROVIDE_DOMAIN,
+    DomainProvider,
     ExtractionItem,
     InterestModule,
     ModuleContext,
@@ -326,12 +328,33 @@ def _record_cost(
     )
 
 
+def _build_deps(
+    module: InterestModule,
+    conn: Connection,
+    user_id: int,
+    active_by_slug: dict[str, InterestModule],
+) -> dict[str, object]:
+    """`ctx.deps` del módulo: por cada slug en su `depends_on` cuyo proveedor activo declara
+    `provide_domain`, inyecta su handle tipado ligado a `(conn, user_id)` — así el módulo usa el
+    dominio de su dependencia sin SQL crudo. Vacío si no declara dependencias con dominio. El
+    proveedor ya corrió antes en la ventana (topo-orden), así que el handle ve datos frescos."""
+    deps: dict[str, object] = {}
+    for slug in module.depends_on:
+        provider = active_by_slug.get(slug)
+        if provider is None or CAP_PROVIDE_DOMAIN not in provider.capabilities:
+            continue
+        if isinstance(provider, DomainProvider):
+            deps[slug] = provider.provide_domain(conn, user_id)
+    return deps
+
+
 async def _extract_module(
     user_id: int,
     llm: LLMClient,
     module: InterestModule,
     rows: tuple[WorkRow, ...],
     stats: ExtractStats,
+    active_by_slug: dict[str, InterestModule],
 ) -> None:
     """Extrae con UN módulo sobre `rows` (su subconjunto pendiente de la ventana)."""
     window = Window(tier=rows[0].tier, source_id=rows[0].source_id, rows=rows)
@@ -419,7 +442,7 @@ async def _extract_module(
             user_id=user_id,
             conn=conn,
             llm=llm,
-            deps={},
+            deps=_build_deps(module, conn, user_id, active_by_slug),
             summary_id=None,
             inbox_ids=tuple(inbox_ids),
         )
@@ -460,6 +483,7 @@ async def _extract_group(
     modules: list[InterestModule],
     rows: tuple[WorkRow, ...],
     stats: ExtractStats,
+    active_by_slug: dict[str, InterestModule],
     *,
     group_size: int,
     policy: str,
@@ -567,7 +591,7 @@ async def _extract_group(
                 user_id=user_id,
                 conn=conn,
                 llm=llm,
-                deps={},
+                deps=_build_deps(module, conn, user_id, active_by_slug),
                 summary_id=None,
                 inbox_ids=tuple(inbox_ids),
             )
@@ -648,7 +672,7 @@ async def _process_window(
                 r for r in window.rows if module.slug not in done.get(r.inbox_id, set())
             )
             if pending:
-                await _extract_module(user_id, llm, module, pending, stats)
+                await _extract_module(user_id, llm, module, pending, stats, active_by_slug)
             continue
         # Grupo ≥2: co-extraer SOLO las filas que NINGÚN miembro procesó (intersección).
         co = tuple(
@@ -658,7 +682,14 @@ async def _process_window(
         )
         if co:
             await _extract_group(
-                user_id, llm, modules, co, stats, group_size=group_size, policy=batching_policy
+                user_id,
+                llm,
+                modules,
+                co,
+                stats,
+                active_by_slug,
+                group_size=group_size,
+                policy=batching_policy,
             )
         # Fallback: filas con progreso parcial → cada módulo rezagado las hace per-módulo (así
         # ningún módulo recién habilitado queda sin procesar filas que otro del grupo ya hizo).
@@ -670,7 +701,7 @@ async def _process_window(
                 if r.inbox_id not in co_ids and module.slug not in done.get(r.inbox_id, set())
             )
             if leftover:
-                await _extract_module(user_id, llm, module, leftover, stats)
+                await _extract_module(user_id, llm, module, leftover, stats, active_by_slug)
 
     # Candidatos ruteados-fuera: marcar "considerado" para no re-rutearlos eternamente.
     for module in candidates:

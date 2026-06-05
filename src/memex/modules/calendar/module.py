@@ -22,6 +22,7 @@ from sqlalchemy.engine import Connection
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.calendar.dedup import DedupRow, mark_duplicates
+from memex.modules.calendar.domain import CalendarDomainReader
 from memex.modules.calendar.prompt import CALENDAR_SYSTEM_PROMPT
 from memex.modules.calendar.schema import CalendarEventItem
 from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, ModuleContext
@@ -238,3 +239,9 @@ class CalendarModule:
         borra solo la fila huérfana. NO toca el consolidado ni los candidatos de dedup (estado que
         trasciende al mensaje)."""
         return forget_inbox_rows(conn, "mod_calendar_events", user_id=user_id, inbox_ids=inbox_ids)
+
+    def provide_domain(self, conn: Connection, user_id: int) -> CalendarDomainReader:
+        """Capacidad `provide_domain`: handle del calendario CONSOLIDADO (lectura por rango +
+        `contribute` para que otros módulos propongan eventos). Lo reciben (vía
+        `ctx.deps['calendar']`) los módulos que declaran `'calendar'` en `depends_on`."""
+        return CalendarDomainReader(conn, user_id)

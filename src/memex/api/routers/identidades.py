@@ -1,13 +1,12 @@
-"""Router del módulo `identidades` para el dashboard (sección /directorio).
+"""Router del módulo `identidades` para el dashboard (sección /directorio), modelo unificado.
 
-Expone el directorio de personas (sync de Google Contacts), la lista de organizaciones/productos/
-agentes de interés (con CRUD — a diferencia del router read-only de calendar, la lista la edita el
-usuario), las menciones extraídas con su resolución, y la observabilidad del sync (cuentas +
-corridas). Calca el patrón de `finance.py`/`calendar.py`: `connection()` + SQL crudo +
+Expone el directorio UNIFICADO de identidades (`mod_identidades`: personas u organizaciones) con
+sus identificadores por-fuente, sedes, afiliaciones y menciones; el CRUD que edita el usuario; la
+cola de candidatos de merge (zona gris del difuso) con confirmación/rechazo + un merge manual; y la
+observabilidad del sync. Calca el patrón de `finance.py`/`calendar.py`: `connection()` + SQL crudo +
 `.mappings()`, paginación por cursor, scoping por `user_id`.
 
-`POST /sync` dispara una corrida de sync server-side (fetch-server-side); NO expone el token (las
-cuentas solo cruzan `account_id` del vault + `sync_token_present`).
+`POST /sync` dispara una corrida server-side (fetch-server-side); NO expone el token.
 """
 
 from typing import Annotated, Any
@@ -17,24 +16,30 @@ from sqlalchemy import text
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
+    IdentityAffiliateCreate,
+    IdentityCreate,
+    IdentityDetail,
+    IdentityIdentifierCreate,
+    IdentityIdentifierRow,
+    IdentityList,
     IdentityMentionList,
-    IdentityOrgCreate,
-    IdentityOrgDetail,
-    IdentityOrgList,
-    IdentityOrgRow,
-    IdentityOrgUpdate,
-    IdentityPersonDetail,
-    IdentityPersonList,
-    IdentityPersonOrgCreate,
-    IdentityPersonRow,
-    IdentityPersonUpdate,
+    IdentityMergeCandidateList,
+    IdentityMergeRequest,
     IdentityProviderAccountList,
+    IdentityRow,
+    IdentitySiteCreate,
+    IdentitySiteRow,
     IdentitySyncRequest,
     IdentitySyncResult,
     IdentitySyncRunList,
+    IdentityUpdate,
 )
 from memex.db import connection
+from memex.llm.client import LLMQuotaError
 from memex.logging import get_logger
+from memex.modules.identidades.hierarchy import run_organize, would_create_cycle
+from memex.modules.identidades.merge import merge_identities
+from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.sync import run_sync
 
 router = APIRouter(prefix="/identidades", tags=["identidades"])
@@ -43,40 +48,39 @@ UserID = Annotated[int, Depends(current_user_id)]
 
 _log = get_logger("memex.api.identidades")
 
-_ORG_KINDS = frozenset({"organizacion", "producto", "agente"})
+_KINDS = frozenset({"persona", "organizacion"})
+_IDENTIFIER_KINDS = frozenset({"email", "phone", "handle", "domain", "url"})
+
+_IDENTITY_COLS = (
+    "id, kind, display_name, aliases, interest, source, notes, given_name, family_name, birthday, "
+    "photo_url, parent_identity_id, metadata, created_at, updated_at"
+)
+_MENTION_COLS = (
+    "id, source_inbox_ids, evidence, mentioned_name, mentioned_kind, email, handle, org_hint, "
+    "role_hint, confidence, resolved_kind, resolved_identity_id, resolution_method, created_at"
+)
 
 
-def _person_row(r: Any) -> dict[str, Any]:
+def _identity_row(r: Any) -> dict[str, Any]:
     meta = r["metadata"] if isinstance(r["metadata"], dict) else {}
     return {
         "id": int(r["id"]),
+        "kind": r["kind"],
         "display_name": r["display_name"],
+        "aliases": list(r["aliases"] or []),
+        "interest": bool(r["interest"]),
+        "source": r["source"],
+        "notes": r["notes"],
         "given_name": r["given_name"],
         "family_name": r["family_name"],
-        "emails": list(r["emails"] or []),
-        "phones": list(r["phones"] or []),
-        "org_name": r["org_name"],
-        "role": r["role"],
-        "source": r["source"],
-        "interest": bool(r["interest"]),
-        "provider": r["provider"],
+        "birthday": r["birthday"],
         "photo_url": r["photo_url"],
         "deleted": bool(meta.get("deleted")),
-        "created_at": r["created_at"],
-        "updated_at": r["updated_at"],
-    }
-
-
-def _org_row(r: Any) -> dict[str, Any]:
-    return {
-        "id": int(r["id"]),
-        "name": r["name"],
-        "kind": r["kind"],
-        "aliases": list(r["aliases"] or []),
-        "domains": list(r["domains"] or []),
-        "interest": bool(r["interest"]),
-        "description": r["description"],
-        "source": r["source"],
+        "parent_id": r["parent_identity_id"],
+        # parent_name / mention_count solo vienen en la lista (JOIN) y el detalle (enriquecido);
+        # en los SELECT de una sola tabla quedan None/0.
+        "parent_name": r.get("parent_name"),
+        "mention_count": int(r["mention_count"]) if r.get("mention_count") is not None else 0,
         "created_at": r["created_at"],
         "updated_at": r["updated_at"],
     }
@@ -96,363 +100,57 @@ def _mention_row(r: Any) -> dict[str, Any]:
         "role_hint": r["role_hint"],
         "confidence": float(conf) if conf is not None else None,
         "resolved_kind": r["resolved_kind"],
-        "resolved_person_id": r["resolved_person_id"],
-        "resolved_org_id": r["resolved_org_id"],
+        "resolved_identity_id": r["resolved_identity_id"],
         "resolution_method": r["resolution_method"],
         "created_at": r["created_at"],
     }
 
 
-_PERSON_COLS = (
-    "id, display_name, given_name, family_name, emails, phones, org_name, role, source, "
-    "interest, provider, photo_url, metadata, created_at, updated_at"
-)
-_ORG_COLS = (
-    "id, name, kind, aliases, domains, interest, description, source, created_at, updated_at"
-)
-_MENTION_COLS = (
-    "id, source_inbox_ids, evidence, mentioned_name, mentioned_kind, email, handle, org_hint, "
-    "role_hint, confidence, resolved_kind, resolved_person_id, resolved_org_id, resolution_method, "
-    "created_at"
-)
+# ---- Directorio (lista + detalle + CRUD) ----------------------------------------------------- #
 
 
-def _prefixed(cols: str, alias: str) -> str:
-    """Prefija cada columna con `alias.` para los SELECT con JOIN (donde `id`/`user_id` etc. son
-    ambiguos entre tablas). El label del resultado sigue siendo la columna sin prefijo."""
-    return ", ".join(f"{alias}.{c.strip()}" for c in cols.split(","))
-
-
-# ---- Personas -------------------------------------------------------------------------------- #
-
-
-@router.get("/persons", response_model=IdentityPersonList)
-async def list_persons(
+@router.get("", response_model=IdentityList)
+async def list_identities(
     user_id: UserID,
-    q: str | None = Query(default=None, description="Busca en display_name / emails."),
-    org_id: int | None = Query(default=None, description="Filtra por org asociada."),
+    q: str | None = Query(default=None, description="Busca en display_name / aliases."),
+    kind: str | None = Query(default=None, description="persona | organizacion."),
     interest: bool | None = Query(default=None, description="true=interés, false=Detectadas."),
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     cursor: int | None = Query(default=None, description="id > cursor for pagination"),
 ) -> dict[str, Any]:
-    """Directorio de personas del usuario, paginado por cursor ascendente."""
-    where = ["p.user_id = :uid"]
+    """Directorio del usuario, paginado por cursor ascendente. Cada fila trae el padre
+    (`parent_name`) y el `mention_count` por LEFT JOIN (no subquery por-fila)."""
+    where = ["i.user_id = :uid"]
     params: dict[str, Any] = {"uid": user_id, "limit": limit}
     if cursor is not None:
-        where.append("p.id > :cur")
+        where.append("i.id > :cur")
         params["cur"] = cursor
-    if q:
-        where.append("(p.display_name ILIKE :q OR array_to_string(p.emails, ' ') ILIKE :q)")
-        params["q"] = f"%{q}%"
+    if kind in _KINDS:
+        where.append("i.kind = :kind")
+        params["kind"] = kind
     if interest is not None:
-        where.append("p.interest = :interest")
+        where.append("i.interest = :interest")
         params["interest"] = interest
-    join = ""
-    if org_id is not None:
-        join = "JOIN mod_identidades_person_orgs po ON po.person_id = p.id AND po.org_id = :oid"
-        params["oid"] = org_id
-    sql = f"""
-        SELECT {_prefixed(_PERSON_COLS, "p")} FROM mod_identidades_persons p
-        {join}
-        WHERE {" AND ".join(where)}
-        ORDER BY p.id
-        LIMIT :limit
-    """
+    if q:
+        where.append("(i.display_name ILIKE :q OR array_to_string(i.aliases, ' ') ILIKE :q)")
+        params["q"] = f"%{q}%"
+    sql = (
+        "SELECT i.id, i.kind, i.display_name, i.aliases, i.interest, i.source, i.notes, "
+        "i.given_name, i.family_name, i.birthday, i.photo_url, i.parent_identity_id, i.metadata, "
+        "i.created_at, i.updated_at, p.display_name AS parent_name, "
+        "COALESCE(mc.n, 0) AS mention_count "
+        "FROM mod_identidades i "
+        "LEFT JOIN mod_identidades p ON p.id = i.parent_identity_id "
+        "LEFT JOIN (SELECT resolved_identity_id, count(*) AS n FROM mod_identidades_mentions "
+        "           WHERE user_id = :uid GROUP BY resolved_identity_id) mc "
+        "       ON mc.resolved_identity_id = i.id "
+        f"WHERE {' AND '.join(where)} ORDER BY i.id LIMIT :limit"
+    )
     with connection() as conn:
         rows = conn.execute(text(sql), params).mappings().all()
-    items = [_person_row(r) for r in rows]
+    items = [_identity_row(r) for r in rows]
     next_cursor = items[-1]["id"] if len(items) == limit else None
     return {"items": items, "next_cursor": next_cursor}
-
-
-@router.get("/persons/{person_id}", response_model=IdentityPersonDetail)
-async def get_person(person_id: int, user_id: UserID) -> dict[str, Any]:
-    """Una persona + sus orgs asociadas + sus menciones recientes."""
-    with connection() as conn:
-        prow = (
-            conn.execute(
-                text(
-                    f"SELECT {_PERSON_COLS} FROM mod_identidades_persons "
-                    "WHERE id = :id AND user_id = :uid"
-                ),
-                {"id": person_id, "uid": user_id},
-            )
-            .mappings()
-            .first()
-        )
-        if prow is None:
-            raise HTTPException(status_code=404, detail="person not found")
-        orgs = (
-            conn.execute(
-                text(
-                    f"""
-                    SELECT {_prefixed(_ORG_COLS, "o")} FROM mod_identidades_orgs o
-                    JOIN mod_identidades_person_orgs po ON po.org_id = o.id
-                    WHERE po.person_id = :id AND o.user_id = :uid ORDER BY o.name
-                    """
-                ),
-                {"id": person_id, "uid": user_id},
-            )
-            .mappings()
-            .all()
-        )
-        mentions = (
-            conn.execute(
-                text(
-                    f"SELECT {_MENTION_COLS} FROM mod_identidades_mentions "
-                    "WHERE resolved_person_id = :id AND user_id = :uid ORDER BY id DESC LIMIT 50"
-                ),
-                {"id": person_id, "uid": user_id},
-            )
-            .mappings()
-            .all()
-        )
-    return {
-        "person": _person_row(prow),
-        "orgs": [_org_row(o) for o in orgs],
-        "mentions": [_mention_row(m) for m in mentions],
-    }
-
-
-@router.patch("/persons/{person_id}", response_model=IdentityPersonRow)
-async def update_person(
-    person_id: int, user_id: UserID, body: IdentityPersonUpdate
-) -> dict[str, Any]:
-    """Actualiza una persona (p. ej. 'promover' = `interest=true`)."""
-    sets: list[str] = []
-    params: dict[str, Any] = {"id": person_id, "uid": user_id}
-    if body.interest is not None:
-        sets.append("interest = :interest")
-        params["interest"] = body.interest
-    if body.display_name is not None:
-        sets.append("display_name = :dn")
-        params["dn"] = body.display_name
-    if body.role is not None:
-        sets.append("role = :role")
-        params["role"] = body.role
-    if body.notes is not None:
-        sets.append("notes = :notes")
-        params["notes"] = body.notes
-    if not sets:
-        raise HTTPException(status_code=422, detail="sin campos para actualizar")
-    sets.append("updated_at = NOW()")
-    with connection() as conn:
-        row = (
-            conn.execute(
-                text(
-                    f"UPDATE mod_identidades_persons SET {', '.join(sets)} "
-                    f"WHERE id = :id AND user_id = :uid RETURNING {_PERSON_COLS}"
-                ),
-                params,
-            )
-            .mappings()
-            .first()
-        )
-    if row is None:
-        raise HTTPException(status_code=404, detail="person not found")
-    return _person_row(row)
-
-
-# ---- Organizaciones / lista de interés (CRUD) ------------------------------------------------ #
-
-
-@router.get("/orgs", response_model=IdentityOrgList)
-async def list_orgs(
-    user_id: UserID,
-    q: str | None = Query(default=None, description="Busca en name / aliases."),
-    interest: bool | None = Query(default=None, description="Filtra por lista de interés."),
-    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
-    cursor: int | None = Query(default=None),
-) -> dict[str, Any]:
-    where = ["user_id = :uid"]
-    params: dict[str, Any] = {"uid": user_id, "limit": limit}
-    if cursor is not None:
-        where.append("id > :cur")
-        params["cur"] = cursor
-    if q:
-        where.append("(name ILIKE :q OR array_to_string(aliases, ' ') ILIKE :q)")
-        params["q"] = f"%{q}%"
-    if interest is not None:
-        where.append("interest = :interest")
-        params["interest"] = interest
-    sql = f"""
-        SELECT {_ORG_COLS} FROM mod_identidades_orgs
-        WHERE {" AND ".join(where)} ORDER BY id LIMIT :limit
-    """
-    with connection() as conn:
-        rows = conn.execute(text(sql), params).mappings().all()
-    items = [_org_row(r) for r in rows]
-    next_cursor = items[-1]["id"] if len(items) == limit else None
-    return {"items": items, "next_cursor": next_cursor}
-
-
-@router.get("/orgs/{org_id}", response_model=IdentityOrgDetail)
-async def get_org(org_id: int, user_id: UserID) -> dict[str, Any]:
-    """Una org + sus personas miembro + sus menciones recientes."""
-    with connection() as conn:
-        orow = (
-            conn.execute(
-                text(f"SELECT {_ORG_COLS} FROM mod_identidades_orgs WHERE id=:id AND user_id=:uid"),
-                {"id": org_id, "uid": user_id},
-            )
-            .mappings()
-            .first()
-        )
-        if orow is None:
-            raise HTTPException(status_code=404, detail="org not found")
-        members = (
-            conn.execute(
-                text(
-                    f"""
-                    SELECT {_prefixed(_PERSON_COLS, "p")} FROM mod_identidades_persons p
-                    JOIN mod_identidades_person_orgs po ON po.person_id = p.id
-                    WHERE po.org_id = :id AND p.user_id = :uid ORDER BY p.display_name
-                    """
-                ),
-                {"id": org_id, "uid": user_id},
-            )
-            .mappings()
-            .all()
-        )
-        mentions = (
-            conn.execute(
-                text(
-                    f"SELECT {_MENTION_COLS} FROM mod_identidades_mentions "
-                    "WHERE resolved_org_id = :id AND user_id = :uid ORDER BY id DESC LIMIT 50"
-                ),
-                {"id": org_id, "uid": user_id},
-            )
-            .mappings()
-            .all()
-        )
-    return {
-        "org": _org_row(orow),
-        "members": [_person_row(p) for p in members],
-        "mentions": [_mention_row(m) for m in mentions],
-    }
-
-
-@router.post("/orgs", response_model=IdentityOrgRow)
-async def create_org(user_id: UserID, body: IdentityOrgCreate) -> dict[str, Any]:
-    if body.kind not in _ORG_KINDS:
-        raise HTTPException(status_code=422, detail=f"kind inválido: {body.kind!r}")
-    with connection() as conn:
-        row = (
-            conn.execute(
-                text(
-                    f"""
-                    INSERT INTO mod_identidades_orgs
-                      (user_id, name, kind, aliases, domains, description, interest, source)
-                    VALUES (:uid, :name, :kind, :aliases, :domains, :desc, :interest, 'manual')
-                    ON CONFLICT (user_id, name) DO UPDATE SET
-                      kind = EXCLUDED.kind, aliases = EXCLUDED.aliases, domains = EXCLUDED.domains,
-                      description = EXCLUDED.description, interest = EXCLUDED.interest,
-                      updated_at = NOW()
-                    RETURNING {_ORG_COLS}
-                    """
-                ),
-                {
-                    "uid": user_id,
-                    "name": body.name,
-                    "kind": body.kind,
-                    "aliases": [a.strip() for a in body.aliases if a.strip()],
-                    "domains": [d.strip().lower() for d in body.domains if d.strip()],
-                    "desc": body.description,
-                    "interest": body.interest,
-                },
-            )
-            .mappings()
-            .one()
-        )
-    return _org_row(row)
-
-
-@router.patch("/orgs/{org_id}", response_model=IdentityOrgRow)
-async def update_org(org_id: int, user_id: UserID, body: IdentityOrgUpdate) -> dict[str, Any]:
-    if body.kind is not None and body.kind not in _ORG_KINDS:
-        raise HTTPException(status_code=422, detail=f"kind inválido: {body.kind!r}")
-    sets: list[str] = []
-    params: dict[str, Any] = {"id": org_id, "uid": user_id}
-    if body.name is not None:
-        sets.append("name = :name")
-        params["name"] = body.name
-    if body.kind is not None:
-        sets.append("kind = :kind")
-        params["kind"] = body.kind
-    if body.aliases is not None:
-        sets.append("aliases = :aliases")
-        params["aliases"] = [a.strip() for a in body.aliases if a.strip()]
-    if body.domains is not None:
-        sets.append("domains = :domains")
-        params["domains"] = [d.strip().lower() for d in body.domains if d.strip()]
-    if body.description is not None:
-        sets.append("description = :desc")
-        params["desc"] = body.description
-    if body.interest is not None:
-        sets.append("interest = :interest")
-        params["interest"] = body.interest
-    if not sets:
-        raise HTTPException(status_code=422, detail="sin campos para actualizar")
-    sets.append("updated_at = NOW()")
-    with connection() as conn:
-        row = (
-            conn.execute(
-                text(
-                    f"UPDATE mod_identidades_orgs SET {', '.join(sets)} "
-                    f"WHERE id = :id AND user_id = :uid RETURNING {_ORG_COLS}"
-                ),
-                params,
-            )
-            .mappings()
-            .first()
-        )
-    if row is None:
-        raise HTTPException(status_code=404, detail="org not found")
-    return _org_row(row)
-
-
-@router.delete("/orgs/{org_id}")
-async def delete_org(org_id: int, user_id: UserID) -> dict[str, bool]:
-    with connection() as conn:
-        res = conn.execute(
-            text("DELETE FROM mod_identidades_orgs WHERE id = :id AND user_id = :uid"),
-            {"id": org_id, "uid": user_id},
-        )
-    if res.rowcount == 0:
-        raise HTTPException(status_code=404, detail="org not found")
-    return {"deleted": True}
-
-
-@router.post("/persons/{person_id}/orgs", response_model=IdentityOrgDetail)
-async def associate_person_org(
-    person_id: int, user_id: UserID, body: IdentityPersonOrgCreate
-) -> dict[str, Any]:
-    """Asocia una persona con una org (idempotente)."""
-    with connection() as conn:
-        owns_person = conn.execute(
-            text("SELECT 1 FROM mod_identidades_persons WHERE id=:p AND user_id=:uid"),
-            {"p": person_id, "uid": user_id},
-        ).first()
-        owns_org = conn.execute(
-            text("SELECT 1 FROM mod_identidades_orgs WHERE id=:o AND user_id=:uid"),
-            {"o": body.org_id, "uid": user_id},
-        ).first()
-        if owns_person is None or owns_org is None:
-            raise HTTPException(status_code=404, detail="person or org not found")
-        conn.execute(
-            text(
-                """
-                INSERT INTO mod_identidades_person_orgs (user_id, person_id, org_id, role, source)
-                VALUES (:uid, :p, :o, :role, 'manual')
-                ON CONFLICT (person_id, org_id) DO UPDATE SET role = EXCLUDED.role
-                """
-            ),
-            {"uid": user_id, "p": person_id, "o": body.org_id, "role": body.role},
-        )
-    return await get_org(body.org_id, user_id)
-
-
-# ---- Menciones ------------------------------------------------------------------------------- #
 
 
 @router.get("/mentions", response_model=IdentityMentionList)
@@ -468,18 +166,504 @@ async def list_mentions(
         where.append("id < :cur")
         params["cur"] = cursor
     if resolved is True:
-        where.append("resolved_kind IS NOT NULL")
+        where.append("resolved_identity_id IS NOT NULL")
     elif resolved is False:
-        where.append("resolved_kind IS NULL")
-    sql = f"""
-        SELECT {_MENTION_COLS} FROM mod_identidades_mentions
-        WHERE {" AND ".join(where)} ORDER BY id DESC LIMIT :limit
-    """
+        where.append("resolved_identity_id IS NULL")
+    sql = (
+        f"SELECT {_MENTION_COLS} FROM mod_identidades_mentions "
+        f"WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT :limit"
+    )
     with connection() as conn:
         rows = conn.execute(text(sql), params).mappings().all()
     items = [_mention_row(r) for r in rows]
     next_cursor = items[-1]["id"] if len(items) == limit else None
     return {"items": items, "next_cursor": next_cursor}
+
+
+@router.get("/merge-candidates", response_model=IdentityMergeCandidateList)
+async def list_merge_candidates(user_id: UserID) -> dict[str, Any]:
+    """Pares candidatos a fusionar (zona gris del difuso) pendientes de decisión."""
+    with connection() as conn:
+        rows = (
+            conn.execute(
+                text(
+                    """
+                    SELECT c.id, c.identity_a_id, c.identity_b_id, c.reason, c.score, c.status,
+                           a.display_name AS a_name, a.kind AS kind, b.display_name AS b_name
+                    FROM mod_identidades_merge_candidates c
+                    JOIN mod_identidades a ON a.id = c.identity_a_id
+                    JOIN mod_identidades b ON b.id = c.identity_b_id
+                    WHERE c.user_id = :uid AND c.status = 'candidate'
+                    ORDER BY c.score DESC NULLS LAST, c.id
+                    """
+                ),
+                {"uid": user_id},
+            )
+            .mappings()
+            .all()
+        )
+    items = [
+        {
+            "id": int(r["id"]),
+            "identity_a_id": int(r["identity_a_id"]),
+            "identity_b_id": int(r["identity_b_id"]),
+            "a_name": r["a_name"],
+            "b_name": r["b_name"],
+            "kind": r["kind"],
+            "reason": r["reason"],
+            "score": float(r["score"]) if r["score"] is not None else None,
+            "status": r["status"],
+        }
+        for r in rows
+    ]
+    return {"items": items}
+
+
+@router.post("/merge", response_model=IdentityRow)
+async def merge(user_id: UserID, body: IdentityMergeRequest) -> dict[str, Any]:
+    """Fusiona dos identidades a mano (la absorbida desaparece). Devuelve la superviviente."""
+    with connection() as conn:
+        if not merge_identities(conn, user_id, body.survivor_id, body.absorbed_id):
+            raise HTTPException(status_code=404, detail="no encontradas o de distinto tipo")
+        row = (
+            conn.execute(
+                text(f"SELECT {_IDENTITY_COLS} FROM mod_identidades WHERE id=:id AND user_id=:uid"),
+                {"id": body.survivor_id, "uid": user_id},
+            )
+            .mappings()
+            .first()
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="superviviente no encontrada")
+    return _identity_row(row)
+
+
+@router.post("/merge-candidates/{cand_id}/confirm", response_model=IdentityRow)
+async def confirm_merge_candidate(cand_id: int, user_id: UserID) -> dict[str, Any]:
+    """Confirma un candidato: fusiona el par (superviviente = id menor). El candidato cae por FK."""
+    with connection() as conn:
+        cand = conn.execute(
+            text(
+                "SELECT identity_a_id, identity_b_id FROM mod_identidades_merge_candidates "
+                "WHERE id = :id AND user_id = :uid AND status = 'candidate'"
+            ),
+            {"id": cand_id, "uid": user_id},
+        ).first()
+        if cand is None:
+            raise HTTPException(status_code=404, detail="candidato no encontrado")
+        survivor, absorbed = sorted((int(cand[0]), int(cand[1])))
+        merge_identities(conn, user_id, survivor, absorbed)
+        row = (
+            conn.execute(
+                text(f"SELECT {_IDENTITY_COLS} FROM mod_identidades WHERE id=:id AND user_id=:uid"),
+                {"id": survivor, "uid": user_id},
+            )
+            .mappings()
+            .first()
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="superviviente no encontrada")
+    return _identity_row(row)
+
+
+@router.post("/merge-candidates/{cand_id}/reject")
+async def reject_merge_candidate(cand_id: int, user_id: UserID) -> dict[str, bool]:
+    """Rechaza un candidato (coexisten): pasa a `rejected`."""
+    with connection() as conn:
+        res = conn.execute(
+            text(
+                "UPDATE mod_identidades_merge_candidates "
+                "SET status = 'rejected', decided_by = 'human', decided_at = NOW() "
+                "WHERE id = :id AND user_id = :uid AND status = 'candidate'"
+            ),
+            {"id": cand_id, "uid": user_id},
+        )
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="candidato no encontrado")
+    return {"rejected": True}
+
+
+@router.post("/organize")
+async def organize_hierarchy(user_id: UserID) -> dict[str, int]:
+    """Organiza la jerarquía de pertenencia («sub») con el LLM y la aplica directo (sin cola de
+    confirmación). Una sola llamada holística sobre todas las organizaciones del directorio."""
+    try:
+        stats = await run_organize(user_id)
+    except LLMQuotaError:
+        raise HTTPException(status_code=503, detail="sin cuota de LLM disponible") from None
+    return {
+        "orgs": stats.orgs,
+        "linked": stats.linked,
+        "created": stats.created,
+        "cleaned": stats.cleaned,
+        "skipped": stats.skipped,
+    }
+
+
+@router.post("", response_model=IdentityRow)
+async def create_identity(user_id: UserID, body: IdentityCreate) -> dict[str, Any]:
+    if body.kind not in _KINDS:
+        raise HTTPException(status_code=422, detail=f"kind inválido: {body.kind!r}")
+    with connection() as conn:
+        row = (
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO mod_identidades
+                      (user_id, kind, display_name, aliases, interest, source, notes,
+                       given_name, family_name, birthday)
+                    VALUES (:uid, :kind, :dn, :aliases, :interest, 'manual', :notes,
+                            :given, :family, :bday)
+                    RETURNING {_IDENTITY_COLS}
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "kind": body.kind,
+                    "dn": body.display_name,
+                    "aliases": [a.strip() for a in body.aliases if a.strip()],
+                    "interest": body.interest,
+                    "notes": body.notes,
+                    "given": body.given_name,
+                    "family": body.family_name,
+                    "bday": body.birthday,
+                },
+            )
+            .mappings()
+            .one()
+        )
+    return _identity_row(row)
+
+
+@router.get("/{identity_id:int}", response_model=IdentityDetail)
+async def get_identity(identity_id: int, user_id: UserID) -> dict[str, Any]:
+    """Una identidad + sus identificadores, sedes, afiliaciones y menciones recientes."""
+    with connection() as conn:
+        irow = (
+            conn.execute(
+                text(f"SELECT {_IDENTITY_COLS} FROM mod_identidades WHERE id=:id AND user_id=:uid"),
+                {"id": identity_id, "uid": user_id},
+            )
+            .mappings()
+            .first()
+        )
+        if irow is None:
+            raise HTTPException(status_code=404, detail="identidad no encontrada")
+        identifiers = (
+            conn.execute(
+                text(
+                    "SELECT id, platform, kind, value, is_primary, source "
+                    "FROM mod_identidades_identifiers WHERE identity_id = :id ORDER BY id"
+                ),
+                {"id": identity_id},
+            )
+            .mappings()
+            .all()
+        )
+        sites = (
+            conn.execute(
+                text(
+                    "SELECT id, label, address, country FROM mod_identidades_sites "
+                    "WHERE identity_id = :id ORDER BY id"
+                ),
+                {"id": identity_id},
+            )
+            .mappings()
+            .all()
+        )
+        affiliations = (
+            conn.execute(
+                text(
+                    """
+                    SELECT po.role AS role, o.id AS id, o.kind AS kind,
+                           o.display_name AS display_name
+                    FROM mod_identidades_person_orgs po
+                    JOIN mod_identidades o
+                      ON o.id = CASE WHEN po.person_id = :id THEN po.org_id ELSE po.person_id END
+                    WHERE (po.person_id = :id OR po.org_id = :id) AND po.user_id = :uid
+                    ORDER BY o.display_name
+                    """
+                ),
+                {"id": identity_id, "uid": user_id},
+            )
+            .mappings()
+            .all()
+        )
+        mentions = (
+            conn.execute(
+                text(
+                    f"SELECT {_MENTION_COLS} FROM mod_identidades_mentions "
+                    "WHERE resolved_identity_id = :id AND user_id = :uid ORDER BY id DESC LIMIT 50"
+                ),
+                {"id": identity_id, "uid": user_id},
+            )
+            .mappings()
+            .all()
+        )
+        # Sub-identidades que cuelgan de esta (sus «partes»: programas, productos, filiales, …).
+        children = (
+            conn.execute(
+                text(
+                    "SELECT id, kind, display_name FROM mod_identidades "
+                    "WHERE parent_identity_id = :id AND user_id = :uid ORDER BY display_name"
+                ),
+                {"id": identity_id, "uid": user_id},
+            )
+            .mappings()
+            .all()
+        )
+        identity = _identity_row(irow)
+        mc = conn.execute(
+            text(
+                "SELECT count(*) FROM mod_identidades_mentions "
+                "WHERE resolved_identity_id = :id AND user_id = :uid"
+            ),
+            {"id": identity_id, "uid": user_id},
+        ).scalar()
+        identity["mention_count"] = int(mc or 0)
+        if identity["parent_id"] is not None:
+            identity["parent_name"] = conn.execute(
+                text("SELECT display_name FROM mod_identidades WHERE id = :p AND user_id = :uid"),
+                {"p": identity["parent_id"], "uid": user_id},
+            ).scalar()
+    return {
+        "identity": identity,
+        "identifiers": [dict(r) for r in identifiers],
+        "sites": [dict(r) for r in sites],
+        "affiliations": [dict(r) for r in affiliations],
+        "mentions": [_mention_row(m) for m in mentions],
+        "children": [dict(r) for r in children],
+    }
+
+
+@router.patch("/{identity_id:int}", response_model=IdentityRow)
+async def update_identity(
+    identity_id: int, user_id: UserID, body: IdentityUpdate
+) -> dict[str, Any]:
+    """Actualiza una identidad ('promover' = `interest=true`; editar notas/cumpleaños/nombre/alias;
+    setear o quitar el padre de pertenencia)."""
+    if body.kind is not None and body.kind not in _KINDS:
+        raise HTTPException(status_code=422, detail=f"kind inválido: {body.kind!r}")
+    sets: list[str] = []
+    params: dict[str, Any] = {"id": identity_id, "uid": user_id}
+    cols: dict[str, Any] = {
+        "display_name": body.display_name,
+        "kind": body.kind,
+        "interest": body.interest,
+        "notes": body.notes,
+        "given_name": body.given_name,
+        "family_name": body.family_name,
+        "birthday": body.birthday,
+    }
+    for col, val in cols.items():
+        if val is not None:
+            sets.append(f"{col} = :{col}")
+            params[col] = val
+    if body.aliases is not None:
+        sets.append("aliases = :aliases")
+        params["aliases"] = [a.strip() for a in body.aliases if a.strip()]
+    # `parent_id` distingue "no enviado" (no tocar) de `null` (quitar el padre) vía exclude_unset.
+    set_parent = "parent_id" in body.model_dump(exclude_unset=True)
+    with connection() as conn:
+        if set_parent:
+            pval = body.parent_id
+            if pval is None:
+                sets.append("parent_identity_id = NULL")
+            else:
+                if pval == identity_id:
+                    raise HTTPException(422, detail="una identidad no puede ser su propio padre")
+                owns = conn.execute(
+                    text("SELECT 1 FROM mod_identidades WHERE id = :p AND user_id = :uid"),
+                    {"p": pval, "uid": user_id},
+                ).first()
+                if owns is None:
+                    raise HTTPException(422, detail="padre no encontrado")
+                if would_create_cycle(conn, user_id, identity_id, pval):
+                    raise HTTPException(422, detail="el padre crearía un ciclo de pertenencia")
+                sets.append("parent_identity_id = :parent_id")
+                params["parent_id"] = pval
+                sets.append(
+                    "metadata = jsonb_set(metadata, '{parent_source}', "
+                    "to_jsonb(CAST('manual' AS TEXT)))"
+                )
+        if not sets:
+            raise HTTPException(status_code=422, detail="sin campos para actualizar")
+        sets.append("updated_at = NOW()")
+        row = (
+            conn.execute(
+                text(
+                    f"UPDATE mod_identidades SET {', '.join(sets)} "
+                    f"WHERE id = :id AND user_id = :uid RETURNING {_IDENTITY_COLS}"
+                ),
+                params,
+            )
+            .mappings()
+            .first()
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="identidad no encontrada")
+    return _identity_row(row)
+
+
+@router.delete("/{identity_id:int}")
+async def delete_identity(identity_id: int, user_id: UserID) -> dict[str, bool]:
+    with connection() as conn:
+        res = conn.execute(
+            text("DELETE FROM mod_identidades WHERE id = :id AND user_id = :uid"),
+            {"id": identity_id, "uid": user_id},
+        )
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="identidad no encontrada")
+    return {"deleted": True}
+
+
+# ---- Identificadores por-fuente -------------------------------------------------------------- #
+
+
+@router.post("/{identity_id}/identifiers", response_model=IdentityIdentifierRow)
+async def add_identifier(
+    identity_id: int, user_id: UserID, body: IdentityIdentifierCreate
+) -> dict[str, Any]:
+    if body.kind not in _IDENTIFIER_KINDS:
+        raise HTTPException(status_code=422, detail=f"kind inválido: {body.kind!r}")
+    vn = norm_identifier(body.kind, body.value)
+    with connection() as conn:
+        owns = conn.execute(
+            text("SELECT 1 FROM mod_identidades WHERE id=:id AND user_id=:uid"),
+            {"id": identity_id, "uid": user_id},
+        ).first()
+        if owns is None:
+            raise HTTPException(status_code=404, detail="identidad no encontrada")
+        row = (
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO mod_identidades_identifiers
+                      (user_id, identity_id, platform, kind, value, value_norm, is_primary, source)
+                    VALUES (:uid, :id, :p, :k, :v, :vn, :prim, 'manual')
+                    ON CONFLICT (identity_id, platform, kind, value_norm)
+                      DO UPDATE SET value = EXCLUDED.value, is_primary = EXCLUDED.is_primary
+                    RETURNING id, platform, kind, value, is_primary, source
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "id": identity_id,
+                    "p": body.platform,
+                    "k": body.kind,
+                    "v": body.value,
+                    "vn": vn,
+                    "prim": body.is_primary,
+                },
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
+@router.delete("/{identity_id}/identifiers/{identifier_id}")
+async def delete_identifier(
+    identity_id: int, identifier_id: int, user_id: UserID
+) -> dict[str, bool]:
+    with connection() as conn:
+        res = conn.execute(
+            text(
+                "DELETE FROM mod_identidades_identifiers "
+                "WHERE id = :iid AND identity_id = :id AND user_id = :uid"
+            ),
+            {"iid": identifier_id, "id": identity_id, "uid": user_id},
+        )
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="identificador no encontrado")
+    return {"deleted": True}
+
+
+# ---- Sedes (organizaciones) ------------------------------------------------------------------ #
+
+
+@router.post("/{identity_id}/sites", response_model=IdentitySiteRow)
+async def add_site(identity_id: int, user_id: UserID, body: IdentitySiteCreate) -> dict[str, Any]:
+    with connection() as conn:
+        kind = conn.execute(
+            text("SELECT kind FROM mod_identidades WHERE id=:id AND user_id=:uid"),
+            {"id": identity_id, "uid": user_id},
+        ).scalar()
+        if kind is None:
+            raise HTTPException(status_code=404, detail="identidad no encontrada")
+        if kind != "organizacion":
+            raise HTTPException(status_code=422, detail="las sedes son solo de organizaciones")
+        row = (
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO mod_identidades_sites
+                      (user_id, identity_id, label, address, country)
+                    VALUES (:uid, :id, :label, :address, :country)
+                    RETURNING id, label, address, country
+                    """
+                ),
+                {
+                    "uid": user_id,
+                    "id": identity_id,
+                    "label": body.label,
+                    "address": body.address,
+                    "country": body.country,
+                },
+            )
+            .mappings()
+            .one()
+        )
+    return dict(row)
+
+
+@router.delete("/{identity_id}/sites/{site_id}")
+async def delete_site(identity_id: int, site_id: int, user_id: UserID) -> dict[str, bool]:
+    with connection() as conn:
+        res = conn.execute(
+            text(
+                "DELETE FROM mod_identidades_sites "
+                "WHERE id = :sid AND identity_id = :id AND user_id = :uid"
+            ),
+            {"sid": site_id, "id": identity_id, "uid": user_id},
+        )
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="sede no encontrada")
+    return {"deleted": True}
+
+
+# ---- Afiliación persona↔org ------------------------------------------------------------------ #
+
+
+@router.post("/{identity_id}/orgs", response_model=IdentityDetail)
+async def affiliate(
+    identity_id: int, user_id: UserID, body: IdentityAffiliateCreate
+) -> dict[str, Any]:
+    """Asocia una persona (`identity_id`) con una organización (`org_id`). Idempotente."""
+    with connection() as conn:
+        person_kind = conn.execute(
+            text("SELECT kind FROM mod_identidades WHERE id=:id AND user_id=:uid"),
+            {"id": identity_id, "uid": user_id},
+        ).scalar()
+        org_kind = conn.execute(
+            text("SELECT kind FROM mod_identidades WHERE id=:id AND user_id=:uid"),
+            {"id": body.org_id, "uid": user_id},
+        ).scalar()
+        if person_kind is None or org_kind is None:
+            raise HTTPException(status_code=404, detail="identidad no encontrada")
+        if person_kind != "persona" or org_kind != "organizacion":
+            raise HTTPException(status_code=422, detail="la afiliación es persona → organización")
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_identidades_person_orgs (user_id, person_id, org_id, role, source)
+                VALUES (:uid, :p, :o, :role, 'manual')
+                ON CONFLICT (person_id, org_id) DO UPDATE SET role = EXCLUDED.role
+                """
+            ),
+            {"uid": user_id, "p": identity_id, "o": body.org_id, "role": body.role},
+        )
+    return await get_identity(identity_id, user_id)
 
 
 # ---- Sync (cuentas + corridas + trigger) ----------------------------------------------------- #

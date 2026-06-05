@@ -1,72 +1,92 @@
-"""Resolución determinista: email/dominio/handle/nombre/alias → conocido; prioridad; unresolved."""
+"""`KnownIndex.resolve` (v2): señales fuertes deterministas sobre el directorio unificado, en orden
+de prioridad (remitente → email → dominio → handle-por-plataforma → nombre → alias). Puro/sin DB."""
 
 from __future__ import annotations
 
-from memex.modules.identidades.resolve import KnownIndex, KnownOrg, KnownPerson
+from typing import Any
+
+from memex.modules.identidades.resolve import KnownIdentifier, KnownIdentity, KnownIndex
 from memex.modules.identidades.schema import IdentityItem
-
-PERSONS = [
-    KnownPerson(id=1, display_name="Ada Lovelace", emails=("ada@x.com",), handles=("@ada",)),
-    KnownPerson(id=2, display_name="Alan Turing"),
-]
-ORGS = [
-    KnownOrg(id=10, name="Unity", aliases=("Unity Technologies",), domains=("unity.com",)),
-    KnownOrg(id=11, name="Claude", aliases=("claude.ai",)),
-]
-
-
-def _item(**kw: object) -> IdentityItem:
-    data: dict[str, object] = {"source_inbox_ids": (1,), "name": ""}
-    data.update(kw)
-    return IdentityItem.model_validate(data)
 
 
 def _idx() -> KnownIndex:
-    return KnownIndex(PERSONS, ORGS)
+    return KnownIndex(
+        [
+            KnownIdentity(
+                id=1,
+                kind="persona",
+                display_name="Ada Lovelace",
+                identifiers=(
+                    KnownIdentifier("email", "email", "ada@x.com"),
+                    KnownIdentifier("x", "handle", "ada"),
+                ),
+            ),
+            KnownIdentity(
+                id=2,
+                kind="persona",
+                display_name="Ana López",
+                identifiers=(KnownIdentifier("instagram", "handle", "ada"),),
+            ),
+            KnownIdentity(
+                id=10,
+                kind="organizacion",
+                display_name="Unity",
+                aliases=("Unity3D",),
+                identifiers=(KnownIdentifier("domain", "domain", "unity.com"),),
+            ),
+        ]
+    )
+
+
+def _probe(**kw: Any) -> IdentityItem:
+    return IdentityItem(source_inbox_ids=(1,), **kw)
 
 
 def test_email_resolves_person() -> None:
-    r = _idx().resolve(_item(name="alguien", email="ADA@x.com"))  # case-insensitive
-    assert (r.kind, r.person_id, r.method) == ("person", 1, "email")
+    res = _idx().resolve(_probe(name="quien", email="ADA@x.com"))
+    assert (res.kind, res.identity_id, res.method) == ("persona", 1, "email")
 
 
 def test_email_domain_resolves_org() -> None:
-    r = _idx().resolve(_item(name="Soporte", email="info@unity.com"))
-    assert (r.kind, r.org_id, r.method) == ("org", 10, "domain")
+    res = _idx().resolve(_probe(name="soporte", email="info@unity.com"))
+    assert (res.kind, res.identity_id, res.method) == ("organizacion", 10, "domain")
 
 
-def test_handle_resolves_person() -> None:
-    r = _idx().resolve(_item(name="x", handle="ada"))  # sin @ también matchea
-    assert (r.kind, r.person_id, r.method) == ("person", 1, "handle")
+def test_sender_email_is_strong_signal() -> None:
+    # la mención no trae email, pero el remitente del mensaje sí → resuelve por remitente
+    res = _idx().resolve(_probe(name="alguien"), sender_email="ada@x.com")
+    assert (res.kind, res.identity_id, res.method) == ("persona", 1, "sender_email")
 
 
-def test_exact_name_resolves_person() -> None:
-    r = _idx().resolve(_item(name="ada  lovelace"))  # normalize colapsa espacios
-    assert (r.kind, r.person_id, r.method) == ("person", 1, "exact_name")
+def test_handle_scoped_by_platform() -> None:
+    idx = _idx()
+    # el mismo handle 'ada' existe en X (id 1) y en Instagram (id 2) → la plataforma desambigua
+    res_x = idx.resolve(_probe(name="x", handle="@ada"), source_platform="x")
+    assert (res_x.identity_id, res_x.method) == (1, "handle")
+    res_ig = idx.resolve(_probe(name="x", handle="ada"), source_platform="instagram")
+    assert res_ig.identity_id == 2
 
 
-def test_name_resolves_org() -> None:
-    r = _idx().resolve(_item(name="unity"))
-    assert (r.kind, r.org_id, r.method) == ("org", 10, "exact_name")
+def test_handle_ambiguous_without_platform_is_unresolved() -> None:
+    # sin plataforma, un handle compartido por dos identidades NO se resuelve (evita cruzar)
+    res = _idx().resolve(_probe(name="desconocido total", handle="ada"))
+    assert res.method == "unresolved"
 
 
-def test_alias_resolves_org() -> None:
-    r = _idx().resolve(_item(name="claude.ai"))
-    assert (r.kind, r.org_id, r.method) == ("org", 11, "alias")
-
-
-def test_unresolved() -> None:
-    r = _idx().resolve(_item(name="Desconocido SA", email="x@nope.com"))
-    assert (r.kind, r.person_id, r.org_id, r.method) == (None, None, None, "unresolved")
+def test_exact_name_and_alias() -> None:
+    idx = _idx()
+    assert idx.resolve(_probe(name="unity")).method == "exact_name"
+    assert idx.resolve(_probe(name="UNITY3D")).method == "alias"  # alias normalizado
+    res = idx.resolve(_probe(name="ada  lovelace"))  # doble espacio + casing
+    assert (res.kind, res.identity_id, res.method) == ("persona", 1, "exact_name")
 
 
 def test_email_beats_name() -> None:
-    # El email (señal fuerte) gana aunque el nombre apunte a una org distinta.
-    r = _idx().resolve(_item(name="unity", email="ada@x.com"))
-    assert (r.kind, r.person_id, r.method) == ("person", 1, "email")
+    # señal fuerte (email) gana sobre el nombre, aunque el nombre apunte a otra identidad
+    res = _idx().resolve(_probe(name="unity", email="ada@x.com"))
+    assert (res.kind, res.identity_id, res.method) == ("persona", 1, "email")
 
 
-def test_empty_index_is_unresolved() -> None:
-    assert (
-        KnownIndex().resolve(_item(name="Ada Lovelace", email="ada@x.com")).method == "unresolved"
-    )
+def test_unresolved() -> None:
+    res = _idx().resolve(_probe(name="Nadie Conocido", email="x@nope.com"))
+    assert (res.kind, res.identity_id, res.method) == (None, None, "unresolved")

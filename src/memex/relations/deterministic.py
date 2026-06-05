@@ -49,6 +49,7 @@ class RelationStats:
     cooccurrence_pistas: int
     afiliacion_reales: int
     high_fanout_skipped: int
+    pertenencia_reales: int = 0
 
 
 def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
@@ -80,17 +81,17 @@ def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
     for r in conn.execute(
         text(
             """
-            SELECT resolved_person_id AS pid, resolved_org_id AS oid, source_inbox_ids AS ids
-            FROM mod_identidades_mentions WHERE user_id = :u
+            SELECT m.resolved_identity_id AS iid, i.kind AS kind, m.source_inbox_ids AS ids
+            FROM mod_identidades_mentions m
+            JOIN mod_identidades i ON i.id = m.resolved_identity_id
+            WHERE m.user_id = :u AND m.resolved_identity_id IS NOT NULL
             """
         ),
         {"u": user_id},
     ).mappings():
         ids = [int(x) for x in (r["ids"] or [])]
-        if r["pid"] is not None:
-            prov[Ref("identidades:person", int(r["pid"]))].update(ids)
-        if r["oid"] is not None:
-            prov[Ref("identidades:org", int(r["oid"]))].update(ids)
+        slug = "identidades:person" if r["kind"] == "persona" else "identidades:org"
+        prov[Ref(slug, int(r["iid"]))].update(ids)
 
     return dict(prov)
 
@@ -155,6 +156,38 @@ def _materialize_afiliacion(conn: Connection, user_id: int) -> int:
     return n
 
 
+def _materialize_pertenencia(conn: Connection, user_id: int) -> int:
+    """Una arista REAL «pertenece_a» sub→padre por cada `parent_identity_id` del directorio (la
+    jerarquía genérica «sub»: programa→universidad, producto→empresa, …). Dirigida (hijo→padre).
+    Devuelve cuántas."""
+    n = 0
+    for r in conn.execute(
+        text(
+            """
+            SELECT c.id AS child_id, c.kind AS child_kind,
+                   p.id AS parent_id, p.kind AS parent_kind
+            FROM mod_identidades c
+            JOIN mod_identidades p ON p.id = c.parent_identity_id
+            WHERE c.user_id = :u AND c.parent_identity_id IS NOT NULL
+            """
+        ),
+        {"u": user_id},
+    ).mappings():
+        child_slug = "identidades:person" if r["child_kind"] == "persona" else "identidades:org"
+        parent_slug = "identidades:person" if r["parent_kind"] == "persona" else "identidades:org"
+        propose_edge(
+            conn,
+            user_id,
+            Ref(child_slug, int(r["child_id"])),
+            Ref(parent_slug, int(r["parent_id"])),
+            producer=PRODUCER_IDENTIDADES,
+            relation_type="pertenece_a",
+            status=STATUS_CONFIRMED,
+        )
+        n += 1
+    return n
+
+
 def build_relations(
     conn: Connection, user_id: int, *, cooccurrence_cap: int = DEFAULT_COOCCURRENCE_CAP
 ) -> RelationStats:
@@ -163,14 +196,19 @@ def build_relations(
     prov = vertex_inbox_ids(conn, user_id)
     pistas, skipped = _materialize_cooccurrence(conn, user_id, prov, cooccurrence_cap)
     afil = _materialize_afiliacion(conn, user_id)
+    pert = _materialize_pertenencia(conn, user_id)
     stats = RelationStats(
-        cooccurrence_pistas=pistas, afiliacion_reales=afil, high_fanout_skipped=skipped
+        cooccurrence_pistas=pistas,
+        afiliacion_reales=afil,
+        high_fanout_skipped=skipped,
+        pertenencia_reales=pert,
     )
     _log.info(
         "relation.build.done",
         user_id=user_id,
         cooccurrence_pistas=pistas,
         afiliacion_reales=afil,
+        pertenencia_reales=pert,
         high_fanout_skipped=skipped,
     )
     return stats

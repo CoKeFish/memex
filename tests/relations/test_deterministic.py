@@ -45,8 +45,8 @@ def _hack(name: str, inbox_ids: list[int]) -> int:
 def _person(name: str) -> int:
     return int(
         _exec(
-            "INSERT INTO mod_identidades_persons (user_id, display_name) "
-            "VALUES (1, :n) RETURNING id",
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'persona', :n) RETURNING id",
             n=name,
         )
     )
@@ -55,7 +55,9 @@ def _person(name: str) -> int:
 def _org(name: str) -> int:
     return int(
         _exec(
-            "INSERT INTO mod_identidades_orgs (user_id, name) VALUES (1, :n) RETURNING id", n=name
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'organizacion', :n) RETURNING id",
+            n=name,
         )
     )
 
@@ -68,13 +70,16 @@ def _link_person_org(person_id: int, org_id: int) -> None:
     )
 
 
-def _mention(person_id: int, inbox_ids: list[int]) -> None:
+def _mention(identity_id: int, inbox_ids: list[int], kind: str = "persona") -> None:
+    # `kind` es cosmético: el slug del vértice sale de `mod_identidades.kind` (no de la mención);
+    # lo que importa es a qué identidad apunta `resolved_identity_id`.
     _exec(
         "INSERT INTO mod_identidades_mentions "
-        "(user_id, source_inbox_ids, mentioned_name, resolved_person_id) "
-        "VALUES (1, :ids, 'X', :p)",
+        "(user_id, source_inbox_ids, mentioned_name, resolved_kind, resolved_identity_id) "
+        "VALUES (1, :ids, 'X', :k, :p)",
         ids=inbox_ids,
-        p=person_id,
+        k=kind,
+        p=identity_id,
     )
 
 
@@ -155,6 +160,54 @@ def test_identidades_transitivo_via_mencion() -> None:
     assert _pair(edges[0]) == {("finance", fin), ("identidades:person", p)}
 
 
+def test_cooccurrence_persona_org_mismo_correo() -> None:
+    # dos identidades (persona + org) co-mencionadas en el MISMO correo → una pista entre ellas.
+    p = _person("Juan")
+    o = _org("Acme")
+    _mention(p, [9])
+    _mention(o, [9], kind="organizacion")
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1)
+    assert stats.cooccurrence_pistas == 1
+    assert len(edges) == 1
+    e = edges[0]
+    assert e.producer == "inbox"
+    assert e.status == "pista"
+    assert e.relation_type == "co-ocurrencia"
+    assert _pair(e) == {("identidades:person", p), ("identidades:org", o)}
+
+
+def test_cooccurrence_misma_identidad_dos_menciones_no_edge() -> None:
+    # dos menciones del MISMO correo que resuelven a la MISMA identidad → sin auto-enlace
+    # (el set de `Ref` colapsa el vértice repetido; queda 1 < 2 vértices).
+    p = _person("Ana")
+    _mention(p, [10])
+    _mention(p, [10])
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1)
+    assert stats.cooccurrence_pistas == 0
+    assert edges == []
+
+
+def test_cooccurrence_identidades_respeta_cap() -> None:
+    # 3 identidades del mismo correo con cap=2 → ese mensaje se salta (la co-ocurrencia es ruido);
+    # arriba del umbral toma el relevo el handler LLM (relations_llm), no este paso determinista.
+    a = _person("A")
+    b = _person("B")
+    c_ = _person("C")
+    _mention(a, [11])
+    _mention(b, [11])
+    _mention(c_, [11])
+    with connection() as c:
+        stats = build_relations(c, 1, cooccurrence_cap=2)
+        edges = list_edges(c, 1)
+    assert stats.high_fanout_skipped == 1
+    assert stats.cooccurrence_pistas == 0
+    assert edges == []
+
+
 def test_afiliacion_real_persona_org() -> None:
     p = _person("Juan")
     o = _org("Acme")
@@ -169,6 +222,26 @@ def test_afiliacion_real_persona_org() -> None:
     assert e.relation_type == "afiliado"
     assert (e.src.slug, e.src.id) == ("identidades:person", p)
     assert (e.dst.slug, e.dst.id) == ("identidades:org", o)
+
+
+def _set_parent(child: int, parent: int) -> None:
+    _exec("UPDATE mod_identidades SET parent_identity_id = :p WHERE id = :c", p=parent, c=child)
+
+
+def test_pertenencia_real_sub_padre() -> None:
+    parent = _org("Valve Corporation")
+    child = _org("Steam")
+    _set_parent(child, parent)
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="identidades")
+    assert stats.pertenencia_reales == 1
+    assert len(edges) == 1
+    e = edges[0]
+    assert e.status == "confirmed"
+    assert e.relation_type == "pertenece_a"
+    assert (e.src.slug, e.src.id) == ("identidades:org", child)  # dirigida: hijo → padre
+    assert (e.dst.slug, e.dst.id) == ("identidades:org", parent)
 
 
 def test_idempotente() -> None:

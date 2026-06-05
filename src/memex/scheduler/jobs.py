@@ -27,6 +27,10 @@ from memex.modules.calendar.merge_llm import run_merge
 from memex.modules.calendar.sync import run_pull, run_push
 from memex.modules.finance.consolidate import run_consolidation as run_finance_consolidation
 from memex.modules.finance.dedup_llm import run_dedup_phase2 as run_finance_dedup_phase2
+from memex.modules.identidades.dedup_llm import run_merge_phase2
+from memex.modules.identidades.hierarchy import run_organize
+from memex.modules.identidades.relations_llm import run_cooccurrence_llm
+from memex.modules.identidades.sync import run_sync as run_identidades_sync
 from memex.modules.orchestrator import run_extraction
 from memex.ocr.worker import run_ocr
 from memex.summarizer.worker import run_summarization
@@ -247,6 +251,95 @@ async def run_finance_cycle(user_id: int) -> FinanceCycleStats:
     return cycle
 
 
+@dataclass
+class IdentidadesCycleStats:
+    """Roll-up de un ciclo de identidades (sync de contactos por cuenta → desempate LLM)."""
+
+    accounts: int = 0
+    synced: int = 0
+    merged: int = 0
+    linked: int = 0  # pertenencias («sub») seteadas por el organizador LLM
+    cooccurrence_edges: int = 0  # aristas confirmed identidad↔identidad del handler de overflow
+    errors: int = 0
+    steps_failed: list[str] = field(default_factory=list)
+
+
+def _identidades_accounts(user_id: int) -> list[int]:
+    """Ids de las cuentas de proveedor de contactos habilitadas del user."""
+    with connection() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT id FROM mod_identidades_provider_accounts "
+                "WHERE user_id = :uid AND enabled ORDER BY id"
+            ),
+            {"uid": user_id},
+        ).all()
+    return [int(r[0]) for r in rows]
+
+
+async def run_identidades_cycle(user_id: int) -> IdentidadesCycleStats:
+    """Ciclo del módulo identidades: sync (ingress) por cuenta habilitada → desempate LLM de los
+    candidatos de merge. Best-effort por paso; `LLMQuotaError` corta el LLM. La construcción del
+    grafo (`build_relations`) es on-demand (`POST /graph/build`), no se dispara acá."""
+    cycle = IdentidadesCycleStats()
+    accounts = _identidades_accounts(user_id)
+    cycle.accounts = len(accounts)
+    for account_id in accounts:
+        try:
+            stats = await run_identidades_sync(user_id, account_id)
+            cycle.synced += stats.pulled
+            cycle.errors += stats.errors
+        except Exception as e:  # best-effort por cuenta
+            cycle.errors += 1
+            cycle.steps_failed.append(f"sync:{account_id}")
+            _log.warning(
+                "scheduler.identidades.step_failed",
+                step="sync",
+                account_id=account_id,
+                error=str(e),
+            )
+    try:
+        merge_stats = await run_merge_phase2(user_id)
+        cycle.merged += merge_stats.merged
+        cycle.errors += merge_stats.errors
+    except LLMQuotaError:
+        cycle.steps_failed.append("merge:no_quota")
+        _log.error("scheduler.identidades.aborted_no_quota", step="merge")
+    except Exception as e:
+        cycle.errors += 1
+        cycle.steps_failed.append("merge")
+        _log.warning("scheduler.identidades.step_failed", step="merge", error=str(e))
+    # Organizar la jerarquía de pertenencia DESPUÉS del dedup (no linkear orgs que se van a fundir).
+    try:
+        organize_stats = await run_organize(user_id)
+        cycle.linked += organize_stats.linked
+        cycle.errors += organize_stats.errors
+    except LLMQuotaError:
+        cycle.steps_failed.append("organize:no_quota")
+        _log.error("scheduler.identidades.aborted_no_quota", step="organize")
+    except Exception as e:
+        cycle.errors += 1
+        cycle.steps_failed.append("organize")
+        _log.warning("scheduler.identidades.step_failed", step="organize", error=str(e))
+    # Co-ocurrencia identidad↔identidad de los correos densos (overflow del tope de fan-out): el
+    # LLM decide qué pares se relacionan. ÚLTIMO paso a propósito: corre DESPUÉS del dedup para no
+    # emitir aristas a ids que se van a fundir. El tope es configurable (MEMEX_COOCCURRENCE_CAP).
+    from memex.config import settings  # import local: estilo del módulo (evita ciclos al importar)
+
+    try:
+        cooc_stats = await run_cooccurrence_llm(user_id, cap=settings.cooccurrence_cap)
+        cycle.cooccurrence_edges += cooc_stats.edges
+        cycle.errors += cooc_stats.errors
+    except LLMQuotaError:
+        cycle.steps_failed.append("cooccurrence:no_quota")
+        _log.error("scheduler.identidades.aborted_no_quota", step="cooccurrence")
+    except Exception as e:
+        cycle.errors += 1
+        cycle.steps_failed.append("cooccurrence")
+        _log.warning("scheduler.identidades.step_failed", step="cooccurrence", error=str(e))
+    return cycle
+
+
 # Registry de jobs. NOTA OCR: su claim de `media_assets` NO usa FOR UPDATE SKIP LOCKED → es seguro
 # solo porque el scheduler corre los jobs EN SERIE. Si algún día se corren en paralelo, agregar
 # SKIP LOCKED al worker de OCR antes de habilitar esa concurrencia.
@@ -257,6 +350,7 @@ _REGISTRY: dict[str, Job] = {
     "ocr": Job("ocr", "PT1H", run_ocr),
     "calendar": Job("calendar", "PT30M", run_calendar_cycle),
     "finance": Job("finance", "PT1H", run_finance_cycle),
+    "identidades": Job("identidades", "PT1H", run_identidades_cycle),
     "log_purge": Job("log_purge", "P1D", _sync(run_log_purge)),
 }
 

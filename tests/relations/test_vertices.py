@@ -38,12 +38,13 @@ def _seed_all(user_id: int = 1) -> dict[str, int]:
         u=user_id,
     )
     person = _exec(
-        "INSERT INTO mod_identidades_persons (user_id, display_name) "
-        "VALUES (:u, 'Juan Valdez') RETURNING id",
+        "INSERT INTO mod_identidades (user_id, kind, display_name) "
+        "VALUES (:u, 'persona', 'Juan Valdez') RETURNING id",
         u=user_id,
     )
     org = _exec(
-        "INSERT INTO mod_identidades_orgs (user_id, name) VALUES (:u, 'Acme') RETURNING id",
+        "INSERT INTO mod_identidades (user_id, kind, display_name) "
+        "VALUES (:u, 'organizacion', 'Acme') RETURNING id",
         u=user_id,
     )
     return {

@@ -1,43 +1,63 @@
-// Superficie del dominio IDENTIDADES contra la API real (router /identidades). Como `calendar.ts`/
-// `finance.ts`: funciones async + transforms snake_case → camelCase. La vista `/directorio` consume
-// el directorio de personas (Google Contacts), la lista de interés (orgs, con CRUD), las menciones
-// extraídas con su resolución, y el estado de sync (cuentas + corridas + trigger).
+// Superficie del dominio IDENTIDADES (modelo unificado) contra la API real (router /identidades).
+// Como `calendar.ts`/`finance.ts`: funciones async + transforms snake_case → camelCase. La vista
+// `/directorio` consume el directorio unificado (personas + organizaciones), el detalle de una
+// identidad (identificadores por-fuente, sedes, afiliaciones, menciones), la cola de candidatos de
+// merge (zona gris del difuso) y el estado de sync de contactos.
 
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api"
 
 // ---- Tipos del dominio (camelCase) ------------------------------------------------------------
 
-export type IdentityKind = "organizacion" | "producto" | "agente"
+export type IdentityKind = "persona" | "organizacion"
 
-export interface IdentityPerson {
+export interface Identity {
   id: number
+  kind: IdentityKind
   displayName: string
+  aliases: string[]
+  interest: boolean
+  source: string
+  notes: string
   givenName: string | null
   familyName: string | null
-  emails: string[]
-  phones: string[]
-  orgName: string | null
-  role: string | null
-  source: string
-  interest: boolean
-  provider: string | null
+  birthday: string | null
   photoUrl: string | null
   deleted: boolean
+  // Pertenencia («sub»): de qué identidad cuelga esta. mentionCount = nº de menciones resueltas acá.
+  parentId: number | null
+  parentName: string | null
+  mentionCount: number
   createdAt: string
   updatedAt: string
 }
 
-export interface IdentityOrg {
+export interface IdentityChild {
   id: number
-  name: string
   kind: IdentityKind
-  aliases: string[]
-  domains: string[]
-  interest: boolean
-  description: string
+  displayName: string
+}
+
+export interface IdentityIdentifier {
+  id: number
+  platform: string
+  kind: "email" | "phone" | "handle" | "domain" | "url"
+  value: string
+  isPrimary: boolean
   source: string
-  createdAt: string
-  updatedAt: string
+}
+
+export interface IdentitySite {
+  id: number
+  label: string
+  address: string
+  country: string | null
+}
+
+export interface IdentityAffiliation {
+  id: number
+  kind: IdentityKind
+  displayName: string
+  role: string | null
 }
 
 export interface IdentityMention {
@@ -48,14 +68,32 @@ export interface IdentityMention {
   mentionedKind: string
   email: string | null
   handle: string | null
-  orgHint: string | null
-  roleHint: string | null
   confidence: number | null
-  resolvedKind: "person" | "org" | null
-  resolvedPersonId: number | null
-  resolvedOrgId: number | null
+  resolvedKind: IdentityKind | null
+  resolvedIdentityId: number | null
   resolutionMethod: string | null
   createdAt: string
+}
+
+export interface IdentityDetail {
+  identity: Identity
+  identifiers: IdentityIdentifier[]
+  sites: IdentitySite[]
+  affiliations: IdentityAffiliation[]
+  mentions: IdentityMention[]
+  children: IdentityChild[]
+}
+
+export interface IdentityMergeCandidate {
+  id: number
+  identityAId: number
+  identityBId: number
+  aName: string
+  bName: string
+  kind: IdentityKind
+  reason: string
+  score: number | null
+  status: string
 }
 
 export interface IdentityProviderAccount {
@@ -91,46 +129,74 @@ export interface IdentitySyncResult {
   errors: number
 }
 
-export interface IdentityOrgInput {
-  name: string
+export interface IdentityCreateInput {
   kind: IdentityKind
-  aliases: string[]
-  domains: string[]
-  description?: string
+  displayName: string
+  aliases?: string[]
   interest?: boolean
+  notes?: string
+}
+
+export interface IdentityUpdateInput {
+  displayName?: string
+  kind?: IdentityKind
+  interest?: boolean
+  notes?: string
+  birthday?: string | null
+  aliases?: string[]
+  // null = quitar el padre; number = setearlo; undefined = no tocar.
+  parentId?: number | null
 }
 
 // ---- Shapes crudos del API (snake_case) -------------------------------------------------------
 
-interface PersonApi {
+interface IdentityApi {
   id: number
+  kind: IdentityKind
   display_name: string
+  aliases: string[]
+  interest: boolean
+  source: string
+  notes: string
   given_name: string | null
   family_name: string | null
-  emails: string[]
-  phones: string[]
-  org_name: string | null
-  role: string | null
-  source: string
-  interest: boolean
-  provider: string | null
+  birthday: string | null
   photo_url: string | null
   deleted: boolean
+  parent_id: number | null
+  parent_name: string | null
+  mention_count: number
   created_at: string
   updated_at: string
 }
 
-interface OrgApi {
+interface ChildApi {
   id: number
-  name: string
   kind: IdentityKind
-  aliases: string[]
-  domains: string[]
-  interest: boolean
-  description: string
+  display_name: string
+}
+
+interface IdentifierApi {
+  id: number
+  platform: string
+  kind: IdentityIdentifier["kind"]
+  value: string
+  is_primary: boolean
   source: string
-  created_at: string
-  updated_at: string
+}
+
+interface SiteApi {
+  id: number
+  label: string
+  address: string
+  country: string | null
+}
+
+interface AffiliationApi {
+  id: number
+  kind: IdentityKind
+  display_name: string
+  role: string | null
 }
 
 interface MentionApi {
@@ -141,14 +207,32 @@ interface MentionApi {
   mentioned_kind: string
   email: string | null
   handle: string | null
-  org_hint: string | null
-  role_hint: string | null
   confidence: number | null
-  resolved_kind: "person" | "org" | null
-  resolved_person_id: number | null
-  resolved_org_id: number | null
+  resolved_kind: IdentityKind | null
+  resolved_identity_id: number | null
   resolution_method: string | null
   created_at: string
+}
+
+interface DetailApi {
+  identity: IdentityApi
+  identifiers: IdentifierApi[]
+  sites: SiteApi[]
+  affiliations: AffiliationApi[]
+  mentions: MentionApi[]
+  children: ChildApi[]
+}
+
+interface MergeCandidateApi {
+  id: number
+  identity_a_id: number
+  identity_b_id: number
+  a_name: string
+  b_name: string
+  kind: IdentityKind
+  reason: string
+  score: number | null
+  status: string
 }
 
 interface ProviderAccountApi {
@@ -180,53 +264,51 @@ interface ListApi<T> {
   next_cursor: number | null
 }
 
-interface PersonDetailApi {
-  person: PersonApi
-  orgs: OrgApi[]
-  mentions: MentionApi[]
-}
-
-interface OrgDetailApi {
-  org: OrgApi
-  members: PersonApi[]
-  mentions: MentionApi[]
-}
-
 // ---- Transforms -------------------------------------------------------------------------------
 
-function toPerson(p: PersonApi): IdentityPerson {
+function toIdentity(i: IdentityApi): Identity {
   return {
-    id: p.id,
-    displayName: p.display_name,
-    givenName: p.given_name,
-    familyName: p.family_name,
-    emails: p.emails,
-    phones: p.phones,
-    orgName: p.org_name,
-    role: p.role,
-    source: p.source,
-    interest: p.interest,
-    provider: p.provider,
-    photoUrl: p.photo_url,
-    deleted: p.deleted,
-    createdAt: p.created_at,
-    updatedAt: p.updated_at,
+    id: i.id,
+    kind: i.kind,
+    displayName: i.display_name,
+    aliases: i.aliases,
+    interest: i.interest,
+    source: i.source,
+    notes: i.notes,
+    givenName: i.given_name,
+    familyName: i.family_name,
+    birthday: i.birthday,
+    photoUrl: i.photo_url,
+    deleted: i.deleted,
+    parentId: i.parent_id,
+    parentName: i.parent_name,
+    mentionCount: i.mention_count,
+    createdAt: i.created_at,
+    updatedAt: i.updated_at,
   }
 }
 
-function toOrg(o: OrgApi): IdentityOrg {
+function toChild(c: ChildApi): IdentityChild {
+  return { id: c.id, kind: c.kind, displayName: c.display_name }
+}
+
+function toIdentifier(i: IdentifierApi): IdentityIdentifier {
   return {
-    id: o.id,
-    name: o.name,
-    kind: o.kind,
-    aliases: o.aliases,
-    domains: o.domains,
-    interest: o.interest,
-    description: o.description,
-    source: o.source,
-    createdAt: o.created_at,
-    updatedAt: o.updated_at,
+    id: i.id,
+    platform: i.platform,
+    kind: i.kind,
+    value: i.value,
+    isPrimary: i.is_primary,
+    source: i.source,
   }
+}
+
+function toSite(s: SiteApi): IdentitySite {
+  return { id: s.id, label: s.label, address: s.address, country: s.country }
+}
+
+function toAffiliation(a: AffiliationApi): IdentityAffiliation {
+  return { id: a.id, kind: a.kind, displayName: a.display_name, role: a.role }
 }
 
 function toMention(m: MentionApi): IdentityMention {
@@ -238,14 +320,25 @@ function toMention(m: MentionApi): IdentityMention {
     mentionedKind: m.mentioned_kind,
     email: m.email,
     handle: m.handle,
-    orgHint: m.org_hint,
-    roleHint: m.role_hint,
     confidence: m.confidence,
     resolvedKind: m.resolved_kind,
-    resolvedPersonId: m.resolved_person_id,
-    resolvedOrgId: m.resolved_org_id,
+    resolvedIdentityId: m.resolved_identity_id,
     resolutionMethod: m.resolution_method,
     createdAt: m.created_at,
+  }
+}
+
+function toMergeCandidate(c: MergeCandidateApi): IdentityMergeCandidate {
+  return {
+    id: c.id,
+    identityAId: c.identity_a_id,
+    identityBId: c.identity_b_id,
+    aName: c.a_name,
+    bName: c.b_name,
+    kind: c.kind,
+    reason: c.reason,
+    score: c.score,
+    status: c.status,
   }
 }
 
@@ -279,50 +372,41 @@ function toRun(r: SyncRunApi): IdentitySyncRun {
 
 // ---- Fetchers ---------------------------------------------------------------------------------
 
-export async function fetchIdentityPersons(q?: string): Promise<IdentityPerson[]> {
-  const query = q ? `?q=${encodeURIComponent(q)}` : ""
-  const page = await apiGet<ListApi<PersonApi>>(`/identidades/persons${query}`)
-  return page.items.map(toPerson)
-}
-
-export interface IdentityPersonDetail {
-  person: IdentityPerson
-  orgs: IdentityOrg[]
-  mentions: IdentityMention[]
-}
-
-export async function fetchIdentityPerson(id: number): Promise<IdentityPersonDetail> {
-  const d = await apiGet<PersonDetailApi>(`/identidades/persons/${id}`)
-  return { person: toPerson(d.person), orgs: d.orgs.map(toOrg), mentions: d.mentions.map(toMention) }
-}
-
-export async function fetchIdentityOrgs(opts?: {
+export async function fetchIdentities(opts?: {
   q?: string
+  kind?: IdentityKind
   interest?: boolean
-}): Promise<IdentityOrg[]> {
+}): Promise<Identity[]> {
   const params = new URLSearchParams()
   if (opts?.q) params.set("q", opts.q)
+  if (opts?.kind) params.set("kind", opts.kind)
   if (opts?.interest !== undefined) params.set("interest", String(opts.interest))
   const qs = params.toString()
-  const page = await apiGet<ListApi<OrgApi>>(`/identidades/orgs${qs ? `?${qs}` : ""}`)
-  return page.items.map(toOrg)
+  const page = await apiGet<ListApi<IdentityApi>>(`/identidades${qs ? `?${qs}` : ""}`)
+  return page.items.map(toIdentity)
 }
 
-export interface IdentityOrgDetail {
-  org: IdentityOrg
-  members: IdentityPerson[]
-  mentions: IdentityMention[]
-}
-
-export async function fetchIdentityOrg(id: number): Promise<IdentityOrgDetail> {
-  const d = await apiGet<OrgDetailApi>(`/identidades/orgs/${id}`)
-  return { org: toOrg(d.org), members: d.members.map(toPerson), mentions: d.mentions.map(toMention) }
+export async function fetchIdentity(id: number): Promise<IdentityDetail> {
+  const d = await apiGet<DetailApi>(`/identidades/${id}`)
+  return {
+    identity: toIdentity(d.identity),
+    identifiers: d.identifiers.map(toIdentifier),
+    sites: d.sites.map(toSite),
+    affiliations: d.affiliations.map(toAffiliation),
+    mentions: d.mentions.map(toMention),
+    children: d.children.map(toChild),
+  }
 }
 
 export async function fetchIdentityMentions(resolved?: boolean): Promise<IdentityMention[]> {
   const query = resolved !== undefined ? `?resolved=${String(resolved)}` : ""
   const page = await apiGet<ListApi<MentionApi>>(`/identidades/mentions${query}`)
   return page.items.map(toMention)
+}
+
+export async function fetchMergeCandidates(): Promise<IdentityMergeCandidate[]> {
+  const page = await apiGet<{ items: MergeCandidateApi[] }>("/identidades/merge-candidates")
+  return page.items.map(toMergeCandidate)
 }
 
 export async function fetchIdentityProviderAccounts(): Promise<IdentityProviderAccount[]> {
@@ -337,26 +421,118 @@ export async function fetchIdentitySyncRuns(): Promise<IdentitySyncRun[]> {
 
 // ---- Mutations --------------------------------------------------------------------------------
 
-export async function createIdentityOrg(body: IdentityOrgInput): Promise<IdentityOrg> {
-  return toOrg(await apiPost<OrgApi>("/identidades/orgs", body))
+export async function createIdentity(input: IdentityCreateInput): Promise<Identity> {
+  return toIdentity(
+    await apiPost<IdentityApi>("/identidades", {
+      kind: input.kind,
+      display_name: input.displayName,
+      aliases: input.aliases ?? [],
+      interest: input.interest ?? true,
+      notes: input.notes ?? "",
+    }),
+  )
 }
 
-export async function updateIdentityOrg(
-  id: number,
-  body: Partial<IdentityOrgInput>,
-): Promise<IdentityOrg> {
-  return toOrg(await apiPatch<OrgApi>(`/identidades/orgs/${id}`, body))
+export async function updateIdentity(id: number, input: IdentityUpdateInput): Promise<Identity> {
+  const body: Record<string, unknown> = {}
+  if (input.displayName !== undefined) body.display_name = input.displayName
+  if (input.kind !== undefined) body.kind = input.kind
+  if (input.interest !== undefined) body.interest = input.interest
+  if (input.notes !== undefined) body.notes = input.notes
+  if (input.birthday !== undefined) body.birthday = input.birthday
+  if (input.aliases !== undefined) body.aliases = input.aliases
+  if (input.parentId !== undefined) body.parent_id = input.parentId
+  return toIdentity(await apiPatch<IdentityApi>(`/identidades/${id}`, body))
 }
 
-export async function deleteIdentityOrg(id: number): Promise<void> {
-  await apiDelete<{ deleted: boolean }>(`/identidades/orgs/${id}`)
+export interface OrganizeResult {
+  orgs: number
+  linked: number
+  created: number
+  cleaned: number
+  skipped: number
 }
 
-export async function updateIdentityPerson(
-  id: number,
-  body: { interest?: boolean; display_name?: string; role?: string },
-): Promise<IdentityPerson> {
-  return toPerson(await apiPatch<PersonApi>(`/identidades/persons/${id}`, body))
+/** Organiza la jerarquía de pertenencia con el LLM (sin confirmación manual). */
+export async function organizeHierarchy(): Promise<OrganizeResult> {
+  return apiPost<OrganizeResult>("/identidades/organize", {})
+}
+
+export async function deleteIdentity(id: number): Promise<void> {
+  await apiDelete<{ deleted: boolean }>(`/identidades/${id}`)
+}
+
+export async function addIdentifier(
+  identityId: number,
+  input: { platform: string; kind: IdentityIdentifier["kind"]; value: string; isPrimary?: boolean },
+): Promise<IdentityIdentifier> {
+  return toIdentifier(
+    await apiPost<IdentifierApi>(`/identidades/${identityId}/identifiers`, {
+      platform: input.platform,
+      kind: input.kind,
+      value: input.value,
+      is_primary: input.isPrimary ?? false,
+    }),
+  )
+}
+
+export async function deleteIdentifier(identityId: number, identifierId: number): Promise<void> {
+  await apiDelete<{ deleted: boolean }>(`/identidades/${identityId}/identifiers/${identifierId}`)
+}
+
+export async function addSite(
+  identityId: number,
+  input: { label?: string; address?: string; country?: string | null },
+): Promise<IdentitySite> {
+  return toSite(
+    await apiPost<SiteApi>(`/identidades/${identityId}/sites`, {
+      label: input.label ?? "",
+      address: input.address ?? "",
+      country: input.country ?? null,
+    }),
+  )
+}
+
+export async function deleteSite(identityId: number, siteId: number): Promise<void> {
+  await apiDelete<{ deleted: boolean }>(`/identidades/${identityId}/sites/${siteId}`)
+}
+
+export async function affiliate(
+  personId: number,
+  orgId: number,
+  role?: string,
+): Promise<IdentityDetail> {
+  const d = await apiPost<DetailApi>(`/identidades/${personId}/orgs`, {
+    org_id: orgId,
+    role: role ?? null,
+  })
+  return {
+    identity: toIdentity(d.identity),
+    identifiers: d.identifiers.map(toIdentifier),
+    sites: d.sites.map(toSite),
+    affiliations: d.affiliations.map(toAffiliation),
+    mentions: d.mentions.map(toMention),
+    children: d.children.map(toChild),
+  }
+}
+
+export async function mergeIdentities(survivorId: number, absorbedId: number): Promise<Identity> {
+  return toIdentity(
+    await apiPost<IdentityApi>("/identidades/merge", {
+      survivor_id: survivorId,
+      absorbed_id: absorbedId,
+    }),
+  )
+}
+
+export async function confirmMergeCandidate(candidateId: number): Promise<Identity> {
+  return toIdentity(
+    await apiPost<IdentityApi>(`/identidades/merge-candidates/${candidateId}/confirm`, {}),
+  )
+}
+
+export async function rejectMergeCandidate(candidateId: number): Promise<void> {
+  await apiPost<{ rejected: boolean }>(`/identidades/merge-candidates/${candidateId}/reject`, {})
 }
 
 export async function triggerIdentitySync(
@@ -364,29 +540,4 @@ export async function triggerIdentitySync(
   full = false,
 ): Promise<IdentitySyncResult> {
   return apiPost<IdentitySyncResult>("/identidades/sync", { account_id: accountId, full })
-}
-
-// ---- Detectadas (no-interés): lo que el sistema encontró y está por promover ------------------
-
-export interface DetectedEntry {
-  kind: "person" | "org"
-  id: number
-  name: string
-  sub: string
-}
-
-export async function fetchDetected(): Promise<DetectedEntry[]> {
-  const [persons, orgs] = await Promise.all([
-    apiGet<ListApi<PersonApi>>("/identidades/persons?interest=false"),
-    apiGet<ListApi<OrgApi>>("/identidades/orgs?interest=false"),
-  ])
-  return [
-    ...persons.items.map((p) => ({
-      kind: "person" as const,
-      id: p.id,
-      name: p.display_name,
-      sub: p.emails[0] ?? p.org_name ?? "persona",
-    })),
-    ...orgs.items.map((o) => ({ kind: "org" as const, id: o.id, name: o.name, sub: o.kind })),
-  ]
 }

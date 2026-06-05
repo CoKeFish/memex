@@ -555,48 +555,52 @@ class CalendarProviderAccountList(BaseModel):
 # ---- Módulo identidades (tablas `mod_identidades_*`) --------------------------------------------
 
 
-class IdentityPersonRow(BaseModel):
-    """Una persona del directorio (`mod_identidades_persons`)."""
+class IdentityIdentifierRow(BaseModel):
+    """Un identificador por-fuente de una identidad (`mod_identidades_identifiers`)."""
 
     id: int
+    platform: str
+    kind: str
+    value: str
+    is_primary: bool = False
+    source: str
+
+
+class IdentitySiteRow(BaseModel):
+    """Una sede de una organización (`mod_identidades_sites`)."""
+
+    id: int
+    label: str = ""
+    address: str = ""
+    country: str | None = None
+
+
+class IdentityRow(BaseModel):
+    """Una identidad del directorio unificado (`mod_identidades`), persona u organización."""
+
+    id: int
+    kind: str
     display_name: str
+    aliases: list[str] = []
+    interest: bool = False
+    source: str
+    notes: str = ""
     given_name: str | None = None
     family_name: str | None = None
-    emails: list[str] = []
-    phones: list[str] = []
-    org_name: str | None = None
-    role: str | None = None
-    source: str
-    interest: bool = False
-    provider: str | None = None
+    birthday: date | None = None
     photo_url: str | None = None
     deleted: bool = False
+    #: Pertenencia («sub»): de qué identidad cuelga esta (None = sin padre). `parent_name` se
+    #: rellena en lista/detalle (JOIN); `mention_count` es el nº de menciones resueltas a esta.
+    parent_id: int | None = None
+    parent_name: str | None = None
+    mention_count: int = 0
     created_at: datetime
     updated_at: datetime
 
 
-class IdentityPersonList(BaseModel):
-    items: list[IdentityPersonRow]
-    next_cursor: int | None = None
-
-
-class IdentityOrgRow(BaseModel):
-    """Una organización/producto/agente (`mod_identidades_orgs`)."""
-
-    id: int
-    name: str
-    kind: str
-    aliases: list[str] = []
-    domains: list[str] = []
-    interest: bool
-    description: str = ""
-    source: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class IdentityOrgList(BaseModel):
-    items: list[IdentityOrgRow]
+class IdentityList(BaseModel):
+    items: list[IdentityRow]
     next_cursor: int | None = None
 
 
@@ -614,8 +618,7 @@ class IdentityMentionRow(BaseModel):
     role_hint: str | None = None
     confidence: float | None = None
     resolved_kind: str | None = None
-    resolved_person_id: int | None = None
-    resolved_org_id: int | None = None
+    resolved_identity_id: int | None = None
     resolution_method: str | None = None
     created_at: datetime
 
@@ -625,16 +628,33 @@ class IdentityMentionList(BaseModel):
     next_cursor: int | None = None
 
 
-class IdentityPersonDetail(BaseModel):
-    person: IdentityPersonRow
-    orgs: list[IdentityOrgRow] = []
-    mentions: list[IdentityMentionRow] = []
+class IdentityAffiliationRow(BaseModel):
+    """La contraparte de una afiliación persona↔org (la otra identidad + el rol)."""
+
+    id: int
+    kind: str
+    display_name: str
+    role: str | None = None
 
 
-class IdentityOrgDetail(BaseModel):
-    org: IdentityOrgRow
-    members: list[IdentityPersonRow] = []
+class IdentityChildRow(BaseModel):
+    """Una sub-identidad que cuelga de esta (su `parent_identity_id` apunta acá)."""
+
+    id: int
+    kind: str
+    display_name: str
+
+
+class IdentityDetail(BaseModel):
+    """Una identidad + sus identificadores, sedes, afiliaciones, menciones y sub-identidades."""
+
+    identity: IdentityRow
+    identifiers: list[IdentityIdentifierRow] = []
+    sites: list[IdentitySiteRow] = []
+    affiliations: list[IdentityAffiliationRow] = []
     mentions: list[IdentityMentionRow] = []
+    #: Las identidades que pertenecen a esta (sus «partes»: programas, productos, filiales, …).
+    children: list[IdentityChildRow] = []
 
 
 class IdentityProviderAccountRow(BaseModel):
@@ -677,36 +697,72 @@ class IdentitySyncRunList(BaseModel):
     next_cursor: int | None = None
 
 
-class IdentityOrgCreate(BaseModel):
-    """Alta de una org en la lista de interés (`kind` se valida en el router)."""
+class IdentityCreate(BaseModel):
+    """Alta manual de una identidad (`kind` se valida en el router)."""
 
-    name: str
     kind: str = "organizacion"
+    display_name: str
     aliases: list[str] = []
-    domains: list[str] = []
-    description: str = ""
     interest: bool = True
+    notes: str = ""
+    given_name: str | None = None
+    family_name: str | None = None
+    birthday: date | None = None
 
 
-class IdentityOrgUpdate(BaseModel):
-    name: str | None = None
-    kind: str | None = None
-    aliases: list[str] | None = None
-    domains: list[str] | None = None
-    description: str | None = None
-    interest: bool | None = None
-
-
-class IdentityPersonUpdate(BaseModel):
-    interest: bool | None = None
+class IdentityUpdate(BaseModel):
     display_name: str | None = None
-    role: str | None = None
+    kind: str | None = None
+    interest: bool | None = None
     notes: str | None = None
+    given_name: str | None = None
+    family_name: str | None = None
+    birthday: date | None = None
+    aliases: list[str] | None = None
+    #: Pertenencia: setear el padre (int) o limpiarlo (null). Se distingue "no enviado" de "null"
+    #: con `model_dump(exclude_unset=True)` en el router (None explícito = quitar el padre).
+    parent_id: int | None = None
 
 
-class IdentityPersonOrgCreate(BaseModel):
+class IdentityIdentifierCreate(BaseModel):
+    platform: str
+    kind: str
+    value: str
+    is_primary: bool = False
+
+
+class IdentitySiteCreate(BaseModel):
+    label: str = ""
+    address: str = ""
+    country: str | None = None
+
+
+class IdentityAffiliateCreate(BaseModel):
     org_id: int
     role: str | None = None
+
+
+class IdentityMergeCandidateRow(BaseModel):
+    """Un par candidato a fusionar, con el nombre de cada lado."""
+
+    id: int
+    identity_a_id: int
+    identity_b_id: int
+    a_name: str
+    b_name: str
+    kind: str
+    reason: str
+    score: float | None = None
+    status: str
+
+
+class IdentityMergeCandidateList(BaseModel):
+    items: list[IdentityMergeCandidateRow]
+
+
+class IdentityMergeRequest(BaseModel):
+    survivor_id: int
+    absorbed_id: int
 
 
 class IdentitySyncRequest(BaseModel):
