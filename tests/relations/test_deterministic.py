@@ -19,8 +19,11 @@ def _exec(sql: str, **params: Any) -> Any:
         return result.scalar() if result.returns_rows else None
 
 
-def _finance(merchant: str, inbox_ids: list[int]) -> int:
-    return int(
+def _finance(merchant: str, inbox_ids: list[int], identity_id: int | None = None) -> int:
+    """Crea una transacción cruda + su consolidado + el link. El VÉRTICE es el consolidado; su
+    procedencia de inbox es transitiva (link → crudo.source_inbox_ids). `identity_id` setea el
+    `counterparty_identity_id` del consolidado (para la arista de contraparte)."""
+    crudo = int(
         _exec(
             "INSERT INTO mod_finance_transactions "
             "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, counterparty) "
@@ -29,6 +32,22 @@ def _finance(merchant: str, inbox_ids: list[int]) -> int:
             m=merchant,
         )
     )
+    cons = int(
+        _exec(
+            "INSERT INTO mod_finance_consolidated (user_id, direction, amount, currency, "
+            "occurred_at, counterparty, counterparty_identity_id) "
+            "VALUES (1, 'egreso', 100, 'COP', NOW(), :m, :iid) RETURNING id",
+            m=merchant,
+            iid=identity_id,
+        )
+    )
+    _exec(
+        "INSERT INTO mod_finance_transaction_links (user_id, consolidated_id, transaction_id) "
+        "VALUES (1, :c, :t)",
+        c=cons,
+        t=crudo,
+    )
+    return cons
 
 
 def _hack(name: str, inbox_ids: list[int]) -> int:
@@ -267,3 +286,43 @@ def test_high_fanout_se_salta() -> None:
     assert stats.high_fanout_skipped == 1
     assert stats.cooccurrence_pistas == 0
     assert edges == []
+
+
+def test_contraparte_real_cobro_a_identidad() -> None:
+    # un cobro CONSOLIDADO cuya contraparte resolvió a una identidad → arista confirmed
+    # cobro→identidad (el enlace por identidad entre finanzas y el directorio).
+    org = _org("Uber")
+    fin = _finance("Uber", [12], identity_id=org)
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="finance")
+    assert stats.contraparte_reales == 1
+    assert len(edges) == 1
+    e = edges[0]
+    assert e.producer == "finance"
+    assert e.status == "confirmed"
+    assert e.relation_type == "contraparte"
+    assert (e.src.slug, e.src.id) == ("finance", fin)  # dirigida: cobro → quién cobró/pagó
+    assert (e.dst.slug, e.dst.id) == ("identidades:org", org)
+
+
+def test_contraparte_sin_identidad_no_edge() -> None:
+    # cobro sin counterparty_identity_id (no resolvió) → no hay arista de contraparte.
+    _finance("Comercio X", [13])
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="finance")
+    assert stats.contraparte_reales == 0
+    assert edges == []
+
+
+def test_contraparte_persona() -> None:
+    # contraparte persona (ej. una transferencia a alguien) → arista a identidades:person.
+    p = _person("Juan Perez")
+    fin = _finance("Juan Perez", [14], identity_id=p)
+    with connection() as c:
+        build_relations(c, 1)
+        edges = list_edges(c, 1, producer="finance")
+    assert len(edges) == 1
+    assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:person", p)
+    assert (edges[0].src.slug, edges[0].src.id) == ("finance", fin)

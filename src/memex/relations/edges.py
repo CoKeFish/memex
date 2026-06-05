@@ -37,6 +37,7 @@ PRODUCER_INBOX = "inbox"  #: el vértice nació de este mensaje (procedencia de 
 PRODUCER_DEDUP = "dedup"  #: candidato de duplicado (p.ej. eventos crudos de calendar)
 PRODUCER_CONSOLIDACION = "consolidacion"  #: el consolidado agrupa sus crudos de respaldo
 PRODUCER_IDENTIDADES = "identidades"  #: resolución determinista de identidad (persona/org)
+PRODUCER_FINANCE = "finance"  #: contraparte de un cobro/pago resuelta a una identidad
 PRODUCER_LLM = "llm"  #: relación semántica / pertenencia a cúmulo decidida por el LLM
 PRODUCER_HUMANO = "humano"  #: confirmada/creada por el usuario
 #: Conocidos (referencia); el `producer` real es texto libre — agregar uno NO requiere migración.
@@ -46,6 +47,7 @@ PRODUCERS: frozenset[str] = frozenset(
         PRODUCER_DEDUP,
         PRODUCER_CONSOLIDACION,
         PRODUCER_IDENTIDADES,
+        PRODUCER_FINANCE,
         PRODUCER_LLM,
         PRODUCER_HUMANO,
     }

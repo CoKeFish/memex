@@ -22,9 +22,9 @@ def _exec(sql: str, **params: Any) -> Any:
 
 def _seed_all(user_id: int = 1) -> dict[str, int]:
     fin = _exec(
-        "INSERT INTO mod_finance_transactions "
-        "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, counterparty) "
-        "VALUES (:u, ARRAY[5]::bigint[], 'egreso', 100, 'COP', NOW(), 'Rappi') RETURNING id",
+        "INSERT INTO mod_finance_consolidated "
+        "(user_id, direction, amount, currency, occurred_at, counterparty) "
+        "VALUES (:u, 'egreso', 100, 'COP', NOW(), 'Rappi') RETURNING id",
         u=user_id,
     )
     hack = _exec(
@@ -96,9 +96,9 @@ def test_get_vertex_y_no_vertices() -> None:
 def test_scoped_por_usuario() -> None:
     _exec("INSERT INTO users (id, email, display_name) VALUES (2, 'u2@local', 'u2')")
     _exec(
-        "INSERT INTO mod_finance_transactions "
-        "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, counterparty) "
-        "VALUES (2, ARRAY[5]::bigint[], 'egreso', 50, 'COP', NOW(), 'Otro')"
+        "INSERT INTO mod_finance_consolidated "
+        "(user_id, direction, amount, currency, occurred_at, counterparty) "
+        "VALUES (2, 'egreso', 50, 'COP', NOW(), 'Otro')"
     )
     _seed_all(1)
     with connection() as c:

@@ -3,9 +3,10 @@ uniforme de vértices `(slug, id, label, kind)`, para que las aristas y el front
 
 Solo LEE (ADR-001/ADR-015): cada módulo sigue dueño de su tabla; esta capa no copia ni escribe. El
 `slug` es la clave de direccionamiento del grafo (igual que en `Ref`): codifica el subtipo de
-identidades (`identidades:person`/`identidades:org`) y apunta al evento CONSOLIDADO de calendar (no
-a los crudos). inbox NO es vértice: es procedencia (el `source_inbox_ids` de cada fila), accesible
-por drill-down, no un nodo del grafo. Los cúmulos (vértices nativos) se sumarán acá cuando existan.
+identidades (`identidades:person`/`identidades:org`) y apunta a lo CONSOLIDADO (calendar y finance,
+no a los crudos) — un vértice por entidad real, no por fila duplicada. inbox NO es vértice: es
+procedencia (`source_inbox_ids`), accesible por drill-down, no un nodo del grafo. Los cúmulos
+(vértices nativos) se sumarán acá cuando existan.
 """
 
 from __future__ import annotations
@@ -49,7 +50,9 @@ class NodeSource:
 #: input de usuario) → seguro interpolarlos en el SQL; `user_id`/`id` van por bind. calendar apunta
 #: al consolidado; identidades proyecta DOS slugs; inbox NO está (es atributo, no vértice).
 NODE_SOURCES: tuple[NodeSource, ...] = (
-    NodeSource("finance", "mod_finance_transactions", "counterparty", "transaccion"),
+    NodeSource(
+        "finance", "mod_finance_consolidated", "counterparty", "transaccion", where="NOT deleted"
+    ),
     NodeSource("hackathones", "mod_hackathones_events", "name", "hackaton"),
     NodeSource("calendar", "mod_calendar_consolidated", "title", "evento", where="NOT deleted"),
     NodeSource(

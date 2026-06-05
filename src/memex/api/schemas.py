@@ -1495,4 +1495,6 @@ class GraphBuildResult(BaseModel):
 
     cooccurrence_pistas: int
     afiliacion_reales: int
+    pertenencia_reales: int = 0
+    contraparte_reales: int = 0
     high_fanout_skipped: int

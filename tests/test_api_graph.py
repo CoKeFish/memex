@@ -18,7 +18,8 @@ def _exec(sql: str, **p: Any) -> Any:
 
 
 def _finance(merchant: str, inbox_ids: list[int]) -> int:
-    return int(
+    """Cobro CONSOLIDADO (el vértice de finanzas) + su crudo + el link (provenance de inbox)."""
+    crudo = int(
         _exec(
             "INSERT INTO mod_finance_transactions "
             "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, counterparty) "
@@ -27,6 +28,20 @@ def _finance(merchant: str, inbox_ids: list[int]) -> int:
             m=merchant,
         )
     )
+    cons = int(
+        _exec(
+            "INSERT INTO mod_finance_consolidated (user_id, direction, amount, currency, "
+            "occurred_at, counterparty) VALUES (1, 'egreso', 100, 'COP', NOW(), :m) RETURNING id",
+            m=merchant,
+        )
+    )
+    _exec(
+        "INSERT INTO mod_finance_transaction_links (user_id, consolidated_id, transaction_id) "
+        "VALUES (1, :c, :t)",
+        c=cons,
+        t=crudo,
+    )
+    return cons
 
 
 def _hack(name: str, inbox_ids: list[int]) -> int:

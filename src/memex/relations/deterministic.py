@@ -2,12 +2,15 @@
 datos ya guardados. Es un paso más del pipeline (on-demand, apagado por default, encadenable por el
 daemon): CONSUME lo disponible, no dispara pasos previos. Idempotente.
 
-Produce las dos clases de arista (ver `memex.relations.edges`):
+Produce las clases de arista (ver `memex.relations.edges`):
 - PISTAS de co-ocurrencia (`producer='inbox'`, `status='pista'`): dos vértices del MISMO mensaje.
   Señal barata de "quizás se relacionan" — NO asegura relación (el LLM la valida después). Se acota
   el fan-out: un mensaje con demasiados vértices (digest) se SALTA y se loguea.
-- REALES de afiliación (`producer='identidades'`, `status='confirmed'`): persona↔org que el
-  directorio enlaza explícitamente (dato, no adivinanza).
+- REALES de afiliación/pertenencia (`producer='identidades'`, `status='confirmed'`): persona↔org y
+  sub→padre que el directorio enlaza explícitamente (dato, no adivinanza).
+- REALES de contraparte (`producer='finance'`, `status='confirmed'`): cobro/pago CONSOLIDADO →
+  identidad del cobrador/pagador (su `counterparty_identity_id` resuelto). El enlace por identidad
+  entre finanzas y el directorio — determinista, el conector más valioso del grafo.
 
 La provenance vértice→mensaje NO es arista (inbox es atributo): vive en `source_inbox_ids`.
 """
@@ -22,6 +25,7 @@ from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
 from memex.relations.edges import (
+    PRODUCER_FINANCE,
     PRODUCER_IDENTIDADES,
     PRODUCER_INBOX,
     STATUS_CONFIRMED,
@@ -35,11 +39,9 @@ _log = get_logger("memex.relations.deterministic")
 #: salta: ahí la co-ocurrencia es ruido (C(n,2) aristas sin sentido). Los saltados se loguean.
 DEFAULT_COOCCURRENCE_CAP = 8
 
-#: Vértices cuyo enlace a inbox es DIRECTO (columna `source_inbox_ids`): slug → tabla.
-_DIRECT_SOURCES: tuple[tuple[str, str], ...] = (
-    ("finance", "mod_finance_transactions"),
-    ("hackathones", "mod_hackathones_events"),
-)
+#: Vértices cuyo enlace a inbox es DIRECTO (columna `source_inbox_ids`): slug → tabla. finance ya NO
+#: está acá: su vértice es el CONSOLIDADO, cuya procedencia es TRANSITIVA (vía links → crudos).
+_DIRECT_SOURCES: tuple[tuple[str, str], ...] = (("hackathones", "mod_hackathones_events"),)
 
 
 @dataclass(frozen=True)
@@ -50,12 +52,13 @@ class RelationStats:
     afiliacion_reales: int
     high_fanout_skipped: int
     pertenencia_reales: int = 0
+    contraparte_reales: int = 0
 
 
 def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
-    """Mapa vértice → ids de los mensajes (inbox) de los que salió. Directo para finance/hackathones
-    (`source_inbox_ids`); TRANSITIVO para calendar (consolidado→crudos) e identidades (persona/org ←
-    menciones). Base de la co-ocurrencia (y, luego, del pre-filtro)."""
+    """Mapa vértice → ids de los mensajes (inbox) de los que salió. Directo para hackathones
+    (`source_inbox_ids`); TRANSITIVO para finance y calendar (consolidado→crudos) e identidades
+    (persona/org ← menciones). Base de la co-ocurrencia (y, luego, del pre-filtro)."""
     prov: dict[Ref, set[int]] = defaultdict(set)
 
     for slug, table in _DIRECT_SOURCES:
@@ -63,6 +66,20 @@ def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
             text(f"SELECT id, source_inbox_ids FROM {table} WHERE user_id = :u"), {"u": user_id}
         ).mappings():
             prov[Ref(slug, int(r["id"]))].update(int(x) for x in (r["source_inbox_ids"] or []))
+
+    for r in conn.execute(
+        text(
+            """
+            SELECT l.consolidated_id AS cid, t.source_inbox_ids AS ids
+            FROM mod_finance_transaction_links l
+            JOIN mod_finance_transactions t ON t.id = l.transaction_id
+            JOIN mod_finance_consolidated c ON c.id = l.consolidated_id
+            WHERE l.user_id = :u AND NOT c.deleted
+            """
+        ),
+        {"u": user_id},
+    ).mappings():
+        prov[Ref("finance", int(r["cid"]))].update(int(x) for x in (r["ids"] or []))
 
     for r in conn.execute(
         text(
@@ -188,6 +205,36 @@ def _materialize_pertenencia(conn: Connection, user_id: int) -> int:
     return n
 
 
+def _materialize_contraparte(conn: Connection, user_id: int) -> int:
+    """Una arista REAL «contraparte» cobro→identidad por cada transacción CONSOLIDADA cuya
+    contraparte resolvió a una identidad del directorio (`counterparty_identity_id`). Dirigida (el
+    cobro/pago → quién cobró/pagó). El enlace por identidad finanzas↔directorio."""
+    n = 0
+    for r in conn.execute(
+        text(
+            """
+            SELECT c.id AS cid, i.id AS iid, i.kind AS kind
+            FROM mod_finance_consolidated c
+            JOIN mod_identidades i ON i.id = c.counterparty_identity_id
+            WHERE c.user_id = :u AND NOT c.deleted AND c.counterparty_identity_id IS NOT NULL
+            """
+        ),
+        {"u": user_id},
+    ).mappings():
+        slug = "identidades:person" if r["kind"] == "persona" else "identidades:org"
+        propose_edge(
+            conn,
+            user_id,
+            Ref("finance", int(r["cid"])),
+            Ref(slug, int(r["iid"])),
+            producer=PRODUCER_FINANCE,
+            relation_type="contraparte",
+            status=STATUS_CONFIRMED,
+        )
+        n += 1
+    return n
+
+
 def build_relations(
     conn: Connection, user_id: int, *, cooccurrence_cap: int = DEFAULT_COOCCURRENCE_CAP
 ) -> RelationStats:
@@ -197,11 +244,13 @@ def build_relations(
     pistas, skipped = _materialize_cooccurrence(conn, user_id, prov, cooccurrence_cap)
     afil = _materialize_afiliacion(conn, user_id)
     pert = _materialize_pertenencia(conn, user_id)
+    contraparte = _materialize_contraparte(conn, user_id)
     stats = RelationStats(
         cooccurrence_pistas=pistas,
         afiliacion_reales=afil,
         high_fanout_skipped=skipped,
         pertenencia_reales=pert,
+        contraparte_reales=contraparte,
     )
     _log.info(
         "relation.build.done",
@@ -209,6 +258,7 @@ def build_relations(
         cooccurrence_pistas=pistas,
         afiliacion_reales=afil,
         pertenencia_reales=pert,
+        contraparte_reales=contraparte,
         high_fanout_skipped=skipped,
     )
     return stats
