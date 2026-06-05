@@ -7,6 +7,7 @@ Telethon real. Verifica el contrato `Source[TelegramCursor]`.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,9 @@ from memex.ingestors.telegram.config import AllowedChat, TelegramConfig
 from memex.ingestors.telegram.source import TelegramSource, make_source
 
 
-def _cfg(allowed_chats: list[AllowedChat] | None = None) -> TelegramConfig:
+def _cfg(
+    allowed_chats: list[AllowedChat] | None = None, *, extract_media: bool = False
+) -> TelegramConfig:
     return TelegramConfig(
         api_id=12345,
         api_hash="dead",
@@ -29,7 +32,26 @@ def _cfg(allowed_chats: list[AllowedChat] | None = None) -> TelegramConfig:
         session_name="test",
         allowed_chats=allowed_chats or [],
         batch_size=10,
+        extract_media=extract_media,
     )
+
+
+@dataclass
+class _FakeFile:
+    mime_type: str | None = None
+    name: str | None = None
+    size: int | None = None
+
+
+class _FakeMediaMsg:
+    """Mensaje Telethon con presencia de foto + `.file` (path de descarga)."""
+
+    def __init__(self, file: _FakeFile, *, photo: Any = None) -> None:
+        self.photo = photo
+        self.video = None
+        self.document = None
+        self.sticker = None
+        self.file = file
 
 
 def _record(chat_id: int, message_id: int, topic_id: int | None = None) -> SourceRecord:
@@ -320,6 +342,84 @@ def test_fetch_topic_filter_drops_records_in_disallowed_topic(
 
     records = list(src.fetch(TelegramCursor()))
     assert records == [in_topic]  # only the in-topic one
+
+
+# ---- fetch: extracción de media ---- #
+
+
+def test_fetch_downloads_photo_media_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Con extract_media=True, el collect loop baja los bytes y los adjunta al record."""
+    cfg = _cfg(allowed_chats=[AllowedChat(chat_id=-100)], extract_media=True)
+    src = TelegramSource(cfg)
+    body = b"\xff\xd8\xff" + b"jpeg-bytes" * 4
+    download_calls: list[Any] = []
+
+    class _FakeTC:
+        def __init__(self, cfg: TelegramConfig) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeTC:
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            pass
+
+        async def iter_chat_messages(
+            self, chat_id: int, *, min_id: int, batch_size: int
+        ) -> AsyncIterator[Any]:
+            yield _FakeMediaMsg(_FakeFile("image/jpeg", None, len(body)), photo=object())
+
+        async def download_media(self, msg: Any) -> bytes | None:
+            download_calls.append(msg)
+            return body
+
+    monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _FakeTC)
+    monkeypatch.setattr(
+        "memex.ingestors.telegram._common.parse_telegram_message", lambda _m: _record(-100, 1)
+    )
+
+    records = list(src.fetch(TelegramCursor()))
+    assert len(records) == 1
+    assert len(records[0].media) == 1
+    assert records[0].media[0].content_type == "image/jpeg"
+    assert records[0].media[0].size == len(body)
+    assert len(download_calls) == 1
+
+
+def test_fetch_does_not_download_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Con extract_media=False (default), el record sale sin media y NO se descarga nada."""
+    cfg = _cfg(allowed_chats=[AllowedChat(chat_id=-100)], extract_media=False)
+    src = TelegramSource(cfg)
+    download_calls: list[Any] = []
+
+    class _FakeTC:
+        def __init__(self, cfg: TelegramConfig) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeTC:
+            return self
+
+        async def __aexit__(self, *a: Any) -> None:
+            pass
+
+        async def iter_chat_messages(
+            self, chat_id: int, *, min_id: int, batch_size: int
+        ) -> AsyncIterator[Any]:
+            yield _FakeMediaMsg(_FakeFile("image/jpeg", None, 1024), photo=object())
+
+        async def download_media(self, msg: Any) -> bytes | None:
+            download_calls.append(msg)
+            return b"should-not-be-called"
+
+    monkeypatch.setattr("memex.ingestors.telegram.source.TelegramClientWrapper", _FakeTC)
+    monkeypatch.setattr(
+        "memex.ingestors.telegram._common.parse_telegram_message", lambda _m: _record(-100, 1)
+    )
+
+    records = list(src.fetch(TelegramCursor()))
+    assert len(records) == 1
+    assert records[0].media == []
+    assert download_calls == []  # el hook ni siquiera entró
 
 
 # ---- advance_checkpoint ---- #

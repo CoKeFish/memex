@@ -25,12 +25,17 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from memex.core.media_types import DEFAULT_MAX_ATTACHMENT_BYTES
 from memex.core.source import SourceConfigError
 
 # session_name se compone en un path filesystem (Telethon append .session).
 # Rechazamos cualquier separador, dot o char especial para evitar path
 # traversal del estilo "../../etc/shadow". Aceptamos alfanumérico + _ -.
 _SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+#: Tope para video crudo: más alto que el de imágenes/PDF (el usuario quiere el video completo).
+#: Override por-source en sources.config (`max_video_bytes`). Espejo de `SocialConfig`.
+_DEFAULT_MAX_VIDEO_BYTES = 100 * 1024 * 1024
 
 
 class TelegramConfigError(SourceConfigError):
@@ -94,6 +99,14 @@ class TelegramConfig(BaseModel):
 
     batch_size: int = 100
 
+    # Extracción de media (fotos + video + documentos imagen/PDF) para MinIO + OCR. Off por
+    # default → opt-in por-source en sources.config (`extract_media: true`). Espejo de
+    # `SocialConfig`/`ImapConfig`. Imágenes/PDF alimentan OCR; el video se guarda sin OCR. Los
+    # bytes se bajan con Telethon (`download_media`), no por URL.
+    extract_media: bool = False
+    max_attachment_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES
+    max_video_bytes: int = _DEFAULT_MAX_VIDEO_BYTES
+
     # Carry env-var *names* (not values) for logging / debugging.
     api_id_env: str = ""
     api_hash_env: str = ""
@@ -124,7 +137,10 @@ class TelegramConfig(BaseModel):
             f"session_path={self.session_path!r}, "
             f"session_name={self.session_name!r}, "
             f"allowed_chats={len(self.allowed_chats)} entries, "
-            f"batch_size={self.batch_size})"
+            f"batch_size={self.batch_size}, "
+            f"extract_media={self.extract_media}, "
+            f"max_attachment_bytes={self.max_attachment_bytes}, "
+            f"max_video_bytes={self.max_video_bytes})"
         )
 
     @classmethod
@@ -143,6 +159,10 @@ class TelegramConfig(BaseModel):
         - `allowed_chats`: lista de dicts con `chat_id` y opcionalmente
           `topic_ids`, `streaming`, `priority`.
         - `batch_size` opcional (default 100).
+        - `extract_media` opcional (default False) — bajar fotos + video +
+          documentos imagen/PDF a MinIO + OCR.
+        - `max_attachment_bytes` / `max_video_bytes` opcionales — topes por
+          asset (imagen/documento / video).
         """
         env_map: Mapping[str, str] = env if env is not None else os.environ
 
@@ -202,6 +222,13 @@ class TelegramConfig(BaseModel):
         if batch_size <= 0:
             raise TelegramConfigError("'batch_size' must be positive")
 
+        max_attachment_bytes = int(cfg.get("max_attachment_bytes", DEFAULT_MAX_ATTACHMENT_BYTES))
+        if max_attachment_bytes <= 0:
+            raise TelegramConfigError("'max_attachment_bytes' must be positive")
+        max_video_bytes = int(cfg.get("max_video_bytes", _DEFAULT_MAX_VIDEO_BYTES))
+        if max_video_bytes <= 0:
+            raise TelegramConfigError("'max_video_bytes' must be positive")
+
         return cls(
             api_id=api_id,
             api_hash=api_hash,
@@ -210,6 +237,9 @@ class TelegramConfig(BaseModel):
             session_name=session_name,
             allowed_chats=allowed_chats,
             batch_size=batch_size,
+            extract_media=bool(cfg.get("extract_media", False)),
+            max_attachment_bytes=max_attachment_bytes,
+            max_video_bytes=max_video_bytes,
             api_id_env=api_id_env,
             api_hash_env=api_hash_env,
             phone_env=phone_env,

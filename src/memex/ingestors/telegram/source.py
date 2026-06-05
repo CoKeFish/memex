@@ -93,6 +93,9 @@ class TelegramSource:
                         batch_size=self.cfg.batch_size,
                         log=self._log,
                         events=FETCH_EVENTS,
+                        extract_media=self.cfg.extract_media,
+                        max_image_bytes=self.cfg.max_attachment_bytes,
+                        max_video_bytes=self.cfg.max_video_bytes,
                     )
                     collected.extend(records)
             return collected

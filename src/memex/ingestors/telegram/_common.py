@@ -20,12 +20,14 @@ vive en `ingestors/` y por tanto no puede importar inbox/checkpoint/db/api).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 from memex.core.cursors import ChatCursor, TelegramCursor
+from memex.core.media_types import DEFAULT_MAX_ATTACHMENT_BYTES
 from memex.core.source import HealthResult, SourceRecord
+from memex.ingestors.telegram._media import download_message_media
 from memex.ingestors.telegram.client import TelegramAuthError, TelegramClientWrapper
 from memex.ingestors.telegram.config import AllowedChat, TelegramConfig
 from memex.ingestors.telegram.parser import parse_telegram_message
@@ -97,6 +99,9 @@ async def collect_chat_records(
     batch_size: int,
     log: Any,
     events: CollectEvents,
+    extract_media: bool = False,
+    max_image_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES,
+    max_video_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES,
 ) -> list[SourceRecord]:
     """Drena mensajes con `id > min_id` de un chat, parseando y filtrando topic.
 
@@ -105,6 +110,12 @@ async def collect_chat_records(
     avanzará solo hasta el último record exitoso; el resto se re-fetchea en la
     próxima pasada). `events` trae los nombres literales de los structlog
     events según el modo (`FETCH_EVENTS` o `CATCHUP_EVENTS`).
+
+    Si `extract_media`, baja los bytes de la media (foto/video/documento
+    imagen·PDF) de cada mensaje y los adjunta al record (best-effort, NUNCA
+    tumba el chat). Los topes `max_image_bytes`/`max_video_bytes` solo aplican en
+    ese caso; sus defaults son placeholders para el path `extract_media=False`
+    (los callers reales pasan los valores de `cfg` junto con `extract_media`).
     """
     chat_log = log.bind(chat_id=allowed.chat_id)
     chat_log.info(events.chat_start, min_id=min_id)
@@ -127,6 +138,16 @@ async def collect_chat_records(
             if not allowed.matches_topic(topic_id_from_payload(record.payload)):
                 topic_rejected += 1
                 continue
+            if extract_media:
+                blobs = await download_message_media(
+                    msg,
+                    tc=tc,
+                    max_image_bytes=max_image_bytes,
+                    max_video_bytes=max_video_bytes,
+                    log=chat_log,
+                )
+                if blobs:
+                    record = replace(record, media=blobs)
             records.append(record)
     except Exception as e:
         chat_log.warning(

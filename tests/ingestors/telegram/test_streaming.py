@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
@@ -27,7 +28,9 @@ _STREAMING_MOD = "memex.ingestors.telegram.streaming"
 _COMMON_MOD = "memex.ingestors.telegram._common"
 
 
-def _cfg(allowed_chats: list[AllowedChat] | None = None) -> TelegramConfig:
+def _cfg(
+    allowed_chats: list[AllowedChat] | None = None, *, extract_media: bool = False
+) -> TelegramConfig:
     return TelegramConfig(
         api_id=12345,
         api_hash="dead",
@@ -36,7 +39,26 @@ def _cfg(allowed_chats: list[AllowedChat] | None = None) -> TelegramConfig:
         session_name="test",
         allowed_chats=allowed_chats or [],
         batch_size=10,
+        extract_media=extract_media,
     )
+
+
+@dataclass
+class _FakeFile:
+    mime_type: str | None = None
+    name: str | None = None
+    size: int | None = None
+
+
+class _FakeMediaMessage:
+    """`event.message` con presencia de foto + `.file` (path de descarga)."""
+
+    def __init__(self) -> None:
+        self.photo = object()
+        self.video = None
+        self.document = None
+        self.sticker = None
+        self.file = _FakeFile("image/jpeg", None, 1024)
 
 
 def _record(chat_id: int, message_id: int, topic_id: int | None = None) -> SourceRecord:
@@ -79,6 +101,7 @@ class _FakeStreamingClient:
         self.handler: EventCb | None = None
         self.chat_ids: list[int] = []
         self.disconnected = False
+        self.download_calls: list[Any] = []
         self._stop = asyncio.Event()
         _FakeStreamingClient.instances.append(self)
 
@@ -91,6 +114,10 @@ class _FakeStreamingClient:
     def add_new_message_handler(self, callback: EventCb, chat_ids: list[int]) -> None:
         self.handler = callback
         self.chat_ids = chat_ids
+
+    async def download_media(self, msg: Any) -> bytes | None:
+        self.download_calls.append(msg)
+        return b"\xff\xd8\xff-jpeg-bytes"
 
     async def run_until_disconnected(self) -> None:
         await self._stop.wait()
@@ -264,6 +291,65 @@ async def test_listen_delivers_event_to_handler(monkeypatch: pytest.MonkeyPatch)
     await task
 
     assert [r.external_id for r in received] == ["telegram:-100:5"]
+
+
+@pytest.mark.asyncio
+async def test_listen_downloads_media_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Con extract_media=True, el handler live baja los bytes y los adjunta al record."""
+    monkeypatch.setattr(f"{_STREAMING_MOD}.TelegramClientWrapper", _FakeStreamingClient)
+    monkeypatch.setattr(
+        f"{_STREAMING_MOD}.parse_telegram_message",
+        lambda msg, *, chat, sender: _record(-100, 5),
+    )
+    src = TelegramStreamingSource(
+        _cfg([AllowedChat(chat_id=-100, streaming=True)], extract_media=True)
+    )
+    received: list[SourceRecord] = []
+
+    async def on_record(r: SourceRecord) -> None:
+        received.append(r)
+
+    task = await _start_listen(src, on_record)
+    fake = _FakeStreamingClient.instances[-1]
+    assert fake.handler is not None
+    await fake.handler(_FakeEvent(message=_FakeMediaMessage()))
+    await asyncio.sleep(0.01)
+    await src.disconnect()
+    await task
+
+    assert len(received) == 1
+    assert len(received[0].media) == 1
+    assert received[0].media[0].content_type == "image/jpeg"
+    assert len(fake.download_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_listen_skips_media_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Con extract_media=False (default), el record sale sin media y NO se descarga nada."""
+    monkeypatch.setattr(f"{_STREAMING_MOD}.TelegramClientWrapper", _FakeStreamingClient)
+    monkeypatch.setattr(
+        f"{_STREAMING_MOD}.parse_telegram_message",
+        lambda msg, *, chat, sender: _record(-100, 5),
+    )
+    src = TelegramStreamingSource(
+        _cfg([AllowedChat(chat_id=-100, streaming=True)], extract_media=False)
+    )
+    received: list[SourceRecord] = []
+
+    async def on_record(r: SourceRecord) -> None:
+        received.append(r)
+
+    task = await _start_listen(src, on_record)
+    fake = _FakeStreamingClient.instances[-1]
+    assert fake.handler is not None
+    await fake.handler(_FakeEvent(message=_FakeMediaMessage()))
+    await asyncio.sleep(0.01)
+    await src.disconnect()
+    await task
+
+    assert len(received) == 1
+    assert received[0].media == []
+    assert fake.download_calls == []
 
 
 @pytest.mark.asyncio

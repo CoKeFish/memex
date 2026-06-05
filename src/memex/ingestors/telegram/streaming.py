@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from builtins import type as _type
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any, ClassVar
 
 from pydantic import BaseModel
@@ -54,6 +55,7 @@ from memex.ingestors.telegram._common import (
     telegram_health_probe,
     topic_id_from_payload,
 )
+from memex.ingestors.telegram._media import download_message_media
 from memex.ingestors.telegram.client import TelegramClientWrapper
 from memex.ingestors.telegram.config import AllowedChat, TelegramConfig
 from memex.ingestors.telegram.parser import parse_telegram_message
@@ -122,6 +124,9 @@ class TelegramStreamingSource:
                         batch_size=self.cfg.batch_size,
                         log=self._log,
                         events=CATCHUP_EVENTS,
+                        extract_media=self.cfg.extract_media,
+                        max_image_bytes=self.cfg.max_attachment_bytes,
+                        max_video_bytes=self.cfg.max_video_bytes,
                     )
                 )
         # Conexión ya cerrada — yieldear no sostiene recursos.
@@ -162,6 +167,16 @@ class TelegramStreamingSource:
                         return
                     if not allowed.matches_topic(topic_id_from_payload(record.payload)):
                         return
+                    if self.cfg.extract_media:
+                        blobs = await download_message_media(
+                            event.message,
+                            tc=tc,
+                            max_image_bytes=self.cfg.max_attachment_bytes,
+                            max_video_bytes=self.cfg.max_video_bytes,
+                            log=self._log,
+                        )
+                        if blobs:
+                            record = replace(record, media=blobs)
                     self._log.info("streaming.event_received", chat_id=chat_id)
                     await on_record(record)
                 except Exception as e:

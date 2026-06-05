@@ -141,6 +141,21 @@ class TelegramClientWrapper:
         ):
             yield msg
 
+    async def download_media(self, msg: Message) -> bytes | None:
+        """Baja los bytes de la media de `msg` EN MEMORIA (sin tocar disco).
+
+        Thin wrapper sobre `client.download_media(msg, file=bytes)`: Telethon baja
+        por MTProto y devuelve los `bytes`, o `None` si el mensaje no tiene media
+        descargable (o está expirada). El caller (`telegram/_media.py`) decide qué
+        kinds bajar y aplica los topes de tamaño — acá solo es I/O.
+
+        `download_media(file=bytes)` baja a memoria; con ese flag Telethon devuelve
+        `bytes` (nunca un path `str`). La firma de Telethon es untyped → anotamos el
+        resultado para no propagar `Any` (mypy strict `no-any-return`).
+        """
+        data: bytes | None = await self._require_client().download_media(msg, file=bytes)
+        return data
+
     async def iter_dialogs(self) -> AsyncIterator[Dialog]:
         """Para `memex-telegram discover` — lista los chats accesibles."""
         client = self._require_client()
