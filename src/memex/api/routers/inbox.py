@@ -213,6 +213,11 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
     # Estado interno por-módulo (dedup, seam contraparte→identidad, consolidación) para la vista de
     # DEBUG; de-hardcodeado (itera el registry por CAP_DEBUG_INBOX). Mapa slug→filas; {} si ninguno.
     data["extraction_debug"] = read_extractions_debug(user_id, inbox_id)
+    # Árbol de traza jerárquica (vista en stack); None ⇒ sin árbol persistido → el front usa el
+    # fallback (LlmTrace + extraction_debug). Cuelga del root las llm_calls de ruteo/extracción/OCR.
+    from memex.core.trace import read_trace
+
+    data["trace"] = read_trace(user_id, inbox_id)
     calls = [dict(c) for c in llm_calls]
     data["llm"] = {
         "calls": len(calls),

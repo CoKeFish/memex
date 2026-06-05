@@ -14,6 +14,7 @@ import type {
   OcrStatus,
   Source,
   SourceType,
+  TraceNodeDto,
 } from "@/types/domain"
 
 interface FeedbackApi {
@@ -177,6 +178,8 @@ interface InboxApiRow {
   summary?: { id?: number | null; tier: string; content: string; created_at?: string | null } | null
   extraction?: InboxExtraction | null
   extraction_debug?: ExtractionDebug | null
+  /** Árbol de traza jerárquica (camelCase, ya en la forma que consume el front). null ⇒ fallback. */
+  trace?: TraceNodeDto[] | null
   llm?: {
     calls: number
     cost_usd: number
@@ -281,6 +284,7 @@ function toInboxRow(r: InboxApiRow): InboxRow {
       : null,
     extraction: r.extraction ?? null,
     extractionDebug: r.extraction_debug ?? null,
+    trace: r.trace ?? null,
     llm: toLlmUsage(r.llm),
     media,
     feedback: r.feedback ? toFeedback(r.feedback) : null,

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from memex.core.source import HealthResult, SourceKind
+from memex.core.trace import NULL_TRACER, TraceNode
 from memex.logging import get_logger
 
 if TYPE_CHECKING:
@@ -43,8 +44,10 @@ CAP_EXTRACT = "extract"
 #: Futuras, declaradas pero SIN flujo en este slice (las ejercitan calendar/hackathones):
 CAP_PROVIDE_DOMAIN = "provide_domain"
 CAP_CONTRIBUTE_DOMAIN = "contribute_domain"
-#: Expone su ESTADO INTERNO por-mensaje (dedup, resolución del seam, consolidación) para la vista de
-#: DEBUG `/datos/:id` — lo que `read_for_inbox` deliberadamente oculta. Vía `InboxDebugProvider`.
+#: DEPRECATED (lo supersede la traza jerárquica `ctx.trace` → `trace_nodes`; se conserva como
+#: FALLBACK para mensajes viejos sin árbol). Expone el ESTADO INTERNO por-mensaje (dedup, seam,
+#: consolidación) para la vista de DEBUG `/datos/:id` — lo que `read_for_inbox` oculta. Vía
+#: `InboxDebugProvider`.
 CAP_DEBUG_INBOX = "debug_inbox"
 
 
@@ -74,6 +77,10 @@ class ModuleContext:
       handle (`ctx.deps[slug]`). Vacío si el módulo no declara dependencias con dominio.
     - `summary_id`: None en este slice (la extracción no depende del resumen; ADR-015 §9).
     - `inbox_ids`: los ids del lote — base de la atribución (`source_inbox_ids ⊆ inbox_ids`).
+    - `trace`: handle de la traza jerárquica (`memex.core.trace.TraceNode`). El módulo emite logs
+      SOLO por acá (`ctx.trace.entity(...).step(...)`, etc.); el front los renderiza genérico (vista
+      en stack). Escribe en `ctx.conn` (atómico con el persist). `NULL_TRACER` (default) = no-op
+      cuando la traza está apagada (batch / window multi-mensaje): el módulo llama sin chequear.
     """
 
     user_id: int
@@ -82,6 +89,7 @@ class ModuleContext:
     deps: Mapping[str, object]
     summary_id: int | None
     inbox_ids: tuple[int, ...]
+    trace: TraceNode = NULL_TRACER
 
 
 @runtime_checkable

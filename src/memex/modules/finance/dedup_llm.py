@@ -22,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.core.observability import CostAccum, record_llm_call
+from memex.core.trace import attach_to_entity
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.logging import get_logger
@@ -147,6 +148,8 @@ async def disambiguate_pair(
 @dataclass(frozen=True)
 class _Candidate:
     pair_id: int
+    a_id: int
+    b_id: int
     a: PairTxView
     b: PairTxView
 
@@ -170,7 +173,7 @@ def _load_candidates(conn: Connection, user_id: int, limit: int) -> list[_Candid
         conn.execute(
             text(
                 """
-                SELECT c.id AS pair_id,
+                SELECT c.id AS pair_id, c.transaction_a_id, c.transaction_b_id,
                        ta.direction AS a_direction, ta.amount AS a_amount,
                        ta.currency AS a_currency, ta.category AS a_category,
                        ta.counterparty AS a_counterparty, ta.place AS a_place,
@@ -195,9 +198,35 @@ def _load_candidates(conn: Connection, user_id: int, limit: int) -> list[_Candid
         .all()
     )
     return [
-        _Candidate(pair_id=int(r["pair_id"]), a=_view("a", dict(r)), b=_view("b", dict(r)))
+        _Candidate(
+            pair_id=int(r["pair_id"]),
+            a_id=int(r["transaction_a_id"]),
+            b_id=int(r["transaction_b_id"]),
+            a=_view("a", dict(r)),
+            b=_view("b", dict(r)),
+        )
         for r in rows
     ]
+
+
+def _attach_desempate(
+    conn: Connection, user_id: int, cand: _Candidate, call_id: int, decision: DedupDecision
+) -> None:
+    """Cuelga el desempate LLM (FASE 2) a la entidad de UNA de las dos transacciones del par —la que
+    tenga nodo de traza— como hoja `llm` con su costo y output crudo. Solo una (no doble-contar el
+    costo); no-op si ninguna fue extraída por-mensaje (batch)."""
+    for tx_id, other in ((cand.a_id, cand.b_id), (cand.b_id, cand.a_id)):
+        node = attach_to_entity(
+            conn, user_id=user_id, table="mod_finance_transactions", ref_id=tx_id
+        )
+        if node is not None:
+            node.llm(
+                call_id,
+                label=f"desempate LLM · vs #{other}",
+                status="ok",
+                detail={"same": decision.same, "confidence": round(decision.confidence, 2)},
+            )
+            return
 
 
 def _record_decision(conn: Connection, pair_id: int, decision: DedupDecision) -> None:
@@ -253,7 +282,7 @@ async def run_dedup_phase2(
                 continue
             with connection() as conn:
                 _record_decision(conn, cand.pair_id, decision)
-            record_llm_call(
+            call_id = record_llm_call(
                 user_id=user_id,
                 purpose="finance_dedup",
                 model=result.model,
@@ -272,6 +301,9 @@ async def run_dedup_phase2(
                     "confidence": decision.confidence,
                 },
             )
+            # Traza: cuelga el desempate a la entidad de una de las transacciones (best-effort).
+            with connection() as conn:
+                _attach_desempate(conn, user_id, cand, call_id, decision)
             stats.cost.calls += 1
             stats.cost.prompt_tokens += result.usage.prompt_tokens
             stats.cost.completion_tokens += result.usage.completion_tokens

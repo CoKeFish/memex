@@ -22,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.core.observability import CostAccum, record_llm_call
+from memex.core.trace import attach_to_entity
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.logging import get_logger
@@ -172,6 +173,25 @@ def _load_candidates(conn: Connection, user_id: int, limit: int) -> list[_Candid
     return out
 
 
+def _attach_desempate(
+    conn: Connection, user_id: int, cand: _Candidate, call_id: int, decision: MergeDecision
+) -> None:
+    """Cuelga el desempate LLM (FASE 2) a la entidad de UNA de las dos identidades del par —la que
+    tenga nodo de traza— como hoja `llm` con su costo y output crudo. Solo una (no doble-contar el
+    costo); no-op si ninguna fue extraída por-mensaje. Tras un merge la entidad absorbida sigue
+    referenciada en la traza (ref_id sin FK), así que el lookup igual la encuentra."""
+    for ident_id, other in ((cand.a_id, cand.b_id), (cand.b_id, cand.a_id)):
+        node = attach_to_entity(conn, user_id=user_id, table="mod_identidades", ref_id=ident_id)
+        if node is not None:
+            node.llm(
+                call_id,
+                label=f"desempate LLM · vs #{other}",
+                status="ok",
+                detail={"same": decision.same, "confidence": round(decision.confidence, 2)},
+            )
+            return
+
+
 def _reject(conn: Connection, pair_id: int, decision: MergeDecision) -> None:
     conn.execute(
         text(
@@ -230,7 +250,7 @@ async def run_merge_phase2(
                 else:
                     _reject(conn, cand.pair_id, decision)
                     stats.rejected += 1
-            record_llm_call(
+            call_id = record_llm_call(
                 user_id=user_id,
                 purpose="identidades_dedup",
                 model=result.model,
@@ -247,6 +267,9 @@ async def run_merge_phase2(
                     "confidence": decision.confidence,
                 },
             )
+            # Traza: cuelga el desempate a la entidad de una de las identidades (best-effort).
+            with connection() as conn:
+                _attach_desempate(conn, user_id, cand, call_id, decision)
             stats.cost.calls += 1
             stats.cost.prompt_tokens += result.usage.prompt_tokens
             stats.cost.completion_tokens += result.usage.completion_tokens

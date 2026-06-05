@@ -12,6 +12,7 @@ import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { RelativeTime } from "@/components/common/time"
 import { JourneyTimeline } from "@/components/features/message/journey-timeline"
 import { LlmTrace } from "@/components/features/message/llm-trace"
+import { TraceTree } from "@/components/features/message/trace-tree"
 import { MediaOcr, UnstoredAttachments, type DeclaredAttachment } from "@/components/features/message/media-ocr"
 import { fmtCost, groupCallsIntoRuns } from "@/components/features/message/llm-trace-runs"
 import { RelatedData } from "@/components/features/message/related-data"
@@ -342,6 +343,7 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
   const summary = row.summary
   const ext = row.extraction
   const llm = row.llm
+  const trace = row.trace ?? null
   const extDone = !!ext?.done
   const extItems =
     (ext?.finance.length ?? 0) +
@@ -449,8 +451,8 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
       <PanelBody className="py-0">
         {/* 2 columnas en xl: etapas a la izquierda, traza LLM + "qué hizo cada módulo" a la derecha
             (aprovecha el ancho; en pantallas chicas colapsa a una sola columna). */}
-        <div className="grid gap-5 py-1 xl:grid-cols-[1.5fr_1fr]">
-          <div className="divide-y divide-border">
+        <div className="grid gap-5 py-1 xl:grid-cols-2">
+          <div className="min-w-0 divide-y divide-border">
         {/* Input — lo que ve el LLM (render_payload), colapsable para auditar */}
         <div className="py-2.5">
           <button
@@ -576,15 +578,22 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
           </div>
           {/* Columna derecha: traza LLM (route+extract) + "qué hizo cada módulo" (dedup, contraparte,
               consolidación + operaciones posteriores LLM con su costo). */}
-          <div className="space-y-4 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-1">
-            {llm && llm.calls > 0 ? (
-              <LlmTrace llm={llm} runs={runs} />
+          <div className="min-w-0 space-y-4 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-1">
+            {trace ? (
+              <TraceTree nodes={trace} />
             ) : (
-              <p className="num text-[11px] text-muted-foreground">
-                Sin traza LLM atribuida a este mensaje (las ops internas, si las hubo, van abajo).
-              </p>
+              /* FALLBACK (borrar con trace_nodes): traza heurística por corridas + estado interno por módulo. */
+              <>
+                {llm && llm.calls > 0 ? (
+                  <LlmTrace llm={llm} runs={runs} />
+                ) : (
+                  <p className="num text-[11px] text-muted-foreground">
+                    Sin traza LLM atribuida a este mensaje (las ops internas, si las hubo, van abajo).
+                  </p>
+                )}
+                <ModuleDebug debug={row.extractionDebug} />
+              </>
             )}
-            <ModuleDebug debug={row.extractionDebug} />
           </div>
         </div>
       </PanelBody>

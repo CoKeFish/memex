@@ -120,3 +120,56 @@ def test_inbox_stats_scoped_to_user(
     assert str(seed_source["id"]) in sources
     assert sources[str(seed_source["id"])] == {"total": 2, "pending": 2, "errored": 0}
     assert str(src2) not in sources
+
+
+def test_get_inbox_returns_trace_tree(client: Any, seed_source: dict[str, Any]) -> None:
+    """GET /inbox/{id} serializa el árbol de traza (TraceNodeDto[]): nodos persistidos + las
+    llm_calls del inbox colgadas del root como hojas `llm`."""
+    _seed_n(seed_source["id"], 1, 1)
+    rid = client.get("/inbox").json()["items"][0]["id"]
+    with connection() as c:
+        root = c.execute(
+            text(
+                "INSERT INTO trace_nodes (user_id, inbox_id, kind, label) "
+                "VALUES (1, :i, 'root', 'msg') RETURNING id"
+            ),
+            {"i": rid},
+        ).scalar_one()
+        mod = c.execute(
+            text(
+                "INSERT INTO trace_nodes (user_id, inbox_id, parent_id, kind, module_slug, label) "
+                "VALUES (1, :i, :p, 'module', 'finance', 'finance') RETURNING id"
+            ),
+            {"i": rid, "p": root},
+        ).scalar_one()
+        c.execute(
+            text(
+                "INSERT INTO trace_nodes (user_id, inbox_id, parent_id, kind, label, ref_table, "
+                "ref_id) VALUES (1, :i, :p, 'entity', 'egreso', 'mod_finance_transactions', 5)"
+            ),
+            {"i": rid, "p": mod},
+        )
+        c.execute(
+            text(
+                "INSERT INTO llm_calls (user_id, inbox_id, purpose, model, prompt_tokens, "
+                "completion_tokens, cost_usd, latency_ms, status, response_text) "
+                "VALUES (1, :i, 'extract_finance', 'fake', 1, 1, 0.004, 1, 'ok', '{\"items\":[]}')"
+            ),
+            {"i": rid},
+        )
+
+    trace = client.get(f"/inbox/{rid}").json()["trace"]
+    assert trace is not None
+    assert {"root", "module", "entity", "llm"} <= {n["kind"] for n in trace}
+    entity = next(n for n in trace if n["kind"] == "entity")
+    assert entity["ref"] == {"table": "mod_finance_transactions", "id": 5}
+    llm = next(n for n in trace if n["kind"] == "llm")
+    assert llm["label"] == "Extracción · finance"
+    assert llm["llm"]["responseText"] == '{"items":[]}'
+
+
+def test_get_inbox_trace_null_without_nodes(client: Any, seed_source: dict[str, Any]) -> None:
+    """Sin nodos persistidos → trace=None (el front cae al fallback)."""
+    _seed_n(seed_source["id"], 1, 1)
+    rid = client.get("/inbox").json()["items"][0]["id"]
+    assert client.get(f"/inbox/{rid}").json()["trace"] is None

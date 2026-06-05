@@ -222,3 +222,44 @@ def test_persist_unmatched_counterparty_fk_null(conn: Connection) -> None:
         text("SELECT counterparty_identity_id FROM mod_finance_transactions")
     ).scalar_one()
     assert fk is None
+
+
+# ----- traza jerárquica (ctx.trace) ---------------------------------------------- #
+
+
+def test_dedup_emits_trace_entities_and_dedup_decision(conn: Connection) -> None:
+    """Con un tracer real inyectado, `dedup` emite una ENTIDAD por transacción + un paso 'dedup' con
+    la comparación 'vs tx #other' del par FASE 1. No-op cuando el tracer está apagado."""
+    from memex.core.trace import create_root, open_module_tracer
+
+    iid = _seed_inbox(datetime(2026, 6, 3, 12, 0, tzinfo=UTC), ext="trace-msg")
+    root = create_root(conn, user_id=1, inbox_id=iid, label="msg")
+    tracer = open_module_tracer(
+        conn, user_id=1, inbox_id=iid, root_id=root, slug="finance", label="finance", seq=0
+    )
+    ctx = ModuleContext(
+        user_id=1,
+        conn=conn,
+        llm=_NoLLM(),
+        deps={},
+        summary_id=None,
+        inbox_ids=(iid,),
+        trace=tracer,
+    )
+    common = {"occurred_on": date(2026, 6, 3), "occurred_time": time(14, 30), "place": "Calle 1"}
+    asyncio.run(
+        FinanceModule().dedup(
+            ctx,
+            [_item(source_inbox_ids=(iid,), **common), _item(source_inbox_ids=(iid,), **common)],
+        )
+    )
+
+    rows = (
+        conn.execute(text("SELECT kind, label FROM trace_nodes WHERE inbox_id = :i"), {"i": iid})
+        .mappings()
+        .all()
+    )
+    kinds = [r["kind"] for r in rows]
+    assert kinds.count("entity") == 2  # una por transacción
+    assert "step" in kinds  # el paso 'dedup'
+    assert any(r["kind"] == "decision" and str(r["label"]).startswith("vs tx #") for r in rows)

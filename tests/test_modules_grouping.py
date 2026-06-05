@@ -121,6 +121,22 @@ def test_parse_grouped_items_ignores_unknown_keys() -> None:
     assert out == {"finance": [{"a": 1}]}
 
 
+def test_parse_grouped_items_unwraps_items_object() -> None:
+    # DeepSeek real envuelve la lista en {"items": [...]} → se desenvuelve (sin esto, default → 0).
+    content = json.dumps(
+        {"finance": {"items": [{"amount": "1"}]}, "calendar": {"items": [{"title": "x"}]}}
+    )
+    out = parse_grouped_items(content, ["finance", "calendar"])
+    assert out == {"finance": [{"amount": "1"}], "calendar": [{"title": "x"}]}
+
+
+def test_parse_grouped_items_mixed_shapes() -> None:
+    # un slug como lista directa, otro envuelto en {"items": [...]} — ambos válidos.
+    content = json.dumps({"finance": [{"a": 1}], "calendar": {"items": [{"b": 2}]}})
+    out = parse_grouped_items(content, ["finance", "calendar"])
+    assert out == {"finance": [{"a": 1}], "calendar": [{"b": 2}]}
+
+
 # ----- build_grouped_user_content ------------------------------------------------- #
 
 

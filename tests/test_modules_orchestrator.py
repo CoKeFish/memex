@@ -814,3 +814,42 @@ def test_read_extractions_de_hardcoded_returns_all_module_keys() -> None:
     for slug in known_modules():
         assert ext[slug] == [], f"la clave {slug} debe existir y venir vacía"
     assert {"finance", "calendar", "hackathones", "identidades"} <= set(ext)
+
+
+# ----- traza jerárquica (trace_nodes) -------------------------------------------- #
+
+
+def test_extract_inbox_writes_trace_tree(seed_source: dict[str, Any]) -> None:
+    """extract_inbox (un mensaje) materializa el árbol: root + span de módulo + entidad por
+    transacción (lo emite finance.dedup vía ctx.trace)."""
+    from memex.modules.orchestrator import extract_inbox
+
+    _enable("finance")
+    iid = _seed(seed_source["id"], "m1", "individual", {"body_text": "pagué $4500"})
+    asyncio.run(extract_inbox(1, iid, client=FakeExtractLLM()))
+
+    with connection() as c:
+        rows = (
+            c.execute(
+                text(
+                    "SELECT kind, module_slug, ref_table FROM trace_nodes "
+                    "WHERE inbox_id = :i ORDER BY id"
+                ),
+                {"i": iid},
+            )
+            .mappings()
+            .all()
+        )
+    assert any(r["kind"] == "root" for r in rows)
+    assert any(r["kind"] == "module" and r["module_slug"] == "finance" for r in rows)
+    assert any(r["kind"] == "entity" and r["ref_table"] == "mod_finance_transactions" for r in rows)
+
+
+def test_run_extraction_batch_writes_no_trace(seed_source: dict[str, Any]) -> None:
+    """El camino batch (run_extraction) NO materializa traza (trace_root_id None → NULL_TRACER): la
+    traza es por-mensaje único, para no mis-atribuir un lote entero a un root."""
+    _enable("finance")
+    _seed(seed_source["id"], "m1", "batch", {"body_text": "pagué $4500"})
+    asyncio.run(run_extraction(1, client=FakeExtractLLM()))
+
+    assert _count("trace_nodes") == 0

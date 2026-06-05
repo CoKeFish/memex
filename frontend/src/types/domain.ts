@@ -174,6 +174,46 @@ export interface InboxLlmUsage {
   items: InboxLlmCall[]
 }
 
+// ---- Traza jerárquica por mensaje (árbol de ejecución, estilo "stack trace") --
+
+/** Tipo de nodo del árbol de traza. El front renderiza GENÉRICO por este campo (no sabe de cada
+ *  módulo): `root`/`module` son spans estructurales del orquestador; `entity` referencia una fila de
+ *  dominio; `step`/`log`/`decision` son pasos internos; `llm` es una llamada al modelo (lleva su costo
+ *  y el output crudo). Un módulo nuevo aparece solo, sin tocar el front. */
+export type TraceNodeKind = "root" | "module" | "entity" | "step" | "log" | "decision" | "llm"
+
+/** Un nodo del árbol de traza — lista PLANA con `parentId` (el front arma el árbol). Es la COSTURA
+ *  front↔back: `GET /inbox/{id}` devuelve `trace: TraceNodeDto[] | null` con esta forma exacta. El
+ *  módulo solo llama `ctx.trace.*` y el backend serializa acá; el front no hardcodea vistas por módulo. */
+export interface TraceNodeDto {
+  id: number
+  parentId: number | null
+  /** Orden entre hermanos. */
+  seq: number
+  kind: TraceNodeKind
+  /** Quién lo emitió; null = span del orquestador (route/extract/persist). */
+  moduleSlug: string | null
+  label: string
+  status: "ok" | "warn" | "error" | "info" | null
+  /** Nodo de entidad → fila de dominio (tabla + id); el front linkea, NO re-renderiza el dato. */
+  ref: { table: string; id: number } | null
+  /** Llamada LLM referenciada (solo en nodos `llm`). */
+  llmCallId: number | null
+  /** Costo propio + acumulado del subárbol (roll-up calculado al leer) y nº de llamadas bajo el nodo. */
+  cost: { ownUsd: number; subtreeUsd: number; calls: number }
+  /** Señales internas del paso (p. ej. {trgm: 0.82, umbral: 0.90}). */
+  detail: Record<string, unknown>
+  /** Solo en hojas `llm`: métricas + output CRUDO del modelo (de llm_calls.response_text). */
+  llm: {
+    model: string
+    promptTokens: number
+    completionTokens: number
+    latencyMs: number
+    status: string
+    responseText: string | null
+  } | null
+}
+
 export type FeedbackKind =
   | "missing_data"
   | "missed_important"
@@ -225,9 +265,13 @@ export interface InboxRow {
   /** Objetos completos de cada fase (solo en el detalle, GET /inbox/{id}). */
   summary?: InboxSummary | null
   extraction?: InboxExtraction | null
-  /** Estado interno por-módulo (dedup, seam contraparte→identidad, consolidación) — vista debug. */
+  /** Estado interno por-módulo (dedup, seam contraparte→identidad, consolidación) — vista debug.
+   *  DEPRECATED: lo supersede `trace` (árbol jerárquico); se conserva como fallback. */
   extractionDebug?: ExtractionDebug | null
   llm?: InboxLlmUsage | null
+  /** Árbol de traza jerárquica de la extracción (GET /inbox/{id}). null ⇒ mensaje viejo sin árbol
+   *  persistido → el front cae al fallback (LlmTrace + extractionDebug). */
+  trace?: TraceNodeDto[] | null
   /** Adjuntos del mensaje (media_assets) — solo en el detalle (GET /inbox/{id}). */
   media?: MediaAsset[]
   /** Feedback manual del usuario sobre este mensaje — solo en el detalle. */

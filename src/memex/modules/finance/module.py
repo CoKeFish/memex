@@ -38,6 +38,7 @@ from memex.modules.finance.dedup import (
     PRECISION_DATE,
     PRECISION_DATETIME,
     PRECISION_INFERRED,
+    DedupPair,
     DedupRow,
     mark_duplicates,
 )
@@ -45,6 +46,7 @@ from memex.modules.finance.prompt import FINANCE_SYSTEM_PROMPT
 from memex.modules.finance.schema import TransactionItem
 
 if TYPE_CHECKING:
+    from memex.core.trace import TraceNode
     from memex.modules.identidades.domain import IdentidadesDomain
 
 _log = get_logger("memex.modules.finance")
@@ -232,9 +234,9 @@ def _mark_processed(conn: Connection, new_ids: list[int], in_pair: set[int]) -> 
         )
 
 
-def _mark_dedup(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> int:
+def _mark_dedup(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> list[DedupPair]:
     """Corre la FASE 1 determinista, registra los pares (candidatos + auto-confirmados) y marca el
-    estado de procesamiento. Devuelve cuántos pares marcó."""
+    estado de procesamiento. Devuelve los pares marcados (para la traza)."""
     existing = _existing_rows(conn, user_id, new_rows)
     pairs = mark_duplicates(new_rows, existing)
     in_pair: set[int] = set()
@@ -273,7 +275,7 @@ def _mark_dedup(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> int
             pairs=len(pairs),
             confirmed=sum(1 for p in pairs if p.decision == "confirmed"),
         )
-    return len(pairs)
+    return pairs
 
 
 class FinanceModule:
@@ -317,7 +319,44 @@ class FinanceModule:
         # Dependencia BLANDA: el handle del directorio si identidades está activo, None si no.
         identidades = ctx.deps.get("identidades")
         new_rows = _insert_transactions(ctx.conn, ctx.user_id, txs, reception_by_id, identidades)
-        _mark_dedup(ctx.conn, ctx.user_id, new_rows)
+        # Traza: una ENTIDAD por transacción + el seam contraparte→identidad (no-op si apagada).
+        ents: dict[int, TraceNode] = {}
+        for r in new_rows:
+            cp = (r.counterparty or r.place or "").strip()
+            label = f"{r.direction} {r.amount} {r.currency}" + (f" · {cp}" if cp else "")
+            ent = ctx.trace.entity(
+                "mod_finance_transactions", id=r.transaction_id, label=label, status="ok"
+            )
+            if r.counterparty_identity_id is not None:
+                ent.decision(
+                    f"contraparte → identidad #{r.counterparty_identity_id}",
+                    ref=("mod_identidades", r.counterparty_identity_id),
+                    detail={"contraparte": r.counterparty},
+                    status="ok",
+                )
+            elif r.counterparty.strip():
+                ent.log(
+                    "contraparte sin identidad resuelta", detail={"contraparte": r.counterparty}
+                )
+            ents[r.transaction_id] = ent
+        # Traza: dedup FASE 1 → comparación "vs tx #other" bajo la entidad que toca el par.
+        pairs = _mark_dedup(ctx.conn, ctx.user_id, new_rows)
+        steps: dict[int, TraceNode] = {}
+        for p in pairs:
+            for tid in (p.a_id, p.b_id):
+                if tid not in ents:
+                    continue  # el otro lado es una transacción pre-existente, no de este mensaje
+                other = p.b_id if tid == p.a_id else p.a_id
+                step = steps.get(tid)
+                if step is None:
+                    step = ents[tid].step("dedup")
+                    steps[tid] = step
+                step.decision(
+                    f"vs tx #{other}",
+                    ref=("mod_finance_transactions", other),
+                    detail={"reason": p.reason, "score": p.score, "decision": p.decision},
+                    status="ok" if p.decision == "confirmed" else "warn",
+                )
         return len(txs)
 
     async def health_check(self) -> HealthResult:

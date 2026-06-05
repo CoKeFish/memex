@@ -42,6 +42,7 @@ from memex.core.observability import (
 from memex.core.observability import (
     cost_fields as _cost_fields,
 )
+from memex.core.trace import create_root, open_module_tracer
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError, LLMResult
 from memex.logging import get_logger
@@ -500,6 +501,8 @@ async def _persist_unit(
     outcome: _UnitOutcome,
     stats: ExtractStats,
     active_by_slug: dict[str, InterestModule],
+    *,
+    trace_root_id: int | None = None,
 ) -> None:
     """FASE 2 (persistir/dedup): SECUENCIAL y en topo-orden. Materializa los items de la unidad —
     cada módulo en su PROPIA tx con `ctx.deps` ya poblado (la dependencia persistió en una unidad
@@ -558,8 +561,19 @@ async def _persist_unit(
     items_by_slug: dict[str, int] = {}
     # Persistir cada módulo en su tx (atomicidad per-módulo). El orden de unidades (topo) garantiza
     # que la dependencia ya commiteó, así que `_build_deps` ve su dominio fresco.
-    for module in unit.modules:
+    for i, module in enumerate(unit.modules):
         with connection() as conn:
+            # Span del módulo bajo el root (atómico con persist + cursor en esta tx). NULL_TRACER
+            # si la traza está apagada (trace_root_id None → batch / window multi-mensaje).
+            tracer = open_module_tracer(
+                conn,
+                user_id=user_id,
+                inbox_id=inbox_ids[0],
+                root_id=trace_root_id,
+                slug=module.slug,
+                label=module.slug,
+                seq=i,
+            )
             ctx = ModuleContext(
                 user_id=user_id,
                 conn=conn,
@@ -567,6 +581,7 @@ async def _persist_unit(
                 deps=_build_deps(module, conn, user_id, active_by_slug),
                 summary_id=None,
                 inbox_ids=tuple(inbox_ids),
+                trace=tracer,
             )
             persisted = await module.persist(ctx, outcome.valid_by_slug[module.slug])
             _insert_cursor(conn, user_id, module.slug, inbox_ids)
@@ -619,6 +634,7 @@ async def _process_window(
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
     batching_policy: str = "grouped",
     group_size: int = _GROUP_SIZE_DEFAULT,
+    trace_root_id: int | None = None,
 ) -> None:
     kind = kind_for_type(window.rows[0].source_type)
     candidates = candidates_for_kind(kind, active)
@@ -686,7 +702,9 @@ async def _process_window(
     # FASE 2 (persistir/dedup): SECUENCIAL y en el orden de las unidades (topo) — el dependiente ve
     # el dominio fresco de su dependencia, aunque ambos se extrajeron a la vez en la FASE 1.
     for unit, outcome in zip(units, outcomes, strict=True):
-        await _persist_unit(user_id, llm, unit, outcome, stats, active_by_slug)
+        await _persist_unit(
+            user_id, llm, unit, outcome, stats, active_by_slug, trace_root_id=trace_root_id
+        )
 
     # Candidatos ruteados-fuera: marcar "considerado" para no re-rutearlos eternamente.
     for module in candidates:
@@ -982,7 +1000,18 @@ async def extract_inbox(
                 row.source_id,
                 (row,),
             )
-        await _process_window(user_id, llm, window, active, active_by_slug, stats)
+        # Traza jerárquica: SOLO con un mensaje único (scope individual / window de 1) — un lote
+        # multi-mensaje mis-atribuiría todo al root del target. `create_root` hace delete-then-write
+        # (re-extraer reemplaza la traza). Apagada (None) → los módulos reciben NULL_TRACER.
+        trace_root_id: int | None = None
+        if len(window.rows) == 1:
+            with connection() as conn:
+                trace_root_id = create_root(
+                    conn, user_id=user_id, inbox_id=inbox_id, label=f"mensaje #{inbox_id}"
+                )
+        await _process_window(
+            user_id, llm, window, active, active_by_slug, stats, trace_root_id=trace_root_id
+        )
     finally:
         if owns_client and isinstance(llm, DeepSeekClient):
             await llm.aclose()

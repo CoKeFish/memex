@@ -18,6 +18,7 @@ el desempate LLM corre en una fase aparte. Declara `provide_domain`.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
@@ -59,6 +60,16 @@ def _identity_kind(mention_kind: str) -> str:
     return KIND_ORG if mention_kind in _ORG_MENTION_KINDS else KIND_PERSONA
 
 
+@dataclass(frozen=True)
+class _MergeHint:
+    """Vecino difuso para la traza: contra quién comparó, su score, y si auto-mergeó (≥HIGH) o quedó
+    como candidato en zona gris (→ desempate LLM)."""
+
+    other_id: int
+    score: float
+    auto_merge: bool
+
+
 class IdentidadesModule:
     """Extrae identidades al directorio (`mod_identidades`) + su evidencia (`_mentions`)."""
 
@@ -96,31 +107,71 @@ class IdentidadesModule:
         index = load_known_index(ctx.conn, ctx.user_id)
         for m in mentions:
             res = index.resolve(m)
+            hint: _MergeHint | None = None
             if res.kind is None:
-                res = self._resolve_fuzzy_or_create(ctx, m, index)
+                res, hint = self._resolve_fuzzy_or_create(ctx, m, index)
             _insert_mention(ctx.conn, ctx.user_id, m, res)
+            self._trace_mention(ctx, m, res, hint)
         return len(mentions)
+
+    def _trace_mention(
+        self, ctx: ModuleContext, m: IdentityItem, res: Resolution, hint: _MergeHint | None
+    ) -> None:
+        """Traza por mención: entidad anclada a la identidad resuelta + cómo resolvió (señal fuerte,
+        auto-merge difuso, candidato en zona gris, o creada). No-op si la traza está apagada."""
+        if res.identity_id is None:
+            return
+        ent = ctx.trace.entity(
+            "mod_identidades", id=res.identity_id, label=f"«{m.name}» → {res.method}", status="ok"
+        )
+        if res.method == "created":
+            ent.log("no se parece a nada → creada nueva", status="info")
+        elif hint is not None and hint.auto_merge:
+            ent.decision(
+                f"auto-merge con #{hint.other_id}",
+                ref=("mod_identidades", hint.other_id),
+                detail={"trgm": round(hint.score, 3), "umbral": HIGH_THRESHOLD},
+                status="ok",
+            )
+        elif hint is not None:  # zona gris → candidato para el desempate LLM (FASE 2)
+            ent.step("dedup · zona gris").decision(
+                f"vs #{hint.other_id}",
+                ref=("mod_identidades", hint.other_id),
+                detail={
+                    "trgm": round(hint.score, 3),
+                    "umbral_low": LOW_THRESHOLD,
+                    "umbral_high": HIGH_THRESHOLD,
+                    "estado": "candidato → desempate LLM",
+                },
+                status="warn",
+            )
+        else:
+            ent.log(f"resuelta por {res.method}", status="ok")
 
     def _resolve_fuzzy_or_create(
         self, ctx: ModuleContext, m: IdentityItem, index: KnownIndex
-    ) -> Resolution:
+    ) -> tuple[Resolution, _MergeHint | None]:
         """Sin match exacto: difuso. ≥HIGH auto-merge (+alias); zona gris crea provisional + encola
-        candidato; <LOW crea nueva."""
+        candidato; <LOW crea nueva. Devuelve el vecino difuso para la traza (None si nueva)."""
         kind = _identity_kind(m.kind)
         candidates = find_fuzzy_candidates(ctx.conn, ctx.user_id, kind=kind, probe=m.name)
         best = candidates[0] if candidates else None
         if best is not None and best.score >= HIGH_THRESHOLD:
             _add_alias(ctx.conn, ctx.user_id, best.identity_id, m.name)
             index.add_alias(m.name, best.identity_id)
-            return Resolution(kind, best.identity_id, "fuzzy")
+            return Resolution(kind, best.identity_id, "fuzzy"), _MergeHint(
+                best.identity_id, best.score, auto_merge=True
+            )
         new_id = _create_entity(ctx.conn, ctx.user_id, m, kind, index)
         if best is not None and best.score >= LOW_THRESHOLD:
             # zona gris: candidato para el desempate LLM (par canónico a<b).
             _propose_merge_candidate(
                 ctx.conn, ctx.user_id, new_id, best.identity_id, "trgm_name", best.score
             )
-            return Resolution(kind, new_id, "fuzzy")
-        return Resolution(kind, new_id, "created")
+            return Resolution(kind, new_id, "fuzzy"), _MergeHint(
+                best.identity_id, best.score, auto_merge=False
+            )
+        return Resolution(kind, new_id, "created"), None
 
     async def health_check(self) -> HealthResult:
         return HealthResult(

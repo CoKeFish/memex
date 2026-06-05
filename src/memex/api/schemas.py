@@ -211,6 +211,9 @@ class InboxRow(BaseModel):
     # rows = dedup/seam/consolidación por entidad; internal_calls = llamadas LLM internas
     # correlacionadas con su costo. Solo módulos con CAP_DEBUG_INBOX; poblado solo en el detalle.
     extraction_debug: dict[str, Any] = Field(default_factory=dict)
+    # Árbol de traza jerárquica de la extracción (TraceNodeDto[] camelCase; ver core.trace).
+    # Lista PLANA con parentId; null ⇒ mensaje sin árbol → el front cae al fallback. Solo detalle.
+    trace: list[dict[str, Any]] | None = None
     llm: LlmUsageInfo | None = None
     media: list[MediaAssetInfo] = Field(default_factory=list)
     # Feedback manual del usuario sobre este mensaje — solo en el detalle.

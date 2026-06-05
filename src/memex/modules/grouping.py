@@ -103,7 +103,11 @@ def build_grouped_user_content(modules: Sequence[InterestModule], messages_json:
 def parse_grouped_items(content: str, slugs: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
     """Parsea `{"<slug>": [...], ...}` a un dict slug→items. Defensivo como `parse_items`: JSON
     inválido, no-dict, o slug ausente → `[]` para ese slug; elementos no-dict se filtran; claves
-    fuera de `slugs` se ignoran. Siempre devuelve una entrada por cada slug pedido."""
+    fuera de `slugs` se ignoran. Siempre devuelve una entrada por cada slug pedido.
+
+    Tolerancia de shape: algunos modelos (p. ej. DeepSeek) envuelven la lista en `{"items": [...]}`
+    (espejando el formato per-module) en vez de devolverla directa. Se acepta `{"<slug>": [...]}` Y
+    `{"<slug>": {"items": [...]}}`; sin esto la extracción agrupada (default) parsea 0."""
     out: dict[str, list[dict[str, Any]]] = {s: [] for s in slugs}
     try:
         data = json.loads(content)
@@ -113,6 +117,8 @@ def parse_grouped_items(content: str, slugs: Sequence[str]) -> dict[str, list[di
         return out
     for s in slugs:
         raw = data.get(s)
+        if isinstance(raw, dict):  # {"items": [...]} → desenvolver
+            raw = raw.get("items")
         if isinstance(raw, list):
             out[s] = [item for item in raw if isinstance(item, dict)]
     return out
