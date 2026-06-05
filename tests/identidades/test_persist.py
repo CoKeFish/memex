@@ -195,6 +195,44 @@ async def test_role_email_not_used_as_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sender_does_not_swallow_other_mentions() -> None:
+    # Correo de Nequi (remitente conocido) que REPORTA un pago hecho en Tigo. Tigo NO debe
+    # colapsarse en Nequi: el remitente es una identidad más, no la contraparte. Regresión del bug
+    # Nequi→Tigo hallado en datos reales (antes el resolver probaba el email del remitente para CADA
+    # mención y fundía todo en el remitente).
+    with connection() as c:
+        nequi = int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_identidades (user_id, kind, display_name, source) "
+                    "VALUES (1,'organizacion','Nequi','manual') RETURNING id"
+                )
+            ).scalar_one()
+        )
+        c.execute(
+            text(
+                "INSERT INTO mod_identidades_identifiers "
+                "(user_id, identity_id, platform, kind, value, value_norm) "
+                "VALUES (1,:i,'email','email','somos@nequi.com.co','somos@nequi.com.co')"
+            ),
+            {"i": nequi},
+        )
+    items = [
+        IdentityItem(
+            source_inbox_ids=(5,), name="Nequi", email="somos@nequi.com.co", kind="organizacion"
+        ),
+        IdentityItem(source_inbox_ids=(5,), name="Tigo", kind="organizacion"),
+    ]
+    await _persist(items)
+    m = _mentions()
+    # el remitente se resuelve a sí mismo por SU email; Tigo se crea como org propia (no Nequi)
+    assert m["Nequi"]["resolved_identity_id"] == nequi
+    assert m["Tigo"]["resolution_method"] == "created"
+    tigo = next(o for o in _identities("organizacion") if o["display_name"] == "Tigo")
+    assert m["Tigo"]["resolved_identity_id"] == tigo["id"] != nequi
+
+
+@pytest.mark.asyncio
 async def test_persist_empty_is_noop() -> None:
     assert await _persist([]) == 0
     assert _mentions() == {}

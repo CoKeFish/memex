@@ -86,10 +86,8 @@ class IdentidadesModule:
         if not mentions:
             return 0
         index = load_known_index(ctx.conn, ctx.user_id)
-        senders = _sender_emails(ctx.conn, ctx.inbox_ids)
         for m in mentions:
-            sender = next((senders[i] for i in m.source_inbox_ids if i in senders), None)
-            res = index.resolve(m, sender_email=sender)
+            res = index.resolve(m)
             if res.kind is None:
                 res = self._resolve_fuzzy_or_create(ctx, m, index)
             _insert_mention(ctx.conn, ctx.user_id, m, res)
@@ -160,21 +158,6 @@ class IdentidadesModule:
 
 
 # --- helpers -------------------------------------------------------------------------- #
-
-
-def _sender_emails(conn: Connection, inbox_ids: Sequence[int]) -> dict[int, str]:
-    """Email del remitente (`payload->'from'->>'email'`) por inbox id, para la señal de contexto.
-    Chat/social sin `from` → simplemente no aparecen en el mapa."""
-    if not inbox_ids:
-        return {}
-    rows = conn.execute(
-        text(
-            "SELECT id, payload->'from'->>'email' AS sender FROM inbox "
-            "WHERE id = ANY(CAST(:ids AS BIGINT[]))"
-        ),
-        {"ids": list(inbox_ids)},
-    ).all()
-    return {int(r[0]): str(r[1]) for r in rows if r[1]}
 
 
 def _create_entity(

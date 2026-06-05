@@ -1,15 +1,15 @@
 """Resolución DETERMINISTA de una mención a una identidad canónica (persona u organización).
 
-Señales FUERTES, en orden de prioridad (sin LLM; el difuso y el desempate LLM viven en `fuzzy.py` /
-`dedup_llm.py`):
+Señales FUERTES de la MENCIÓN MISMA, en orden de prioridad (sin LLM; el difuso y el desempate LLM
+viven en `fuzzy.py` / `dedup_llm.py`). El remitente del mensaje NO se usa como señal: que el correo
+venga de una identidad conocida no implica que las otras entidades mencionadas sean ese remitente.
 
-  1. remitente del mensaje (email del `from`) → identidad   (señal de contexto fuerte)
-  2. email exacto del item                    → identidad
-  3. dominio del email                         → org
-  4. handle exacto ACOTADO POR PLATAFORMA      → identidad   (el handle de X ≠ Instagram ≠ ...)
-  5. nombre normalizado exacto                 → identidad
-  6. alias normalizado                         → identidad
-  7. nada matchea                              → unresolved
+  1. email exacto del item                → identidad
+  2. dominio del email                     → org
+  3. handle exacto ACOTADO POR PLATAFORMA  → identidad   (el handle de X ≠ Instagram ≠ ...)
+  4. nombre normalizado exacto             → identidad
+  5. alias normalizado                     → identidad
+  6. nada matchea                          → unresolved
 
 `KnownIndex` es puro (se arma desde una lista de `KnownIdentity` en memoria) → testeable sin DB. El
 módulo lo alimenta con lo que lee de `mod_identidades` + `mod_identidades_identifiers`. La
@@ -132,15 +132,13 @@ class KnownIndex:
         self,
         item: IdentityItem,
         *,
-        sender_email: str | None = None,
         source_platform: str | None = None,
     ) -> Resolution:
-        # 1. remitente del mensaje (señal fuerte de contexto).
-        if sender_email:
-            res = self._by_email(sender_email, "sender_email")
-            if res is not None:
-                return res
-        # 2/3. email del item → identidad; dominio → org.
+        # Cada mención se resuelve por SUS PROPIOS identificadores. El remitente del mensaje NO se
+        # usa: que el correo venga de una identidad conocida (un banco, Nequi) no implica que las
+        # OTRAS entidades mencionadas (el comercio donde se pagó) sean ese remitente. El remitente,
+        # si importa, se extrae como su propia mención (con su email) y resuelve por email abajo.
+        # 1/2. email del item → identidad; dominio → org.
         if item.email:
             res = self._by_email(item.email, "email")
             if res is not None:

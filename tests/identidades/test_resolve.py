@@ -1,5 +1,6 @@
 """`KnownIndex.resolve` (v2): señales fuertes deterministas sobre el directorio unificado, en orden
-de prioridad (remitente → email → dominio → handle-por-plataforma → nombre → alias). Puro/sin DB."""
+de prioridad (email → dominio → handle-por-plataforma → nombre → alias). El remitente del mensaje NO
+es señal. Puro/sin DB."""
 
 from __future__ import annotations
 
@@ -52,10 +53,12 @@ def test_email_domain_resolves_org() -> None:
     assert (res.kind, res.identity_id, res.method) == ("organizacion", 10, "domain")
 
 
-def test_sender_email_is_strong_signal() -> None:
-    # la mención no trae email, pero el remitente del mensaje sí → resuelve por remitente
-    res = _idx().resolve(_probe(name="alguien"), sender_email="ada@x.com")
-    assert (res.kind, res.identity_id, res.method) == ("persona", 1, "sender_email")
+def test_sender_is_not_a_resolution_signal() -> None:
+    # una mención cuyo nombre/identificadores no están en el directorio queda SIN resolver. El
+    # remitente del mensaje ya NO se usa: que el correo venga de Ada (ada@x.com) no implica que esta
+    # mención sea Ada. Antes esto se colapsaba erróneamente al remitente (bug Nequi→Tigo).
+    res = _idx().resolve(_probe(name="alguien"))
+    assert res.method == "unresolved"
 
 
 def test_handle_scoped_by_platform() -> None:
