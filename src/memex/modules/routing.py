@@ -35,11 +35,17 @@ class RouteResult:
 
 
 def _toposort(survivors: set[str], active: Mapping[str, InterestModule]) -> list[str]:
-    """Kahn determinista sobre `survivors` (deps antes que dependientes). Ciclo → ValueError."""
+    """Kahn determinista sobre `survivors` (deps antes que dependientes). Ciclo → ValueError.
+
+    Las aristas de orden salen de `depends_on` (duras) Y de `optional_deps` (blandas): una optional
+    dep que TAMBIÉN sobrevivió ordena al dependiente después (para que persista antes y su dominio
+    esté fresco); una que no está en `survivors` simplemente no agrega arista (no fuerza ni dropea —
+    eso lo maneja `resolve_order`, que solo cierra/dropea por `depends_on`)."""
     indeg = {s: 0 for s in survivors}
     adj: dict[str, list[str]] = {s: [] for s in survivors}
     for s in survivors:
-        for dep in active[s].depends_on:
+        # dedup defensivo: si un slug estuviera en ambas listas, no contar la arista dos veces.
+        for dep in dict.fromkeys((*active[s].depends_on, *active[s].optional_deps)):
             if dep in survivors:
                 adj[dep].append(s)
                 indeg[s] += 1

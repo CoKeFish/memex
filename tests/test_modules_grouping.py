@@ -23,7 +23,9 @@ class _FakeModule:
     """Módulo mínimo que satisface `InterestModule` para probar el agrupado (solo importa el
     `slug` y `depends_on`; lo demás es relleno válido)."""
 
-    def __init__(self, slug: str, depends_on: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self, slug: str, depends_on: tuple[str, ...] = (), optional_deps: tuple[str, ...] = ()
+    ) -> None:
         self.slug = slug
         self.interest = f"interés de {slug}"
         self.extraction_schema: type[ExtractionItem] = TransactionItem
@@ -31,6 +33,7 @@ class _FakeModule:
         self.capabilities = frozenset({CAP_EXTRACT})
         self.consumes_kinds = frozenset({SourceKind.EMAIL})
         self.depends_on = depends_on
+        self.optional_deps = optional_deps
 
     async def persist(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
         return 0

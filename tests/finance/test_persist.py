@@ -17,6 +17,7 @@ from memex.llm import ChatMessage, LLMResult, ResponseFormat
 from memex.modules.contract import ModuleContext
 from memex.modules.finance.module import FinanceModule
 from memex.modules.finance.schema import TransactionItem
+from memex.modules.identidades.module import IdentidadesModule
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
@@ -166,3 +167,58 @@ def test_forget_inbox_removes_orphan(conn: Connection) -> None:
 
 def test_persist_empty_is_noop(conn: Connection) -> None:
     assert asyncio.run(FinanceModule().dedup(_ctx(conn), [])) == 0
+
+
+# ----- seam de identidad (dependencia BLANDA via ctx.deps) ----------------------- #
+
+
+def _ctx_with_identidades(conn: Connection, inbox_ids: tuple[int, ...]) -> ModuleContext:
+    """ctx con el handle REAL del directorio inyectado (lo que pasaría el orquestador)."""
+    handle = IdentidadesModule().provide_domain(conn, 1)
+    return ModuleContext(
+        user_id=1,
+        conn=conn,
+        llm=_NoLLM(),
+        deps={"identidades": handle},
+        summary_id=None,
+        inbox_ids=inbox_ids,
+    )
+
+
+def test_persist_resolves_counterparty_identity(conn: Connection) -> None:
+    # contraparte que matchea una identidad sembrada → se persiste el FK canónico.
+    oid = conn.execute(
+        text(
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1,'organizacion','Rappi') RETURNING id"
+        )
+    ).scalar_one()
+    asyncio.run(
+        FinanceModule().dedup(_ctx_with_identidades(conn, (1,)), [_item(counterparty="Rappi")])
+    )
+    fk = conn.execute(
+        text("SELECT counterparty_identity_id FROM mod_finance_transactions WHERE user_id = 1")
+    ).scalar_one()
+    assert fk == oid
+
+
+def test_persist_without_identidades_leaves_fk_null(conn: Connection) -> None:
+    # identidades apagado (deps vacío) → corre igual, FK NULL (best-effort).
+    asyncio.run(FinanceModule().dedup(_ctx(conn, (1,)), [_item(counterparty="Rappi")]))
+    fk = conn.execute(
+        text("SELECT counterparty_identity_id FROM mod_finance_transactions")
+    ).scalar_one()
+    assert fk is None
+
+
+def test_persist_unmatched_counterparty_fk_null(conn: Connection) -> None:
+    # handle presente pero el directorio no tiene la contraparte → FK NULL (resolve no crea).
+    asyncio.run(
+        FinanceModule().dedup(
+            _ctx_with_identidades(conn, (1,)), [_item(counterparty="Comercio Desconocido SAS")]
+        )
+    )
+    fk = conn.execute(
+        text("SELECT counterparty_identity_id FROM mod_finance_transactions")
+    ).scalar_one()
+    assert fk is None

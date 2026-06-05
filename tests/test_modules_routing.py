@@ -20,6 +20,7 @@ def _mod(
     slug: str,
     *,
     depends_on: Iterable[str] = (),
+    optional_deps: Iterable[str] = (),
     kinds: frozenset[SourceKind] = frozenset({SourceKind.EMAIL}),
 ) -> InterestModule:
     cls = type(
@@ -33,6 +34,7 @@ def _mod(
             "capabilities": frozenset({CAP_EXTRACT}),
             "consumes_kinds": kinds,
             "depends_on": tuple(depends_on),
+            "optional_deps": tuple(optional_deps),
         },
     )
     return cls()  # type: ignore[no-any-return]
@@ -105,6 +107,32 @@ def test_resolve_order_cycle_raises() -> None:
     active = _active(_mod("a", depends_on=["b"]), _mod("b", depends_on=["a"]))
     with pytest.raises(ValueError, match="ciclo"):
         resolve_order(["a"], active)
+
+
+# ----- optional_deps (dependencia BLANDA: ordena si está, no dropea si no) -------- #
+
+
+def test_optional_dep_orders_before_when_present() -> None:
+    # finance optional-depende de identidades; ambos elegidos → identidades persiste antes.
+    active = _active(_mod("identidades"), _mod("finance", optional_deps=["identidades"]))
+    result = resolve_order(["finance", "identidades"], active)
+    assert result.order.index("identidades") < result.order.index("finance")
+    assert result.dropped == ()
+
+
+def test_optional_dep_absent_does_not_drop() -> None:
+    # identidades NO está activo: finance corre igual (no se dropea como con depends_on duro).
+    active = _active(_mod("finance", optional_deps=["identidades"]))
+    result = resolve_order(["finance"], active)
+    assert result.order == ("finance",)
+    assert result.dropped == ()
+
+
+def test_optional_dep_not_force_included() -> None:
+    # identidades activo pero NO elegido por el router: no se arrastra al run por la optional dep.
+    active = _active(_mod("identidades"), _mod("finance", optional_deps=["identidades"]))
+    result = resolve_order(["finance"], active)
+    assert result.order == ("finance",)
 
 
 def test_resolve_order_chosen_not_active_dropped() -> None:

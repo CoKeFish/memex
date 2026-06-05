@@ -14,15 +14,18 @@ hora es del cobro (`datetime`), solo la fecha (`date`) o inferida de la recepci�
 dedup usa esa precisión para comparar por hora o por día.
 
 `consumes_kinds` excluye SOCIAL a propósito — los movimientos de plata viven en correos (banco,
-recibos) y chats. La identidad de la contraparte se guarda como TEXTO (`counterparty`): el enganche
-al directorio de identidades es un seam diferido en `dedup._same_responsible` (en refactor).
+recibos) y chats. La contraparte se guarda como TEXTO (`counterparty`, evidencia del LLM) Y como
+referencia canónica `counterparty_identity_id`: en `persist` se resuelve contra el directorio de
+identidades vía `ctx.deps['identidades']` (dependencia BLANDA `optional_deps`; None si identidades
+está apagado). El dedup compara responsables por esa identidad cuando ambos lados la tienen
+(`dedup._same_responsible`), cayendo al texto si no.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, time, timedelta
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -41,7 +44,21 @@ from memex.modules.finance.dedup import (
 from memex.modules.finance.prompt import FINANCE_SYSTEM_PROMPT
 from memex.modules.finance.schema import TransactionItem
 
+if TYPE_CHECKING:
+    from memex.modules.identidades.domain import IdentidadesDomain
+
 _log = get_logger("memex.modules.finance")
+
+
+def _resolve_identity(handle: object | None, name: str) -> int | None:
+    """Resuelve la contraparte (`name`) contra el directorio de identidades usando el handle de
+    `ctx.deps['identidades']` (dependencia BLANDA). Best-effort: sin handle (identidades apagado) o
+    sin texto → None; sin match en el directorio → None. Determinista (el handle no usa LLM)."""
+    if handle is None or not name.strip():
+        return None
+    res = cast("IdentidadesDomain", handle).resolve(name=name)
+    return res.id if res is not None else None
+
 
 #: Margen alrededor del lote para traer transacciones existentes comparables en el dedup. Mayor que
 #: la ventana de día (`DEFAULT_DAY_WINDOW`, 30h) para no perder pares por el borde.
@@ -88,20 +105,25 @@ def _insert_transactions(
     user_id: int,
     items: Sequence[TransactionItem],
     reception_by_id: dict[int, datetime],
+    identidades: object | None,
 ) -> list[DedupRow]:
-    """Inserta cada transacción y devuelve un `DedupRow` por cada una (con su `id` nuevo)."""
+    """Inserta cada transacción y devuelve un `DedupRow` por cada una (con su `id` nuevo). Resuelve
+    la contraparte contra el directorio de identidades (`identidades`, handle de `ctx.deps`) y
+    persiste la referencia canónica `counterparty_identity_id` (None si no resolvió / apagado)."""
     rows: list[DedupRow] = []
     for it in items:
         occurred_at, precision = _resolve_instant(it, reception_by_id)
+        identity_id = _resolve_identity(identidades, it.counterparty)
         tid = conn.execute(
             text(
                 """
                 INSERT INTO mod_finance_transactions
                   (user_id, source_inbox_ids, direction, amount, currency, category, counterparty,
-                   place, occurred_at, occurred_at_precision, description, evidence)
+                   counterparty_identity_id, place, occurred_at, occurred_at_precision, description,
+                   evidence)
                 VALUES
                   (:uid, :ids, :direction, :amount, :currency, :category, :counterparty,
-                   :place, :occurred_at, :precision, :description, :evidence)
+                   :identity_id, :place, :occurred_at, :precision, :description, :evidence)
                 RETURNING id
                 """
             ),
@@ -113,6 +135,7 @@ def _insert_transactions(
                 "currency": it.currency,
                 "category": it.category,
                 "counterparty": it.counterparty,
+                "identity_id": identity_id,
                 "place": it.place,
                 "occurred_at": occurred_at,
                 "precision": precision,
@@ -131,6 +154,7 @@ def _insert_transactions(
                 place=it.place,
                 occurred_at=occurred_at,
                 precision=precision,
+                counterparty_identity_id=identity_id,
             )
         )
     return rows
@@ -150,8 +174,8 @@ def _existing_rows(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> 
         conn.execute(
             text(
                 """
-                SELECT id, direction, amount, currency, category, counterparty, place,
-                       occurred_at, occurred_at_precision
+                SELECT id, direction, amount, currency, category, counterparty,
+                       counterparty_identity_id, place, occurred_at, occurred_at_precision
                 FROM mod_finance_transactions
                 WHERE user_id = :uid
                   AND occurred_at BETWEEN :lo AND :hi
@@ -183,6 +207,11 @@ def _existing_rows(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> 
             place=str(r["place"]),
             occurred_at=r["occurred_at"],
             precision=str(r["occurred_at_precision"]),
+            counterparty_identity_id=(
+                int(r["counterparty_identity_id"])
+                if r["counterparty_identity_id"] is not None
+                else None
+            ),
         )
         for r in rows
     ]
@@ -271,6 +300,11 @@ class FinanceModule:
     capabilities: ClassVar[frozenset[str]] = frozenset({CAP_EXTRACT})
     consumes_kinds: ClassVar[frozenset[SourceKind]] = frozenset({SourceKind.EMAIL, SourceKind.CHAT})
     depends_on: ClassVar[tuple[str, ...]] = ()
+    #: Dependencia BLANDA de identidades: si está activa, su handle resuelve la contraparte
+    #: (`counterparty` → `counterparty_identity_id`) en `persist`; si está apagada, finanzas corre
+    #: igual y el dedup cae a comparar contraparte por texto. NO es `depends_on` duro a propósito
+    #: (no apagar finanzas cuando identidades esté off).
+    optional_deps: ClassVar[tuple[str, ...]] = ("identidades",)
     #: `()` = dedup por MECANISMO PROPIO: la unicidad del vértice-transacción la da la CONSOLIDACIÓN
     #: (`mod_finance_consolidated`), no un UNIQUE sobre la fila cruda — las crudas coexisten; la
     #: FASE 1 solo marca pares (candidatos para el LLM o auto-confirmados procedimentalmente).
@@ -289,7 +323,9 @@ class FinanceModule:
         if not txs:
             return 0
         reception_by_id = _reception_by_id(ctx.conn, ctx.user_id, ctx.inbox_ids)
-        new_rows = _insert_transactions(ctx.conn, ctx.user_id, txs, reception_by_id)
+        # Dependencia BLANDA: el handle del directorio si identidades está activo, None si no.
+        identidades = ctx.deps.get("identidades")
+        new_rows = _insert_transactions(ctx.conn, ctx.user_id, txs, reception_by_id, identidades)
         _mark_dedup(ctx.conn, ctx.user_id, new_rows)
         return len(txs)
 

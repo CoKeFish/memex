@@ -106,7 +106,15 @@ class InterestModule(Protocol):
     """Filtro barato pre-LLM por categoría de fuente (email/chat/social)."""
 
     depends_on: ClassVar[tuple[str, ...]]
-    """Slugs requeridos; el orquestador hace cierre + topo-sort. finance: ()."""
+    """Slugs requeridos (dependencia DURA): el orquestador hace cierre + topo-sort y DROPEA al
+    módulo si una dep no está activa. finance: ()."""
+
+    optional_deps: ClassVar[tuple[str, ...]]
+    """Slugs deseados pero NO requeridos (dependencia BLANDA): si el proveedor está activo, su
+    handle `provide_domain` se inyecta en `ctx.deps[slug]` y se respeta el topo-orden (la dep
+    persiste antes); si NO está activo, el módulo corre igual (sin dropearse) y `ctx.deps` no trae
+    ese slug. Para enganches best-effort a otro dominio sin acoplar el encendido (finance:
+    `("identidades",)` — resuelve la contraparte si identidades corre, si no usa texto)."""
 
     identity_fields: ClassVar[tuple[str, ...]]
     """Business-key del VÉRTICE del módulo: los campos de la fila `mod_*` que lo hacen ÚNICO (v2).

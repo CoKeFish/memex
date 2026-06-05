@@ -62,7 +62,10 @@ DEFAULT_BAND_CANDIDATE = 0.40  # [esto, confirm) → candidato (FASE 2 LLM); < e
 @dataclass(frozen=True)
 class DedupRow:
     """Una transacción a comparar. `occurred_at` es el mejor instante conocido; `precision` dice qué
-    tan confiable es su hora (ver constantes `PRECISION_*`)."""
+    tan confiable es su hora (ver constantes `PRECISION_*`). `counterparty_identity_id` es la
+    identidad del directorio a la que resolvió la contraparte (None si no resolvió o identidades
+    está apagado): cuando ambos lados la tienen, el dedup compara responsables por IDENTIDAD, no
+    por texto."""
 
     transaction_id: int
     direction: str
@@ -73,6 +76,7 @@ class DedupRow:
     place: str
     occurred_at: datetime
     precision: str
+    counterparty_identity_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -91,11 +95,14 @@ def _similarity(a: str, b: str) -> float:
 
 
 def _same_responsible(a: DedupRow, b: DedupRow, *, text_threshold: float) -> bool | None:
-    """SEAM de identidad. Hoy: `True` si las contrapartes coinciden por texto (alta similitud);
-    `None` si alguna está vacía o la similitud es baja (el texto NO puede afirmar con confianza que
-    son responsables DISTINTOS — eso lo deja a la FASE 2 LLM). Nunca devuelve `False` hoy: queda
-    RESERVADO para cuando identidades resuelva acá responsables confirmadamente distintos (que vetan
-    el par). El scoring solo suma el peso de contraparte cuando esto es `True`."""
+    """SEAM de identidad. Si AMBAS contrapartes resolvieron a una identidad del directorio
+    (`counterparty_identity_id`), compara por IDENTIDAD: misma id → `True` (mismo responsable); ids
+    DISTINTAS → `False` (responsables confirmadamente distintos → VETA el par en `_evaluate_pair`,
+    aunque monto/fecha coincidan). Si al menos una no resolvió, cae al TEXTO: alta similitud →
+    `True`; si no → `None` (el texto no puede AFIRMAR que son distintos — eso lo deja a la FASE 2
+    LLM). El scoring solo suma el peso de contraparte cuando esto es `True`."""
+    if a.counterparty_identity_id is not None and b.counterparty_identity_id is not None:
+        return a.counterparty_identity_id == b.counterparty_identity_id
     if not a.counterparty.strip() or not b.counterparty.strip():
         return None
     if _similarity(a.counterparty, b.counterparty) >= text_threshold:

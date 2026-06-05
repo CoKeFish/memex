@@ -49,6 +49,7 @@ class ConsTx:
     precision: str
     description: str
     recency: datetime  # created_at (desempate por más reciente)
+    counterparty_identity_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class ConsolidatedFields:
     precision: str
     description: str
     winner_transaction_id: int
+    counterparty_identity_id: int | None = None
 
 
 # --- PURO: agrupamiento + elección del ganador ------------------------------------- #
@@ -136,6 +138,9 @@ def merge_fields(members: Sequence[ConsTx]) -> ConsolidatedFields:
     winner = ordered[0]
     counterparty, place, description = winner.counterparty, winner.place, winner.description
     occurred_at, precision = winner.occurred_at, winner.precision
+    # La identidad del grupo es única (el veto del dedup impide agrupar identidades distintas): la
+    # del ganador, o la primera no-nula del resto si el ganador no resolvió.
+    counterparty_identity_id = winner.counterparty_identity_id
 
     for m in ordered:
         if not counterparty.strip() and m.counterparty.strip():
@@ -144,6 +149,8 @@ def merge_fields(members: Sequence[ConsTx]) -> ConsolidatedFields:
             place = m.place
         if not description.strip() and m.description.strip():
             description = m.description
+        if counterparty_identity_id is None and m.counterparty_identity_id is not None:
+            counterparty_identity_id = m.counterparty_identity_id
         # Adoptar una fecha más precisa si la del ganador no es la mejor (ordered ya está por
         # precisión dentro de la misma completitud, pero el ganador pudo ganar por completitud con
         # una fecha inferida; tomamos la mejor fecha del grupo).
@@ -161,6 +168,7 @@ def merge_fields(members: Sequence[ConsTx]) -> ConsolidatedFields:
         precision=precision,
         description=description,
         winner_transaction_id=winner.transaction_id,
+        counterparty_identity_id=counterparty_identity_id,
     )
 
 
@@ -179,8 +187,9 @@ def _load_transactions(conn: Connection, user_id: int) -> list[ConsTx]:
         conn.execute(
             text(
                 """
-                SELECT id, direction, amount, currency, category, counterparty, place,
-                       occurred_at, occurred_at_precision, description, created_at
+                SELECT id, direction, amount, currency, category, counterparty,
+                       counterparty_identity_id, place, occurred_at, occurred_at_precision,
+                       description, created_at
                 FROM mod_finance_transactions
                 WHERE user_id = :uid
                 ORDER BY id
@@ -204,6 +213,11 @@ def _load_transactions(conn: Connection, user_id: int) -> list[ConsTx]:
             precision=str(r["occurred_at_precision"]),
             description=str(r["description"]),
             recency=r["created_at"],
+            counterparty_identity_id=(
+                int(r["counterparty_identity_id"])
+                if r["counterparty_identity_id"] is not None
+                else None
+            ),
         )
         for r in rows
     ]
@@ -244,6 +258,7 @@ def _write_consolidated(
         "currency": fields.currency,
         "category": fields.category,
         "counterparty": fields.counterparty,
+        "identity_id": fields.counterparty_identity_id,
         "place": fields.place,
         "occurred_at": fields.occurred_at,
         "precision": fields.precision,
@@ -256,11 +271,12 @@ def _write_consolidated(
                 text(
                     """
                     INSERT INTO mod_finance_consolidated
-                      (user_id, direction, amount, currency, category, counterparty, place,
-                       occurred_at, occurred_at_precision, description, winner_transaction_id)
+                      (user_id, direction, amount, currency, category, counterparty,
+                       counterparty_identity_id, place, occurred_at, occurred_at_precision,
+                       description, winner_transaction_id)
                     VALUES
-                      (:uid, :direction, :amount, :currency, :category, :counterparty, :place,
-                       :occurred_at, :precision, :description, :winner)
+                      (:uid, :direction, :amount, :currency, :category, :counterparty,
+                       :identity_id, :place, :occurred_at, :precision, :description, :winner)
                     RETURNING id
                     """
                 ),
@@ -272,9 +288,10 @@ def _write_consolidated(
             """
             UPDATE mod_finance_consolidated SET
               direction = :direction, amount = :amount, currency = :currency, category = :category,
-              counterparty = :counterparty, place = :place, occurred_at = :occurred_at,
-              occurred_at_precision = :precision, description = :description,
-              winner_transaction_id = :winner, deleted = FALSE, updated_at = NOW()
+              counterparty = :counterparty, counterparty_identity_id = :identity_id,
+              place = :place, occurred_at = :occurred_at, occurred_at_precision = :precision,
+              description = :description, winner_transaction_id = :winner, deleted = FALSE,
+              updated_at = NOW()
             WHERE id = :id
             """
         ),

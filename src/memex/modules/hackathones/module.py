@@ -47,6 +47,7 @@ class HackathonModule:
         {SourceKind.EMAIL, SourceKind.CHAT, SourceKind.SOCIAL}
     )
     depends_on: ClassVar[tuple[str, ...]] = ()
+    optional_deps: ClassVar[tuple[str, ...]] = ()
     #: business-key del vértice hackatón. `name` se compara normalizado (lower + colapso de
     #: whitespace) por la DB; el UNIQUE de negocio (índice funcional) vive en la migración 0030
     #: (con `starts_on` NULL = centinela, para anuncios sin fecha del evento).

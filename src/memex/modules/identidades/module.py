@@ -69,6 +69,7 @@ class IdentidadesModule:
         {SourceKind.EMAIL, SourceKind.CHAT, SourceKind.SOCIAL}
     )
     depends_on: ClassVar[tuple[str, ...]] = ()
+    optional_deps: ClassVar[tuple[str, ...]] = ()
     #: `()` = dedup por MECANISMO PROPIO: señales fuertes (`KnownIndex`) + difuso (`pg_trgm`) +
     #: auto-merge/candidato. La identidad es multi-señal, no una clave simple.
     identity_fields: ClassVar[tuple[str, ...]] = ()

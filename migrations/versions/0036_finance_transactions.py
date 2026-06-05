@@ -65,6 +65,9 @@ def upgrade() -> None:
             currency           TEXT NOT NULL,
             category           TEXT NOT NULL DEFAULT 'otros',
             counterparty       TEXT NOT NULL DEFAULT '',
+            -- referencia canónica al directorio de identidades (resuelta de `counterparty` en
+            -- persist si identidades está activa); NULL si no resolvió o el módulo está apagado.
+            counterparty_identity_id BIGINT REFERENCES mod_identidades(id) ON DELETE SET NULL,
             place              TEXT NOT NULL DEFAULT '',
             occurred_at        TIMESTAMPTZ NOT NULL,
             occurred_at_precision TEXT NOT NULL DEFAULT 'inferred'
@@ -85,6 +88,8 @@ def upgrade() -> None:
             ON mod_finance_transactions (user_id, category);
         CREATE INDEX mod_finance_transactions_user_outcome
             ON mod_finance_transactions (user_id, processing_outcome);
+        CREATE INDEX mod_finance_transactions_user_identity
+            ON mod_finance_transactions (user_id, counterparty_identity_id);
         """
     )
 
@@ -127,6 +132,7 @@ def upgrade() -> None:
             currency              TEXT NOT NULL,
             category              TEXT NOT NULL DEFAULT 'otros',
             counterparty          TEXT NOT NULL DEFAULT '',
+            counterparty_identity_id BIGINT REFERENCES mod_identidades(id) ON DELETE SET NULL,
             place                 TEXT NOT NULL DEFAULT '',
             occurred_at           TIMESTAMPTZ NOT NULL,
             occurred_at_precision TEXT NOT NULL DEFAULT 'inferred'

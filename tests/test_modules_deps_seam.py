@@ -19,6 +19,7 @@ class _FakeProvider:
     slug = "prov"
     capabilities = frozenset({CAP_PROVIDE_DOMAIN})
     depends_on: tuple[str, ...] = ()
+    optional_deps: tuple[str, ...] = ()
 
     def provide_domain(self, conn: Any, user_id: int) -> tuple[str, int]:
         return ("handle", user_id)
@@ -28,8 +29,11 @@ class _FakeConsumer:
     slug = "cons"
     capabilities = frozenset({CAP_EXTRACT})
 
-    def __init__(self, depends_on: tuple[str, ...]) -> None:
+    def __init__(
+        self, depends_on: tuple[str, ...] = (), optional_deps: tuple[str, ...] = ()
+    ) -> None:
         self.depends_on = depends_on
+        self.optional_deps = optional_deps
 
 
 class _CapButNoMethod:
@@ -38,6 +42,7 @@ class _CapButNoMethod:
     slug = "fake"
     capabilities = frozenset({CAP_PROVIDE_DOMAIN})
     depends_on: tuple[str, ...] = ()
+    optional_deps: tuple[str, ...] = ()
 
 
 def test_build_deps_injects_declared_provider() -> None:
@@ -68,6 +73,21 @@ def test_build_deps_skips_cap_without_method() -> None:
     cons: Any = _FakeConsumer(depends_on=("fake",))
     conn: Any = None
     assert _build_deps(cons, conn, 1, {"fake": np, "cons": cons}) == {}
+
+
+def test_build_deps_injects_optional_provider() -> None:
+    # dependencia BLANDA: si el proveedor está activo, su handle se inyecta igual que depends_on.
+    prov: Any = _FakeProvider()
+    cons: Any = _FakeConsumer(optional_deps=("prov",))
+    conn: Any = None
+    assert _build_deps(cons, conn, 9, {"prov": prov, "cons": cons}) == {"prov": ("handle", 9)}
+
+
+def test_build_deps_optional_provider_absent_is_empty() -> None:
+    # optional dep con proveedor NO activo → no aparece en ctx.deps (el módulo cae a best-effort).
+    cons: Any = _FakeConsumer(optional_deps=("prov",))
+    conn: Any = None
+    assert _build_deps(cons, conn, 1, {"cons": cons}) == {}
 
 
 def test_identidades_provide_domain_resolves() -> None:

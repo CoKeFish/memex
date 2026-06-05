@@ -32,6 +32,7 @@ def _row(
     place: str = "",
     at: datetime | None = None,
     precision: str = PRECISION_DATETIME,
+    identity_id: int | None = None,
 ) -> DedupRow:
     return DedupRow(
         transaction_id=tid,
@@ -43,6 +44,7 @@ def _row(
         place=place,
         occurred_at=at if at is not None else _BASE,
         precision=precision,
+        counterparty_identity_id=identity_id,
     )
 
 
@@ -144,6 +146,35 @@ def test_same_responsible_none_when_low_similarity() -> None:
     a = _row(1, counterparty="Rappi")
     b = _row(2, counterparty="Cabify")
     assert _same_responsible(a, b, text_threshold=0.85) is None
+
+
+def test_same_responsible_same_identity_true() -> None:
+    # ambos resuelven a la MISMA identidad → True aunque el texto difiera mucho.
+    a = _row(1, counterparty="RAPPI*REST", identity_id=42)
+    b = _row(2, counterparty="Rappi Colombia SAS", identity_id=42)
+    assert _same_responsible(a, b, text_threshold=0.85) is True
+
+
+def test_same_responsible_different_identity_vetoes() -> None:
+    # ambos resuelven a identidades DISTINTAS → False (veta el par aunque el texto se parezca).
+    a = _row(1, counterparty="Rappi", identity_id=42)
+    b = _row(2, counterparty="Rappi", identity_id=99)
+    assert _same_responsible(a, b, text_threshold=0.85) is False
+
+
+def test_same_responsible_one_identity_falls_back_to_text() -> None:
+    # solo un lado resolvió → no se compara por id; cae al texto (alta similitud → True).
+    a = _row(1, counterparty="Rappi", identity_id=42)
+    b = _row(2, counterparty="Rappi", identity_id=None)
+    assert _same_responsible(a, b, text_threshold=0.85) is True
+
+
+def test_different_identity_vetoes_pair_despite_match() -> None:
+    # integración de la compuerta: mismo monto + misma hora + lugar (score alto) pero identidades
+    # distintas → el veto de `_same_responsible` (False) descarta el par por completo.
+    a = _row(1, counterparty="Rappi", place="Calle 1", identity_id=42)
+    b = _row(2, counterparty="Rappi", place="Calle 1", identity_id=99)
+    assert _pairs(a, b) == []
 
 
 # ----- determinismo / orden ------------------------------------------------------ #

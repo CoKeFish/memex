@@ -334,12 +334,15 @@ def _build_deps(
     user_id: int,
     active_by_slug: dict[str, InterestModule],
 ) -> dict[str, object]:
-    """`ctx.deps` del módulo: por cada slug en su `depends_on` cuyo proveedor activo declara
-    `provide_domain`, inyecta su handle tipado ligado a `(conn, user_id)` — así el módulo usa el
-    dominio de su dependencia sin SQL crudo. Vacío si no declara dependencias con dominio. El
-    proveedor ya corrió antes en la ventana (topo-orden), así que el handle ve datos frescos."""
+    """`ctx.deps` del módulo: por cada slug en su `depends_on` (duro) u `optional_deps` (blando)
+    cuyo proveedor activo declara `provide_domain`, inyecta su handle tipado ligado a `(conn,
+    user_id)` — así el módulo usa el dominio de su dependencia sin SQL crudo. Vacío si no declara
+    dependencias con dominio. Una `optional_deps` cuyo proveedor está apagado simplemente no aparece
+    en `ctx.deps` (el módulo cae a su camino best-effort). El proveedor ya corrió antes en la
+    ventana (topo-orden), así que el handle ve datos frescos."""
     deps: dict[str, object] = {}
-    for slug in module.depends_on:
+    # dedup defensivo: un slug en ambas listas se inyecta una sola vez.
+    for slug in dict.fromkeys((*module.depends_on, *module.optional_deps)):
         provider = active_by_slug.get(slug)
         if provider is None or CAP_PROVIDE_DOMAIN not in provider.capabilities:
             continue

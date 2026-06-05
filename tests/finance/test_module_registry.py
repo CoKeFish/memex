@@ -36,3 +36,8 @@ def test_finance_consumes_email_and_chat_not_social() -> None:
 def test_finance_has_no_dependencies() -> None:
     # depends_on=() a propósito: un depends_on duro a identidades apagaría finanzas cuando esté off.
     assert FinanceModule.depends_on == ()
+
+
+def test_finance_optionally_depends_on_identidades() -> None:
+    # dependencia BLANDA: resuelve la contraparte si identidades está activo, corre igual si no.
+    assert FinanceModule.optional_deps == ("identidades",)
