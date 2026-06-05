@@ -487,7 +487,8 @@ async def run_pull(
             if _mark_cancelled(conn, account, provider_event_id, run_id):
                 stats.deleted += 1
         if new_rows:
-            stats.dedup_pairs = _mark_dedup(conn, user_id, new_rows)
+            # La sync de proveedor no es per-mensaje (sin `ctx.trace`); solo cuenta los pares.
+            stats.dedup_pairs = len(_mark_dedup(conn, user_id, new_rows))
         _save_cursor(conn, account_id, new_sync_token)
         _finish_run(conn, run_id, stats, status="ok")
 

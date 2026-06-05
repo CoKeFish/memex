@@ -84,7 +84,7 @@ class HackathonModule:
                 "evidence": h.evidence,
             }
             identity = {"user_id": ctx.user_id, "name": h.name, "starts_on": h.starts_on}
-            upsert_unique(
+            hid, _created = upsert_unique(
                 ctx.conn,
                 "mod_hackathones_events",
                 identity=identity,
@@ -92,6 +92,12 @@ class HackathonModule:
                 merge_arrays=("source_inbox_ids",),
                 norm_text=("name",),
             )
+            # Traza: una ENTIDAD por hackatón (no-op si la traza está apagada). Sin dedup-pairs ni
+            # worker FASE-2 → no hay `decision`/`llm` que colgar.
+            label = h.name.strip() or "(sin nombre)"
+            if h.starts_on is not None:
+                label = f"{label} · {h.starts_on}"
+            ctx.trace.entity("mod_hackathones_events", id=hid, label=label, status="ok")
         return len(hackathons)
 
     async def health_check(self) -> HealthResult:

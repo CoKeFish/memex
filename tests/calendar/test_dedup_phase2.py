@@ -7,12 +7,13 @@ coexistir ante respuesta no parseable, e idempotencia (solo toca `candidate`).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, time
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import text
 
+from memex.core.trace import create_root, open_module_tracer
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.calendar.dedup_llm import (
@@ -74,6 +75,22 @@ def _seed_candidate(a_id: int, b_id: int) -> None:
             ),
             {"a": lo, "b": hi},
         )
+
+
+def _seed_inbox(ext: str) -> int:
+    with connection() as c:
+        sid = c.execute(
+            text("INSERT INTO sources (user_id, name, type) VALUES (1, :n, 'imap') RETURNING id"),
+            {"n": ext},
+        ).scalar_one()
+        iid = c.execute(
+            text(
+                "INSERT INTO inbox (user_id, source_id, external_id, occurred_at, payload) "
+                "VALUES (1, :sid, :ext, :occ, CAST('{}' AS JSONB)) RETURNING id"
+            ),
+            {"sid": sid, "ext": ext, "occ": datetime(2026, 6, 3, 12, 0, tzinfo=UTC)},
+        ).scalar_one()
+    return int(iid)
 
 
 def _status(a_id: int, b_id: int) -> tuple[str, str | None]:
@@ -167,6 +184,41 @@ async def test_idempotent_only_processes_candidates() -> None:
 
     assert stats2.pairs == 0
     assert fake.calls == 1  # no re-llamó al LLM
+
+
+@pytest.mark.asyncio
+async def test_attaches_desempate_to_event_entity() -> None:
+    # La FASE 2 cuelga su desempate (con costo/output) a la entidad de UNO de los eventos del par
+    # (un solo lado → sin doble-conteo). No-op si ningún evento tiene nodo de traza.
+    a = _seed_event("Dentista", start_time=time(10, 0))
+    b = _seed_event("Cita Dentalink", start_time=time(10, 0))
+    _seed_candidate(a, b)
+    iid = _seed_inbox("cal-dedup2-trace")
+    with connection() as c:
+        root = create_root(c, user_id=1, inbox_id=iid, label="msg")
+        span = open_module_tracer(
+            c, user_id=1, inbox_id=iid, root_id=root, slug="calendar", label="calendar", seq=0
+        )
+        span.entity("mod_calendar_events", id=a, label="Dentista")
+        span.entity("mod_calendar_events", id=b, label="Cita Dentalink")
+
+    await run_dedup_phase2(1, client=FakeLLM('{"same": true, "confidence": 0.9, "rationale": "x"}'))
+
+    with connection() as c:
+        rows = (
+            c.execute(
+                text(
+                    "SELECT label, llm_call_id FROM trace_nodes "
+                    "WHERE inbox_id = :i AND kind = 'llm'"
+                ),
+                {"i": iid},
+            )
+            .mappings()
+            .all()
+        )
+    assert len(rows) == 1  # un solo lado del par (no doble-conteo del costo)
+    assert str(rows[0]["label"]).startswith("desempate LLM · vs #")
+    assert rows[0]["llm_call_id"] is not None
 
 
 def test_disambiguate_pair_view_is_usable() -> None:

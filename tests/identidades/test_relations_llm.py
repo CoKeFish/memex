@@ -9,12 +9,14 @@ no llama sin overcap, `LLMQuotaError` propaga).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
 import pytest
 from sqlalchemy import text
 
+from memex.core.trace import create_root
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.llm.client import LLMQuotaError
@@ -126,6 +128,21 @@ def _mention(conn: Any, identity_id: int, inbox_ids: list[int], kind: str = "per
 
 def _pair(e: Any) -> set[tuple[str, int]]:
     return {(e.src.slug, e.src.id), (e.dst.slug, e.dst.id)}
+
+
+def _seed_inbox(conn: Any, ext: str) -> int:
+    sid = conn.execute(
+        text("INSERT INTO sources (user_id, name, type) VALUES (1, :n, 'imap') RETURNING id"),
+        {"n": ext},
+    ).scalar_one()
+    iid = conn.execute(
+        text(
+            "INSERT INTO inbox (user_id, source_id, external_id, occurred_at, payload) "
+            "VALUES (1, :sid, :ext, :occ, CAST('{}' AS JSONB)) RETURNING id"
+        ),
+        {"sid": sid, "ext": ext, "occ": datetime(2026, 6, 3, 12, 0, tzinfo=UTC)},
+    ).scalar_one()
+    return int(iid)
 
 
 # --- _parse_pairs (puro) ----------------------------------------------------------- #
@@ -251,6 +268,38 @@ async def test_run_cooccurrence_llm_best_effort_one_bad_email() -> None:
         edges = list_edges(c, 1)
     assert len(edges) == 1
     assert _pair(edges[0]) == {("identidades:person", a), ("identidades:org", b)}
+
+
+@pytest.mark.asyncio
+async def test_run_cooccurrence_llm_attaches_cost_to_root() -> None:
+    # La co-ocurrencia es per-mensaje: si el correo tiene root de traza, su costo se cuelga ahí
+    # (hoja `llm` "co-ocurrencia" bajo el root) para que el costo del mensaje sea fiel.
+    with connection() as c:
+        iid = _seed_inbox(c, "cooc-trace")
+        p = _identity(c, "persona", "Juan")
+        o = _identity(c, "organizacion", "Acme")
+        _mention(c, p, [iid])
+        _mention(c, o, [iid], kind="organizacion")
+        root = create_root(c, user_id=1, inbox_id=iid, label="msg")
+    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}}}]}}')
+    await run_cooccurrence_llm(1, cap=1, client=fake)
+
+    with connection() as c:
+        rows = (
+            c.execute(
+                text(
+                    "SELECT parent_id, label, llm_call_id FROM trace_nodes "
+                    "WHERE inbox_id = :i AND kind = 'llm'"
+                ),
+                {"i": iid},
+            )
+            .mappings()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0]["parent_id"] == root  # cuelga del root del mensaje
+    assert rows[0]["label"] == "co-ocurrencia"
+    assert rows[0]["llm_call_id"] is not None
 
 
 @pytest.mark.asyncio

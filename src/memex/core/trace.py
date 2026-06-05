@@ -121,7 +121,13 @@ class TraceNode:
         detail: dict[str, Any] | None = None,
     ) -> TraceNode:
         """Nodo de ENTIDAD: referencia (no copia) una fila de dominio (`table`+`id`). El front la
-        muestra como `#id` linkeable y le cuelga abajo los pasos de qué le pasó."""
+        muestra como `#id` linkeable y le cuelga abajo los pasos de qué le pasó.
+
+        Convención: `entity` = fila de dominio TOCADA por el mensaje (creada O referenciada), no
+        estrictamente "insertada en esta corrida". finance/calendar/hackathones emiten una por fila
+        materializada; identidades emite una por MENCIÓN resuelta, anclada a la identidad resuelta
+        —que puede ser preexistente—. Por eso el invariante de cobertura exige `≥1` entity cuando un
+        módulo persistió filas, no una correspondencia 1:1."""
         return self._child("entity", label, status=status, detail=detail, ref=(table, id))
 
     def step(
@@ -225,6 +231,31 @@ def attach_to_entity(
     if row is None:
         return None
     return TraceNode(conn, user_id=user_id, inbox_id=row["inbox_id"], node_id=int(row["id"]))
+
+
+def attach_to_root(conn: Connection, *, user_id: int, inbox_id: int) -> TraceNode | None:
+    """Handle posicionado en el nodo `root` del mensaje `inbox_id`, o None si no existe (el mensaje
+    nunca se extrajo por-mensaje). Para un worker ASÍNCRONO per-mensaje que NO produce una fila de
+    dominio con su propio nodo `entity` (p. ej. la co-ocurrencia de identidades, que materializa
+    `relation_edges`): cuelga su llamada LLM directo bajo el root del mensaje. Escribe en `conn`."""
+    row = (
+        conn.execute(
+            text(
+                """
+                SELECT id FROM trace_nodes
+                WHERE user_id = :u AND inbox_id = :i AND kind = 'root'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ),
+            {"u": user_id, "i": inbox_id},
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+    return TraceNode(conn, user_id=user_id, inbox_id=inbox_id, node_id=int(row["id"]))
 
 
 # --- lectura: serialización del árbol + roll-up de costo ----------------------------- #

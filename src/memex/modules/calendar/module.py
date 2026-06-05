@@ -14,19 +14,22 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
-from memex.modules.calendar.dedup import DedupRow, mark_duplicates
+from memex.modules.calendar.dedup import DedupPair, DedupRow, mark_duplicates
 from memex.modules.calendar.domain import CalendarDomainReader
 from memex.modules.calendar.prompt import CALENDAR_SYSTEM_PROMPT
 from memex.modules.calendar.schema import CalendarEventItem
 from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, ModuleContext
 from memex.modules.dedup import forget_inbox_rows
+
+if TYPE_CHECKING:
+    from memex.core.trace import TraceNode
 
 _log = get_logger("memex.modules.calendar")
 
@@ -143,9 +146,9 @@ def _mark_processed(conn: Connection, new_event_ids: list[int], in_pair: set[int
         )
 
 
-def _mark_dedup(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> int:
+def _mark_dedup(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> list[DedupPair]:
     """Corre el dedup determinista FASE 1, registra los pares candidatos y marca el estado de
-    procesamiento de los eventos nuevos. Devuelve cuántos pares marcó."""
+    procesamiento de los eventos nuevos. Devuelve los pares marcados (para la traza)."""
     existing = _existing_rows(conn, user_id, new_rows)
     pairs = mark_duplicates(new_rows, existing)
     in_pair: set[int] = set()
@@ -169,7 +172,7 @@ def _mark_dedup(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> int
     _mark_processed(conn, [r.event_id for r in new_rows], in_pair)
     if pairs:
         _log.info("calendar.dedup.marked", pairs=len(pairs))
-    return len(pairs)
+    return pairs
 
 
 class CalendarModule:
@@ -205,7 +208,33 @@ class CalendarModule:
         if not events:
             return 0
         new_rows = _insert_events(ctx.conn, ctx.user_id, events)
-        _mark_dedup(ctx.conn, ctx.user_id, new_rows)
+        # Traza: una ENTIDAD por evento (no-op si la traza está apagada).
+        ents: dict[int, TraceNode] = {}
+        for r in new_rows:
+            label = r.title.strip() or "(sin título)"
+            if r.starts_on is not None:
+                label = f"{label} · {r.starts_on}"
+            ents[r.event_id] = ctx.trace.entity(
+                "mod_calendar_events", id=r.event_id, label=label, status="ok"
+            )
+        # Traza: dedup FASE 1 → comparación "vs evento #other" bajo la entidad que toca el par.
+        pairs = _mark_dedup(ctx.conn, ctx.user_id, new_rows)
+        steps: dict[int, TraceNode] = {}
+        for p in pairs:
+            for eid in (p.a_id, p.b_id):
+                if eid not in ents:
+                    continue  # el otro lado es un evento pre-existente, no de este mensaje
+                other = p.b_id if eid == p.a_id else p.a_id
+                step = steps.get(eid)
+                if step is None:
+                    step = ents[eid].step("dedup")
+                    steps[eid] = step
+                step.decision(
+                    f"vs evento #{other}",
+                    ref=("mod_calendar_events", other),
+                    detail={"reason": p.reason, "score": p.score},
+                    status="warn",
+                )
         return len(events)
 
     async def health_check(self) -> HealthResult:

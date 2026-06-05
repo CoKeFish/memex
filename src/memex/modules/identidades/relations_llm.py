@@ -28,6 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.core.observability import CostAccum, record_llm_call
+from memex.core.trace import attach_to_root
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.llm.client import LLMQuotaError
@@ -262,7 +263,7 @@ async def run_cooccurrence_llm(
                         evidence=f"inbox:{mid}",
                     )
                     stats.edges += 1
-            record_llm_call(
+            call_id = record_llm_call(
                 user_id=user_id,
                 purpose="identidades_cooccurrence",
                 model=result.model,
@@ -278,6 +279,18 @@ async def run_cooccurrence_llm(
                 source_id=None,
                 metadata={"inbox_id": mid, "identities": len(identities), "pairs": len(pairs)},
             )
+            # Traza: la co-ocurrencia es per-mensaje pero no produce fila de dominio con `entity`
+            # (materializa `relation_edges`) → cuelga su costo bajo el ROOT del mensaje. No-op si
+            # el correo no se extrajo por-mensaje (sin root).
+            with connection() as conn:
+                node = attach_to_root(conn, user_id=user_id, inbox_id=mid)
+                if node is not None:
+                    node.llm(
+                        call_id,
+                        label="co-ocurrencia",
+                        status="ok",
+                        detail={"identities": len(identities), "pairs": len(pairs)},
+                    )
             stats.cost.calls += 1
             stats.cost.prompt_tokens += result.usage.prompt_tokens
             stats.cost.completion_tokens += result.usage.completion_tokens

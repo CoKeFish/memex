@@ -15,6 +15,7 @@ from sqlalchemy import text
 from memex.core.trace import (
     NULL_TRACER,
     attach_to_entity,
+    attach_to_root,
     create_root,
     open_module_tracer,
     read_trace,
@@ -231,3 +232,46 @@ def test_attach_to_entity_returns_none_without_node() -> None:
     # Sin nodo de entidad (mensaje batch / no extraído por-mensaje) → None (el worker omite).
     with connection() as c:
         assert attach_to_entity(c, user_id=1, table="mod_finance_transactions", ref_id=999) is None
+
+
+def test_attach_to_root_hangs_call_under_root_with_null_inbox() -> None:
+    # La co-ocurrencia (FASE batch) es per-mensaje pero no produce fila de dominio con `entity`:
+    # su call (inbox_id=NULL) se cuelga bajo el ROOT del mensaje vía attach_to_root + node.llm.
+    iid = _seed_inbox()
+    resp = '{"pairs": []}'
+    with connection() as c:  # call del worker, SIN inbox_id (columna), como la co-ocurrencia real
+        cid = int(
+            c.execute(
+                text(
+                    """
+                    INSERT INTO llm_calls
+                      (user_id, inbox_id, purpose, model, prompt_tokens, completion_tokens,
+                       cost_usd, latency_ms, status, response_text)
+                    VALUES (1, NULL, 'identidades_cooccurrence', 'fake', 1, 1, 0.0005, 1, 'ok', :r)
+                    RETURNING id
+                    """
+                ),
+                {"r": resp},
+            ).scalar_one()
+        )
+    with connection() as c:
+        root = create_root(c, user_id=1, inbox_id=iid, label="msg")
+        node = attach_to_root(c, user_id=1, inbox_id=iid)
+        assert node is not None
+        node.llm(cid, label="co-ocurrencia", detail={"pairs": 0})
+
+    tree = read_trace(1, iid)
+    assert tree is not None
+    cooc = next(n for n in tree if n["kind"] == "llm" and n["label"] == "co-ocurrencia")
+    assert cooc["parentId"] == root
+    assert cooc["llmCallId"] == cid
+    assert cooc["cost"]["ownUsd"] == pytest.approx(0.0005)
+    root_node = next(n for n in tree if n["kind"] == "root")
+    assert root_node["cost"]["subtreeUsd"] == pytest.approx(0.0005)  # el costo sube al root
+
+
+def test_attach_to_root_returns_none_without_root() -> None:
+    # Mensaje sin root (no extraído por-mensaje / batch) → None (el worker omite el atado).
+    iid = _seed_inbox()
+    with connection() as c:
+        assert attach_to_root(c, user_id=1, inbox_id=iid) is None

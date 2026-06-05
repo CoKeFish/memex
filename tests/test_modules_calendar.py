@@ -5,7 +5,9 @@ Los del schema/registry/dedup son puros; `events_in_range` y `contribute` tocan 
 
 from __future__ import annotations
 
-from datetime import date, time, timedelta
+import asyncio
+from collections.abc import Sequence
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -13,7 +15,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.core.source import SourceKind
+from memex.core.trace import create_root, open_module_tracer
 from memex.db import connection
+from memex.llm import ChatMessage, LLMResult, ResponseFormat
 from memex.modules import known_modules, resolve
 from memex.modules.calendar.dedup import DedupRow, mark_duplicates
 from memex.modules.calendar.domain import (
@@ -24,7 +28,13 @@ from memex.modules.calendar.domain import (
 )
 from memex.modules.calendar.module import CalendarModule
 from memex.modules.calendar.schema import CalendarEventItem
-from memex.modules.contract import CAP_EXTRACT, CAP_PROVIDE_DOMAIN, ExtractionItem, InterestModule
+from memex.modules.contract import (
+    CAP_EXTRACT,
+    CAP_PROVIDE_DOMAIN,
+    ExtractionItem,
+    InterestModule,
+    ModuleContext,
+)
 
 # ----- schema -------------------------------------------------------------------- #
 
@@ -248,3 +258,76 @@ def test_contribute_inserts_module_events_with_priority(conn: Connection) -> Non
 def test_contribute_empty_is_noop(conn: Connection) -> None:
     reader = CalendarDomainReader(conn, 1)
     assert reader.contribute([], contributed_by="classes") == 0
+
+
+# ----- traza jerárquica (ctx.trace) ---------------------------------------------- #
+
+
+class _NoLLM:
+    """Satisface `LLMClient`; `dedup` no toca el LLM (la FASE 2 corre aparte)."""
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        response_format: ResponseFormat = "text",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResult:
+        raise AssertionError("dedup no debe llamar al LLM")
+
+
+def _seed_inbox(ext: str) -> int:
+    with connection() as c:
+        sid = c.execute(
+            text("INSERT INTO sources (user_id, name, type) VALUES (1, :n, 'imap') RETURNING id"),
+            {"n": ext},
+        ).scalar_one()
+        iid = c.execute(
+            text(
+                "INSERT INTO inbox (user_id, source_id, external_id, occurred_at, payload) "
+                "VALUES (1, :sid, :ext, :occ, CAST('{}' AS JSONB)) RETURNING id"
+            ),
+            {"sid": sid, "ext": ext, "occ": datetime(2026, 6, 3, 12, 0, tzinfo=UTC)},
+        ).scalar_one()
+    return int(iid)
+
+
+def test_dedup_emits_trace_entities_and_dedup_decision(conn: Connection) -> None:
+    """Con un tracer real, `dedup` emite una ENTIDAD por evento + un paso 'dedup' con la comparación
+    'vs evento #other' del par FASE 1 (dos eventos mismo día/hora/título marcan par)."""
+    iid = _seed_inbox(ext="cal-trace")
+    root = create_root(conn, user_id=1, inbox_id=iid, label="msg")
+    tracer = open_module_tracer(
+        conn, user_id=1, inbox_id=iid, root_id=root, slug="calendar", label="calendar", seq=0
+    )
+    ctx = ModuleContext(
+        user_id=1,
+        conn=conn,
+        llm=_NoLLM(),
+        deps={},
+        summary_id=None,
+        inbox_ids=(iid,),
+        trace=tracer,
+    )
+    common = {
+        "source_inbox_ids": (iid,),
+        "title": "Examen de Análisis",
+        "starts_on": date(2026, 6, 3),
+        "start_time": time(15, 30),
+        "evidence": "examen 3/6 15:30",
+    }
+    asyncio.run(
+        CalendarModule().dedup(ctx, [CalendarEventItem(**common), CalendarEventItem(**common)])
+    )
+
+    rows = (
+        conn.execute(text("SELECT kind, label FROM trace_nodes WHERE inbox_id = :i"), {"i": iid})
+        .mappings()
+        .all()
+    )
+    kinds = [r["kind"] for r in rows]
+    assert kinds.count("entity") == 2  # una por evento
+    assert "step" in kinds  # el paso 'dedup'
+    assert any(r["kind"] == "decision" and str(r["label"]).startswith("vs evento #") for r in rows)
