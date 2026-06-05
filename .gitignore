@@ -147,10 +147,10 @@ Desktop.ini
 /logs/
 
 # -----------------------------------------------------------------------------
-# Claude Code / agent caches
+# Claude Code / agent: caches, artefactos de sesión y git worktrees (.claude/worktrees/).
+# Se ignora todo `.claude/` (no es código del proyecto; un `git add -A` no debe agarrarlo).
 # -----------------------------------------------------------------------------
-.claude/cache/
-.claude/local/
+.claude/
 
 # Diagramas de arquitectura — artefactos locales, no se versionan.
 # Las fuentes (.dot/.mmd) y los renders (.png/.svg) son regenerables y
