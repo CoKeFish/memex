@@ -33,7 +33,7 @@ from sqlalchemy.engine import Connection
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_DEBUG_INBOX, CAP_EXTRACT, ExtractionItem, ModuleContext
-from memex.modules.dedup import forget_inbox_rows
+from memex.modules.dedup import fetch_internal_calls, forget_inbox_rows
 from memex.modules.finance.dedup import (
     PRECISION_DATE,
     PRECISION_DATETIME,
@@ -350,10 +350,11 @@ class FinanceModule:
 
     def debug_for_inbox(
         self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
-    ) -> list[dict[str, Any]]:
-        """Estado INTERNO por transacción materializada desde `inbox_ids` (capacidad `debug_inbox`,
-        vista `/datos/:id`): la identidad de contraparte resuelta (seam), el outcome de dedup + su
-        consolidado, y los pares candidatos que la tocan (decisión proc/LLM, score, cuándo)."""
+    ) -> dict[str, Any]:
+        """Estado INTERNO de finance para `inbox_ids` (capacidad `debug_inbox`, vista `/datos/:id`):
+        `{"rows", "internal_calls"}`. `rows` = por transacción: identidad de contraparte resuelta
+        (seam), outcome de dedup + consolidado, y los pares candidatos que la tocan.
+        `internal_calls` = las llamadas `finance_dedup` que decidieron esos pares, con costo."""
         rows = (
             conn.execute(
                 text(
@@ -378,13 +379,13 @@ class FinanceModule:
             .all()
         )
         if not rows:
-            return []
+            return {"rows": [], "internal_calls": []}
         tx_ids = [int(r["id"]) for r in rows]
         cands = (
             conn.execute(
                 text(
                     """
-                    SELECT transaction_a_id, transaction_b_id, reason, score, status,
+                    SELECT id, transaction_a_id, transaction_b_id, reason, score, status,
                            decided_by, confidence, rationale, created_at, decided_at
                     FROM mod_finance_dedup_candidates
                     WHERE user_id = :uid AND (
@@ -416,7 +417,12 @@ class FinanceModule:
                 by_tx[a].append({**pair, "other_transaction_id": b})
             if b in by_tx:
                 by_tx[b].append({**pair, "other_transaction_id": a})
-        return [
+        # Llamadas LLM de dedup fase-2 que decidieron estos pares (batch, inbox_id=NULL): se
+        # correlacionan por `metadata.pair_id` = id del candidato. Traen su costo real.
+        internal_calls = fetch_internal_calls(
+            conn, user_id, purpose="finance_dedup", pair_ids=[int(c["id"]) for c in cands]
+        )
+        debug_rows = [
             {
                 "transaction_id": int(r["id"]),
                 "direction": r["direction"],
@@ -434,6 +440,7 @@ class FinanceModule:
             }
             for r in rows
         ]
+        return {"rows": debug_rows, "internal_calls": internal_calls}
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
         """Olvida lo aportado por `inbox_ids` a las transacciones (fila cruda): les saca la

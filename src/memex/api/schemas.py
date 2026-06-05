@@ -207,10 +207,10 @@ class InboxRow(BaseModel):
     # Objetos completos: solo los puebla el detalle (GET /inbox/{id}); en la lista van vacíos/null.
     summary: SummaryInfo | None = None
     extraction: ExtractionInfo | None = None
-    # Estado INTERNO por-módulo para la vista de DEBUG (`/datos/:id`): mapa slug→filas de debug
-    # (dedup, seam contraparte→identidad, consolidación). Solo módulos con CAP_DEBUG_INBOX. Shape
-    # específico por módulo → dict suelto. {} en la lista; poblado solo en el detalle.
-    extraction_debug: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    # Estado INTERNO por-módulo (vista DEBUG `/datos/:id`): mapa slug→{rows, internal_calls}.
+    # rows = dedup/seam/consolidación por entidad; internal_calls = llamadas LLM internas
+    # correlacionadas con su costo. Solo módulos con CAP_DEBUG_INBOX; poblado solo en el detalle.
+    extraction_debug: dict[str, Any] = Field(default_factory=dict)
     llm: LlmUsageInfo | None = None
     media: list[MediaAssetInfo] = Field(default_factory=list)
     # Feedback manual del usuario sobre este mensaje — solo en el detalle.

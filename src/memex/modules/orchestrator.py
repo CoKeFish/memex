@@ -902,12 +902,13 @@ def read_extractions(user_id: int, inbox_id: int) -> dict[str, Any]:
     return result
 
 
-def read_extractions_debug(user_id: int, inbox_id: int) -> dict[str, list[dict[str, Any]]]:
+def read_extractions_debug(user_id: int, inbox_id: int) -> dict[str, dict[str, Any]]:
     """Estado INTERNO por-módulo de un inbox para la vista de DEBUG (`/datos/:id`): de-hardcodeado,
-    itera el registry y le pide su `debug_for_inbox` a cada módulo que declara `CAP_DEBUG_INBOX`
-    (resolución del seam, dedup, consolidación — lo que `read_for_inbox` oculta). Solo aparecen los
-    módulos con esa capacidad (finance/identidades hoy); el resto se omite. Read-only."""
-    out: dict[str, list[dict[str, Any]]] = {}
+    itera el registry y le pide su `debug_for_inbox` a cada módulo que declara `CAP_DEBUG_INBOX`.
+    Cada valor es `{"rows": [...], "internal_calls": [...]}` (estado por-entidad + las llamadas LLM
+    internas correlacionadas, con su costo). Solo módulos con la capacidad (finance/identidades);
+    el resto se omite. Read-only."""
+    out: dict[str, dict[str, Any]] = {}
     with connection() as conn:
         for slug in known_modules():
             module = resolve(slug)()

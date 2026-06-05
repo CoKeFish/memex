@@ -33,7 +33,7 @@ from memex.modules.contract import (
     ExtractionItem,
     ModuleContext,
 )
-from memex.modules.dedup import forget_inbox_rows
+from memex.modules.dedup import fetch_internal_calls, forget_inbox_rows
 from memex.modules.identidades.domain import IdentidadesDomainReader
 from memex.modules.identidades.fuzzy import HIGH_THRESHOLD, LOW_THRESHOLD, find_fuzzy_candidates
 from memex.modules.identidades.normalize import is_role_email, norm_identifier
@@ -159,11 +159,12 @@ class IdentidadesModule:
 
     def debug_for_inbox(
         self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
-    ) -> list[dict[str, Any]]:
-        """Estado INTERNO por mención materializada desde `inbox_ids` (capacidad `debug_inbox`).
-        Vista `/datos/:id`: cómo resolvió (método: email/exact_name/alias/fuzzy/created/llm…), a qué
-        identidad del directorio, y los candidatos de merge que tocan esa identidad (zona gris /
-        desempate LLM, con score, decisión y cuándo)."""
+    ) -> dict[str, Any]:
+        """Estado INTERNO de identidades para `inbox_ids` (capacidad `debug_inbox`, vista
+        `/datos/:id`): `{"rows", "internal_calls"}`. `rows` = por mención: cómo resolvió (método) a
+        qué identidad y los candidatos de merge que la tocan. `internal_calls` = llamadas LLM
+        `identidades_dedup` (desempate de esos candidatos) + `identidades_cooccurrence` (de este
+        correo, correlacionada por `metadata.inbox_id`), con su costo real."""
         mentions = (
             conn.execute(
                 text(
@@ -183,7 +184,7 @@ class IdentidadesModule:
             .all()
         )
         if not mentions:
-            return []
+            return {"rows": [], "internal_calls": []}
         identity_ids = sorted(
             {
                 int(m["resolved_identity_id"])
@@ -192,13 +193,14 @@ class IdentidadesModule:
             }
         )
         by_identity: dict[int, list[dict[str, Any]]] = {iid: [] for iid in identity_ids}
+        cand_ids: list[int] = []
         if identity_ids:
             cands = (
                 conn.execute(
                     text(
                         """
-                        SELECT mc.identity_a_id, mc.identity_b_id, mc.reason, mc.score, mc.status,
-                               mc.decided_by, mc.confidence, mc.rationale, mc.created_at,
+                        SELECT mc.id, mc.identity_a_id, mc.identity_b_id, mc.reason, mc.score,
+                               mc.status, mc.decided_by, mc.confidence, mc.rationale, mc.created_at,
                                mc.decided_at, ia.display_name AS a_name, ib.display_name AS b_name
                         FROM mod_identidades_merge_candidates mc
                         LEFT JOIN mod_identidades ia ON ia.id = mc.identity_a_id
@@ -215,6 +217,7 @@ class IdentidadesModule:
                 .mappings()
                 .all()
             )
+            cand_ids = [int(c["id"]) for c in cands]
             for c in cands:
                 a, b = int(c["identity_a_id"]), int(c["identity_b_id"])
                 pair = {
@@ -235,7 +238,7 @@ class IdentidadesModule:
                     by_identity[b].append(
                         {**pair, "other_identity_id": a, "other_identity_name": c["a_name"]}
                     )
-        return [
+        mention_rows = [
             {
                 "mention_id": int(m["id"]),
                 "mentioned_name": m["mentioned_name"],
@@ -252,6 +255,14 @@ class IdentidadesModule:
             }
             for m in mentions
         ]
+        # Llamadas LLM internas correlacionadas a este correo: el desempate de merge (por `pair_id`)
+        # y la co-ocurrencia (por `metadata.inbox_id`). Traen su costo real.
+        internal_calls = fetch_internal_calls(
+            conn, user_id, purpose="identidades_dedup", pair_ids=cand_ids
+        ) + fetch_internal_calls(
+            conn, user_id, purpose="identidades_cooccurrence", inbox_ids=list(inbox_ids)
+        )
+        return {"rows": mention_rows, "internal_calls": internal_calls}
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
         """Olvida lo aportado por `inbox_ids`: saca la referencia y borra la mención solo si queda

@@ -48,6 +48,7 @@ import type {
   IdentidadesDebugRow,
   InboxLlmCall,
   InboxRow,
+  InternalLlmCall,
   MessageJourney,
   Source,
 } from "@/types/domain"
@@ -444,7 +445,11 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
           </div>
         }
       />
-      <PanelBody className="divide-y divide-border py-0">
+      <PanelBody className="py-0">
+        {/* 2 columnas en xl: etapas a la izquierda, traza LLM + "qué hizo cada módulo" a la derecha
+            (aprovecha el ancho; en pantallas chicas colapsa a una sola columna). */}
+        <div className="grid gap-5 py-1 xl:grid-cols-[1.5fr_1fr]">
+          <div className="divide-y divide-border">
         {/* Input — lo que ve el LLM (render_payload), colapsable para auditar */}
         <div className="py-2.5">
           <button
@@ -560,9 +565,6 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
                   ))}
                 </>
               )}
-              {/* Qué hizo cada módulo POR DENTRO (dedup · seam contraparte→identidad · consolidación):
-                  pasos deterministas / cross-mensaje que NO dejan llamada LLM atada a este correo. */}
-              <ModuleDebug debug={row.extractionDebug} />
               <PhaseButton label="Rehacer" icon={RotateCw} variant="outline" busy={busy === "extract"} disabled={busy !== null} onClick={() => extract(true)} />
             </div>
           ) : (
@@ -570,12 +572,20 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
           )}
         </Stage>
 
-        {/* Traza LLM — auditoría por corridas: cada llamada con modelo, tokens, latencia, costo */}
-        {llm && llm.calls > 0 && (
-          <div className="py-3">
-            <LlmTrace llm={llm} runs={runs} />
           </div>
-        )}
+          {/* Columna derecha: traza LLM (route+extract) + "qué hizo cada módulo" (dedup, contraparte,
+              consolidación + operaciones posteriores LLM con su costo). */}
+          <div className="space-y-4 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-1">
+            {llm && llm.calls > 0 ? (
+              <LlmTrace llm={llm} runs={runs} />
+            ) : (
+              <p className="num text-[11px] text-muted-foreground">
+                Sin traza LLM atribuida a este mensaje (las ops internas, si las hubo, van abajo).
+              </p>
+            )}
+            <ModuleDebug debug={row.extractionDebug} />
+          </div>
+        </div>
       </PanelBody>
     </Panel>
   )
@@ -846,14 +856,55 @@ function IdentidadesDebug({ rows }: { rows: IdentidadesDebugRow[] }) {
   )
 }
 
+const INTERNAL_PURPOSE_LABEL: Record<string, string> = {
+  finance_dedup: "Dedup finanzas",
+  identidades_dedup: "Dedup identidades",
+  identidades_cooccurrence: "Co-ocurrencia identidades",
+  identidades_hierarchy: "Jerarquía identidades",
+}
+
+/** Llamadas LLM INTERNAS (dedup fase-2 / co-ocurrencia) correlacionadas a este correo, con su costo
+ *  real — corren en batch con inbox_id=NULL, así que no salen en la traza principal de arriba. */
+function InternalCalls({ calls }: { calls: InternalLlmCall[] }) {
+  if (calls.length === 0) return null
+  const total = calls.reduce((a, c) => a + c.cost_usd, 0)
+  return (
+    <div className="space-y-1">
+      <div className="eyebrow">
+        operaciones posteriores (LLM) · {calls.length} · <span className="text-brand">{fmtCost(total)}</span>
+      </div>
+      {calls.map((c, i) => (
+        <div
+          key={i}
+          className="num flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded border border-border bg-card/40 p-2 text-[10px] text-muted-foreground"
+        >
+          <span className="text-foreground">{INTERNAL_PURPOSE_LABEL[c.purpose] ?? c.purpose}</span>
+          <span>{c.model}</span>
+          <span>
+            {c.prompt_tokens}+{c.completion_tokens} tok
+          </span>
+          <span>{c.latency_ms} ms</span>
+          <span className={c.status === "ok" ? "text-status-ok" : "text-status-error"}>{c.status}</span>
+          {c.created_at && <RelativeTime date={c.created_at} />}
+          <span className="ml-auto text-brand">{fmtCost(c.cost_usd)}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /** Estado INTERNO por-módulo (capacidad `debug_inbox`): dedup, seam contraparte→identidad,
- *  consolidación. Colapsable + acceso al JSON crudo (herramienta de debug, no UI de cliente). */
+ *  consolidación + las operaciones LLM posteriores. Colapsable + JSON crudo (herramienta de debug). */
 function ModuleDebug({ debug }: { debug?: ExtractionDebug | null }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(true)
   const [raw, setRaw] = useState(false)
-  const finance = debug?.finance ?? []
-  const identidades = debug?.identidades ?? []
-  if (finance.length === 0 && identidades.length === 0) return null
+  const finance = debug?.finance?.rows ?? []
+  const identidades = debug?.identidades?.rows ?? []
+  const internalCalls = [
+    ...(debug?.finance?.internal_calls ?? []),
+    ...(debug?.identidades?.internal_calls ?? []),
+  ]
+  if (finance.length === 0 && identidades.length === 0 && internalCalls.length === 0) return null
   return (
     <div className="rounded-md border border-border bg-muted/10 p-2.5">
       <button
@@ -868,6 +919,7 @@ function ModuleDebug({ debug }: { debug?: ExtractionDebug | null }) {
         <div className="mt-2 space-y-3">
           {finance.length > 0 && <FinanceDebug rows={finance} />}
           {identidades.length > 0 && <IdentidadesDebug rows={identidades} />}
+          <InternalCalls calls={internalCalls} />
           <button
             type="button"
             onClick={() => setRaw((v) => !v)}

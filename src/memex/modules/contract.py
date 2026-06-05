@@ -191,9 +191,13 @@ class InboxDebugProvider(Protocol):
 
     def debug_for_inbox(
         self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
-    ) -> list[dict[str, Any]]:
-        """Filas de debug (una por entidad materializada desde `inbox_ids`) con sus señales
-        internas. Read-only; NO abre tx propia."""
+    ) -> dict[str, Any]:
+        """Estado interno del módulo para `inbox_ids`: `{"rows": [...], "internal_calls": [...]}`.
+        `rows` = una fila por entidad materializada (sus señales internas). `internal_calls` = las
+        llamadas LLM INTERNAS (dedup fase-2, co-ocurrencia, …) que tocaron esas entidades —
+        correlacionadas por metadata (`pair_id`/`inbox_id`) porque corren en batch con
+        `inbox_id=NULL`; cada una con su costo real, para que el costo del LLM sea visible aquí.
+        Read-only; NO abre tx propia."""
         ...
 
 

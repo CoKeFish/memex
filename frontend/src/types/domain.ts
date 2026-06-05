@@ -124,10 +124,30 @@ export interface IdentidadesDebugRow {
   })[]
 }
 
-/** Estado INTERNO por-módulo para la vista de debug (slug → filas). Solo módulos con debug_inbox. */
+/** Una llamada LLM INTERNA (dedup fase-2 / co-ocurrencia) correlacionada al mensaje, con su costo
+ *  real — estas ops corren en batch con inbox_id=NULL, así que no salen en la traza por-correo. */
+export interface InternalLlmCall {
+  purpose: string
+  model: string
+  prompt_tokens: number
+  completion_tokens: number
+  cost_usd: number
+  latency_ms: number
+  status: string
+  created_at: string | null
+  metadata: Record<string, unknown> | null
+}
+
+/** Estado interno de un módulo: filas por-entidad + las llamadas LLM internas correlacionadas. */
+export interface ModuleDebugData<TRow> {
+  rows: TRow[]
+  internal_calls: InternalLlmCall[]
+}
+
+/** Estado INTERNO por-módulo para la vista de debug (slug → {rows, internal_calls}). debug_inbox. */
 export interface ExtractionDebug {
-  finance?: FinanceDebugRow[]
-  identidades?: IdentidadesDebugRow[]
+  finance?: ModuleDebugData<FinanceDebugRow>
+  identidades?: ModuleDebugData<IdentidadesDebugRow>
 }
 
 export interface InboxLlmCall {

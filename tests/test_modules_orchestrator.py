@@ -640,12 +640,14 @@ def test_read_extractions_debug_exposes_finance_seam(seed_source: dict[str, Any]
 
     debug = read_extractions_debug(1, iid)
     assert "calendar" not in debug and "hackathones" not in debug  # no declaran CAP_DEBUG_INBOX
-    assert len(debug["finance"]) == 1
-    row = debug["finance"][0]
+    fin = debug["finance"]
+    assert len(fin["rows"]) == 1
+    row = fin["rows"][0]
     assert row["counterparty_identity_id"] == oid
     assert row["counterparty_identity_name"] == "Test"
     assert row["processing_outcome"] in {"pending", "unique", "duplicate"}
     assert row["dedup_candidates"] == []  # único movimiento → sin pares (la query igual corre)
+    assert fin["internal_calls"] == []  # sin dedup fase-2 todavía → sin llamadas LLM internas
 
 
 def test_identidades_debug_for_inbox_exposes_resolution_and_merge() -> None:
@@ -687,8 +689,10 @@ def test_identidades_debug_for_inbox_exposes_resolution_and_merge() -> None:
         )
 
     with connection() as c:
-        rows = IdentidadesModule().debug_for_inbox(c, 1, [55])
+        result = IdentidadesModule().debug_for_inbox(c, 1, [55])
 
+    rows = result["rows"]
+    assert result["internal_calls"] == []  # sin llamadas LLM internas sembradas
     assert len(rows) == 1
     m = rows[0]
     assert m["resolution_method"] == "fuzzy"
@@ -699,6 +703,101 @@ def test_identidades_debug_for_inbox_exposes_resolution_and_merge() -> None:
     assert cand["other_identity_name"] == "Acme Inc"
     assert cand["status"] == "candidate"
     assert cand["score"] == 0.7
+
+
+def test_finance_internal_calls_surface_dedup_cost() -> None:
+    """Las llamadas LLM de dedup fase-2 (`finance_dedup`) corren en batch con inbox_id=NULL; el
+    debug las correlaciona por `metadata.pair_id` → candidato → tx del correo, con su COSTO real."""
+    from decimal import Decimal
+
+    from memex.core.observability import record_llm_call
+    from memex.modules.orchestrator import read_extractions_debug
+
+    with connection() as c:
+        t1 = int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_finance_transactions (user_id, source_inbox_ids, direction, "
+                    "amount, currency, occurred_at, counterparty) "
+                    "VALUES (1, ARRAY[77]::bigint[], 'egreso', 100, 'COP', NOW(), 'Uber') "
+                    "RETURNING id"
+                )
+            ).scalar_one()
+        )
+        t2 = int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_finance_transactions (user_id, source_inbox_ids, direction, "
+                    "amount, currency, occurred_at, counterparty) "
+                    "VALUES (1, ARRAY[88]::bigint[], 'egreso', 100, 'COP', NOW(), 'Uber') "
+                    "RETURNING id"
+                )
+            ).scalar_one()
+        )
+        lo, hi = sorted((t1, t2))
+        cand = int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_finance_dedup_candidates (user_id, transaction_a_id, "
+                    "transaction_b_id, reason, score, status, decided_by, confidence) "
+                    "VALUES (1, :a, :b, 'amount+fecha', 0.9, 'confirmed', 'llm', 0.95) RETURNING id"
+                ),
+                {"a": lo, "b": hi},
+            ).scalar_one()
+        )
+    record_llm_call(
+        user_id=1,
+        purpose="finance_dedup",
+        model="deepseek-chat",
+        prompt_tokens=120,
+        completion_tokens=20,
+        cost_usd=Decimal("0.0004"),
+        latency_ms=300,
+        status="ok",
+        inbox_id=None,  # corre en batch: la correlación es por metadata.pair_id, no por columna
+        metadata={"pair_id": cand, "same": True, "confidence": 0.95},
+    )
+
+    calls = read_extractions_debug(1, 77)["finance"]["internal_calls"]
+    assert len(calls) == 1
+    assert calls[0]["purpose"] == "finance_dedup"
+    assert calls[0]["cost_usd"] == 0.0004  # costo real visible en el debug del mensaje
+    assert calls[0]["metadata"]["pair_id"] == cand
+
+
+def test_identidades_internal_calls_surface_cooccurrence_cost() -> None:
+    """La co-ocurrencia (`identidades_cooccurrence`) es por-mensaje pero con inbox_id=NULL en la
+    columna; se correlaciona por `metadata.inbox_id` y trae su costo real."""
+    from decimal import Decimal
+
+    from memex.core.observability import record_llm_call
+    from memex.modules.identidades.module import IdentidadesModule
+
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_identidades_mentions (user_id, source_inbox_ids, mentioned_name, "
+                "mentioned_kind) VALUES (1, ARRAY[91]::bigint[], 'Foo', 'organizacion')"
+            )
+        )
+    record_llm_call(
+        user_id=1,
+        purpose="identidades_cooccurrence",
+        model="deepseek-chat",
+        prompt_tokens=200,
+        completion_tokens=40,
+        cost_usd=Decimal("0.0006"),
+        latency_ms=400,
+        status="ok",
+        inbox_id=None,
+        metadata={"inbox_id": 91, "identities": 5, "pairs": 3},
+    )
+
+    with connection() as c:
+        calls = IdentidadesModule().debug_for_inbox(c, 1, [91])["internal_calls"]
+    cooc = [x for x in calls if x["purpose"] == "identidades_cooccurrence"]
+    assert len(cooc) == 1
+    assert cooc[0]["cost_usd"] == 0.0006
 
 
 def test_read_extractions_de_hardcoded_returns_all_module_keys() -> None:
