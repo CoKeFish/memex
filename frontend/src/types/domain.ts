@@ -545,12 +545,18 @@ export type ExpenseCategory =
   | "entretenimiento"
   | "otros"
 
-export interface FinanceExpense {
+/** Sentido del movimiento: plata que SALE (egreso/gasto) vs plata que ENTRA (ingreso/cobro). */
+export type FinanceDirection = "ingreso" | "egreso"
+
+export interface FinanceTransaction {
   id: number
+  /** 'egreso' = gasto (plata que sale); 'ingreso' = cobro (plata que entra). */
+  direction: FinanceDirection
   amount: number
   currency: string
+  /** La contraparte (comercio que cobra o pagador que ingresa); cae a `place` o "—" si viene vacía. */
   merchant: string
-  /** Categoría DERIVADA (no es columna real de mod_finance_expenses todavía). */
+  /** Categoría de GASTO; los ingresos suelen caer a 'otros'. */
   category: ExpenseCategory
   occurredOn: string // fecha (date)
   description: string

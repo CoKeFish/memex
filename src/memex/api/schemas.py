@@ -328,6 +328,12 @@ class FinanceTransactionRow(BaseModel):
     dinero en respuestas (cf. `cost_usd`). `occurred_at` es el mejor instante conocido del cobro;
     `occurred_at_precision` ('datetime'|'date'|'inferred') dice si la hora es del cobro, solo la
     fecha, o inferida de la recepción del mensaje. `direction` es 'ingreso' | 'egreso'.
+
+    `evidence` y `source_inbox_ids` NO viven en `mod_finance_consolidated`: se recuperan en el query
+    de las crudas (`mod_finance_transactions`) — `evidence` de la transacción ganadora
+    (`winner_transaction_id`) y `source_inbox_ids` como unión de los mensajes de todas las crudas
+    enlazadas (vía `mod_finance_transaction_links`). Alimentan, en el dashboard, la evidencia del
+    movimiento y el link al correo de origen (trazabilidad). Degradan a '' / [] si faltan.
     """
 
     id: int
@@ -340,6 +346,8 @@ class FinanceTransactionRow(BaseModel):
     occurred_at: datetime
     occurred_at_precision: str
     description: str
+    evidence: str
+    source_inbox_ids: list[int]
     created_at: datetime
 
 

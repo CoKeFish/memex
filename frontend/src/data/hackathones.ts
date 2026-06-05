@@ -62,7 +62,7 @@ export interface FetchHackathonesOpts {
 
 /**
  * Todos los hackatones del usuario (GET /hackathones/events), paginando por cursor igual que
- * `fetchFinanceExpenses`. El dashboard ordena/filtra en el cliente, así que por defecto trae todo.
+ * `fetchFinanceTransactions`. El dashboard ordena/filtra en el cliente, así que por defecto trae todo.
  */
 export async function fetchHackathones(opts?: FetchHackathonesOpts): Promise<Hackathon[]> {
   const max = opts?.max ?? 5000

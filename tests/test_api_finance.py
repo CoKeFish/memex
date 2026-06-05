@@ -115,3 +115,49 @@ def test_list_transactions_pagination(client: Any) -> None:
 def test_list_transactions_empty(client: Any) -> None:
     body = client.get("/finance/transactions").json()
     assert body == {"items": [], "next_cursor": None}
+
+
+def test_list_transactions_exposes_evidence_and_source_inbox_ids(client: Any) -> None:
+    """`evidence` (de la cruda GANADORA) y `source_inbox_ids` (unión de los mensajes de las crudas
+    enlazadas) se traen con el join — no son columnas de `mod_finance_consolidated`."""
+    with connection() as c:
+        txn_id = c.execute(
+            text(
+                """
+                INSERT INTO mod_finance_transactions
+                  (user_id, source_inbox_ids, direction, amount, currency, occurred_at, evidence)
+                VALUES (1, ARRAY[7, 9]::bigint[], 'egreso', 100, 'MXN', :at, 'pago OXXO $100')
+                RETURNING id
+                """
+            ),
+            {"at": datetime(2026, 5, 10, 12, 0, tzinfo=UTC)},
+        ).scalar_one()
+        cons_id = c.execute(
+            text(
+                """
+                INSERT INTO mod_finance_consolidated
+                  (user_id, direction, amount, currency, occurred_at, winner_transaction_id)
+                VALUES (1, 'egreso', 100, 'MXN', :at, :w)
+                RETURNING id
+                """
+            ),
+            {"at": datetime(2026, 5, 10, 12, 0, tzinfo=UTC), "w": txn_id},
+        ).scalar_one()
+        c.execute(
+            text(
+                "INSERT INTO mod_finance_transaction_links "
+                "(user_id, consolidated_id, transaction_id) VALUES (1, :c, :t)"
+            ),
+            {"c": cons_id, "t": txn_id},
+        )
+    item = client.get("/finance/transactions").json()["items"][0]
+    assert item["evidence"] == "pago OXXO $100"
+    assert sorted(item["source_inbox_ids"]) == [7, 9]
+
+
+def test_list_transactions_evidence_defaults_without_raw(client: Any) -> None:
+    """Una fila consolidada SIN winner ni links (sembrada directa) degrada limpio: '' / []."""
+    _seed_consolidated(1, counterparty="solo-consolidado")
+    item = client.get("/finance/transactions").json()["items"][0]
+    assert item["evidence"] == ""
+    assert item["source_inbox_ids"] == []

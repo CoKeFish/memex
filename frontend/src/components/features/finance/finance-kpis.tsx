@@ -1,24 +1,41 @@
 import { KpiCard } from "@/components/common/kpi-card"
 import { Delta } from "@/components/common/stat"
-import { formatInt, formatMoney } from "@/lib/format"
-import { CATEGORY_LABEL, financeKpis } from "@/data"
-import type { FinanceExpense } from "@/types/domain"
+import { formatMoney } from "@/lib/format"
+import { CATEGORY_LABEL, financeKpis, financeMonthSummary } from "@/data"
+import type { FinanceTransaction } from "@/types/domain"
 
-export function FinanceKpis({ expenses, currency }: { expenses: FinanceExpense[]; currency: string }) {
-  const k = financeKpis(expenses, currency)
+export function FinanceKpis({ txns, currency }: { txns: FinanceTransaction[]; currency: string }) {
+  const s = financeMonthSummary(txns, currency)
+  // Las métricas de GASTO (delta vs mes anterior, categoría top) miran solo los egresos.
+  const k = financeKpis(
+    txns.filter((t) => t.direction === "egreso"),
+    currency,
+  )
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       <KpiCard
-        eyebrow={`Gasto del mes · ${currency}`}
-        value={formatMoney(k.thisMonth, currency)}
+        eyebrow={`Ingresos del mes · ${currency}`}
+        value={<span className="text-status-ok">+{formatMoney(s.income, currency)}</span>}
+        footer="lo que entró"
+      />
+      <KpiCard
+        eyebrow={`Gastos del mes · ${currency}`}
+        value={<span className="text-status-error">−{formatMoney(s.expense, currency)}</span>}
         delta={<Delta value={k.deltaPct} />}
-        accent
         footer={`mes anterior ${formatMoney(k.lastMonth, currency)}`}
       />
-      <KpiCard eyebrow="Movimientos del mes" value={formatInt(k.count)} footer="gastos registrados" />
-      <KpiCard eyebrow="Ticket promedio" value={formatMoney(k.avg, currency)} footer="por movimiento" />
       <KpiCard
-        eyebrow="Categoría top"
+        eyebrow={`Balance del mes · ${currency}`}
+        value={
+          <span className={s.balance >= 0 ? "text-status-ok" : "text-status-error"}>
+            {s.balance >= 0 ? "+" : ""}
+            {formatMoney(s.balance, currency)}
+          </span>
+        }
+        footer="ingresos − gastos"
+      />
+      <KpiCard
+        eyebrow="Categoría top de gasto"
         value={k.topCategory ? CATEGORY_LABEL[k.topCategory.category] : "—"}
         footer={k.topCategory ? formatMoney(k.topCategory.total, currency) : "sin gastos"}
       />

@@ -263,7 +263,7 @@ function toProviderAccount(r: ProviderAccountApi): ProviderAccount {
 
 /**
  * Todos los eventos consolidados del usuario (GET /calendar/events), paginando por cursor igual que
- * `fetchFinanceExpenses`. El calendario mensual/agenda filtran por fecha en el cliente.
+ * `fetchFinanceTransactions`. El calendario mensual/agenda filtran por fecha en el cliente.
  */
 export async function fetchCalendarEvents(max = 5000): Promise<ConsolidatedEvent[]> {
   const pageSize = 500

@@ -1,9 +1,10 @@
-// Agregaciones puras del módulo finance sobre una lista de gastos (`FinanceExpense[]`) que el caller
-// trae de la API (`@/data` → `fetchFinanceExpenses`). Sin estado ni mocks: el page hace UN fetch y
-// pasa los gastos a estas funciones. Los buckets de mes son relativos a la fecha REAL (hoy), no al
-// `NOW` fijo de los mocks.
+// Agregaciones puras del módulo finance sobre transacciones (`FinanceTransaction[]`) que el caller
+// trae de la API (`@/data` → `fetchFinanceTransactions`). Las funciones de GASTO (por mes, categoría,
+// comercio, KPIs) asumen egresos — el page les pasa solo los egresos; `financeMonthSummary` y
+// `financeCurrencies` operan sobre todas las transacciones. Sin estado ni mocks: el page hace UN
+// fetch y reparte. Los buckets de mes son relativos a la fecha REAL (hoy), no al `NOW` de los mocks.
 import { monthKey, monthLabel } from "@/lib/format"
-import type { ExpenseCategory, FinanceExpense } from "@/types/domain"
+import type { ExpenseCategory, FinanceTransaction } from "@/types/domain"
 
 export const CATEGORIES: { key: ExpenseCategory; label: string; chart: string }[] = [
   { key: "comida", label: "Comida", chart: "var(--chart-1)" },
@@ -19,13 +20,13 @@ export const CATEGORY_LABEL = Object.fromEntries(CATEGORIES.map((c) => [c.key, c
 export const CATEGORY_CHART = Object.fromEntries(CATEGORIES.map((c) => [c.key, c.chart])) as Record<ExpenseCategory, string>
 
 /** Monedas presentes, la más usada primero. */
-export function financeCurrencies(expenses: FinanceExpense[]): string[] {
+export function financeCurrencies(expenses: FinanceTransaction[]): string[] {
   const count = new Map<string, number>()
   for (const e of expenses) count.set(e.currency, (count.get(e.currency) ?? 0) + 1)
   return [...count.entries()].sort((a, b) => b[1] - a[1]).map(([c]) => c)
 }
 
-function inCurrency(expenses: FinanceExpense[], currency: string): FinanceExpense[] {
+function inCurrency(expenses: FinanceTransaction[], currency: string): FinanceTransaction[] {
   return expenses.filter((e) => e.currency === currency)
 }
 
@@ -40,7 +41,7 @@ function emptyCats(): Record<ExpenseCategory, number> {
   return { comida: 0, transporte: 0, software: 0, servicios: 0, educacion: 0, salud: 0, entretenimiento: 0, otros: 0 }
 }
 
-export function financeByMonth(expenses: FinanceExpense[], currency: string, months = 5): MonthPoint[] {
+export function financeByMonth(expenses: FinanceTransaction[], currency: string, months = 5): MonthPoint[] {
   const buckets: MonthPoint[] = []
   const today = new Date()
   const base = new Date(today.getFullYear(), today.getMonth(), 1)
@@ -66,7 +67,7 @@ export interface CatAgg {
   count: number
 }
 
-export function financeByCategory(expenses: FinanceExpense[], currency: string, mKey?: string): CatAgg[] {
+export function financeByCategory(expenses: FinanceTransaction[], currency: string, mKey?: string): CatAgg[] {
   const rows = inCurrency(expenses, currency).filter((e) => !mKey || monthKey(e.occurredOn) === mKey)
   return CATEGORIES.map((c) => {
     const sub = rows.filter((e) => e.category === c.key)
@@ -82,7 +83,7 @@ export interface MerchantAgg {
   count: number
 }
 
-export function financeByMerchant(expenses: FinanceExpense[], currency: string, mKey?: string): MerchantAgg[] {
+export function financeByMerchant(expenses: FinanceTransaction[], currency: string, mKey?: string): MerchantAgg[] {
   const rows = inCurrency(expenses, currency).filter((e) => !mKey || monthKey(e.occurredOn) === mKey)
   const map = new Map<string, MerchantAgg>()
   for (const e of rows) {
@@ -103,7 +104,7 @@ export interface FinanceKpis {
   topCategory: CatAgg | null
 }
 
-export function financeKpis(expenses: FinanceExpense[], currency: string): FinanceKpis {
+export function financeKpis(expenses: FinanceTransaction[], currency: string): FinanceKpis {
   const today = new Date()
   const tk = monthKey(new Date(today.getFullYear(), today.getMonth(), 1))
   const lk = monthKey(new Date(today.getFullYear(), today.getMonth() - 1, 1))
@@ -119,4 +120,26 @@ export function financeKpis(expenses: FinanceExpense[], currency: string): Finan
     avg: thisRows.length ? thisMonth / thisRows.length : 0,
     topCategory: financeByCategory(expenses, currency, tk)[0] ?? null,
   }
+}
+
+export interface FinanceMonthSummary {
+  income: number
+  expense: number
+  balance: number
+  count: number
+}
+
+/** Resumen del MES ACTUAL para una moneda: ingresos, gastos, balance (ingresos − gastos) y conteo.
+ *  A diferencia del resto del módulo (que asume gastos), opera sobre TODAS las transacciones y mira
+ *  `direction`. Mismo criterio de mes timezone-safe que `financeKpis` (`monthKey` sobre `occurredOn`). */
+export function financeMonthSummary(
+  txns: FinanceTransaction[],
+  currency: string,
+): FinanceMonthSummary {
+  const today = new Date()
+  const tk = monthKey(new Date(today.getFullYear(), today.getMonth(), 1))
+  const cur = txns.filter((t) => t.currency === currency && monthKey(t.occurredOn) === tk)
+  const income = cur.filter((t) => t.direction === "ingreso").reduce((a, t) => a + t.amount, 0)
+  const expense = cur.filter((t) => t.direction === "egreso").reduce((a, t) => a + t.amount, 0)
+  return { income, expense, balance: income - expense, count: cur.length }
 }
