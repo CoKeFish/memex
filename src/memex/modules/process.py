@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from memex.llm import DeepSeekClient, LLMClient, LLMConfig
 from memex.logging import get_logger
-from memex.modules.orchestrator import ExtractStats, run_extraction
+from memex.modules.orchestrator import _GROUP_SIZE_DEFAULT, ExtractStats, run_extraction
 from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
 from memex.summarizer.worker import SummarizeStats, run_summarization
 
@@ -38,8 +38,8 @@ async def run_combined(
     max_window_size: int = MAX_WINDOW_SIZE,
     max_gap_seconds: int = MAX_GAP_SECONDS,
     route_chunk_size: int = 0,  # 0 = sin split (mirror del default de run_extraction)
-    batching_policy: str = "per_module",
-    group_size: int = 3,
+    batching_policy: str = "grouped",  # mirror de run_extraction: una llamada para todos
+    group_size: int = _GROUP_SIZE_DEFAULT,
     client: LLMClient | None = None,
 ) -> CombinedStats:
     """Corre resumen y luego extracción sobre los mismos mensajes, compartiendo cliente LLM.

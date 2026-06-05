@@ -419,7 +419,7 @@ def test_route_chunking_one_call_per_chunk(seed_source: dict[str, Any]) -> None:
     stats = asyncio.run(run_extraction(1, route_chunk_size=1, client=fake))
 
     assert _count_purpose("module_route") == 2  # un chunk por módulo
-    assert stats.items == 4  # finance 2 + calendar 2 (per_module por defecto)
+    assert stats.items == 4  # finance 2 + calendar 2 (chunking del ruteo, no de la extracción)
     assert _count("mod_finance_transactions") == 2
     assert _count("mod_calendar_events") == 2
 
@@ -458,6 +458,37 @@ def test_grouped_single_extraction_call(seed_source: dict[str, Any]) -> None:
     assert _count("mod_calendar_events") == 2
     assert _count("module_extractions") == 4  # 2 mensajes x 2 módulos
     assert set(stats.by_module) == {"finance", "calendar"}
+
+
+def test_default_policy_groups_one_call(seed_source: dict[str, Any]) -> None:
+    """DEFAULT (sin pasar batching_policy) = grouped: un correo individual con 2 módulos elegidos se
+    extrae en UNA sola llamada `extract_grouped`, NO una por módulo. Lockea la invariante (el
+    benchmark muestra que separar por módulo reenvía el correo N veces → más caro)."""
+    sid = seed_source["id"]
+    _enable("finance")
+    _enable("calendar")
+    _seed(sid, "i1", "individual", {"body_text": "pagué $4500"})
+
+    asyncio.run(run_extraction(1, client=FakeExtractLLM()))
+
+    assert _count_purpose("extract_grouped") == 1
+    assert _count_purpose("extract_finance") == 0
+    assert _count_purpose("extract_calendar") == 0
+
+
+def test_per_module_opt_in_splits_calls(seed_source: dict[str, Any]) -> None:
+    """`per_module` NO se quitó: como opción explícita parte en una llamada por módulo
+    (`extract_<slug>`), sin `extract_grouped`."""
+    sid = seed_source["id"]
+    _enable("finance")
+    _enable("calendar")
+    _seed(sid, "i1", "individual", {"body_text": "pagué $4500"})
+
+    asyncio.run(run_extraction(1, batching_policy="per_module", client=FakeExtractLLM()))
+
+    assert _count_purpose("extract_finance") == 1
+    assert _count_purpose("extract_calendar") == 1
+    assert _count_purpose("extract_grouped") == 0
 
 
 def test_all_policy_single_group(seed_source: dict[str, Any]) -> None:
@@ -593,6 +624,81 @@ def test_orchestrator_finance_runs_without_identidades(seed_source: dict[str, An
 
     assert stats.items == 1
     assert _finance_fk() is None
+
+
+def test_read_extractions_debug_exposes_finance_seam(seed_source: dict[str, Any]) -> None:
+    """read_extractions_debug (vista DEBUG): expone el estado INTERNO de finance — la contraparte
+    resuelta a identidad + el outcome de dedup. Solo módulos con CAP_DEBUG_INBOX (calendar/
+    hackathones NO aparecen aunque estén registrados)."""
+    from memex.modules.orchestrator import read_extractions_debug
+
+    _enable("finance")
+    _enable("identidades")
+    oid = _seeded_identity("Test")
+    iid = _seed(seed_source["id"], "m1", "individual", {"body_text": "pagué $4500"})
+    asyncio.run(run_extraction(1, client=FakeExtractLLM(route_choose=["finance"])))
+
+    debug = read_extractions_debug(1, iid)
+    assert "calendar" not in debug and "hackathones" not in debug  # no declaran CAP_DEBUG_INBOX
+    assert len(debug["finance"]) == 1
+    row = debug["finance"][0]
+    assert row["counterparty_identity_id"] == oid
+    assert row["counterparty_identity_name"] == "Test"
+    assert row["processing_outcome"] in {"pending", "unique", "duplicate"}
+    assert row["dedup_candidates"] == []  # único movimiento → sin pares (la query igual corre)
+
+
+def test_identidades_debug_for_inbox_exposes_resolution_and_merge() -> None:
+    """IdentidadesModule.debug_for_inbox: por mención, método de resolución, identidad resuelta y
+    los candidatos de merge que la tocan (con el nombre de la otra). Ejercita el SQL completo."""
+    from memex.modules.identidades.module import IdentidadesModule
+
+    with connection() as c:
+        a = c.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'organizacion','Acme') RETURNING id"
+            )
+        ).scalar_one()
+        b = c.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'organizacion','Acme Inc') RETURNING id"
+            )
+        ).scalar_one()
+        lo, hi = sorted((int(a), int(b)))
+        c.execute(
+            text(
+                """INSERT INTO mod_identidades_merge_candidates
+                   (user_id, identity_a_id, identity_b_id, reason, score, status)
+                   VALUES (1, :lo, :hi, 'trgm_name', 0.7, 'candidate')"""
+            ),
+            {"lo": lo, "hi": hi},
+        )
+        c.execute(
+            text(
+                """INSERT INTO mod_identidades_mentions
+                   (user_id, source_inbox_ids, mentioned_name, mentioned_kind,
+                    resolved_kind, resolved_identity_id, resolution_method)
+                   VALUES (1, ARRAY[55]::bigint[], 'Acme', 'organizacion',
+                           'organizacion', :rid, 'fuzzy')"""
+            ),
+            {"rid": lo},
+        )
+
+    with connection() as c:
+        rows = IdentidadesModule().debug_for_inbox(c, 1, [55])
+
+    assert len(rows) == 1
+    m = rows[0]
+    assert m["resolution_method"] == "fuzzy"
+    assert m["resolved_identity_id"] == lo
+    assert len(m["merge_candidates"]) == 1
+    cand = m["merge_candidates"][0]
+    assert cand["other_identity_id"] == hi
+    assert cand["other_identity_name"] == "Acme Inc"
+    assert cand["status"] == "candidate"
+    assert cand["score"] == 0.7
 
 
 def test_read_extractions_de_hardcoded_returns_all_module_keys() -> None:

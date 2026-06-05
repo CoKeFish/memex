@@ -85,6 +85,22 @@ def test_build_idempotente(client: Any) -> None:
     assert len(client.get("/graph").json()["edges"]) == 1
 
 
+def test_source_inbox_id_enfoca_subgrafo(client: Any) -> None:
+    """`?source_inbox_id=` enfoca el grafo en lo que produjo ese correo (sus vértices + vecinos a un
+    salto); el sentido inverso del drill-down nodo→correo. Un correo sin nada → grafo vacío."""
+    _finance("Rappi", [5])
+    _hack("HackBogota", [5])
+    _finance("Netflix", [9])  # otro correo, sin relación con los del correo 5
+    client.post("/graph/build")
+
+    focado = client.get("/graph?source_inbox_id=5").json()
+    assert len(focado["nodes"]) == 2  # solo los 2 del correo 5 (Netflix del 9 queda fuera)
+    assert all(5 in n["source_inbox_ids"] for n in focado["nodes"])
+    assert len(focado["edges"]) == 1  # la co-ocurrencia entre ellos sí aparece
+
+    assert client.get("/graph?source_inbox_id=999").json() == {"nodes": [], "edges": []}
+
+
 def test_status_filtra_aristas(client: Any) -> None:
     # una PISTA (co-ocurrencia) + una REAL (persona↔org)
     _finance("Rappi", [5])

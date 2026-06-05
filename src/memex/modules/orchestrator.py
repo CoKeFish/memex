@@ -1,4 +1,4 @@
-"""Orquestador de extracción (ADR-015 §2): Etapa A (ruteo) + Etapa B (extracción per_module).
+"""Orquestador de extracción (ADR-015 §2): Etapa A (ruteo) + Etapa B (extracción agrupada).
 
 Parte de la etapa COMBINADA sobre los mensajes clasificados ORIGINALES (junto al summarizer,
 no downstream). La unidad de trabajo es una ventana (lote batch / mensaje individual).
@@ -7,10 +7,13 @@ Etapa A — ruteo (SIEMPRE primero; dependency-aware): pre-filtro determinista p
 `consumes_kinds`; con 0/1 candidato hace short-circuit (sin LLM); con ≥2 candidatos, 1 llamada
 LLM barata elige los relevantes. Cierra con `depends_on` + topo-sort (`resolve_order`).
 
-Etapa B — extracción `per_module` (default): por cada módulo elegido (en orden topológico) se
-extrae sobre los mensajes de la ventana que aún no procesó. Cada item se valida contra el
-`extraction_schema` y se descarta si su atribución cae fuera del lote (alucinación). Persistir
-filas + cursor (`module_extractions`) es atómico por (módulo, ventana); el costo va a `llm_calls`.
+Etapa B — extracción `grouped` (default): los módulos elegidos se co-extraen en UNA sola llamada
+LLM por ventana (FASE 1, sin efectos), partiendo en varias solo si superan `group_size` o ante
+dependencias duras (`per_module` y `all` siguen disponibles como perilla). Luego se persiste
+SECUENCIAL en orden topológico (FASE 2): cada item se valida contra el `extraction_schema` y se
+descarta si su atribución cae fuera del lote (alucinación). Persistir filas + cursor
+(`module_extractions`) es atómico por (módulo, ventana); el costo va a `llm_calls`. El benchmark
+(experiments/batching_cache_bench) respalda agrupar: separar por módulo reenvía el correo N veces.
 
 Best-effort: una ventana o módulo que falla se loguea + registra error y NO frena las demás
 (la idempotencia del cursor evita re-trabajo). Cliente LLM inyectable (tests sin red).
@@ -44,9 +47,11 @@ from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuot
 from memex.logging import get_logger
 from memex.modules import known_modules, resolve
 from memex.modules.contract import (
+    CAP_DEBUG_INBOX,
     CAP_PROVIDE_DOMAIN,
     DomainProvider,
     ExtractionItem,
+    InboxDebugProvider,
     InterestModule,
     ModuleContext,
     parse_items,
@@ -85,7 +90,11 @@ _EXTRACT_MAX_TOKENS = 2048
 #: chunks de a lo sumo ese nº de módulos (perilla para muchos módulos; ADR-015 §2).
 _ROUTE_CHUNK_DEFAULT = 0
 #: Módulos por llamada de extracción con `batching_policy="grouped"` (ignorado en per_module/all).
-_GROUP_SIZE_DEFAULT = 3
+#: Default 8 = headroom sobre los módulos actuales (4) → una sola llamada agrupada por ventana; el
+#: split por conteo recién entra si los módulos elegidos superan este cap (perilla para "muchos
+#: módulos"). El benchmark (experiments/batching_cache_bench) muestra que separar por módulo es lo
+#: más caro: conviene mandar cada correo una sola vez.
+_GROUP_SIZE_DEFAULT = 8
 #: Tope de tokens de salida de una extracción agrupada (se escala por nº de módulos, con este cap).
 _GROUPED_MAX_TOKENS_CAP = 8192
 #: finish_reasons de respuesta COMPLETA. Otro valor (p. ej. "length" por max_tokens) = truncada →
@@ -608,7 +617,7 @@ async def _process_window(
     stats: ExtractStats,
     *,
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
-    batching_policy: str = "per_module",
+    batching_policy: str = "grouped",
     group_size: int = _GROUP_SIZE_DEFAULT,
 ) -> None:
     kind = kind_for_type(window.rows[0].source_type)
@@ -708,7 +717,7 @@ async def run_extraction(
     max_window_size: int = MAX_WINDOW_SIZE,
     max_gap_seconds: int = MAX_GAP_SECONDS,
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
-    batching_policy: str = "per_module",
+    batching_policy: str = "grouped",
     group_size: int = _GROUP_SIZE_DEFAULT,
     client: LLMClient | None = None,
 ) -> ExtractStats:
@@ -891,6 +900,23 @@ def read_extractions(user_id: int, inbox_id: int) -> dict[str, Any]:
         for slug in known_modules():
             result[slug] = resolve(slug)().read_for_inbox(conn, user_id, [inbox_id])
     return result
+
+
+def read_extractions_debug(user_id: int, inbox_id: int) -> dict[str, list[dict[str, Any]]]:
+    """Estado INTERNO por-módulo de un inbox para la vista de DEBUG (`/datos/:id`): de-hardcodeado,
+    itera el registry y le pide su `debug_for_inbox` a cada módulo que declara `CAP_DEBUG_INBOX`
+    (resolución del seam, dedup, consolidación — lo que `read_for_inbox` oculta). Solo aparecen los
+    módulos con esa capacidad (finance/identidades hoy); el resto se omite. Read-only."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    with connection() as conn:
+        for slug in known_modules():
+            module = resolve(slug)()
+            if CAP_DEBUG_INBOX not in module.capabilities or not isinstance(
+                module, InboxDebugProvider
+            ):
+                continue
+            out[slug] = module.debug_for_inbox(conn, user_id, [inbox_id])
+    return out
 
 
 def _coerce_payload(raw: Any) -> dict[str, Any]:

@@ -206,10 +206,13 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
         feedback = get_feedback(conn, inbox_id)
     # Extracciones: única fuente = read_extractions (de-hardcodeado, itera el registry). Antes este
     # router duplicaba el SQL por módulo y ya había divergido (le faltaba identidades).
-    from memex.modules.orchestrator import read_extractions
+    from memex.modules.orchestrator import read_extractions, read_extractions_debug
 
     data["summary"] = dict(summary) if summary else None
     data["extraction"] = read_extractions(user_id, inbox_id)
+    # Estado interno por-módulo (dedup, seam contraparte→identidad, consolidación) para la vista de
+    # DEBUG; de-hardcodeado (itera el registry por CAP_DEBUG_INBOX). Mapa slug→filas; {} si ninguno.
+    data["extraction_debug"] = read_extractions_debug(user_id, inbox_id)
     calls = [dict(c) for c in llm_calls]
     data["llm"] = {
         "calls": len(calls),
