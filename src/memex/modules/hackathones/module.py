@@ -8,8 +8,9 @@ universitarias, MLH/Devpost), comunidades dev (Discord/Telegram) y redes (Twitte
 Forward-compat (cuando aterrice el seam inter-módulo de relaciones, slice 3 de ADR-015): este
 módulo pasará a declarar `depends_on=("calendar",)` + `CAP_CONTRIBUTE_DOMAIN` y contribuirá los
 hackatones agendables al dominio calendar vía `ctx.deps["calendar"].contribute(...)` (la ontología
-ya admite `<módulo> → calendar : materializado_como`). Hoy el orquestador inyecta `ctx.deps={}`, así
-que esa capacidad NO va todavía — agregarla ahora sería diseño especulativo (ADR-015 §4).
+ya admite `<módulo> → calendar : materializado_como`). El seam `ctx.deps` ya está cableado en el
+orquestador (`_build_deps`, commit b5e01c7), pero este módulo aún declara `depends_on=()` y NO
+contribuye al dominio calendar — agregarlo ahora sería diseño especulativo (ADR-015 §4).
 """
 
 from __future__ import annotations

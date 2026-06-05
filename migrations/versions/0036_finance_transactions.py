@@ -1,7 +1,7 @@
 """finance v2: mod_finance_transactions + dedup 2 fases + consolidación
 
-Revision ID: 0034
-Revises: 0032
+Revision ID: 0036_finance_transactions
+Revises: 0035_identidades_pertenencia
 Create Date: 2026-06-04
 
 El módulo finance pasa de extractor PLANO solo-gastos (`mod_finance_expenses`, un `merchant`, fecha

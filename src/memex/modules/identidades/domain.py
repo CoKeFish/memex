@@ -4,8 +4,9 @@
 dependiente NO lee las tablas con SQL crudo — recibe este handle vía `ctx.deps["identidades"]` y
 resuelve referencias (nombre/email/handle) a la identidad canónica con un método tipado. Este slice
 construye el seam de LECTURA (`resolve`, reusando la resolución determinista del módulo); no hay
-`contribute` (identidades no recibe aportes de otros módulos). El orquestador todavía NO inyecta
-esto (`ctx.deps={}`); el wiring es trabajo de un slice posterior.
+`contribute` (identidades no recibe aportes de otros módulos). El orquestador YA inyecta esto
+vía `ctx.deps` (`_build_deps`, commit b5e01c7); finance lo usa como `optional_deps` para resolver
+la contraparte.
 """
 
 from __future__ import annotations

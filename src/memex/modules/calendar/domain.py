@@ -6,8 +6,8 @@ usa con métodos tipados. En este slice se construye el seam de LECTURA (`events
 genuinamente útil y testeable); `contribute` queda declarado en la interface pero sin
 implementar, porque la resolución de prioridad (`priority_rank`/`protected`/`override_policy`)
 y la forma de la contribución se definen recién cuando exista un módulo contribuyente — antes
-sería diseño especulativo. El orquestador todavía NO inyecta esto (`ctx.deps={}`); el wiring
-es trabajo de slice 3.
+sería diseño especulativo. El orquestador YA inyecta esto vía `ctx.deps` (`_build_deps`,
+commit b5e01c7); falta un módulo consumidor que declare `depends_on=("calendar",)` y lo use.
 """
 
 from __future__ import annotations
