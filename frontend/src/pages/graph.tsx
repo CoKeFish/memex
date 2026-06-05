@@ -11,14 +11,14 @@ import type { GraphData, GraphEdge, GraphNode } from "@/data/graph"
 import { useAsync } from "@/lib/use-async"
 
 const KIND_COLOR: Record<string, string> = {
-  gasto: "#10b981",
+  transaccion: "#10b981",
   evento: "#3b82f6",
   hackaton: "#a855f7",
   persona: "#14b8a6",
   organizacion: "#f97316",
 }
 const KIND_LABEL: Record<string, string> = {
-  gasto: "Gasto",
+  transaccion: "Cobro/pago",
   evento: "Evento",
   hackaton: "Hackatón",
   persona: "Persona",
@@ -433,8 +433,9 @@ export function GraphPage() {
     setBuilding(true)
     try {
       const r = await buildGraph()
+      const reales = r.afiliacionReales + r.pertenenciaReales + r.contraparteReales
       toast.success(
-        `Grafo armado: ${r.cooccurrencePistas} pistas, ${r.afiliacionReales} reales` +
+        `Grafo armado: ${r.cooccurrencePistas} pistas, ${reales} reales (${r.contraparteReales} contraparte)` +
           (r.highFanoutSkipped ? ` · ${r.highFanoutSkipped} mensajes saltados` : ""),
       )
       reload()
@@ -450,7 +451,7 @@ export function GraphPage() {
       <PageHeader
         eyebrow="relaciones · grafo"
         title="Grafo de relaciones"
-        description="Cada vértice es una entidad única (gasto, evento, hackatón, persona, organización). Las aristas las forman el inbox (co-ocurrencia = PISTA, sin vouchar) y el directorio (afiliación = REAL); el LLM valida las pistas después. Rueda = zoom · arrastrá = mover · click en un nodo = ver sus relaciones."
+        description="Cada vértice es una entidad única (cobro/pago, evento, hackatón, persona, organización). Las aristas las forman el inbox (co-ocurrencia = PISTA, sin vouchar) y los datos reales (afiliación/pertenencia del directorio y la contraparte de cada cobro→identidad = REAL); el LLM valida las pistas después. Filtrá «Reales» para ver solo lo confirmado. Rueda = zoom · arrastrá = mover · click en un nodo = ver sus relaciones."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex items-center gap-1.5 text-xs text-muted-foreground">

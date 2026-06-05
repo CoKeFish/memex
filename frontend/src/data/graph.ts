@@ -33,6 +33,8 @@ export interface GraphData {
 export interface GraphBuildResult {
   cooccurrencePistas: number
   afiliacionReales: number
+  pertenenciaReales: number
+  contraparteReales: number
   highFanoutSkipped: number
 }
 
@@ -81,11 +83,15 @@ export async function buildGraph(): Promise<GraphBuildResult> {
   const r = await apiPost<{
     cooccurrence_pistas: number
     afiliacion_reales: number
+    pertenencia_reales?: number
+    contraparte_reales?: number
     high_fanout_skipped: number
   }>("/graph/build")
   return {
     cooccurrencePistas: r.cooccurrence_pistas,
     afiliacionReales: r.afiliacion_reales,
+    pertenenciaReales: r.pertenencia_reales ?? 0,
+    contraparteReales: r.contraparte_reales ?? 0,
     highFanoutSkipped: r.high_fanout_skipped,
   }
 }
