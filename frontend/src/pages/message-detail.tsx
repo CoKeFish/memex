@@ -34,6 +34,7 @@ import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
 import { renderPayload } from "@/lib/render-payload"
 import { sourceMeta } from "@/lib/inbox-format"
+import { formatDateOnly } from "@/lib/format"
 import {
   ATTACHMENT_ICON,
   ATTACHMENT_LABEL,
@@ -472,7 +473,7 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
                       key={`f${i}`}
                       icon={DollarSign}
                       tone="text-chart-3"
-                      title={`${fmtMoney(f.amount, f.currency)}${f.merchant ? ` · ${str(f.merchant)}` : ""}${f.occurred_on ? ` · ${str(f.occurred_on)}` : ""}`}
+                      title={`${str(f.direction)} ${fmtMoney(f.amount, f.currency)}${(f.counterparty || f.place) ? ` · ${str(f.counterparty || f.place)}` : ""}${f.occurred_at ? ` · ${formatDateOnly(String(f.occurred_at))}` : ""}`}
                       tag={str(f.category)}
                       sub={str(f.description)}
                       evidence={str(f.evidence)}
