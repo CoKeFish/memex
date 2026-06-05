@@ -1,4 +1,4 @@
-"""Verifica la migración 0034: tablas nuevas, tabla vieja dropeada, CHECKs y cascadas."""
+"""Migración 0036 (finance v2): tablas nuevas, tabla vieja dropeada, CHECKs y cascadas."""
 
 from __future__ import annotations
 

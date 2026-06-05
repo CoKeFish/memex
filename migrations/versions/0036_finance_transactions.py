@@ -30,18 +30,19 @@ migración). Se DROPea el índice UNIQUE 0030 (finance ya no deduplica por busin
 API y front se actualizan en el mismo cambio). `downgrade` es LOSSY (se pierden direction/place y la
 precisión de hora) — aceptable en el flujo forward-only del dueño.
 
-Numeración (migration-numbering-worktrees): la cabeza commiteada es 0032; 0033 lo reclama el refactor
-de identidad (`worktree-identidades-v2`, sin commitear). 0034 verificado libre en todas las ramas. Al
-MERGEAR: si 0033_identidades ya está en main, re-apuntar `down_revision` a esa cabeza (linealizar; o
-`alembic merge`) para no dejar multi-head.
+Numeración (migration-numbering-worktrees): identidad v2 (0033) + pertenencia (0035) ya están en
+main; 0034 quedó libre en el medio (no se usa). Al mergear este worktree se renumeró 0034 → 0036
+colgando de `0035_identidades_pertenencia` (cabeza de main) para linealizar la cadena
+0032 → 0033 → 0035 → 0036 y no dejar multi-head. El FK a `mod_identidades` (counterparty) entra acá
+porque identidad ya existe en la cadena.
 """
 
 from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0034"
-down_revision: str | None = "0032"
+revision: str = "0036_finance_transactions"
+down_revision: str | None = "0035_identidades_pertenencia"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
