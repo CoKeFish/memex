@@ -544,6 +544,57 @@ def test_truncated_grouped_retryable(seed_source: dict[str, Any]) -> None:
     assert _count("module_extractions") == 0  # sin cursor → reintentable
 
 
+# ----- seam de identidad a través del orquestador (optional_deps + FASE 2 topo) -------- #
+
+
+def _seeded_identity(name: str) -> int:
+    with connection() as c:
+        return int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                    "VALUES (1, 'organizacion', :n) RETURNING id"
+                ),
+                {"n": name},
+            ).scalar_one()
+        )
+
+
+def _finance_fk() -> int | None:
+    with connection() as c:
+        val = c.execute(
+            text("SELECT counterparty_identity_id FROM mod_finance_transactions WHERE user_id = 1")
+        ).scalar_one()
+    return int(val) if val is not None else None
+
+
+def test_orchestrator_resolves_counterparty_identity(seed_source: dict[str, Any]) -> None:
+    """End-to-end: con identidades ACTIVO, finanzas recibe su handle (`ctx.deps`, vía
+    `optional_deps`) en FASE 2 y persiste el FK de la contraparte. `route_choose=['finance']`: no se
+    extrae en esta ventana pero igual provee el dominio (handle ligado a active_by_slug)."""
+    _enable("finance")
+    _enable("identidades")
+    oid = _seeded_identity("Test")  # el fake emite counterparty="Test"
+    _seed(seed_source["id"], "m1", "individual", {"body_text": "pagué $4500"})
+
+    asyncio.run(run_extraction(1, client=FakeExtractLLM(route_choose=["finance"])))
+
+    assert _finance_fk() == oid
+
+
+def test_orchestrator_finance_runs_without_identidades(seed_source: dict[str, Any]) -> None:
+    """Dependencia BLANDA: identidades APAGADO → finanzas corre igual (no se dropea) y el FK queda
+    NULL aunque la identidad exista (sin handle no se resuelve; el dedup cae al texto)."""
+    _enable("finance")  # identidades NO habilitado
+    _seeded_identity("Test")
+    _seed(seed_source["id"], "m1", "individual", {"body_text": "pagué $4500"})
+
+    stats = asyncio.run(run_extraction(1, client=FakeExtractLLM()))
+
+    assert stats.items == 1
+    assert _finance_fk() is None
+
+
 def test_read_extractions_de_hardcoded_returns_all_module_keys() -> None:
     """read_extractions itera el registry (de-hardcodeado): TODAS las claves de módulo presentes
     —incluida identidades, que antes no aparecía— aun sin datos, para no soltar una clave que el

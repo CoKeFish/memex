@@ -18,6 +18,7 @@ Best-effort: una ventana o módulo que falla se loguea + registra error y NO fre
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -39,7 +40,7 @@ from memex.core.observability import (
     cost_fields as _cost_fields,
 )
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
+from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError, LLMResult
 from memex.logging import get_logger
 from memex.modules import known_modules, resolve
 from memex.modules.contract import (
@@ -351,235 +352,77 @@ def _build_deps(
     return deps
 
 
-async def _extract_module(
-    user_id: int,
-    llm: LLMClient,
-    module: InterestModule,
-    rows: tuple[WorkRow, ...],
-    stats: ExtractStats,
-    active_by_slug: dict[str, InterestModule],
-) -> None:
-    """Extrae con UN módulo sobre `rows` (su subconjunto pendiente de la ventana)."""
-    window = Window(tier=rows[0].tier, source_id=rows[0].source_id, rows=rows)
+@dataclass(frozen=True)
+class _Unit:
+    """Unidad de extracción de una ventana: un módulo SOLO o un GRUPO co-extraído en una llamada.
+
+    La EXTRACCIÓN (FASE 1) corre concurrente entre unidades (no dependen entre sí); la PERSISTENCIA
+    (FASE 2) corre en el ORDEN de las unidades — que respeta el topo-orden de `chosen` — así una
+    dependencia (cuya unidad va antes) ya persistió cuando el dependiente resuelve `ctx.deps`."""
+
+    modules: tuple[InterestModule, ...]
+    rows: tuple[WorkRow, ...]
+    grouped: bool  # True → una sola llamada LLM agrupada (≥2 módulos); False → módulo único
+    group_size: int
+    policy: str
+
+
+@dataclass
+class _UnitOutcome:
+    """Resultado de extraer una unidad (FASE 1). SIN efectos: no toca DB, `stats` ni `llm_calls`."""
+
+    status: str  # "ok" | "error" | "empty_input"
+    valid_by_slug: dict[str, list[ExtractionItem]]
+    discarded_by_slug: dict[str, int]
+    result: LLMResult | None  # para registrar el costo en FASE 2; None si empty_input
+    error_message: str | None = None
+
+
+async def _extract_unit(user_id: int, llm: LLMClient, unit: _Unit) -> _UnitOutcome:
+    """FASE 1 (extraer): UNA llamada LLM (por módulo o agrupada) + validación. NO persiste, NO toca
+    `stats` ni el costo — solo devuelve los items validados o un marcador error/empty para que la
+    FASE 2 (secuencial) los procese sin carreras. Es seguro correr varias en `asyncio.gather`."""
+    window = Window(tier=unit.rows[0].tier, source_id=unit.rows[0].source_id, rows=unit.rows)
     messages_json, rendered_by_id = _build_messages(window)
-    inbox_ids = [r.inbox_id for r in rows]
+    inbox_ids = [r.inbox_id for r in unit.rows]
+    slugs = [m.slug for m in unit.modules]
 
     if not any(t.strip() for t in rendered_by_id.values()):
-        # Lote sin texto útil → nada que extraer; se marca el cursor para no recargarlo.
-        with connection() as conn:
-            _insert_cursor(conn, user_id, module.slug, inbox_ids)
-        _log.info("extract.module.empty_input", slug=module.slug, n=len(rows))
-        return
+        return _UnitOutcome("empty_input", {}, {}, None)
 
-    msgs = [
-        ChatMessage("system", module.extraction_prompt),
-        ChatMessage("user", "Mensajes (JSON):\n" + messages_json),
-    ]
-    result = await llm.complete(
-        msgs, response_format="json_object", temperature=0.0, max_tokens=_EXTRACT_MAX_TOKENS
-    )
+    if unit.grouped:
+        msgs = [
+            ChatMessage("system", GROUPED_SYSTEM_PROMPT),
+            ChatMessage("user", build_grouped_user_content(list(unit.modules), messages_json)),
+        ]
+        max_tokens = min(_EXTRACT_MAX_TOKENS * len(unit.modules), _GROUPED_MAX_TOKENS_CAP)
+    else:
+        msgs = [
+            ChatMessage("system", unit.modules[0].extraction_prompt),
+            ChatMessage("user", "Mensajes (JSON):\n" + messages_json),
+        ]
+        max_tokens = _EXTRACT_MAX_TOKENS
 
-    if not result.content.strip():
-        stats.errors += 1
-        _record_cost(
-            user_id,
-            module.slug,
-            stats,
-            status="error",
-            model=result.model,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            cache_hit_tokens=result.usage.cache_hit_tokens,
-            cost_usd=result.cost_usd,
-            latency_ms=result.latency_ms,
-            n=len(rows),
-            source_id=window.source_id,
-            error_message="empty content",
-            response_text=result.content,
-        )
-        _log.warning("extract.module.empty_content", slug=module.slug, n=len(rows))
-        return  # sin cursor → reintentable
-
-    if result.finish_reason is not None and result.finish_reason not in _OK_FINISH:
-        # Truncada (p. ej. "length"): el JSON queda cortado → parse_items daría [] y cursorearíamos
-        # como "0 items" (pérdida silenciosa). Tratar como error reintentable: sin cursor.
-        stats.errors += 1
-        _record_cost(
-            user_id,
-            module.slug,
-            stats,
-            status="error",
-            model=result.model,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            cache_hit_tokens=result.usage.cache_hit_tokens,
-            cost_usd=result.cost_usd,
-            latency_ms=result.latency_ms,
-            n=len(rows),
-            source_id=window.source_id,
-            error_message=f"truncated ({result.finish_reason})",
-            response_text=result.content,
-        )
-        _log.warning(
-            "extract.module.truncated",
-            slug=module.slug,
-            finish_reason=result.finish_reason,
-            n=len(rows),
-        )
-        return  # sin cursor → reintentable
-
-    raw_items = parse_items(result.content)
-    lote = frozenset(inbox_ids)
-    valid: list[ExtractionItem] = []
-    for raw in raw_items:
-        item = validate_item(
-            module.extraction_schema, raw, lote=lote, rendered_by_id=rendered_by_id
-        )
-        if item is not None:
-            valid.append(item)
-    discarded = len(raw_items) - len(valid)
-
-    # Persistir filas + cursor en UNA tx (atomicidad por modulo/ventana). Persistir ANTES del costo.
-    with connection() as conn:
-        ctx = ModuleContext(
-            user_id=user_id,
-            conn=conn,
-            llm=llm,
-            deps=_build_deps(module, conn, user_id, active_by_slug),
-            summary_id=None,
-            inbox_ids=tuple(inbox_ids),
-        )
-        persisted = await module.persist(ctx, valid)
-        _insert_cursor(conn, user_id, module.slug, inbox_ids)
-
-    _record_cost(
-        user_id,
-        module.slug,
-        stats,
-        status="ok",
-        model=result.model,
-        prompt_tokens=result.usage.prompt_tokens,
-        completion_tokens=result.usage.completion_tokens,
-        cost_usd=result.cost_usd,
-        latency_ms=result.latency_ms,
-        n=len(rows),
-        source_id=window.source_id,
-        items=persisted,
-        discarded=discarded,
-        response_text=result.content,
-    )
-    stats.items += persisted
-    stats.discarded += discarded
-    stats.by_module[module.slug] = stats.by_module.get(module.slug, 0) + persisted
-    _log.info(
-        "extract.module.done",
-        slug=module.slug,
-        n=len(rows),
-        items=persisted,
-        discarded=discarded,
-    )
-
-
-async def _extract_group(
-    user_id: int,
-    llm: LLMClient,
-    modules: list[InterestModule],
-    rows: tuple[WorkRow, ...],
-    stats: ExtractStats,
-    active_by_slug: dict[str, InterestModule],
-    *,
-    group_size: int,
-    policy: str,
-) -> None:
-    """Extrae con VARIOS módulos en UNA sola llamada LLM (`batching_policy` grouped/all).
-
-    Valida + persiste + cursorea CADA módulo en su PROPIA tx (atomicidad per-módulo preservada,
-    igual que `_extract_module`). El costo va a UN solo `llm_call` (`extract_grouped`): el costo
-    per-módulo NO es separable (un prompt+completion compartido), pero se conserva la atribución de
-    ITEMS por slug en la metadata."""
-    window = Window(tier=rows[0].tier, source_id=rows[0].source_id, rows=rows)
-    messages_json, rendered_by_id = _build_messages(window)
-    inbox_ids = [r.inbox_id for r in rows]
-    slugs = [m.slug for m in modules]
-
-    if not any(t.strip() for t in rendered_by_id.values()):
-        # Lote sin texto útil → nada que extraer; se marca el cursor de CADA módulo del grupo.
-        with connection() as conn:
-            for m in modules:
-                _insert_cursor(conn, user_id, m.slug, inbox_ids)
-        _log.info("extract.group.empty_input", slugs=slugs, n=len(rows))
-        return
-
-    msgs = [
-        ChatMessage("system", GROUPED_SYSTEM_PROMPT),
-        ChatMessage("user", build_grouped_user_content(modules, messages_json)),
-    ]
-    max_tokens = min(_EXTRACT_MAX_TOKENS * len(modules), _GROUPED_MAX_TOKENS_CAP)
     result = await llm.complete(
         msgs, response_format="json_object", temperature=0.0, max_tokens=max_tokens
     )
 
     if not result.content.strip():
-        stats.errors += 1
-        record_llm_call(
-            user_id=user_id,
-            purpose="extract_grouped",
-            model=result.model,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            cache_hit_tokens=result.usage.cache_hit_tokens,
-            cost_usd=result.cost_usd,
-            latency_ms=result.latency_ms,
-            status="error",
-            source_id=window.source_id,  # atribución first-class por source
-            error_message="empty content",
-            metadata={"policy": policy, "group_size": group_size, "slugs": slugs, "n": len(rows)},
-            response_text=result.content,
-        )
-        stats.cost.record(
-            window.source_id,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            cost_usd=result.cost_usd,
-        )
-        _log.warning("extract.group.empty_content", slugs=slugs, n=len(rows))
-        return  # sin cursor → reintentable
-
+        return _UnitOutcome("error", {}, {}, result, "empty content")
+    # Truncada (p. ej. "length"): el JSON queda cortado → parse daría [] y cursorearíamos "0 items"
+    # (pérdida silenciosa). Tratar como error reintentable: sin cursor.
     if result.finish_reason is not None and result.finish_reason not in _OK_FINISH:
-        # Truncada: JSON agrupado cortado → no cursorear ningún módulo del grupo (reintentable).
-        stats.errors += 1
-        record_llm_call(
-            user_id=user_id,
-            purpose="extract_grouped",
-            model=result.model,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            cache_hit_tokens=result.usage.cache_hit_tokens,
-            cost_usd=result.cost_usd,
-            latency_ms=result.latency_ms,
-            status="error",
-            source_id=window.source_id,  # atribución first-class por source
-            error_message=f"truncated ({result.finish_reason})",
-            metadata={"policy": policy, "group_size": group_size, "slugs": slugs, "n": len(rows)},
-            response_text=result.content,
-        )
-        stats.cost.record(
-            window.source_id,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            cost_usd=result.cost_usd,
-        )
-        _log.warning(
-            "extract.group.truncated", slugs=slugs, finish_reason=result.finish_reason, n=len(rows)
-        )
-        return  # sin cursor → reintentable
+        return _UnitOutcome("error", {}, {}, result, f"truncated ({result.finish_reason})")
 
-    by_slug = parse_grouped_items(result.content, slugs)
     lote = frozenset(inbox_ids)
-    items_by_slug: dict[str, int] = {}
+    by_slug = (
+        parse_grouped_items(result.content, slugs)
+        if unit.grouped
+        else {unit.modules[0].slug: parse_items(result.content)}
+    )
+    valid_by_slug: dict[str, list[ExtractionItem]] = {}
     discarded_by_slug: dict[str, int] = {}
-    # Persistir por módulo en tx propia ANTES de registrar el costo (atomicidad por módulo).
-    for module in modules:
+    for module in unit.modules:
         raw_items = by_slug[module.slug]
         valid: list[ExtractionItem] = []
         for raw in raw_items:
@@ -588,7 +431,125 @@ async def _extract_group(
             )
             if item is not None:
                 valid.append(item)
-        discarded = len(raw_items) - len(valid)
+        valid_by_slug[module.slug] = valid
+        discarded_by_slug[module.slug] = len(raw_items) - len(valid)
+    return _UnitOutcome("ok", valid_by_slug, discarded_by_slug, result)
+
+
+def _record_grouped_cost(
+    user_id: int,
+    unit: _Unit,
+    result: LLMResult,
+    stats: ExtractStats,
+    *,
+    status: str,
+    source_id: int | None,
+    n: int,
+    items_by_slug: dict[str, int] | None = None,
+    discarded_by_slug: dict[str, int] | None = None,
+    error_message: str | None = None,
+) -> None:
+    """UN solo `extract_grouped` `llm_call` por llamada agrupada (el costo per-módulo no es
+    separable: prompt+completion compartido). Conserva la atribución items/discarded por slug."""
+    metadata: dict[str, object] = {
+        "policy": unit.policy,
+        "group_size": unit.group_size,
+        "slugs": [m.slug for m in unit.modules],
+        "n": n,
+    }
+    if items_by_slug is not None:
+        metadata["items_by_slug"] = items_by_slug
+    if discarded_by_slug is not None:
+        metadata["discarded_by_slug"] = discarded_by_slug
+    record_llm_call(
+        user_id=user_id,
+        purpose="extract_grouped",
+        model=result.model,
+        prompt_tokens=result.usage.prompt_tokens,
+        completion_tokens=result.usage.completion_tokens,
+        cache_hit_tokens=result.usage.cache_hit_tokens,
+        cost_usd=result.cost_usd,
+        latency_ms=result.latency_ms,
+        status=status,
+        source_id=source_id,  # atribución first-class por source
+        error_message=error_message,
+        metadata=metadata,
+        response_text=result.content,
+    )
+    stats.cost.record(
+        source_id,
+        prompt_tokens=result.usage.prompt_tokens,
+        completion_tokens=result.usage.completion_tokens,
+        cost_usd=result.cost_usd,
+    )
+
+
+async def _persist_unit(
+    user_id: int,
+    llm: LLMClient,
+    unit: _Unit,
+    outcome: _UnitOutcome,
+    stats: ExtractStats,
+    active_by_slug: dict[str, InterestModule],
+) -> None:
+    """FASE 2 (persistir/dedup): SECUENCIAL y en topo-orden. Materializa los items de la unidad —
+    cada módulo en su PROPIA tx con `ctx.deps` ya poblado (la dependencia persistió en una unidad
+    ANTERIOR), escribe el cursor (atómico con el persist) y registra costo + `stats`."""
+    inbox_ids = [r.inbox_id for r in unit.rows]
+    source_id = unit.rows[0].source_id
+    slugs = [m.slug for m in unit.modules]
+    n = len(unit.rows)
+
+    if outcome.status == "empty_input":
+        # Lote sin texto útil → nada que extraer; se marca el cursor de cada módulo (no recargarlo).
+        with connection() as conn:
+            for module in unit.modules:
+                _insert_cursor(conn, user_id, module.slug, inbox_ids)
+        _log.info("extract.unit.empty_input", slugs=slugs, n=n)
+        return
+
+    if outcome.status == "error":
+        stats.errors += 1
+        result = outcome.result
+        if result is not None:  # en 'error' siempre lo es; el guard es para el type-checker
+            if unit.grouped:
+                _record_grouped_cost(
+                    user_id,
+                    unit,
+                    result,
+                    stats,
+                    status="error",
+                    source_id=source_id,
+                    n=n,
+                    error_message=outcome.error_message,
+                )
+            else:
+                _record_cost(
+                    user_id,
+                    unit.modules[0].slug,
+                    stats,
+                    status="error",
+                    model=result.model,
+                    prompt_tokens=result.usage.prompt_tokens,
+                    completion_tokens=result.usage.completion_tokens,
+                    cache_hit_tokens=result.usage.cache_hit_tokens,
+                    cost_usd=result.cost_usd,
+                    latency_ms=result.latency_ms,
+                    n=n,
+                    source_id=source_id,
+                    error_message=outcome.error_message,
+                    response_text=result.content,
+                )
+        _log.warning("extract.unit.error", slugs=slugs, n=n, error=outcome.error_message)
+        return  # sin cursor → reintentable
+
+    result = outcome.result
+    if result is None:  # 'ok' siempre trae result; defensivo para el type-checker
+        return
+    items_by_slug: dict[str, int] = {}
+    # Persistir cada módulo en su tx (atomicidad per-módulo). El orden de unidades (topo) garantiza
+    # que la dependencia ya commiteó, así que `_build_deps` ve su dominio fresco.
+    for module in unit.modules:
         with connection() as conn:
             ctx = ModuleContext(
                 user_id=user_id,
@@ -598,47 +559,44 @@ async def _extract_group(
                 summary_id=None,
                 inbox_ids=tuple(inbox_ids),
             )
-            persisted = await module.persist(ctx, valid)
+            persisted = await module.persist(ctx, outcome.valid_by_slug[module.slug])
             _insert_cursor(conn, user_id, module.slug, inbox_ids)
         items_by_slug[module.slug] = persisted
-        discarded_by_slug[module.slug] = discarded
         stats.items += persisted
-        stats.discarded += discarded
+        stats.discarded += outcome.discarded_by_slug[module.slug]
         stats.by_module[module.slug] = stats.by_module.get(module.slug, 0) + persisted
 
-    record_llm_call(
-        user_id=user_id,
-        purpose="extract_grouped",
-        model=result.model,
-        prompt_tokens=result.usage.prompt_tokens,
-        completion_tokens=result.usage.completion_tokens,
-        cost_usd=result.cost_usd,
-        latency_ms=result.latency_ms,
-        status="ok",
-        source_id=window.source_id,  # atribución first-class por source
-        metadata={
-            "policy": policy,
-            "group_size": group_size,
-            "slugs": slugs,
-            "items_by_slug": items_by_slug,
-            "discarded_by_slug": discarded_by_slug,
-            "n": len(rows),
-        },
-        response_text=result.content,
-    )
-    stats.cost.record(
-        window.source_id,
-        prompt_tokens=result.usage.prompt_tokens,
-        completion_tokens=result.usage.completion_tokens,
-        cost_usd=result.cost_usd,
-    )
-    _log.info(
-        "extract.group.done",
-        slugs=slugs,
-        n=len(rows),
-        items=sum(items_by_slug.values()),
-        discarded=sum(discarded_by_slug.values()),
-    )
+    if unit.grouped:
+        _record_grouped_cost(
+            user_id,
+            unit,
+            result,
+            stats,
+            status="ok",
+            source_id=source_id,
+            n=n,
+            items_by_slug=items_by_slug,
+            discarded_by_slug=outcome.discarded_by_slug,
+        )
+    else:
+        slug = unit.modules[0].slug
+        _record_cost(
+            user_id,
+            slug,
+            stats,
+            status="ok",
+            model=result.model,
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            cost_usd=result.cost_usd,
+            latency_ms=result.latency_ms,
+            n=n,
+            source_id=source_id,
+            items=items_by_slug[slug],
+            discarded=outcome.discarded_by_slug[slug],
+            response_text=result.content,
+        )
+    _log.info("extract.unit.done", slugs=slugs, n=n, items=sum(items_by_slug.values()))
 
 
 async def _process_window(
@@ -666,7 +624,10 @@ async def _process_window(
     )
     chosen_set = set(chosen)
 
-    # Etapa B: agrupar los elegidos (ya topo-ordenados) según la policy y extraer.
+    # Etapa B — construir las UNIDADES de extracción (mismo cálculo de filas pending/co/leftover) en
+    # el ORDEN de `chosen` (topo): la FASE 2 persiste en este orden, así una dependencia persiste
+    # antes que su dependiente.
+    units: list[_Unit] = []
     for group in plan_groups(chosen, active_by_slug, batching_policy, group_size):
         modules = [active_by_slug[s] for s in group]
         if len(modules) == 1:
@@ -675,7 +636,7 @@ async def _process_window(
                 r for r in window.rows if module.slug not in done.get(r.inbox_id, set())
             )
             if pending:
-                await _extract_module(user_id, llm, module, pending, stats, active_by_slug)
+                units.append(_Unit((module,), pending, False, group_size, batching_policy))
             continue
         # Grupo ≥2: co-extraer SOLO las filas que NINGÚN miembro procesó (intersección).
         co = tuple(
@@ -684,16 +645,7 @@ async def _process_window(
             if all(m.slug not in done.get(r.inbox_id, set()) for m in modules)
         )
         if co:
-            await _extract_group(
-                user_id,
-                llm,
-                modules,
-                co,
-                stats,
-                active_by_slug,
-                group_size=group_size,
-                policy=batching_policy,
-            )
+            units.append(_Unit(tuple(modules), co, True, group_size, batching_policy))
         # Fallback: filas con progreso parcial → cada módulo rezagado las hace per-módulo (así
         # ningún módulo recién habilitado queda sin procesar filas que otro del grupo ya hizo).
         co_ids = {r.inbox_id for r in co}
@@ -704,7 +656,28 @@ async def _process_window(
                 if r.inbox_id not in co_ids and module.slug not in done.get(r.inbox_id, set())
             )
             if leftover:
-                await _extract_module(user_id, llm, module, leftover, stats, active_by_slug)
+                units.append(_Unit((module,), leftover, False, group_size, batching_policy))
+
+    # FASE 1 (extraer): todas las unidades CONCURRENTEMENTE, sin efectos. `return_exceptions=True`
+    # para no dejar tareas huérfanas si una revienta. Como nada se persistió aún, la ventana queda
+    # 100% reintentable: una excepción dura se re-lanza (best-effort por ventana en run_extraction;
+    # quota TIENE PRIORIDAD y aborta la corrida).
+    results = await asyncio.gather(
+        *(_extract_unit(user_id, llm, u) for u in units), return_exceptions=True
+    )
+    for res in results:
+        if isinstance(res, LLMQuotaError):
+            raise res
+    outcomes: list[_UnitOutcome] = []
+    for res in results:
+        if isinstance(res, BaseException):
+            raise res
+        outcomes.append(res)
+
+    # FASE 2 (persistir/dedup): SECUENCIAL y en el orden de las unidades (topo) — el dependiente ve
+    # el dominio fresco de su dependencia, aunque ambos se extrajeron a la vez en la FASE 1.
+    for unit, outcome in zip(units, outcomes, strict=True):
+        await _persist_unit(user_id, llm, unit, outcome, stats, active_by_slug)
 
     # Candidatos ruteados-fuera: marcar "considerado" para no re-rutearlos eternamente.
     for module in candidates:
