@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Link } from "react-router-dom"
 import { Hammer, Loader2, Maximize2 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/common/page-header"
@@ -371,6 +372,25 @@ function DetailPanel({ node, edges, nodesByKey }: { node: GraphNode; edges: Grap
           </ul>
         )}
       </div>
+      {node.sourceInboxIds.length > 0 && (
+        <div>
+          <div className="mb-1 text-xs font-medium text-muted-foreground">
+            Correos de origen ({node.sourceInboxIds.length})
+          </div>
+          <ul className="flex flex-wrap gap-1.5">
+            {node.sourceInboxIds.map((iid) => (
+              <li key={iid}>
+                <Link
+                  to={`/datos/${iid}`}
+                  className="inline-block rounded border bg-muted/30 px-2 py-0.5 text-xs text-origin-inbox hover:underline"
+                >
+                  correo #{iid}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }

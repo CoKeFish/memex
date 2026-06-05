@@ -10,6 +10,7 @@ export interface GraphNode {
   id: number
   label: string
   kind: string
+  sourceInboxIds: number[]
 }
 
 export interface GraphEdge {
@@ -51,9 +52,21 @@ interface EdgeApiRow {
   evidence: string
 }
 
+interface NodeApiRow {
+  slug: string
+  id: number
+  label: string
+  kind: string
+  source_inbox_ids: number[]
+}
+
 interface GraphApi {
-  nodes: GraphNode[]
+  nodes: NodeApiRow[]
   edges: EdgeApiRow[]
+}
+
+function toNode(n: NodeApiRow): GraphNode {
+  return { slug: n.slug, id: n.id, label: n.label, kind: n.kind, sourceInboxIds: n.source_inbox_ids ?? [] }
 }
 
 function toEdge(e: EdgeApiRow): GraphEdge {
@@ -75,7 +88,7 @@ function toEdge(e: EdgeApiRow): GraphEdge {
 export async function fetchGraph(status?: string): Promise<GraphData> {
   const qs = status ? `?status=${encodeURIComponent(status)}` : ""
   const g = await apiGet<GraphApi>(`/graph${qs}`)
-  return { nodes: g.nodes, edges: g.edges.map(toEdge) }
+  return { nodes: g.nodes.map(toNode), edges: g.edges.map(toEdge) }
 }
 
 /** Corre el paso determinista (POST /graph/build): materializa pistas + reales sobre lo guardado. */

@@ -7,7 +7,7 @@ from memex.api.schemas import GraphBuildResult, GraphResponse
 from memex.config import settings
 from memex.db import connection
 from memex.logging import get_logger
-from memex.relations.deterministic import build_relations
+from memex.relations.deterministic import build_relations, vertex_inbox_ids
 from memex.relations.edges import list_edges
 from memex.relations.vertices import list_vertices
 
@@ -25,14 +25,25 @@ async def get_graph(
 ) -> dict[str, Any]:
     """El grafo del user: vértices (proyectados de las tablas `mod_*`) + aristas (`relation_edges`).
 
-    Un vértice se direcciona por `(slug, id)`; inbox NO es vértice (es procedencia, drill-down). Las
-    aristas llevan su `producer` y su `status` (`pista` vs `confirmed`); el front puede filtrar por
-    `status`. Solo LECTURA: no dispara el armado (eso es POST /graph/build).
+    Un vértice se direcciona por `(slug, id)`; inbox NO es vértice (es procedencia, drill-down):
+    cada nodo lleva sus `source_inbox_ids` (los mensajes de los que salió) para abrir el correo
+    original desde el grafo. Las aristas llevan su `producer` y su `status` (`pista`/`confirmed`);
+    el front filtra por `status`. Solo LECTURA: no dispara el armado (POST /graph/build).
     """
     with connection() as conn:
         verts = list_vertices(conn, user_id)
         edges = list_edges(conn, user_id, status=status)
-    nodes = [{"slug": v.slug, "id": v.id, "label": v.label, "kind": v.kind} for v in verts]
+        prov = vertex_inbox_ids(conn, user_id)
+    nodes = [
+        {
+            "slug": v.slug,
+            "id": v.id,
+            "label": v.label,
+            "kind": v.kind,
+            "source_inbox_ids": sorted(prov.get(v.ref, set())),
+        }
+        for v in verts
+    ]
     out_edges = [
         {
             "id": e.id,

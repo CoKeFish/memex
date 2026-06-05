@@ -1467,6 +1467,7 @@ class GraphNode(BaseModel):
     id: int
     label: str
     kind: str
+    source_inbox_ids: list[int] = []
 
 
 class GraphEdge(BaseModel):
