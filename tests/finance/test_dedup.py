@@ -126,6 +126,42 @@ def test_weak_day_level_coexists() -> None:
     assert _pairs(a, b) == []
 
 
+# ----- multi-moneda (conversión + banda) ----------------------------------------- #
+
+
+def test_cross_currency_equivalent_is_candidate() -> None:
+    # 50 USD vs 200000 COP (≈50 USD) mismo día/contraparte/lugar → par, pero cross-currency NUNCA
+    # auto-confirma (conversión difusa): queda candidate con señales 'fx' y 'dia'.
+    a = _row(1, amount="50.00", currency="USD", counterparty="Rappi", place="Calle 1")
+    b = _row(2, amount="200000.00", currency="COP", counterparty="Rappi", place="Calle 1")
+    pairs = _pairs(a, b)
+    assert len(pairs) == 1
+    assert pairs[0].decision == "candidate"
+    assert "fx" in pairs[0].reason
+    assert "dia" in pairs[0].reason  # cross-currency compara a nivel día aunque ambos sean datetime
+
+
+def test_cross_currency_mismatched_amount_no_pair() -> None:
+    # 50 USD vs 100000 COP (≈25 USD) → fuera de la banda del 12 % → coexisten.
+    a = _row(1, amount="50.00", currency="USD")
+    b = _row(2, amount="100000.00", currency="COP")
+    assert _pairs(a, b) == []
+
+
+def test_cross_currency_unknown_rate_no_pair() -> None:
+    # sin tasa para una moneda → no se puede comparar → coexisten (no se adivina).
+    a = _row(1, amount="50.00", currency="USD")
+    b = _row(2, amount="50.00", currency="XYZ")
+    assert _pairs(a, b) == []
+
+
+def test_cross_currency_different_identity_still_vetoes() -> None:
+    # equivalente por conversión pero identidades distintas → veta (el monto no salva el veto).
+    a = _row(1, amount="50.00", currency="USD", identity_id=1)
+    b = _row(2, amount="200000.00", currency="COP", identity_id=2)
+    assert _pairs(a, b) == []
+
+
 # ----- seam de identidad --------------------------------------------------------- #
 
 

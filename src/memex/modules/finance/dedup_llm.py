@@ -25,6 +25,7 @@ from memex.core.observability import CostAccum, record_llm_call
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.logging import get_logger
+from memex.modules.finance import fx
 from memex.modules.finance.prompt import FINANCE_DEDUP_SYSTEM_PROMPT
 
 _log = get_logger("memex.modules.finance.dedup_llm")
@@ -104,6 +105,21 @@ def _parse_decision(content: str) -> DedupDecision:
     return DedupDecision(same=same, confidence=confidence, rationale=rationale)
 
 
+def _fx_hint(a: PairTxView, b: PairTxView) -> str:
+    """Pista de conversión cuando A y B están en monedas distintas: B convertido a la moneda de A a
+    tasa aproximada (vacío si misma moneda o no hay tasa para alguna)."""
+    if a.currency.strip().upper() == b.currency.strip().upper():
+        return ""
+    converted = fx.convert(b.amount, b.currency, a.currency)
+    if converted is None:
+        return ""
+    return (
+        f"\nPISTA de conversión (tasa aproximada): {b.amount} {b.currency} ≈ "
+        f"{converted.quantize(Decimal('0.01'))} {a.currency} (la de A). Las tasas varían; tolerá "
+        "el spread."
+    )
+
+
 async def disambiguate_pair(
     llm: LLMClient, a: PairTxView, b: PairTxView
 ) -> tuple[DedupDecision, LLMResult]:
@@ -111,7 +127,7 @@ async def disambiguate_pair(
     (para registrar el costo). Sesgo a coexistir aplicado en el parseo."""
     user_content = (
         "¿Estos dos movimientos son el MISMO cobro/pago de la vida real?\n\n"
-        f"{_fmt_tx('A', a)}\n{_fmt_tx('B', b)}"
+        f"{_fmt_tx('A', a)}\n{_fmt_tx('B', b)}{_fx_hint(a, b)}"
     )
     result = await llm.complete(
         [

@@ -161,12 +161,12 @@ def _insert_transactions(
 
 
 def _existing_rows(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> list[DedupRow]:
-    """Transacciones ya persistidas del user comparables con el lote: mismo monto+moneda (la
-    compuerta del dedup los exige exactos) dentro de la ventana temporal ± margen, excluyendo las
-    recién insertadas. El prefiltro por monto/moneda achica el set sin cambiar el resultado."""
+    """Transacciones ya persistidas del user comparables con el lote: dentro de la ventana temporal
+    ± margen, excluyendo las recién insertadas. NO se prefiltra por monto/moneda exactos: un
+    duplicado CROSS-CURRENCY tiene otro monto y otra moneda (se compara convertido en el dedup), así
+    que ese prefiltro lo perdería; el monto real lo decide la compuerta `fx.approx_equal`. El
+    volumen por ventana (± pocos días) es chico, así que traer todo el rango es barato."""
     new_ids = [r.transaction_id for r in new_rows]
-    amounts = list({r.amount for r in new_rows})
-    currencies = list({r.currency for r in new_rows})
     instants = [r.occurred_at for r in new_rows]
     lo = min(instants) - _EXISTING_MARGIN
     hi = max(instants) + _EXISTING_MARGIN
@@ -179,19 +179,10 @@ def _existing_rows(conn: Connection, user_id: int, new_rows: list[DedupRow]) -> 
                 FROM mod_finance_transactions
                 WHERE user_id = :uid
                   AND occurred_at BETWEEN :lo AND :hi
-                  AND amount = ANY(CAST(:amounts AS NUMERIC[]))
-                  AND currency = ANY(CAST(:currencies AS TEXT[]))
                   AND NOT (id = ANY(CAST(:new_ids AS BIGINT[])))
                 """
             ),
-            {
-                "uid": user_id,
-                "lo": lo,
-                "hi": hi,
-                "amounts": amounts,
-                "currencies": currencies,
-                "new_ids": new_ids,
-            },
+            {"uid": user_id, "lo": lo, "hi": hi, "new_ids": new_ids},
         )
         .mappings()
         .all()

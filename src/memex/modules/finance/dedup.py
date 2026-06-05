@@ -5,32 +5,36 @@ modelando lo que pidió el dueño: "dos montos iguales en la misma hora son prob
 cobro; la probabilidad sube si más campos coinciden; si la probabilidad es lo bastante baja pero
 cumple los requisitos, lo decide un LLM; si claramente es el mismo, la consolidación lo fusiona".
 
-Compuerta mínima (si no, los movimientos coexisten, no son par): misma MONEDA, mismo MONTO (exacto)
-y proximidad temporal. La proximidad depende de la precisión del instante: si AMBOS lados tienen la
-hora del cobro (`precision='datetime'`) se exige ≤ 1h ("misma hora" literal); si no (solo fecha, o
-fecha inferida de la recepción), se compara a nivel DÍA (ventana ancha): la hora no es confiable.
+Compuerta mínima (si no, los movimientos coexisten, no son par): MISMO MONTO y proximidad temporal.
+Mismo monto = igualdad EXACTA si la moneda coincide; si difiere (banco en pesos vs factura en
+dólares) se convierte con `fx` y se compara en una BANDA de tolerancia (la conversión es aprox.).
+La proximidad depende de la precisión del instante: si AMBOS lados tienen la hora del cobro
+(`precision='datetime'`) se exige ≤ 1h ("misma hora"); si no (solo fecha, o fecha inferida de la
+recepción), se compara a nivel DÍA (ventana ancha): la hora no es confiable.
 
 Sobre la compuerta se suma un SCORE con los campos que coinciden (contraparte, lugar, rubro,
 dirección). El score cae en tres bandas:
-- `>= BAND_CONFIRM` Y ambos con hora (`datetime`) → `confirmed` (decidido procedimentalmente, sin
-  LLM): mismo monto + misma hora + contraparte/lugar fuertes = casi seguro el mismo cargo.
-- `[BAND_CANDIDATE, ...)` (o score alto pero sin hora confiable) → `candidate`: lo resuelve el LLM.
+- `>= BAND_CONFIRM` Y ambos con hora (`datetime`) Y misma moneda → `confirmed` (procedimental, sin
+  LLM): mismo monto + misma hora + contraparte/lugar fuertes = casi seguro el mismo cargo. Un par
+  CROSS-CURRENCY nunca auto-confirma (conversión difusa): queda `candidate` para la FASE 2 LLM.
+- `[BAND_CANDIDATE, ...)` (o score alto sin hora confiable, o cross-currency) → `candidate`: LLM.
 - `< BAND_CANDIDATE` → sin par (coexisten).
 
-`_same_responsible` es el SEAM de identidad (ADR-015): hoy compara `counterparty` por texto; cuando
-el directorio de identidades se estabilice, se enchufa acá la resolución "mismo responsable" sin
-tocar a los llamadores ni el scoring. La similitud de texto reusa `contract.normalize` + `difflib`.
+`_same_responsible` es el SEAM de identidad (ADR-015): compara por `counterparty_identity_id` si
+ambos lados resolvieron (misma id → mismo responsable; ids distintas → VETA el par); cae al texto
+(`contract.normalize` + `difflib`) si no.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from difflib import SequenceMatcher
 
 from memex.modules.contract import normalize
+from memex.modules.finance import fx
 
 #: Precisión del instante del cobro (espeja la columna `occurred_at_precision`).
 PRECISION_DATETIME = "datetime"  # hora del cobro conocida → la compuerta exige "misma hora"
@@ -110,15 +114,32 @@ def _same_responsible(a: DedupRow, b: DedupRow, *, text_threshold: float) -> boo
     return None
 
 
+def _both_timed(a: DedupRow, b: DedupRow) -> bool:
+    """Ambos con hora confiable (`datetime`) Y misma moneda: solo entonces se compara/puntúa a nivel
+    HORA. Un par CROSS-CURRENCY viene de dos sistemas distintos (banco vs comercio) cuyos timestamps
+    no alinean a la hora → se compara a nivel DÍA aunque ambos sean `datetime`."""
+    same_currency = a.currency.strip().upper() == b.currency.strip().upper()
+    return a.precision == PRECISION_DATETIME and b.precision == PRECISION_DATETIME and same_currency
+
+
 def _gate(
-    a: DedupRow, b: DedupRow, *, hour_window: timedelta, day_window: timedelta
+    a: DedupRow,
+    b: DedupRow,
+    *,
+    hour_window: timedelta,
+    day_window: timedelta,
+    fx_rates: Mapping[str, Decimal],
+    fx_tolerance: Decimal,
 ) -> float | None:
     """¿El par pasa la compuerta mínima? Devuelve el peso BASE (según precisión temporal) o `None`.
-    Requiere misma moneda, mismo monto exacto y proximidad temporal (hora si ambos `datetime`, si
-    no día)."""
-    if a.currency != b.currency or a.amount != b.amount:
+    Requiere MISMO MONTO (exacto si igual moneda; convertido dentro de la banda `fx_tolerance` si
+    difiere — sin tasa para alguna moneda no son par) y proximidad temporal (hora solo si
+    `_both_timed`, si no día)."""
+    if not fx.approx_equal(
+        a.amount, a.currency, b.amount, b.currency, tol=fx_tolerance, rates=fx_rates
+    ):
         return None
-    both_timed = a.precision == PRECISION_DATETIME and b.precision == PRECISION_DATETIME
+    both_timed = _both_timed(a, b)
     window = hour_window if both_timed else day_window
     if abs(a.occurred_at - b.occurred_at) > window:
         return None
@@ -134,17 +155,29 @@ def _evaluate_pair(
     text_threshold: float,
     band_confirm: float,
     band_candidate: float,
+    fx_rates: Mapping[str, Decimal],
+    fx_tolerance: Decimal,
 ) -> DedupPair | None:
-    base = _gate(a, b, hour_window=hour_window, day_window=day_window)
+    base = _gate(
+        a,
+        b,
+        hour_window=hour_window,
+        day_window=day_window,
+        fx_rates=fx_rates,
+        fx_tolerance=fx_tolerance,
+    )
     if base is None:
         return None
 
     resp = _same_responsible(a, b, text_threshold=text_threshold)
-    if resp is False:  # seam de identidad: responsables distintos confirmados → veto (futuro)
+    if resp is False:  # seam de identidad: responsables distintos confirmados → veta el par
         return None
 
+    cross_currency = a.currency.strip().upper() != b.currency.strip().upper()
+    both_timed = _both_timed(a, b)  # ya excluye cross-currency (timestamps de sistemas distintos)
     signals = ["amount"]
-    both_timed = a.precision == PRECISION_DATETIME and b.precision == PRECISION_DATETIME
+    if cross_currency:
+        signals.append("fx")  # monto equivalente por conversión, no idéntico
     signals.append("hora" if both_timed else "dia")
 
     score = base
@@ -164,8 +197,9 @@ def _evaluate_pair(
 
     if score < band_candidate:
         return None
-    # Auto-confirmar (saltear el LLM) solo con hora confiable: mismo monto + MISMA HORA + señales
-    # fuertes ≈ el mismo cargo de dos fuentes. Sin hora, aunque el score sea alto, decide el LLM.
+    # Auto-confirmar (saltear el LLM) solo con `_both_timed` (hora confiable Y misma moneda): mismo
+    # monto + MISMA HORA + señales fuertes ≈ el mismo cargo de dos fuentes. Sin hora confiable, o
+    # cross-currency (conversión difusa), aunque el score sea alto lo decide el LLM.
     decision = "confirmed" if (score >= band_confirm and both_timed) else "candidate"
 
     lo, hi = (a, b) if a.transaction_id < b.transaction_id else (b, a)
@@ -187,12 +221,17 @@ def mark_duplicates(
     text_threshold: float = DEFAULT_TEXT_THRESHOLD,
     band_confirm: float = DEFAULT_BAND_CONFIRM,
     band_candidate: float = DEFAULT_BAND_CANDIDATE,
+    fx_rates: Mapping[str, Decimal] | None = None,
+    fx_tolerance: Decimal | None = None,
 ) -> list[DedupPair]:
     """Devuelve los pares candidatos de duplicado, comparando las transacciones NUEVAS entre sí y
     contra las EXISTENTES (nunca existentes contra existentes — ya se compararon en su corrida).
 
-    Pura y determinista: pares canónicos (`a_id < b_id`), ordenados por `(a_id, b_id)`.
+    Pura y determinista: pares canónicos (`a_id < b_id`), ordenados por `(a_id, b_id)`. Las tasas y
+    la banda de conversión se resuelven UNA vez (defaults + env si no se pasan).
     """
+    rates = fx_rates if fx_rates is not None else fx.load_rates()
+    tolerance = fx_tolerance if fx_tolerance is not None else fx.load_tolerance()
     pairs: list[DedupPair] = []
 
     def evaluate(a: DedupRow, b: DedupRow) -> None:
@@ -204,6 +243,8 @@ def mark_duplicates(
             text_threshold=text_threshold,
             band_confirm=band_confirm,
             band_candidate=band_candidate,
+            fx_rates=rates,
+            fx_tolerance=tolerance,
         )
         if pair is not None:
             pairs.append(pair)
