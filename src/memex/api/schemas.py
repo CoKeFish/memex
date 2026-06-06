@@ -161,6 +161,19 @@ class MediaAssetInfo(BaseModel):
     ocr_done_at: datetime | None = None
 
 
+class MediaListItem(MediaAssetInfo):
+    """Un media_asset + contexto de su mensaje, para el monitor /ocr (GET /media)."""
+
+    inbox_id: int
+    subject: str | None = None
+    occurred_at: datetime | None = None
+
+
+class MediaList(BaseModel):
+    items: list[MediaListItem] = Field(default_factory=list)
+    next_cursor: int | None = None
+
+
 class FeedbackInfo(BaseModel):
     kinds: list[str] = Field(default_factory=list)
     note: str | None = None
@@ -188,6 +201,12 @@ class FeedbackListItem(FeedbackInfo):
 
 class FeedbackList(BaseModel):
     items: list[FeedbackListItem] = Field(default_factory=list)
+
+
+class FeedbackStatusUpdate(BaseModel):
+    """Cambio de estado de un feedback (gestión en Calidad y precisión)."""
+
+    status: Literal["open", "reviewed", "dismissed"]
 
 
 class InboxRow(BaseModel):
@@ -1552,7 +1571,8 @@ class GraphNode(BaseModel):
 
 class GraphEdge(BaseModel):
     """Una arista del grafo: referencia `src`→`dst` con su productor y nivel. `confidence` cruza
-    como `float` (la DB es NUMERIC) por convención del repo; NULL salvo en aristas del LLM."""
+    como `float` (la DB es NUMERIC) por convención del repo; hoy SIEMPRE NULL (ningún productor la
+    setea — la poblaría el decisor LLM de Fase 4)."""
 
     id: int
     src_slug: str
@@ -1579,3 +1599,4 @@ class GraphBuildResult(BaseModel):
     pertenencia_reales: int = 0
     contraparte_reales: int = 0
     high_fanout_skipped: int
+    orphans_pruned: int = 0

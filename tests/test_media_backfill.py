@@ -31,7 +31,9 @@ INTERNALDATE = datetime(2026, 5, 23, 10, 0, tzinfo=UTC)
 def _zip_bytes() -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
-        z.writestr("nota.txt", b"contenido interno del zip")
+        # >1 KiB para superar el piso de _extract_media (DEFAULT_MIN_MEDIA_BYTES): un zip de factura
+        # real nunca pesa ~139 B, y por debajo del piso el parser lo saltea (tracking pixel/logo).
+        z.writestr("nota.txt", b"contenido interno del zip\n" * 64)
     return buf.getvalue()
 
 

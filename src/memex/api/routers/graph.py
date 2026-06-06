@@ -50,6 +50,11 @@ async def get_graph(
             keep.add(e.src)
             keep.add(e.dst)
         verts = [v for v in verts if v.ref in keep]
+    # Poda de aristas huérfanas: ambos extremos deben ser vértices PRESENTES (vivos en default,
+    # dentro del subgrafo en foco). Cruza-filtra contra el set final de `verts` → nunca se sirve
+    # una arista a un nodo ausente (consolidado tombstoneado / fila borrada / merge sin GC aún).
+    present = {v.ref for v in verts}
+    edges = [e for e in edges if e.src in present and e.dst in present]
     nodes = [
         {
             "slug": v.slug,
@@ -95,6 +100,7 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         pertenencia=stats.pertenencia_reales,
         contraparte=stats.contraparte_reales,
         skipped=stats.high_fanout_skipped,
+        orphans_pruned=stats.orphans_pruned,
     )
     return {
         "cooccurrence_pistas": stats.cooccurrence_pistas,
@@ -102,4 +108,5 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         "pertenencia_reales": stats.pertenencia_reales,
         "contraparte_reales": stats.contraparte_reales,
         "high_fanout_skipped": stats.high_fanout_skipped,
+        "orphans_pruned": stats.orphans_pruned,
     }

@@ -33,8 +33,10 @@ from memex.relations.edges import (
     PRODUCER_INBOX,
     STATUS_CONFIRMED,
     Ref,
+    list_edges,
     propose_edge,
 )
+from memex.relations.vertices import list_vertices
 
 _log = get_logger("memex.relations.deterministic")
 
@@ -57,6 +59,7 @@ class RelationStats:
     pertenencia_reales: int = 0
     contraparte_reales: int = 0
     same_event_reales: int = 0
+    orphans_pruned: int = 0
 
 
 def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
@@ -295,6 +298,23 @@ def _materialize_same_event(
     return n
 
 
+def prune_orphan_edges(conn: Connection, user_id: int) -> int:
+    """Borra de `relation_edges` toda arista con un extremo que ya no resuelve a un vértice vivo
+    (consolidado tombstoneado, fila borrada, identidad absorbida en un merge…). Usa la MISMA
+    proyección que LEE el grafo (`list_vertices`): prune y lectura nunca divergen. Paso FINAL de
+    `build_relations` (tras los materializadores aditivos). Devuelve cuántas borró. NOTA: un
+    `(slug, id)` que hoy no proyecte `list_vertices` se trata como huérfano; al sumar vértices
+    nativos (cúmulos) hay que agregarlos a `NODE_SOURCES` o exceptuarlos acá."""
+    live = {v.ref for v in list_vertices(conn, user_id)}
+    orphan_ids = [e.id for e in list_edges(conn, user_id) if e.src not in live or e.dst not in live]
+    if orphan_ids:
+        conn.execute(
+            text("DELETE FROM relation_edges WHERE user_id = :u AND id = ANY(:ids)"),
+            {"u": user_id, "ids": orphan_ids},
+        )
+    return len(orphan_ids)
+
+
 def build_relations(
     conn: Connection, user_id: int, *, cooccurrence_cap: int = DEFAULT_COOCCURRENCE_CAP
 ) -> RelationStats:
@@ -306,6 +326,9 @@ def build_relations(
     pert = _materialize_pertenencia(conn, user_id)
     contraparte = _materialize_contraparte(conn, user_id)
     same_event = _materialize_same_event(conn, user_id)
+    # Paso FINAL: barrer aristas huérfanas (vértices idos por tombstone/borrado/merge).
+    # Idempotente: los materializadores son aditivos y nunca re-crean aristas a vértices muertos.
+    pruned = prune_orphan_edges(conn, user_id)
     stats = RelationStats(
         cooccurrence_pistas=pistas,
         afiliacion_reales=afil,
@@ -313,6 +336,7 @@ def build_relations(
         pertenencia_reales=pert,
         contraparte_reales=contraparte,
         same_event_reales=same_event,
+        orphans_pruned=pruned,
     )
     _log.info(
         "relation.build.done",
@@ -323,6 +347,7 @@ def build_relations(
         contraparte_reales=contraparte,
         same_event_reales=same_event,
         high_fanout_skipped=skipped,
+        orphans_pruned=pruned,
     )
     return stats
 

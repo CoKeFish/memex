@@ -130,3 +130,19 @@ def test_status_filtra_aristas(client: Any) -> None:
     assert confirmed[0]["relation_type"] == "afiliado"
     assert len(pistas) == 1
     assert pistas[0]["relation_type"] == "co-ocurrencia"
+
+
+def test_get_graph_poda_aristas_huerfanas(client: Any) -> None:
+    # build crea 1 pista; tombstoneamos el consolidado SIN re-build → la poda de LECTURA descarta la
+    # arista colgante (aísla el filtro de get_graph del GC de build, que no corre acá).
+    fin = _finance("Rappi", [5])
+    _hack("HackBogota", [5])
+    client.post("/graph/build")
+    assert len(client.get("/graph").json()["edges"]) == 1
+    _exec("UPDATE mod_finance_consolidated SET deleted = TRUE WHERE id = :i", i=fin)
+    body = client.get("/graph").json()
+    assert len(body["nodes"]) == 1  # solo el hackatón sobrevive como vértice
+    assert body["edges"] == []  # la arista huérfana se poda en lectura
+    # también en modo foco: el correo 5 ya no debe mostrar la arista colgante
+    focado = client.get("/graph?source_inbox_id=5").json()
+    assert focado["edges"] == []

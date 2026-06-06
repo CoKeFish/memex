@@ -68,6 +68,12 @@ SOCIAL_MEDIA_CONTENT_TYPES = IMAGE_CONTENT_TYPES | VIDEO_CONTENT_TYPES
 #: Tope de bytes por adjunto/media (default 10 MiB). Arriba de esto se saltea + loguea.
 DEFAULT_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
+#: Piso de bytes por imagen/media (default 1 KiB). Debajo de esto se saltea + loguea: casi seguro
+#: es un tracking pixel 1x1 o un logo/spacer de firma, no contenido (recibo, captura) — no vale el
+#: costo de subirlo a MinIO + OCR. Romo a propósito: puede descartar contenido legítimo diminuto
+#: (QR/miniatura chica); es un knob conservador, fácil de subir/bajar.
+DEFAULT_MIN_MEDIA_BYTES = 1024
+
 
 def normalize_content_type(value: str | None) -> str:
     """Content-type en minúsculas y sin parámetros (`image/jpeg; charset=x` → `image/jpeg`)."""

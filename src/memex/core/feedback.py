@@ -25,8 +25,13 @@ FEEDBACK_KINDS: frozenset[str] = frozenset(
 )
 
 
+#: Estados válidos de un feedback en la gestión/calibración (`open` al capturar; el usuario lo
+#: mueve a `reviewed`/`dismissed` desde "Calidad y precisión").
+FEEDBACK_STATUSES: frozenset[str] = frozenset({"open", "reviewed", "dismissed"})
+
+
 class InvalidFeedbackError(ValueError):
-    """`kinds` vacío o con categorías fuera de `FEEDBACK_KINDS`."""
+    """`kinds` vacío/categorías inválidas, o estado fuera de `FEEDBACK_STATUSES`."""
 
 
 def _validate_kinds(kinds: list[str]) -> list[str]:
@@ -127,3 +132,33 @@ def list_feedback(
         .all()
     )
     return [dict(r) for r in rows]
+
+
+def set_feedback_status(
+    conn: Connection, *, user_id: int, inbox_id: int, status: str
+) -> dict[str, Any] | None:
+    """Cambia el estado de un feedback (acotado al dueño). Devuelve la fila o None si no existe.
+
+    Solo mueve el estado (gestión/calibración); no toca `kinds`/`note`/`metadata`. Re-reportar el
+    mensaje lo resetea a `open` (ver `record_feedback`).
+    """
+    if status not in FEEDBACK_STATUSES:
+        raise InvalidFeedbackError(
+            f"estado inválido: {status!r}; válidos: {sorted(FEEDBACK_STATUSES)}"
+        )
+    row = (
+        conn.execute(
+            text(
+                """
+                UPDATE inbox_feedback
+                   SET status = :st, updated_at = NOW()
+                 WHERE inbox_id = :iid AND user_id = :uid
+                RETURNING kinds, note, metadata, status, created_at, updated_at
+                """
+            ),
+            {"st": status, "iid": inbox_id, "uid": user_id},
+        )
+        .mappings()
+        .first()
+    )
+    return dict(row) if row else None

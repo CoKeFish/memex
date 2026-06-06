@@ -6,8 +6,10 @@ Disciplina (modelo v2):
 - Cada arista DEBE declarar su `producer` (quién la formó: `inbox`/`dedup`/`consolidacion`/
   `identidades`/`llm`/`humano`/...). Vocabulario ABIERTO: las constantes `PRODUCER_*` dan
   typo-safety sin cerrar el conjunto (igual que `capabilities`/`CAP_*`); NO se valida contra lista.
-- `status` None = HECHO determinista (sin cola de revisión). Las inferencias nacen `pending` y
-  transicionan con `resolve_edge` (monótono: `confirmed`/`rejected` son terminales).
+- `status` nace `pista` (DEFAULT NOT NULL en DB; señal determinista sin vouchar, p.ej.
+  co-ocurrencia) y transiciona vía `resolve_edge` a `confirmed`/`rejected` (terminales, monótono).
+  Las relaciones vouchadas (identidades/finance/llm/humano) se proponen directo en `confirmed`. No
+  existe `None` ni `pending`.
 - `propose_edge` es IDEMPOTENTE (ON CONFLICT sobre la UNIQUE lógica, que incluye el productor): el
   mismo productor re-corriendo no duplica ni pisa; distintos productores del mismo par coexisten.
 """
@@ -34,8 +36,8 @@ VALID_STATUS: frozenset[str] = frozenset({STATUS_PISTA, STATUS_CONFIRMED, STATUS
 
 # --- Productores (set ABIERTO; typo-safety, NO un gate de DB) ------------------------- #
 PRODUCER_INBOX = "inbox"  #: el vértice nació de este mensaje (procedencia de ingesta)
-PRODUCER_DEDUP = "dedup"  #: candidato de duplicado (p.ej. eventos crudos de calendar)
-PRODUCER_CONSOLIDACION = "consolidacion"  #: el consolidado agrupa sus crudos de respaldo
+PRODUCER_DEDUP = "dedup"  #: (placeholder, sin materializador) si se usa, referí consolidados
+PRODUCER_CONSOLIDACION = "consolidacion"  #: (placeholder) crudo↔consolidado vive en mod_*_links
 PRODUCER_IDENTIDADES = "identidades"  #: resolución determinista de identidad (persona/org)
 PRODUCER_FINANCE = "finance"  #: contraparte de un cobro/pago resuelta a una identidad
 PRODUCER_LLM = "llm"  #: relación semántica / pertenencia a cúmulo decidida por el LLM
