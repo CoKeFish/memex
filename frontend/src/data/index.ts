@@ -7,6 +7,10 @@
 // ---- Correos (datos reales contra la API) -------------------------------------
 export * from "./email"
 
+// ---- Feedback / calibración (datos reales: router /feedback) -------------------
+// fetchFeedback (lista por estado) + setFeedbackStatus (revisado/descartado/reabrir) para /calidad.
+export * from "./feedback"
+
 // ---- Backfill segmentado (importación masiva por ventanas, datos reales) ------
 export * from "./backfill"
 

@@ -19,6 +19,7 @@ import { GraphPage } from "@/pages/graph"
 import { IngestPage } from "@/pages/ingest"
 import { ProcessingPage } from "@/pages/processing"
 import { FiltersPage } from "@/pages/filters"
+import { QualityPage } from "@/pages/quality"
 import { StubView } from "@/pages/stub"
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -77,23 +78,7 @@ export default function App() {
             />
           }
         />
-        <Route
-          path="calidad"
-          element={
-            <StubView
-              eyebrow="Categoría · calidad"
-              title="Calidad y precisión de los datos"
-              description="Procedencia, evidencia y confianza: cada dato rastreable a su mensaje de origen."
-              features={[
-                "Drill-down de procedencia con resaltado de evidencia",
-                "Badge de confianza/decisión del LLM por extracción",
-                "Detección de huecos de cobertura",
-                "Historial de decisiones de dedup",
-                "Inspección de duplicados de ingesta",
-              ]}
-            />
-          }
-        />
+        <Route path="calidad" element={<QualityPage />} />
         <Route path="procesamiento" element={<ProcessingPage />} />
         <Route
           path="*"

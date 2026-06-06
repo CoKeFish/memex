@@ -44,7 +44,7 @@ export const NAV: NavItem[] = [
   { path: "/carga", label: "Carga / ingesta", icon: PlusCircle },
   { path: "/filtros", label: "Filtros", icon: Filter },
   { path: "/ocr", label: "Multimedia / OCR", icon: Image, stub: true },
-  { path: "/calidad", label: "Calidad y precisión", icon: ShieldCheck, stub: true },
+  { path: "/calidad", label: "Calidad y precisión", icon: ShieldCheck },
   { path: "/procesamiento", label: "Procesamiento", icon: SlidersHorizontal },
   { path: "/cuenta", label: "Cuenta", icon: UserCog },
 ]

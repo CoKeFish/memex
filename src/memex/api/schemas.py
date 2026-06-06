@@ -190,6 +190,12 @@ class FeedbackList(BaseModel):
     items: list[FeedbackListItem] = Field(default_factory=list)
 
 
+class FeedbackStatusUpdate(BaseModel):
+    """Cambio de estado de un feedback (gestión en Calidad y precisión)."""
+
+    status: Literal["open", "reviewed", "dismissed"]
+
+
 class InboxRow(BaseModel):
     id: int
     source_id: int

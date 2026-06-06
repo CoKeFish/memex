@@ -61,6 +61,41 @@ def test_feedback_capture_and_surface(client: Any, seed_source: dict[str, Any]) 
     assert r2.json()["kinds"] == ["other"]
 
 
+def test_feedback_set_status_moves_between_filters(
+    client: Any, seed_source: dict[str, Any]
+) -> None:
+    iid = _seed(seed_source["id"])
+    client.post(f"/inbox/{iid}/feedback", json={"kinds": ["bad_summary"]})
+
+    # arranca en 'open'
+    assert any(i["inbox_id"] == iid for i in client.get("/feedback").json()["items"])
+
+    # marcar revisado
+    r = client.post(f"/feedback/{iid}/status", json={"status": "reviewed"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "reviewed"
+
+    # sale de 'open', entra en 'reviewed'
+    assert all(i["inbox_id"] != iid for i in client.get("/feedback?status=open").json()["items"])
+    assert any(
+        i["inbox_id"] == iid for i in client.get("/feedback?status=reviewed").json()["items"]
+    )
+
+    # re-reportar el mensaje lo resetea a 'open'
+    client.post(f"/inbox/{iid}/feedback", json={"kinds": ["other"]})
+    assert any(i["inbox_id"] == iid for i in client.get("/feedback?status=open").json()["items"])
+
+
+def test_feedback_set_status_invalid_is_422(client: Any, seed_source: dict[str, Any]) -> None:
+    iid = _seed(seed_source["id"])
+    client.post(f"/inbox/{iid}/feedback", json={"kinds": ["other"]})
+    assert client.post(f"/feedback/{iid}/status", json={"status": "nope"}).status_code == 422
+
+
+def test_feedback_set_status_unknown_is_404(client: Any) -> None:
+    assert client.post("/feedback/999999/status", json={"status": "reviewed"}).status_code == 404
+
+
 def test_feedback_invalid_kind_is_422(client: Any, seed_source: dict[str, Any]) -> None:
     iid = _seed(seed_source["id"])
     assert client.post(f"/inbox/{iid}/feedback", json={"kinds": ["nope"]}).status_code == 422
