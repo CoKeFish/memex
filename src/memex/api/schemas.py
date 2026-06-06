@@ -161,6 +161,19 @@ class MediaAssetInfo(BaseModel):
     ocr_done_at: datetime | None = None
 
 
+class MediaListItem(MediaAssetInfo):
+    """Un media_asset + contexto de su mensaje, para el monitor /ocr (GET /media)."""
+
+    inbox_id: int
+    subject: str | None = None
+    occurred_at: datetime | None = None
+
+
+class MediaList(BaseModel):
+    items: list[MediaListItem] = Field(default_factory=list)
+    next_cursor: int | None = None
+
+
 class FeedbackInfo(BaseModel):
     kinds: list[str] = Field(default_factory=list)
     note: str | None = None

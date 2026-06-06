@@ -157,3 +157,76 @@ def test_media_cross_tenant_is_404(
 
 def test_media_nonexistent_is_404(client: Any, fake_store: FakeStore) -> None:
     assert client.get("/media/999999").status_code == 404
+
+
+def test_list_media_returns_assets_with_context(
+    client: Any, seed_source: dict[str, Any], fake_store: FakeStore
+) -> None:
+    sid = seed_source["id"]
+    item = _media_item(b"PNGDATA", content_type="image/png", filename="captura.png")
+    client.post("/ingest/batch", json={"records": [_record(sid, "m1", [item])]})
+    iid = _only_media()["inbox_id"]
+
+    body = client.get("/media").json()
+    assert body["next_cursor"] is None
+    assert len(body["items"]) == 1
+    it = body["items"][0]
+    assert it["inbox_id"] == iid
+    assert it["subject"] == "recibo"  # viene del payload del mensaje
+    assert it["ocr_status"] == "pending"
+    assert it["filename"] == "captura.png"
+    # La referencia interna (object_key/bucket) NO se expone.
+    assert "object_key" not in it and "bucket" not in it
+
+
+def test_list_media_filter_by_ocr_status(
+    client: Any, seed_source: dict[str, Any], fake_store: FakeStore
+) -> None:
+    sid = seed_source["id"]
+    item = _media_item(b"PNGDATA", content_type="image/png", filename="c.png")
+    client.post("/ingest/batch", json={"records": [_record(sid, "m1", [item])]})
+
+    assert len(client.get("/media?ocr_status=pending").json()["items"]) == 1
+    assert client.get("/media?ocr_status=ok").json()["items"] == []
+
+
+def test_list_media_excludes_other_tenant(
+    client: Any, seed_source: dict[str, Any], seed_user2: int, fake_store: FakeStore
+) -> None:
+    sid = seed_source["id"]
+    item = _media_item(b"PNGDATA", content_type="image/png", filename="mine.png")
+    client.post("/ingest/batch", json={"records": [_record(sid, "m1", [item])]})
+    with connection() as c:
+        src2 = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) VALUES (:u, 's2', 'imap') RETURNING id"
+            ),
+            {"u": seed_user2},
+        ).scalar_one()
+        insert_record(
+            c,
+            user_id=seed_user2,
+            source_id=int(src2),
+            record=SourceRecord(
+                external_id="u2-m1",
+                occurred_at=datetime(2026, 5, 28, 12, 0, tzinfo=UTC),
+                payload={"subject": "ajeno"},
+                dedupe_keys=[],
+            ),
+        )
+        iid2 = c.execute(
+            text("SELECT id FROM inbox WHERE user_id = :u LIMIT 1"), {"u": seed_user2}
+        ).scalar_one()
+        mid2 = c.execute(
+            text(
+                "INSERT INTO media_assets "
+                "(user_id, inbox_id, sha256, object_key, bucket, content_type, size_bytes) "
+                "VALUES (:u, :i, 'sh2', 'k2', 'memex-media', 'image/png', 3) RETURNING id"
+            ),
+            {"u": seed_user2, "i": int(iid2)},
+        ).scalar_one()
+
+    items = client.get("/media").json()["items"]
+    ids = {it["id"] for it in items}
+    assert int(mid2) not in ids  # el media del otro tenant no se filtra
+    assert len(items) == 1 and items[0]["filename"] == "mine.png"

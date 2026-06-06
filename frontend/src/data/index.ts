@@ -11,6 +11,10 @@ export * from "./email"
 // fetchFeedback (lista por estado) + setFeedbackStatus (revisado/descartado/reabrir) para /calidad.
 export * from "./feedback"
 
+// ---- Media / OCR (datos reales: router /media) --------------------------------
+// fetchMediaList (lista de adjuntos con estado OCR + contexto del mensaje) para /ocr.
+export * from "./media"
+
 // ---- Backfill segmentado (importación masiva por ventanas, datos reales) ------
 export * from "./backfill"
 

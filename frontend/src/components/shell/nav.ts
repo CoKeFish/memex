@@ -43,7 +43,7 @@ export const NAV: NavItem[] = [
   { path: "/logs", label: "Logs", icon: ScrollText },
   { path: "/carga", label: "Carga / ingesta", icon: PlusCircle },
   { path: "/filtros", label: "Filtros", icon: Filter },
-  { path: "/ocr", label: "Multimedia / OCR", icon: Image, stub: true },
+  { path: "/ocr", label: "Multimedia / OCR", icon: Image },
   { path: "/calidad", label: "Calidad y precisión", icon: ShieldCheck },
   { path: "/procesamiento", label: "Procesamiento", icon: SlidersHorizontal },
   { path: "/cuenta", label: "Cuenta", icon: UserCog },

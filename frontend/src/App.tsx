@@ -20,6 +20,7 @@ import { IngestPage } from "@/pages/ingest"
 import { ProcessingPage } from "@/pages/processing"
 import { FiltersPage } from "@/pages/filters"
 import { QualityPage } from "@/pages/quality"
+import { OcrMediaPage } from "@/pages/ocr-media"
 import { StubView } from "@/pages/stub"
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -62,22 +63,7 @@ export default function App() {
         <Route path="cuenta" element={<AccountPage />} />
         <Route path="carga" element={<IngestPage />} />
         <Route path="filtros" element={<FiltersPage />} />
-        <Route
-          path="ocr"
-          element={
-            <StubView
-              eyebrow="Categoría · multimedia"
-              title="Multimedia / OCR"
-              description="Pipeline de OCR sobre imágenes en MinIO, visor texto-vs-imagen y reproceso."
-              features={[
-                "Monitor del pipeline de OCR/Media con re-OCR",
-                "Visor OCR: texto extraído vs imagen original",
-                "Señalización de texto OCR truncado o incierto",
-                "Piso de tamaño de OCR (anti tracking-pixel)",
-              ]}
-            />
-          }
-        />
+        <Route path="ocr" element={<OcrMediaPage />} />
         <Route path="calidad" element={<QualityPage />} />
         <Route path="procesamiento" element={<ProcessingPage />} />
         <Route
