@@ -1487,7 +1487,8 @@ class GraphNode(BaseModel):
 
 class GraphEdge(BaseModel):
     """Una arista del grafo: referencia `src`→`dst` con su productor y nivel. `confidence` cruza
-    como `float` (la DB es NUMERIC) por convención del repo; NULL salvo en aristas del LLM."""
+    como `float` (la DB es NUMERIC) por convención del repo; hoy SIEMPRE NULL (ningún productor la
+    setea — la poblaría el decisor LLM de Fase 4)."""
 
     id: int
     src_slug: str
@@ -1514,3 +1515,4 @@ class GraphBuildResult(BaseModel):
     pertenencia_reales: int = 0
     contraparte_reales: int = 0
     high_fanout_skipped: int
+    orphans_pruned: int = 0

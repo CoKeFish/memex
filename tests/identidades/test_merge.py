@@ -164,3 +164,59 @@ def test_merge_dedups_logical_edge(conn: Any) -> None:
         ).scalar_one()
         == 1
     )
+
+
+def _mk_org(conn: Any, name: str) -> int:
+    return int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'organizacion',:n) RETURNING id"
+            ),
+            {"n": name},
+        ).scalar_one()
+    )
+
+
+def test_merge_repunta_counterparty_de_finanzas(conn: Any) -> None:
+    # fusionar dos orgs re-apunta counterparty_identity_id de finanzas (consolidado + cruda) al
+    # superviviente; si no, el FK ON DELETE SET NULL lo dejaría NULL y se perdería el vínculo.
+    surv = _mk_org(conn, "Acme Inc")
+    absb = _mk_org(conn, "Acme")
+    cid = int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_finance_consolidated "
+                "(user_id, direction, amount, currency, occurred_at, counterparty, "
+                " counterparty_identity_id) "
+                "VALUES (1,'egreso',100,'COP',NOW(),'Acme',:a) RETURNING id"
+            ),
+            {"a": absb},
+        ).scalar_one()
+    )
+    tid = int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_finance_transactions "
+                "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, "
+                " counterparty, counterparty_identity_id) "
+                "VALUES (1, ARRAY[7], 'egreso',100,'COP',NOW(),'Acme',:a) RETURNING id"
+            ),
+            {"a": absb},
+        ).scalar_one()
+    )
+    assert merge_identities(conn, 1, surv, absb) is True
+    assert (
+        conn.execute(
+            text("SELECT counterparty_identity_id FROM mod_finance_consolidated WHERE id = :c"),
+            {"c": cid},
+        ).scalar_one()
+        == surv
+    )
+    assert (
+        conn.execute(
+            text("SELECT counterparty_identity_id FROM mod_finance_transactions WHERE id = :t"),
+            {"t": tid},
+        ).scalar_one()
+        == surv
+    )

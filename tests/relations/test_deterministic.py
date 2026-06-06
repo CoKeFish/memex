@@ -11,6 +11,7 @@ from sqlalchemy import text
 from memex.db import connection
 from memex.relations.deterministic import build_relations
 from memex.relations.edges import list_edges
+from memex.relations.vertices import list_vertices
 
 
 def _exec(sql: str, **params: Any) -> Any:
@@ -326,3 +327,40 @@ def test_contraparte_persona() -> None:
     assert len(edges) == 1
     assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:person", p)
     assert (edges[0].src.slug, edges[0].src.id) == ("finance", fin)
+
+
+def test_build_poda_huerfana_por_tombstone() -> None:
+    # fin y hack co-ocurren en el correo 5 → 1 pista; tombstoneamos el consolidado: su vértice
+    # desaparece (where NOT deleted) y la arista que lo tocaba queda huérfana → el GC la barre.
+    fin = _finance("Rappi", [5])
+    _hack("HackBogota", [5])
+    with connection() as c:
+        build_relations(c, 1)
+        assert len(list_edges(c, 1)) == 1
+    _exec("UPDATE mod_finance_consolidated SET deleted = TRUE WHERE id = :i", i=fin)
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1)
+        live = {(v.slug, v.id) for v in list_vertices(c, 1)}
+    assert stats.orphans_pruned == 1
+    assert edges == []  # la única arista tocaba el vértice tombstoneado
+    # invariante "cero huérfanas": toda arista que quede resuelve a un vértice vivo
+    for e in edges:
+        assert (e.src.slug, e.src.id) in live
+        assert (e.dst.slug, e.dst.id) in live
+
+
+def test_build_poda_huerfana_por_fila_borrada() -> None:
+    # camino hard-delete (en vez de tombstone): el hackatón se borra tras construir → su arista de
+    # co-ocurrencia queda huérfana y el GC la barre.
+    _finance("Rappi", [6])
+    hack = _hack("HackMed", [6])
+    with connection() as c:
+        build_relations(c, 1)
+        assert len(list_edges(c, 1)) == 1
+    _exec("DELETE FROM mod_hackathones_events WHERE id = :i", i=hack)
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1)
+    assert stats.orphans_pruned == 1
+    assert edges == []

@@ -10,6 +10,8 @@ identidad, esta primitiva las colapsa en la superviviente y borra la absorbida, 
      que violarían `relation_edges_logical_uq` y las que quedarían self-loop;
   4b. re-apunta la jerarquía de pertenencia: los hijos del absorbido cuelgan del superviviente y se
      limpia el self-loop si el superviviente colgaba del absorbido (el padre final se decide abajo);
+  4c. re-apunta el `counterparty_identity_id` de finanzas (consolidado + crudas): el FK es ON DELETE
+     SET NULL, así que sin esto el DELETE de la absorbida perdería el vínculo finance↔identidad;
   5. agrega el nombre + alias de la absorbida a los alias de la superviviente;
   6. fill-only de columnas NULL de la superviviente (given/family/birthday/foto/provider*/notes y el
      `parent_identity_id`, sin crear self-parent);
@@ -186,6 +188,25 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
         text(
             "UPDATE mod_identidades SET parent_identity_id = NULL "
             "WHERE id = :surv AND parent_identity_id = :absb AND user_id = :u"
+        ),
+        p,
+    )
+
+    # 4c. costura finanzas: re-apuntar `counterparty_identity_id` absorbido→superviviente ANTES del
+    #     DELETE. El FK es ON DELETE SET NULL (0036): sin esto, borrar el absorbido perdería en
+    #     silencio el vínculo finance↔identidad (la consolidación re-escribiría NULL). Sin UNIQUE
+    #     en esa columna → sin manejo de conflicto. (Follow-up: centralizar las FK SET NULL.)
+    conn.execute(
+        text(
+            "UPDATE mod_finance_consolidated SET counterparty_identity_id = :surv "
+            "WHERE user_id = :u AND counterparty_identity_id = :absb"
+        ),
+        p,
+    )
+    conn.execute(
+        text(
+            "UPDATE mod_finance_transactions SET counterparty_identity_id = :surv "
+            "WHERE user_id = :u AND counterparty_identity_id = :absb"
         ),
         p,
     )
