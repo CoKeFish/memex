@@ -18,13 +18,16 @@ La provenance vértice→mensaje NO es arista (inbox es atributo): vive en `sour
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
 from memex.relations.edges import (
+    PRODUCER_EVENT,
     PRODUCER_FINANCE,
     PRODUCER_IDENTIDADES,
     PRODUCER_INBOX,
@@ -53,6 +56,7 @@ class RelationStats:
     high_fanout_skipped: int
     pertenencia_reales: int = 0
     contraparte_reales: int = 0
+    same_event_reales: int = 0
 
 
 def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
@@ -205,21 +209,28 @@ def _materialize_pertenencia(conn: Connection, user_id: int) -> int:
     return n
 
 
-def _materialize_contraparte(conn: Connection, user_id: int) -> int:
+def _materialize_contraparte(
+    conn: Connection, user_id: int, *, consolidated_ids: Sequence[int] | None = None
+) -> int:
     """Una arista REAL «contraparte» cobro→identidad por cada transacción CONSOLIDADA cuya
     contraparte resolvió a una identidad del directorio (`counterparty_identity_id`). Dirigida (el
-    cobro/pago → quién cobró/pagó). El enlace por identidad finanzas↔directorio."""
+    cobro/pago → quién cobró/pagó). El enlace por identidad finanzas↔directorio. Con
+    `consolidated_ids` acota a esos consolidados (incremental); sin él, barre todos. Idempotente."""
+    scope = "" if consolidated_ids is None else " AND c.id = ANY(:cids)"
+    params: dict[str, Any] = {"u": user_id}
+    if consolidated_ids is not None:
+        params["cids"] = list(consolidated_ids)
     n = 0
     for r in conn.execute(
         text(
-            """
+            f"""
             SELECT c.id AS cid, i.id AS iid, i.kind AS kind
             FROM mod_finance_consolidated c
             JOIN mod_identidades i ON i.id = c.counterparty_identity_id
-            WHERE c.user_id = :u AND NOT c.deleted AND c.counterparty_identity_id IS NOT NULL
+            WHERE c.user_id = :u AND NOT c.deleted AND c.counterparty_identity_id IS NOT NULL{scope}
             """
         ),
-        {"u": user_id},
+        params,
     ).mappings():
         slug = "identidades:person" if r["kind"] == "persona" else "identidades:org"
         propose_edge(
@@ -235,6 +246,55 @@ def _materialize_contraparte(conn: Connection, user_id: int) -> int:
     return n
 
 
+def _materialize_same_event(
+    conn: Connection, user_id: int, *, event_ids: Sequence[str] | None = None
+) -> int:
+    """Una arista REAL «mismo_evento» entre hechos que comparten `event_id` — los que el agente
+    (Hermes) correlacionó en un mismo mensaje. CROSS-MODULE: bienestar (el registro) y finanzas (la
+    transacción mapeada a su CONSOLIDADO, el vértice del grafo); `event_id` NULL no correlaciona.
+    Par canónico por `(slug, id)`. Con `event_ids` acota a esos eventos (uso incremental, ambos
+    brazos del CTE); sin él, barre todos (full-sweep). Idempotente. Devuelve cuántas."""
+    scope_b = "" if event_ids is None else " AND event_id = ANY(:eids)"
+    scope_f = "" if event_ids is None else " AND t.event_id = ANY(:eids)"
+    params: dict[str, Any] = {"u": user_id}
+    if event_ids is not None:
+        params["eids"] = list(event_ids)
+    n = 0
+    for r in conn.execute(
+        text(
+            f"""
+            WITH facts AS (
+                SELECT 'bienestar' AS slug, id AS vid, event_id
+                FROM mod_bienestar_registros
+                WHERE user_id = :u AND event_id IS NOT NULL{scope_b}
+                UNION
+                SELECT 'finance' AS slug, c.id AS vid, t.event_id
+                FROM mod_finance_transactions t
+                JOIN mod_finance_transaction_links l ON l.transaction_id = t.id
+                JOIN mod_finance_consolidated c ON c.id = l.consolidated_id AND NOT c.deleted
+                WHERE t.user_id = :u AND t.event_id IS NOT NULL{scope_f}
+            )
+            SELECT a.slug AS a_slug, a.vid AS a_vid, b.slug AS b_slug, b.vid AS b_vid
+            FROM facts a
+            JOIN facts b ON a.event_id = b.event_id AND (a.slug, a.vid) < (b.slug, b.vid)
+            """
+        ),
+        params,
+    ).mappings():
+        propose_edge(
+            conn,
+            user_id,
+            Ref(str(r["a_slug"]), int(r["a_vid"])),
+            Ref(str(r["b_slug"]), int(r["b_vid"])),
+            producer=PRODUCER_EVENT,
+            relation_type="mismo_evento",
+            status=STATUS_CONFIRMED,
+            evidence="event_id",
+        )
+        n += 1
+    return n
+
+
 def build_relations(
     conn: Connection, user_id: int, *, cooccurrence_cap: int = DEFAULT_COOCCURRENCE_CAP
 ) -> RelationStats:
@@ -245,12 +305,14 @@ def build_relations(
     afil = _materialize_afiliacion(conn, user_id)
     pert = _materialize_pertenencia(conn, user_id)
     contraparte = _materialize_contraparte(conn, user_id)
+    same_event = _materialize_same_event(conn, user_id)
     stats = RelationStats(
         cooccurrence_pistas=pistas,
         afiliacion_reales=afil,
         high_fanout_skipped=skipped,
         pertenencia_reales=pert,
         contraparte_reales=contraparte,
+        same_event_reales=same_event,
     )
     _log.info(
         "relation.build.done",
@@ -259,6 +321,33 @@ def build_relations(
         afiliacion_reales=afil,
         pertenencia_reales=pert,
         contraparte_reales=contraparte,
+        same_event_reales=same_event,
         high_fanout_skipped=skipped,
     )
     return stats
+
+
+def weave_event(conn: Connection, user_id: int, event_id: str) -> int:
+    """INCREMENTAL: teje las aristas «mismo_evento» de UN evento, en la misma tx del caller. Lo
+    llaman los módulos al escribir un hecho con `event_id`, para no depender del full-sweep. Si el
+    otro extremo aún no existe, no crea nada todavía (lo creará quien aterrice último). Idempotente.
+    Devuelve cuántas aristas tocó."""
+    if not event_id:
+        return 0
+    return _materialize_same_event(conn, user_id, event_ids=[event_id])
+
+
+def weave_finance_consolidated(
+    conn: Connection,
+    user_id: int,
+    consolidated_ids: Sequence[int],
+    event_ids: Sequence[str],
+) -> tuple[int, int]:
+    """INCREMENTAL: tras consolidar finanzas (donde nace su vértice), teje «contraparte» de esos
+    consolidados y «mismo_evento» de sus eventos, en la misma tx. Idempotente. Devuelve
+    (contraparte, mismo_evento)."""
+    cids = list(consolidated_ids)
+    eids = [e for e in event_ids if e]
+    contraparte = _materialize_contraparte(conn, user_id, consolidated_ids=cids) if cids else 0
+    same_event = _materialize_same_event(conn, user_id, event_ids=eids) if eids else 0
+    return contraparte, same_event

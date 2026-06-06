@@ -27,6 +27,7 @@ from sqlalchemy.engine import Connection
 
 from memex.db import connection
 from memex.logging import get_logger
+from memex.relations.deterministic import weave_finance_consolidated
 
 _log = get_logger("memex.modules.finance.consolidate")
 
@@ -337,6 +338,7 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
 
         groups = build_groups(sorted(tx_ids), pairs)
         outcomes: dict[str, list[int]] = {"unique": [], "duplicate": []}
+        touched: set[int] = set()  # consolidados tocados → tejer sus aristas al cierre
 
         for group_ids in groups:
             stats.groups += 1
@@ -397,6 +399,7 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
 
             for tid in group_ids:
                 _link(conn, user_id, cons_id, tid)
+            touched.add(cons_id)
 
             # outcomes del grupo (los que aún tienen un par 'candidate' sin resolver → pending).
             for tid in group_ids:
@@ -408,6 +411,23 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
                     outcomes["unique"].append(tid)
 
         _set_outcomes(conn, outcomes)
+
+        # Tejido incremental de aristas: el vértice de finanzas (el consolidado) nace acá, así que
+        # acá se crean «contraparte» y «mismo_evento» (en la misma tx). El full-sweep es respaldo.
+        if touched:
+            cids = sorted(touched)
+            eids = [
+                str(r[0])
+                for r in conn.execute(
+                    text(
+                        "SELECT DISTINCT t.event_id FROM mod_finance_transactions t "
+                        "JOIN mod_finance_transaction_links l ON l.transaction_id = t.id "
+                        "WHERE l.consolidated_id = ANY(:cids) AND t.event_id IS NOT NULL"
+                    ),
+                    {"cids": cids},
+                ).all()
+            ]
+            weave_finance_consolidated(conn, user_id, cids, eids)
 
     _log.info(
         "finance.consolidate.done",

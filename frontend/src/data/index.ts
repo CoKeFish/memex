@@ -68,6 +68,10 @@ export * from "./identidades"
 // (corre el paso determinista on-demand).
 export * from "./graph"
 
+// ---- Bienestar (datos reales contra la API: router /bienestar, solo lectura) --
+// fetchBienestarRegistros/Summary/Habits (registros + resumen + hábitos con adherencia/racha).
+export * from "./bienestar"
+
 // ---- Finance (datos reales contra la API) -------------------------------------
 export * from "./finance"
 // Agregaciones puras (operan sobre las transacciones que trae ./finance) + catálogo de categorías.

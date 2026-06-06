@@ -56,8 +56,12 @@ def _seed_all(user_id: int = 1) -> dict[str, int]:
     }
 
 
-def test_proyecta_los_cinco_tipos() -> None:
+def test_proyecta_todos_los_tipos() -> None:
     ids = _seed_all()
+    _exec(
+        "INSERT INTO mod_bienestar_registros (user_id, category, activity, occurred_at) "
+        "VALUES (1, 'comida', 'almuerzo', NOW())"
+    )
     with connection() as c:
         verts = list_vertices(c, 1)
     by_slug = {v.slug: v for v in verts}
@@ -69,6 +73,8 @@ def test_proyecta_los_cinco_tipos() -> None:
     assert by_slug["calendar"].kind == "evento"
     assert by_slug["identidades:person"].label == "Juan Valdez"
     assert by_slug["identidades:org"].kind == "organizacion"
+    assert by_slug["bienestar"].kind == "registro"
+    assert by_slug["bienestar"].label == "almuerzo"
 
 
 def test_calendar_excluye_borrados() -> None:

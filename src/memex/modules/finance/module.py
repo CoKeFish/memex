@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, datetime, time, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from sqlalchemy import text
@@ -43,7 +44,7 @@ from memex.modules.finance.dedup import (
     mark_duplicates,
 )
 from memex.modules.finance.prompt import FINANCE_SYSTEM_PROMPT
-from memex.modules.finance.schema import TransactionItem
+from memex.modules.finance.schema import FINANCE_CATEGORIES, TransactionItem
 
 if TYPE_CHECKING:
     from memex.core.trace import TraceNode
@@ -488,3 +489,109 @@ class FinanceModule:
         return forget_inbox_rows(
             conn, "mod_finance_transactions", user_id=user_id, inbox_ids=inbox_ids
         )
+
+
+def register(
+    conn: Connection,
+    user_id: int,
+    *,
+    amount: Decimal,
+    currency: str,
+    direction: str = "egreso",
+    category: str = "otros",
+    counterparty: str = "",
+    place: str = "",
+    occurred_at: datetime | None = None,
+    occurred_at_precision: str | None = None,
+    description: str = "",
+    event_id: str | None = None,
+) -> dict[str, Any]:
+    """Registra una transacción DETERMINISTA (sin LLM): inserta + resuelve la contraparte a una
+    identidad del directorio + marca dedup FASE 1. Entrada por AGENTE (Hermes pasa los campos ya
+    leídos de la factura/texto); el enriquecimiento de dominio (identidad, dedup) corre ACÁ, no en
+    Hermes. `event_id` correlaciona con otros hechos del mismo mensaje. NO teje aristas: el vértice
+    de finanzas es el CONSOLIDADO, que nace en `run_consolidation` (ahí se tejen «contraparte» y
+    «mismo_evento»). Devuelve la fila pública (con `amount` float)."""
+    from memex.modules.identidades.module import IdentidadesModule
+
+    if occurred_at is None:
+        occurred_at = datetime.now(UTC)
+        prec = PRECISION_DATETIME
+    else:
+        prec = (
+            occurred_at_precision
+            if occurred_at_precision in (PRECISION_DATETIME, PRECISION_DATE)
+            else PRECISION_DATETIME
+        )
+    direction = "ingreso" if direction.strip().lower() == "ingreso" else "egreso"
+    cat = category.strip().lower()
+    category = cat if cat in FINANCE_CATEGORIES else "otros"
+    currency = (currency or "").strip().upper()
+
+    # Identidad del comercio: best-effort contra el directorio (aunque el módulo esté apagado).
+    identity_id = _resolve_identity(IdentidadesModule().provide_domain(conn, user_id), counterparty)
+
+    row = (
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_finance_transactions
+                  (user_id, source_inbox_ids, direction, amount, currency, category, counterparty,
+                   counterparty_identity_id, place, occurred_at, occurred_at_precision, description,
+                   evidence, event_id)
+                VALUES
+                  (:uid, ARRAY[]::bigint[], :direction, :amount, :currency, :category,
+                   :counterparty, :identity_id, :place, :occurred_at, :precision, :description,
+                   '', :event_id)
+                RETURNING id, direction, amount, currency, category, counterparty,
+                          counterparty_identity_id, place, occurred_at, occurred_at_precision,
+                          description, event_id, created_at
+                """
+            ),
+            {
+                "uid": user_id,
+                "direction": direction,
+                "amount": amount,
+                "currency": currency,
+                "category": category,
+                "counterparty": counterparty,
+                "identity_id": identity_id,
+                "place": place,
+                "occurred_at": occurred_at,
+                "precision": prec,
+                "description": description.strip(),
+                "event_id": event_id,
+            },
+        )
+        .mappings()
+        .one()
+    )
+    _mark_dedup(
+        conn,
+        user_id,
+        [
+            DedupRow(
+                transaction_id=int(row["id"]),
+                direction=direction,
+                amount=amount,
+                currency=currency,
+                category=category,
+                counterparty=counterparty,
+                place=place,
+                occurred_at=occurred_at,
+                precision=prec,
+                counterparty_identity_id=identity_id,
+            )
+        ],
+    )
+    _log.info(
+        "finance.registered",
+        user_id=user_id,
+        transaction_id=int(row["id"]),
+        amount=str(amount),
+        currency=currency,
+        event_id=event_id,
+    )
+    out = dict(row)
+    out["amount"] = float(out["amount"])
+    return out

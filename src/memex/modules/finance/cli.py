@@ -16,13 +16,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
+from datetime import UTC, date, datetime, time
+from decimal import Decimal
 
 from dotenv import load_dotenv
 
+from memex.db import connection
 from memex.logging import get_logger, setup_logging
 from memex.modules.finance.consolidate import run_consolidation
 from memex.modules.finance.dedup_llm import run_dedup_phase2
+from memex.modules.finance.module import register
 
 
 def _safe(text_: str) -> str:
@@ -34,6 +39,26 @@ def _safe(text_: str) -> str:
 
 def _say(msg: str, *, err: bool = False) -> None:
     print(_safe(msg), file=sys.stderr if err else sys.stdout)
+
+
+def _emit_json(obj: object) -> None:
+    print(_safe(json.dumps(obj, default=str, ensure_ascii=False)))
+
+
+def _parse_when(s: str | None) -> tuple[datetime | None, str | None]:
+    """ISO 8601: solo fecha → 'date' (medianoche UTC); con hora → 'datetime' (naive=UTC)."""
+    if not s:
+        return None, None
+    s = s.strip()
+    try:
+        d = date.fromisoformat(s)
+        return datetime.combine(d, time.min, tzinfo=UTC), "date"
+    except ValueError:
+        pass
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt, "datetime"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -50,6 +75,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "consolidate", help="Reconstruye la vista consolidada (grupos + ganador por completitud)."
     )
     cons_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+
+    reg_p = sub.add_parser(
+        "register", help="Registra una transacción determinista (entrada por agente, sin LLM)."
+    )
+    reg_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    reg_p.add_argument("--amount", required=True, help="Monto POSITIVO (sin separadores de miles).")
+    reg_p.add_argument("--currency", required=True, help="ISO 4217 (USD, COP, …).")
+    reg_p.add_argument("--direction", default="egreso", choices=("ingreso", "egreso"))
+    reg_p.add_argument("--category", default="otros")
+    reg_p.add_argument(
+        "--counterparty", default="", help="Comercio/persona (se resuelve a identidad)."
+    )
+    reg_p.add_argument("--place", default="", help="Lugar físico o URL.")
+    reg_p.add_argument(
+        "--occurred-at", default=None, help="ISO 8601 (fecha o fecha-hora). Sin esto, ahora."
+    )
+    reg_p.add_argument("--description", default="")
+    reg_p.add_argument(
+        "--event", default=None, help="Id de correlación (hechos del mismo mensaje)."
+    )
+    reg_p.add_argument("--json", action="store_true", dest="as_json")
 
     return parser
 
@@ -72,6 +118,31 @@ def _cmd_consolidate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_register(args: argparse.Namespace) -> int:
+    occurred_at, precision = _parse_when(args.occurred_at)
+    with connection() as conn:
+        row = register(
+            conn,
+            args.user,
+            amount=Decimal(args.amount),
+            currency=args.currency,
+            direction=args.direction,
+            category=args.category,
+            counterparty=args.counterparty,
+            place=args.place,
+            occurred_at=occurred_at,
+            occurred_at_precision=precision,
+            description=args.description,
+            event_id=args.event,
+        )
+    if args.as_json:
+        _emit_json(row)
+    else:
+        cp = f" · {row['counterparty']}" if row["counterparty"] else ""
+        _say(f"registrada #{row['id']}: {row['direction']} {row['amount']} {row['currency']}{cp}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -86,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_dedup(args)
         if args.cmd == "consolidate":
             return _cmd_consolidate(args)
+        if args.cmd == "register":
+            return _cmd_register(args)
         log.error("finance.cli.unknown_command", cmd=args.cmd)
         return 1
     except Exception as e:

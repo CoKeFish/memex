@@ -65,6 +65,12 @@ NODE_SOURCES: tuple[NodeSource, ...] = (
         "organizacion",
         where="kind = 'organizacion'",
     ),
+    NodeSource(
+        "bienestar",
+        "mod_bienestar_registros",
+        "COALESCE(NULLIF(activity, ''), category)",
+        "registro",
+    ),
 )
 
 _BY_SLUG: dict[str, NodeSource] = {s.slug: s for s in NODE_SOURCES}

@@ -12,6 +12,7 @@ import { MetricsPage } from "@/pages/metrics"
 import { LogsPage } from "@/pages/logs"
 import { AccountPage } from "@/pages/account"
 import { FinancePage } from "@/pages/finance"
+import { BienestarPage } from "@/pages/bienestar"
 import { HackathonesPage } from "@/pages/hackathones"
 import { CalendarPage } from "@/pages/calendar"
 import { IdentidadesPage } from "@/pages/identidades"
@@ -55,6 +56,7 @@ export default function App() {
         <Route path="directorio" element={<IdentidadesPage />} />
         <Route path="grafo" element={<GraphPage />} />
         <Route path="finanzas" element={<FinancePage />} />
+        <Route path="bienestar" element={<BienestarPage />} />
         <Route path="hackathones" element={<HackathonesPage />} />
         <Route path="metricas" element={<MetricsPage />} />
         <Route path="logs" element={<LogsPage />} />

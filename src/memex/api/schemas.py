@@ -363,6 +363,71 @@ class FinanceTransactionList(BaseModel):
     next_cursor: int | None = None
 
 
+# ---- Módulo bienestar (registrador determinista) ------------------------------------------------
+# Solo LECTURA: registros, resumen, actividad y hábitos con adherencia (escritura por CLI/agente).
+# JSONB (detail/metadata) → dict; TIMESTAMPTZ → ISO. La adherencia se calcula en lectura.
+
+
+class BienestarRegistroRow(BaseModel):
+    """Un registro de bienestar (fila de `mod_bienestar_registros`). `event_id` correlaciona hechos
+    del mismo mensaje del agente (NULL = suelto)."""
+
+    id: int
+    category: str
+    activity: str
+    occurred_at: datetime
+    occurred_at_precision: str
+    description: str
+    detail: dict[str, Any]
+    metadata: dict[str, Any]
+    event_id: str | None
+    created_at: datetime
+
+
+class BienestarRegistroList(BaseModel):
+    items: list[BienestarRegistroRow]
+
+
+class BienestarSummary(BaseModel):
+    total: int
+    by_category: dict[str, int]
+    by_activity: dict[str, int]
+    since: datetime | None = None
+    until: datetime | None = None
+
+
+class BienestarDailyRow(BaseModel):
+    day: str
+    total: int
+    by_category: dict[str, int]
+
+
+class BienestarDaily(BaseModel):
+    days: list[BienestarDailyRow]
+
+
+class BienestarHabitPoint(BaseModel):
+    period: str
+    count: int
+    met: bool
+
+
+class BienestarHabitAdherence(BaseModel):
+    """Un hábito + su adherencia derivada (racha con gracia del período en curso + historia)."""
+
+    habit: dict[str, Any]
+    cadence: str
+    target_count: int
+    current: int
+    met_current: bool
+    streak: int
+    history: list[BienestarHabitPoint]
+
+
+class BienestarHabitList(BaseModel):
+    items: list[BienestarHabitAdherence]
+
+
 # ---- Módulo hackathones (extractor puro) --------------------------------------------------------
 # El dashboard lee `mod_hackathones_events` de SOLO LECTURA (GET). Las fechas pueden ser NULL (un
 # anuncio suele traer solo el deadline de inscripción); el front decide cómo mostrarlas.

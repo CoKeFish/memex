@@ -8,6 +8,7 @@ from memex.api.routers import (
     accounts,
     auth,
     backfill,
+    bienestar,
     calendar,
     feedback,
     filters,
@@ -78,6 +79,7 @@ app.include_router(media.router)
 app.include_router(filters.router)
 app.include_router(feedback.router)
 app.include_router(finance.router)
+app.include_router(bienestar.router)
 app.include_router(calendar.router)
 app.include_router(hackathones.router)
 app.include_router(identidades.router)

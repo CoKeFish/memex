@@ -40,6 +40,7 @@ PRODUCER_IDENTIDADES = "identidades"  #: resolución determinista de identidad (
 PRODUCER_FINANCE = "finance"  #: contraparte de un cobro/pago resuelta a una identidad
 PRODUCER_LLM = "llm"  #: relación semántica / pertenencia a cúmulo decidida por el LLM
 PRODUCER_HUMANO = "humano"  #: confirmada/creada por el usuario
+PRODUCER_EVENT = "event"  #: hechos correlacionados por Hermes en un mismo mensaje (mismo event_id)
 #: Conocidos (referencia); el `producer` real es texto libre — agregar uno NO requiere migración.
 PRODUCERS: frozenset[str] = frozenset(
     {
@@ -50,6 +51,7 @@ PRODUCERS: frozenset[str] = frozenset(
         PRODUCER_FINANCE,
         PRODUCER_LLM,
         PRODUCER_HUMANO,
+        PRODUCER_EVENT,
     }
 )
 
