@@ -85,6 +85,7 @@ def parse_facebook_item(item: dict[str, Any], account: str) -> SourceRecord | No
         return None
 
     url = _as_str(_first(item, "url", "postUrl", "link")) or f"https://www.facebook.com/{account}"
+    media_refs = _fb_media_refs(item)
     return _build_record(
         platform="facebook",
         account=account,
@@ -93,8 +94,8 @@ def parse_facebook_item(item: dict[str, Any], account: str) -> SourceRecord | No
         url=url,
         text=_as_str(_first(item, "text", "message", "postText")) or "",
         posted_at=posted_at,
-        media_kind=_fb_media_kind(item),
-        media_refs=_fb_media_refs(item),
+        media_kind=_fb_media_kind(item, media_refs),
+        media_refs=media_refs,
         engagement=_engagement(
             likes=_as_int(_first(item, "likes", "likesCount", "reactionsCount", "reactions")),
             comments=_as_int(_first(item, "comments", "commentsCount")),
@@ -185,7 +186,7 @@ def _build_record(
     )
 
 
-def _fb_media_kind(item: dict[str, Any]) -> MediaKind:
+def _fb_media_kind(item: dict[str, Any], refs: list[SocialMediaRef]) -> MediaKind:
     t = _as_str(_first(item, "type", "mediaType"))
     if t:
         tl = t.lower()
@@ -197,6 +198,11 @@ def _fb_media_kind(item: dict[str, Any]) -> MediaKind:
         return "video"
     if _first(item, "imageUrl", "images", "photo") is not None:
         return "image"
+    # Fallback: derivar el kind de los refs ya colectados. Cubre la imagen anidada en
+    # `media[].photo_image`, que el heurístico top-level no ve, evitando media_kind="none"
+    # con media_refs no vacío. El video gana sobre la imagen.
+    if refs:
+        return "video" if any(r.kind == "video" for r in refs) else "image"
     return "none"
 
 

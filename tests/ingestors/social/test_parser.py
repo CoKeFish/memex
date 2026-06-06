@@ -250,6 +250,29 @@ def test_facebook_media_refs() -> None:
     assert ("https://cdn/fb.mp4", "video") in refs
 
 
+def test_facebook_media_kind_from_nested_media() -> None:
+    # Imagen SOLO anidada en media[].photo_image.uri, sin `type`/imageUrl top-level: el heurístico
+    # top-level daría "none"; debe derivarse "image" de los refs ya colectados (regresión).
+    item = _fb_item(media=[{"photo_image": {"uri": "https://cdn/fb.jpg"}}])
+    del item["type"]
+    rec = parse_facebook_item(item, "utn")
+    assert rec is not None
+    assert rec.payload["media_kind"] == "image"
+    assert any(r["url"] == "https://cdn/fb.jpg" for r in rec.payload["media_refs"])
+
+
+def test_facebook_media_kind_video_wins_from_refs() -> None:
+    # Con refs de imagen y video pero sin `type` usable, el video gana sobre la imagen.
+    item = _fb_item(
+        media=[{"photo_image": {"uri": "https://cdn/fb.jpg"}}],
+        videoUrl="https://cdn/fb.mp4",
+    )
+    del item["type"]
+    rec = parse_facebook_item(item, "utn")
+    assert rec is not None
+    assert rec.payload["media_kind"] == "video"
+
+
 def test_x_media_refs_photo_and_best_video_variant() -> None:
     item = _x_item(
         media=[
