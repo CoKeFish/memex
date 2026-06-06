@@ -11,6 +11,7 @@ from typing import Literal
 
 from memex.core.media_types import (
     DEFAULT_MAX_ATTACHMENT_BYTES,
+    DEFAULT_MIN_MEDIA_BYTES,
     MEDIA_CONTENT_TYPES,
     make_media_blob,
 )
@@ -29,7 +30,7 @@ BodySource = Literal["text", "html_stripped"]
 #: Content-types de adjuntos que extraemos para OCR (imágenes + PDF + ZIP) y el tope por adjunto
 #: viven en `core.media_types` (fuente única, compartida con las sources sociales). Re-exportados
 #: acá por compatibilidad con quien los importe desde el parser.
-__all__ = ["DEFAULT_MAX_ATTACHMENT_BYTES", "MEDIA_CONTENT_TYPES"]
+__all__ = ["DEFAULT_MAX_ATTACHMENT_BYTES", "DEFAULT_MIN_MEDIA_BYTES", "MEDIA_CONTENT_TYPES"]
 
 _log = get_logger("memex.ingestors.imap.parser")
 
@@ -48,6 +49,7 @@ def parse_email_message(
     fetch_body: bool = True,
     extract_media: bool = False,
     max_attachment_bytes: int = DEFAULT_MAX_ATTACHMENT_BYTES,
+    min_attachment_bytes: int = DEFAULT_MIN_MEDIA_BYTES,
 ) -> SourceRecord:
     """Convert a stdlib email.message.Message + IMAP metadata into a SourceRecord.
 
@@ -89,7 +91,11 @@ def parse_email_message(
         body_text, body_source, body_truncated = _extract_body(msg, max_body_bytes)
 
     attachments = _extract_attachment_meta(msg)
-    media = _extract_media(msg, max_bytes=max_attachment_bytes) if extract_media else []
+    media = (
+        _extract_media(msg, max_bytes=max_attachment_bytes, min_bytes=min_attachment_bytes)
+        if extract_media
+        else []
+    )
 
     raw_headers: dict[str, str] = {}
     for h in RAW_HEADERS_WHITELIST:
@@ -340,12 +346,15 @@ def _extract_attachment_meta(msg: Message) -> list[Attachment]:
     return result
 
 
-def _extract_media(msg: Message, *, max_bytes: int) -> list[MediaBlob]:
+def _extract_media(
+    msg: Message, *, max_bytes: int, min_bytes: int = DEFAULT_MIN_MEDIA_BYTES
+) -> list[MediaBlob]:
     """Extrae los BYTES de adjuntos imagen/PDF (para subir a MinIO + OCR).
 
     Re-camina `msg.walk()` (independiente de `_extract_attachment_meta`, que solo saca metadata).
-    Solo content-types en `MEDIA_CONTENT_TYPES`. Saltea (y loguea) los que pasan `max_bytes`.
-    sha256 + base64 con stdlib → función pura, testeable con `.eml`.
+    Solo content-types en `MEDIA_CONTENT_TYPES`. Saltea (y loguea) los que pasan `max_bytes` o
+    no llegan a `min_bytes` (tracking pixels / logos de firma). sha256 + base64 con stdlib →
+    función pura, testeable con `.eml`.
     """
     result: list[MediaBlob] = []
     for part in msg.walk():
@@ -363,6 +372,16 @@ def _extract_media(msg: Message, *, max_bytes: int) -> list[MediaBlob]:
                 content_type=ctype,
                 size=len(payload),
                 max_bytes=max_bytes,
+            )
+            continue
+        if len(payload) < min_bytes:
+            # Casi seguro un tracking pixel o logo de firma; no vale subirlo+OCR-earlo. A nivel
+            # debug (no warning) porque son altísima frecuencia y a warning inundarían el log.
+            _log.debug(
+                "imap.media.too_small",
+                content_type=ctype,
+                size=len(payload),
+                min_bytes=min_bytes,
             )
             continue
         filename = part.get_filename()

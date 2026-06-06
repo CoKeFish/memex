@@ -73,7 +73,9 @@ def test_default_off_extracts_no_media() -> None:
 
 
 def test_extract_media_captures_image_and_pdf() -> None:
-    record = _parse(_build_email(), extract_media=True, max_attachment_bytes=1000)
+    record = _parse(
+        _build_email(), extract_media=True, max_attachment_bytes=1000, min_attachment_bytes=0
+    )
 
     by_type = {m.content_type: m for m in record.media}
     # PNG y PDF caben (< 1000); el JPEG (5000+) se saltea por tamaño.
@@ -91,15 +93,40 @@ def test_extract_media_captures_image_and_pdf() -> None:
 
 
 def test_oversize_skipped_but_small_kept() -> None:
-    record = _parse(_build_email(), extract_media=True, max_attachment_bytes=1000)
+    record = _parse(
+        _build_email(), extract_media=True, max_attachment_bytes=1000, min_attachment_bytes=0
+    )
     assert all(m.content_type != "image/jpeg" for m in record.media)
 
 
 def test_large_cap_captures_all_three() -> None:
-    record = _parse(_build_email(), extract_media=True, max_attachment_bytes=10 * 1024 * 1024)
+    record = _parse(
+        _build_email(),
+        extract_media=True,
+        max_attachment_bytes=10 * 1024 * 1024,
+        min_attachment_bytes=0,
+    )
     assert len(record.media) == 3
     assert {m.content_type for m in record.media} == {
         "image/png",
         "application/pdf",
         "image/jpeg",
     }
+
+
+def test_below_floor_skipped_by_default() -> None:
+    # PNG_BYTES (~72 B) y PDF_BYTES (~104 B) están por debajo del piso por defecto (1 KiB) →
+    # se descartan como tracking pixels / spacers; solo el JPEG (~5 KB) supera el piso.
+    record = _parse(_build_email(), extract_media=True, max_attachment_bytes=10 * 1024 * 1024)
+    assert {m.content_type for m in record.media} == {"image/jpeg"}
+
+
+def test_floor_override_keeps_small() -> None:
+    # Con el piso en 0 (desactivado) los tres adjuntos diminutos se conservan.
+    record = _parse(
+        _build_email(),
+        extract_media=True,
+        max_attachment_bytes=10 * 1024 * 1024,
+        min_attachment_bytes=0,
+    )
+    assert len(record.media) == 3
