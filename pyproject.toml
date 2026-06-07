@@ -45,6 +45,7 @@ build-backend = "hatchling.build"
 packages = ["src/memex", "src/memex_local_client"]
 
 [project.scripts]
+memex = "memex.agent_cli:main"
 memex-local-client = "memex_local_client.cli:main"
 memex-filters = "memex.cli.filters:main"
 memex-telegram = "memex.ingestors.telegram.cli:main"

@@ -9,6 +9,7 @@ Subcomandos:
   summary   — agregado para reportes (total + conteos por categoría y actividad).
   habit     — gestiona hábitos (add/list/rm): compromisos recurrentes.
   adherence — adherencia + rachas de los hábitos activos.
+  help      — resumen de los comandos (para que el agente descubra la CLI).
 
 Todos aceptan `--json` para salida que parsea el agente; sin él, la salida es humana. Server-side:
 habla con la DB vía `connection()`. Exit 0 si OK, 1 si error.
@@ -71,9 +72,28 @@ def _since_from_args(args: argparse.Namespace) -> datetime | None:
     return since
 
 
+_HELP = """memex-bienestar — salud y bienestar (registrador determinista, sin LLM).
+
+Comandos:
+  register    registra un evento (comida/higiene/ejercicio/grooming/salud/otros)
+  list        lista registros filtrados
+  summary     agregado: total + conteos por categoría/actividad
+  habit       define hábitos: add | list | rm
+  adherence   adherencia + rachas de los hábitos activos
+  help        muestra esta ayuda
+
+Reglas:
+  --event <id>  hechos del MISMO mensaje comparten el id → el grafo los conecta
+                (un mensaje con un solo hecho no necesita --event)
+  --json        la respuesta JSON es la ÚLTIMA línea de stdout (las previas son logs)
+
+Flags de cada comando: memex-bienestar <comando> -h"""
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="memex-bienestar")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("help", help="Resumen de los comandos (para descubrir la CLI).")
 
     reg = sub.add_parser("register", help="Registra un evento de bienestar (campos estructurados).")
     reg.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -274,6 +294,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.cmd == "help":
+        _say(_HELP)
+        return 0
     log.info("bienestar.cli.start", cmd=args.cmd)
 
     try:

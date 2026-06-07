@@ -10,6 +10,9 @@ llamás sus **comandos deterministas** con campos ya estructurados. memex guarda
 identidades y conecta los datos. **Vos no interpretás adentro de memex ni creás relaciones** — solo
 traducís el mensaje a una o más llamadas a comandos.
 
+Todo va por **un** comando: `memex <grupo> <comando> [opciones]` (grupos: `bienestar`, `finance`).
+`memex help` lista lo que podés hacer.
+
 Reparto: **vos pensás y orquestás; memex guarda, calcula y conecta.** El único razonamiento abierto
 (qué hacer, narrar un reporte, leer una imagen) es tuyo; el de dominio (identidad, dedup, racha,
 aristas) es de memex.
@@ -23,9 +26,17 @@ solo hecho, no hace falta `--event`.
 Todos aceptan `--json`. **La respuesta JSON es la ÚLTIMA línea de stdout** (las anteriores son logs):
 parseá la última línea.
 
+## Descubrir los comandos
+Si dudás de qué hay o cómo se llama un flag, preguntale a la propia CLI:
+```
+memex help                   # todos los comandos del agente
+memex bienestar help         # detalle del grupo bienestar
+memex bienestar register -h  # flags completos de un comando puntual
+```
+
 ## Registrar — bienestar (comida, higiene, ejercicio, grooming, salud)
 ```
-memex-bienestar register --category <comida|higiene|ejercicio|grooming|salud|otros> \
+memex bienestar register --category <comida|higiene|ejercicio|grooming|salud|otros> \
     --activity "<acto>" [--description "<detalle>"] [--occurred-at <ISO8601>] [--event <id>] [--json]
 ```
 - `--activity`: etiqueta CORTA y consistente del acto ("almuerzo", "gimnasio", "cepillado"). Es la
@@ -34,29 +45,29 @@ memex-bienestar register --category <comida|higiene|ejercicio|grooming|salud|otr
 
 ## Registrar — finanzas (gastos/ingresos)
 ```
-memex-finance register --amount <num> --currency <ISO4217> [--direction <ingreso|egreso>] \
+memex finance register --amount <num> --currency <ISO4217> [--direction <ingreso|egreso>] \
     [--category ...] [--counterparty "<comercio>"] [--occurred-at <ISO>] [--event <id>] [--json]
 ```
 - `--amount`: número positivo, SIN separadores de miles. `--currency`: USD, COP, ARS, …
-- `--counterparty`: el comercio/persona. memex lo resuelve a una identidad y deduplica contra la
-  alerta del banco del mismo cargo si existe.
+- `--counterparty`: el comercio/persona. memex lo resuelve a una identidad del directorio **si ya
+  existe** (no la crea) y deduplica contra la alerta del banco del mismo cargo.
 - Para una FOTO de factura: **vos la leés** (tu visión) y pasás monto/comercio/fecha. memex no lee la
   imagen en este flujo.
 
 ## Consultar / reportar (solo lectura, JSON)
 ```
-memex-bienestar list      [--since <ISO>] [--until <ISO>] [--category ...] [--days N] --json
-memex-bienestar summary   [--days N] --json
-memex-bienestar adherence [--periods N] [--tz <IANA>] --json
+memex bienestar list      [--since <ISO>] [--until <ISO>] [--category ...] [--days N] --json
+memex bienestar summary   [--days N] --json
+memex bienestar adherence [--periods N] [--tz <IANA>] --json
 ```
 Con estos datos armás vos la respuesta en lenguaje natural (la narrativa, el "estimado" y el juicio
 son tuyos; memex da los hechos limpios).
 
 ## Hábitos (definirlos cuando el usuario lo pide explícito)
 ```
-memex-bienestar habit add --name "<nombre>" --cadence <daily|weekly> [--target N] --activity "<acto>"
-memex-bienestar habit list
-memex-bienestar habit rm --id <n>
+memex bienestar habit add --name "<nombre>" --cadence <daily|weekly> [--target N] --activity "<acto>"
+memex bienestar habit list
+memex bienestar habit rm --id <n>
 ```
 
 ## Ejemplo — "acá está la factura del almuerzo, comí una milanesa"
@@ -64,9 +75,9 @@ memex-bienestar habit rm --id <n>
 # 1) un id de evento para este mensaje (con N hechos)
 ev="evt-lunch-001"
 # 2) el gasto (vos leíste la factura con tu visión)
-memex-finance   register --event "$ev" --amount 18000 --currency COP --counterparty "Rest X"
+memex finance   register --event "$ev" --amount 18000 --currency COP --counterparty "Rest X"
 # 3) la comida (del texto)
-memex-bienestar register --event "$ev" --category comida --activity almuerzo --description "milanesa"
+memex bienestar register --event "$ev" --category comida --activity almuerzo --description "milanesa"
 ```
 memex conecta el gasto y la comida con una arista de "mismo_evento" automáticamente.
 

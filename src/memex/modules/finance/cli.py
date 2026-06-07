@@ -1,8 +1,10 @@
 """CLI `memex-finance` — workers post-extracción de finance.
 
 Subcomandos:
+  register     — registra una transacción determinista (entrada por agente, sin LLM).
   dedup        — FASE 2: resuelve con LLM los pares candidatos (confirmar/rechazar).
   consolidate  — reconstruye la proyección consolidada (grupos + ganador por completitud).
+  help         — resumen de los comandos (para que el agente descubra la CLI).
 
 Server-side (corre DENTRO de memex): habla con la DB vía `connection()`, igual que
 `memex-calendar-sync`. `dedup` necesita las env vars del LLM (inyectadas por `doppler run`);
@@ -61,9 +63,29 @@ def _parse_when(s: str | None) -> tuple[datetime | None, str | None]:
     return dt, "datetime"
 
 
+_HELP = """memex-finance — finanzas: transacciones + dedup + consolidación.
+
+Comandos:
+  register     registra una transacción; asegura su consolidado y teje aristas en el acto
+  dedup        FASE 2 de dedup con LLM (mantenimiento)
+  consolidate  reconstruye la proyección consolidada (reconciliador/mantenimiento)
+  help         muestra esta ayuda
+
+register (entrada del agente):
+  --amount <n> --currency <ISO4217> [--direction ingreso|egreso] [--category]
+  [--counterparty "<comercio>"] [--place] [--occurred-at ISO] [--event <id>] [--json]
+
+Reglas:
+  --event <id>  hechos del MISMO mensaje comparten el id (factura = gasto + comida)
+  --json        la respuesta JSON es la ÚLTIMA línea de stdout
+
+Flags de cada comando: memex-finance <comando> -h"""
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="memex-finance")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("help", help="Resumen de los comandos (para descubrir la CLI).")
 
     dedup_p = sub.add_parser(
         "dedup", help="Dedup FASE 2: resuelve con LLM los pares candidatos (confirmar/rechazar)."
@@ -150,6 +172,9 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.cmd == "help":
+        _say(_HELP)
+        return 0
     log.info("finance.cli.start", cmd=args.cmd)
 
     try:

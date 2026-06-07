@@ -100,6 +100,15 @@ def test_cli_habit_add_list_rm() -> None:
     assert n == 0
 
 
+def test_cli_help(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = main(["help"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "memex-bienestar" in out
+    assert "register" in out
+    assert "--event" in out
+
+
 def test_cli_adherence_json(capsys: pytest.CaptureFixture[str]) -> None:
     main(["habit", "add", "--name", "Gym", "--cadence", "daily", "--activity", "gimnasio"])
     main(["register", "--category", "ejercicio", "--activity", "gimnasio"])  # ahora → cuenta hoy
