@@ -21,7 +21,17 @@ def test_help_lists_groups(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert "bienestar" in out
     assert "finance" in out
+    assert "identidad" in out
     assert "--event" in out
+    # comandos del flujo de evento
+    assert "start" in out
+    assert "end" in out
+
+
+def test_event_commands_are_recognized() -> None:
+    assert main(["start"]) == 0
+    assert main(["cancel"]) == 0  # descarta el abierto
+    assert main(["end"]) == 1  # nada abierto ni cerrado → error de flujo
 
 
 def test_no_args_shows_help(capsys: pytest.CaptureFixture[str]) -> None:
@@ -46,9 +56,30 @@ def test_dispatch_finance_register(capsys: pytest.CaptureFixture[str]) -> None:
     assert row["amount"] == 5.0
 
 
+def test_dispatch_identidad_add(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = main(["identidad", "add", "--name", "Ada", "--kind", "persona", "--json"])
+    assert rc == 0
+    row = _last_json(capsys.readouterr().out)
+    assert row["kind"] == "persona"
+    assert row["display_name"] == "Ada"
+    with connection() as c:
+        n = c.execute(text("SELECT count(*) FROM mod_identidades")).scalar_one()
+    assert n == 1
+
+
 def test_blocks_finance_maintenance() -> None:
     assert main(["finance", "consolidate"]) == 2  # mantenimiento, no del agente
     assert main(["finance", "dedup"]) == 2
+
+
+def test_identidad_exposes_only_add(capsys: pytest.CaptureFixture[str]) -> None:
+    # Solo `add` (+`help`); el mantenimiento de identidades NO se expone al agente.
+    assert main(["identidad", "sync", "--account", "1"]) == 2
+    assert main(["identidad", "merge"]) == 2
+    assert main(["identidad", "interest", "list"]) == 2
+    assert main(["identidad", "candidates"]) == 2
+    assert main(["identidad", "help"]) == 0
+    assert "add" in capsys.readouterr().out
 
 
 def test_unknown_group() -> None:

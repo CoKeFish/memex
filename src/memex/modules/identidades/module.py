@@ -48,6 +48,7 @@ from memex.modules.identidades.resolve import (
     Resolution,
 )
 from memex.modules.identidades.schema import IdentityItem
+from memex.relations.deterministic import weave_afiliacion
 
 _log = get_logger("memex.modules.identidades")
 
@@ -109,7 +110,7 @@ class IdentidadesModule:
             res = index.resolve(m)
             hint: _MergeHint | None = None
             if res.kind is None:
-                res, hint = self._resolve_fuzzy_or_create(ctx, m, index)
+                res, hint = _resolve_fuzzy_or_create(ctx.conn, ctx.user_id, m, index)
             _insert_mention(ctx.conn, ctx.user_id, m, res)
             self._trace_mention(ctx, m, res, hint)
         return len(mentions)
@@ -147,31 +148,6 @@ class IdentidadesModule:
             )
         else:
             ent.log(f"resuelta por {res.method}", status="ok")
-
-    def _resolve_fuzzy_or_create(
-        self, ctx: ModuleContext, m: IdentityItem, index: KnownIndex
-    ) -> tuple[Resolution, _MergeHint | None]:
-        """Sin match exacto: difuso. ≥HIGH auto-merge (+alias); zona gris crea provisional + encola
-        candidato; <LOW crea nueva. Devuelve el vecino difuso para la traza (None si nueva)."""
-        kind = _identity_kind(m.kind)
-        candidates = find_fuzzy_candidates(ctx.conn, ctx.user_id, kind=kind, probe=m.name)
-        best = candidates[0] if candidates else None
-        if best is not None and best.score >= HIGH_THRESHOLD:
-            _add_alias(ctx.conn, ctx.user_id, best.identity_id, m.name)
-            index.add_alias(m.name, best.identity_id)
-            return Resolution(kind, best.identity_id, "fuzzy"), _MergeHint(
-                best.identity_id, best.score, auto_merge=True
-            )
-        new_id = _create_entity(ctx.conn, ctx.user_id, m, kind, index)
-        if best is not None and best.score >= LOW_THRESHOLD:
-            # zona gris: candidato para el desempate LLM (par canónico a<b).
-            _propose_merge_candidate(
-                ctx.conn, ctx.user_id, new_id, best.identity_id, "trgm_name", best.score
-            )
-            return Resolution(kind, new_id, "fuzzy"), _MergeHint(
-                best.identity_id, best.score, auto_merge=False
-            )
-        return Resolution(kind, new_id, "created"), None
 
     async def health_check(self) -> HealthResult:
         return HealthResult(
@@ -326,21 +302,58 @@ class IdentidadesModule:
 # --- helpers -------------------------------------------------------------------------- #
 
 
+def _resolve_fuzzy_or_create(
+    conn: Connection,
+    user_id: int,
+    m: IdentityItem,
+    index: KnownIndex,
+    *,
+    source: str = "extraction",
+) -> tuple[Resolution, _MergeHint | None]:
+    """Sin match exacto: difuso. ≥HIGH auto-merge (+alias); zona gris crea provisional + encola
+    candidato; <LOW crea nueva. `source` se propaga a la entidad creada ('extraction' por default;
+    'manual' desde una tarjeta). Devuelve el vecino difuso para la traza (None si nueva)."""
+    kind = _identity_kind(m.kind)
+    candidates = find_fuzzy_candidates(conn, user_id, kind=kind, probe=m.name)
+    best = candidates[0] if candidates else None
+    if best is not None and best.score >= HIGH_THRESHOLD:
+        _add_alias(conn, user_id, best.identity_id, m.name)
+        index.add_alias(m.name, best.identity_id)
+        return Resolution(kind, best.identity_id, "fuzzy"), _MergeHint(
+            best.identity_id, best.score, auto_merge=True
+        )
+    new_id = _create_entity(conn, user_id, m, kind, index, source=source)
+    if best is not None and best.score >= LOW_THRESHOLD:
+        # zona gris: candidato para el desempate LLM (par canónico a<b).
+        _propose_merge_candidate(conn, user_id, new_id, best.identity_id, "trgm_name", best.score)
+        return Resolution(kind, new_id, "fuzzy"), _MergeHint(
+            best.identity_id, best.score, auto_merge=False
+        )
+    return Resolution(kind, new_id, "created"), None
+
+
 def _create_entity(
-    conn: Connection, user_id: int, item: IdentityItem, kind: str, index: KnownIndex
+    conn: Connection,
+    user_id: int,
+    item: IdentityItem,
+    kind: str,
+    index: KnownIndex,
+    *,
+    source: str = "extraction",
 ) -> int:
-    """Crea una identidad NUEVA (source='extraction', interest=FALSE), vuelca email/handle a
-    identificadores, y la registra en el índice para el dedup intra-corrida. Devuelve el id."""
+    """Crea una identidad NUEVA (interest=FALSE), vuelca email/handle a identificadores, y la
+    registra en el índice para el dedup intra-corrida. `source` distingue la procedencia
+    ('extraction' por default; 'manual' cuando la siembra una tarjeta). Devuelve el id."""
     new_id = int(
         conn.execute(
             text(
                 """
                 INSERT INTO mod_identidades (user_id, kind, display_name, source, interest)
-                VALUES (:u, :k, :n, 'extraction', FALSE)
+                VALUES (:u, :k, :n, :src, FALSE)
                 RETURNING id
                 """
             ),
-            {"u": user_id, "k": kind, "n": item.name},
+            {"u": user_id, "k": kind, "n": item.name, "src": source},
         ).scalar_one()
     )
     identifiers: list[KnownIdentifier] = []
@@ -348,11 +361,13 @@ def _create_entity(
     # como identificador (si no, fusionaría remitentes distintos que comparten el relay).
     if item.email and not is_role_email(item.email):
         vn = norm_identifier("email", item.email)
-        _insert_identifier(conn, user_id, new_id, "email", "email", item.email, vn)
+        _insert_identifier(conn, user_id, new_id, "email", "email", item.email, vn, source=source)
         identifiers.append(KnownIdentifier("email", "email", vn))
     if item.handle:
         vn = norm_identifier("handle", item.handle)
-        _insert_identifier(conn, user_id, new_id, "unknown", "handle", item.handle, vn)
+        _insert_identifier(
+            conn, user_id, new_id, "unknown", "handle", item.handle, vn, source=source
+        )
         identifiers.append(KnownIdentifier("unknown", "handle", vn))
     index.add(
         KnownIdentity(id=new_id, kind=kind, display_name=item.name, identifiers=tuple(identifiers))
@@ -361,18 +376,34 @@ def _create_entity(
 
 
 def _insert_identifier(
-    conn: Connection, user_id: int, identity_id: int, platform: str, kind: str, value: str, vn: str
+    conn: Connection,
+    user_id: int,
+    identity_id: int,
+    platform: str,
+    kind: str,
+    value: str,
+    vn: str,
+    *,
+    source: str = "extraction",
 ) -> None:
     conn.execute(
         text(
             """
             INSERT INTO mod_identidades_identifiers
               (user_id, identity_id, platform, kind, value, value_norm, source)
-            VALUES (:u, :iid, :p, :k, :v, :vn, 'extraction')
+            VALUES (:u, :iid, :p, :k, :v, :vn, :src)
             ON CONFLICT (identity_id, platform, kind, value_norm) DO NOTHING
             """
         ),
-        {"u": user_id, "iid": identity_id, "p": platform, "k": kind, "v": value, "vn": vn},
+        {
+            "u": user_id,
+            "iid": identity_id,
+            "p": platform,
+            "k": kind,
+            "v": value,
+            "vn": vn,
+            "src": source,
+        },
     )
 
 
@@ -485,4 +516,153 @@ def load_known_index(conn: Connection, user_id: int) -> KnownIndex:
     )
 
 
-__all__ = ["IdentidadesModule", "load_known_index"]
+# --- alta por tarjeta (resolve-or-create manual, sin mención) ------------------------- #
+
+
+def resolve_or_create_identity(
+    conn: Connection, user_id: int, item: IdentityItem, *, source: str = "manual"
+) -> Resolution:
+    """Resuelve `item` contra el directorio (señales fuertes + difuso) y crea si no existe — la
+    MISMA lógica que `dedup` usa en la extracción, pero SIN registrar mención (una tarjeta no es
+    evidencia de un mensaje). Idempotente. Devuelve la `Resolution` (merge/candidato/creada)."""
+    index = load_known_index(conn, user_id)
+    res = index.resolve(item)
+    if res.kind is None:
+        res, _hint = _resolve_fuzzy_or_create(conn, user_id, item, index, source=source)
+    return res
+
+
+def _store_card_identifiers(
+    conn: Connection,
+    user_id: int,
+    identity_id: int,
+    *,
+    email: str | None,
+    handle: str | None,
+    phone: str | None,
+    source: str = "manual",
+) -> None:
+    """Vuelca los identificadores de la tarjeta a la identidad resuelta (idempotente por el UNIQUE):
+    enriquece el directorio aun si resolvió a una identidad existente. El email role/relay (noreply,
+    …) NO es clave de identidad → no se guarda (igual que la extracción)."""
+    if email and not is_role_email(email):
+        vn = norm_identifier("email", email)
+        if vn:
+            _insert_identifier(
+                conn, user_id, identity_id, "email", "email", email, vn, source=source
+            )
+    if handle:
+        vn = norm_identifier("handle", handle)
+        if vn:
+            _insert_identifier(
+                conn, user_id, identity_id, "unknown", "handle", handle, vn, source=source
+            )
+    if phone:
+        vn = norm_identifier("phone", phone)
+        if vn:
+            _insert_identifier(
+                conn, user_id, identity_id, "phone", "phone", phone, vn, source=source
+            )
+
+
+def _public_identity(conn: Connection, user_id: int, identity_id: int) -> dict[str, Any]:
+    """La fila pública de una identidad (lo que la CLI del agente devuelve en `--json`)."""
+    r = (
+        conn.execute(
+            text(
+                """
+                SELECT id, kind, display_name, source, interest, created_at, updated_at
+                FROM mod_identidades WHERE id = :id AND user_id = :u
+                """
+            ),
+            {"id": identity_id, "u": user_id},
+        )
+        .mappings()
+        .one()
+    )
+    return dict(r)
+
+
+def _affiliate(
+    conn: Connection,
+    user_id: int,
+    person_id: int,
+    org_id: int,
+    role: str | None,
+    *,
+    source: str = "manual",
+) -> None:
+    """Enlaza persona↔org en el directorio (idempotente; re-correr con otro rol lo actualiza)."""
+    conn.execute(
+        text(
+            """
+            INSERT INTO mod_identidades_person_orgs (user_id, person_id, org_id, role, source)
+            VALUES (:u, :p, :o, :role, :src)
+            ON CONFLICT (person_id, org_id) DO UPDATE SET role = EXCLUDED.role
+            """
+        ),
+        {"u": user_id, "p": person_id, "o": org_id, "role": role, "src": source},
+    )
+
+
+def register_card(
+    conn: Connection,
+    user_id: int,
+    *,
+    name: str,
+    kind: str,
+    email: str | None = None,
+    handle: str | None = None,
+    phone: str | None = None,
+    org: str | None = None,
+    role: str | None = None,
+) -> dict[str, Any]:
+    """Resolve-or-create de UNA identidad desde una tarjeta de contacto (manual, sin LLM): la pasa
+    por la MISMA resolución que la extracción y vuelca sus identificadores (email/handle/phone). Si
+    trae `org` (solo personas), asegura la organización, teje la afiliación persona↔org y su arista
+    `afiliado` en el grafo. Idempotente. Devuelve la fila pública resuelta (+ `method` y, si hubo,
+    `org`). Escribe todo en `conn` (atómico con la tx del caller)."""
+    if kind not in (KIND_PERSONA, KIND_ORG):
+        raise ValueError(f"kind inválido: {kind!r} (esperado 'persona' u 'organizacion')")
+    if org and kind != KIND_PERSONA:
+        raise ValueError("'org' solo aplica a una persona (la afiliación es persona↔organización)")
+
+    item = IdentityItem.model_validate(
+        {
+            "source_inbox_ids": (),
+            "name": name,
+            "kind": kind,
+            "email": email,
+            "handle": handle,
+            "org": org,
+            "role": role,
+        }
+    )
+    res = resolve_or_create_identity(conn, user_id, item, source="manual")
+    assert res.identity_id is not None  # resolve_or_create_identity siempre ata o crea
+    _store_card_identifiers(conn, user_id, res.identity_id, email=email, handle=handle, phone=phone)
+    result = _public_identity(conn, user_id, res.identity_id)
+    result["method"] = res.method
+
+    if org and res.kind == KIND_PERSONA:
+        org_item = IdentityItem.model_validate(
+            {"source_inbox_ids": (), "name": org, "kind": "organizacion"}
+        )
+        ores = resolve_or_create_identity(conn, user_id, org_item, source="manual")
+        assert ores.identity_id is not None
+        _affiliate(conn, user_id, res.identity_id, ores.identity_id, role)
+        weave_afiliacion(conn, user_id, res.identity_id)
+        org_row = _public_identity(conn, user_id, ores.identity_id)
+        org_row["method"] = ores.method
+        org_row["role"] = role
+        result["org"] = org_row
+
+    return result
+
+
+__all__ = [
+    "IdentidadesModule",
+    "load_known_index",
+    "register_card",
+    "resolve_or_create_identity",
+]

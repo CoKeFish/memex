@@ -24,6 +24,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from dotenv import load_dotenv
+from sqlalchemy.engine import Connection
 
 from memex.db import connection
 from memex.logging import get_logger, setup_logging
@@ -158,29 +159,42 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _cmd_register(args: argparse.Namespace) -> int:
+def register_from_args(
+    conn: Connection, user_id: int, args: argparse.Namespace, *, event_id: str | None = None
+) -> dict[str, Any]:
+    """Mapea `args` (ya parseados) → `bienestar.register` sobre un `conn` DADO. Lo reusan
+    `_cmd_register` (que abre su propia tx) y el cierre de evento del agente (tx compartida, con el
+    `event_id` del evento). `event_id`, si viene, pisa `args.event`. `ValueError` si `--detail` no
+    es un objeto JSON."""
     occurred_at, precision = _parse_when(args.occurred_at)
     detail: dict[str, Any] | None = None
     if args.detail:
         parsed = json.loads(args.detail)
         if not isinstance(parsed, dict):
-            _say("--detail debe ser un objeto JSON", err=True)
-            return 1
+            raise ValueError("--detail debe ser un objeto JSON")
         detail = parsed
     metadata = {"source_text": args.source_text} if args.source_text else None
-    with connection() as conn:
-        row = register(
-            conn,
-            args.user,
-            category=args.category,
-            activity=args.activity,
-            description=args.description,
-            occurred_at=occurred_at,
-            precision=precision,
-            detail=detail,
-            metadata=metadata,
-            event_id=args.event,
-        )
+    return register(
+        conn,
+        user_id,
+        category=args.category,
+        activity=args.activity,
+        description=args.description,
+        occurred_at=occurred_at,
+        precision=precision,
+        detail=detail,
+        metadata=metadata,
+        event_id=event_id if event_id is not None else args.event,
+    )
+
+
+def _cmd_register(args: argparse.Namespace) -> int:
+    try:
+        with connection() as conn:
+            row = register_from_args(conn, args.user, args)
+    except ValueError as e:
+        _say(str(e), err=True)
+        return 1
     if args.as_json:
         _emit_json(row)
     else:

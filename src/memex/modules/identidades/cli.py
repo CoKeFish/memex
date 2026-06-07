@@ -1,6 +1,9 @@
-"""CLI `memex-identidades` — sync de Google Contacts + lista de interés + desempate de merges.
+"""CLI `memex-identidades` — alta por tarjeta + sync de Google Contacts + interés + merges.
 
 Subcomandos:
+  add          — resolve-or-create de una identidad desde una tarjeta de contacto (lo usa el agente
+                 vía `memex identidad add`): misma resolución que la extracción, sin LLM.
+  help         — resumen de los comandos.
   sync         — una pasada de sync (ingress) de una cuenta de proveedor (Google People).
   add-account  — registra (upsert) una cuenta de proveedor, vinculada a la cuenta del dashboard
                  (`accounts.id`) cuyo vault tiene el token Google.
@@ -21,14 +24,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
+from typing import Any
 
 from dotenv import load_dotenv
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 from memex.db import connection
 from memex.logging import get_logger, setup_logging
 from memex.modules.identidades.dedup_llm import run_merge_phase2
+from memex.modules.identidades.module import register_card
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.providers import known_providers
 from memex.modules.identidades.providers.base import ContactsProviderError
@@ -45,9 +52,53 @@ def _say(msg: str, *, err: bool = False) -> None:
     print(_safe(msg), file=sys.stderr if err else sys.stdout)
 
 
+def _emit_json(obj: Any) -> None:
+    """La fila pública como ÚLTIMA línea de stdout (las previas son logs). `default=str` serializa
+    datetimes sin acoplar a un encoder propio (igual que bienestar/finance)."""
+    print(_safe(json.dumps(obj, default=str, ensure_ascii=False)))
+
+
+_HELP = """memex-identidades — directorio de personas y organizaciones (resolución determinista).
+
+Comandos del agente:
+  add          registra/resuelve una tarjeta de contacto (resolve-or-create, no duplica)
+  help         muestra esta ayuda
+
+Mantenimiento (no del agente; usar 'memex-identidades' directo, no 'memex identidad'):
+  sync · add-account · accounts · interest · merge · candidates
+
+add — desde una tarjeta de contacto / vCard (la lee el agente, no memex):
+  memex-identidades add --name "<nombre>" --kind <persona|organizacion> [--email <e>]
+      [--phone <t>] [--handle <@>] [--org "<empresa>"] [--role "<rol>"] [--json]
+  - resuelve contra el directorio (señales fuertes + difuso) y crea si no existe; idempotente.
+  - --org (solo personas) teje la afiliación persona↔organización.
+  - --json: la fila pública es la ÚLTIMA línea de stdout (las previas son logs).
+
+Flags de cada comando: memex-identidades <comando> -h"""
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="memex-identidades")
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    add_id = sub.add_parser("add", help="Registra/resuelve una identidad desde una tarjeta.")
+    add_id.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    add_id.add_argument("--name", required=True, help="Nombre de la persona u organización.")
+    add_id.add_argument(
+        "--kind", required=True, choices=["persona", "organizacion"], help="Tipo de identidad."
+    )
+    add_id.add_argument("--email", help="Email de contacto.")
+    add_id.add_argument("--phone", help="Teléfono de contacto.")
+    add_id.add_argument("--handle", help="Handle/usuario (ej. @ada).")
+    add_id.add_argument(
+        "--org", help="Empresa de la persona (teje la afiliación; solo --kind persona)."
+    )
+    add_id.add_argument("--role", help="Rol/cargo en la empresa (con --org).")
+    add_id.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite la fila pública como JSON."
+    )
+
+    sub.add_parser("help", help="Resumen de los comandos (para descubrir la CLI).")
 
     sync_p = sub.add_parser("sync", help="Sincroniza (ingress) una cuenta de contactos externa.")
     sync_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -99,6 +150,42 @@ def _build_parser() -> argparse.ArgumentParser:
     cand_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
 
     return parser
+
+
+def register_add_from_args(
+    conn: Connection, user_id: int, args: argparse.Namespace
+) -> dict[str, Any]:
+    """Mapea `args` (ya parseados) → `register_card` sobre un `conn` DADO. Lo reusan `_cmd_add` (que
+    abre su propia tx) y el cierre de evento del agente (tx compartida)."""
+    return register_card(
+        conn,
+        user_id,
+        name=args.name,
+        kind=args.kind,
+        email=args.email,
+        handle=args.handle,
+        phone=args.phone,
+        org=args.org,
+        role=args.role,
+    )
+
+
+def _cmd_add(args: argparse.Namespace) -> int:
+    """Resolve-or-create de una identidad desde una tarjeta de contacto. Delega en
+    `register_card` (misma resolución que la extracción; sin LLM). Idempotente."""
+    if args.org and args.kind != "persona":
+        _say("--org solo aplica a --kind persona (la afiliación es persona↔org).", err=True)
+        return 1
+    with connection() as conn:
+        row = register_add_from_args(conn, args.user, args)
+    if args.as_json:
+        _emit_json(row)
+    else:
+        verbo = "creada" if row["method"] == "created" else f"resuelta ({row['method']})"
+        org = row.get("org")
+        afil = f" · afiliada a #{org['id']} {org['display_name']!r}" if org else ""
+        _say(f"\n{verbo}: id={row['id']} {row['display_name']!r} ({row['kind']}){afil}.\n")
+    return 0
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
@@ -336,9 +423,14 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.cmd == "help":
+        _say(_HELP)
+        return 0
     log.info("identidades.cli.start", cmd=args.cmd)
 
     try:
+        if args.cmd == "add":
+            return _cmd_add(args)
         if args.cmd == "sync":
             return _cmd_sync(args)
         if args.cmd == "add-account":

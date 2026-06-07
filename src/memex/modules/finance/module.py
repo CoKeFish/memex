@@ -507,6 +507,7 @@ def register(
     occurred_at_precision: str | None = None,
     description: str = "",
     event_id: str | None = None,
+    counterparty_identity_id: int | None = None,
 ) -> dict[str, Any]:
     """Registra una transacción DETERMINISTA (sin LLM): inserta + resuelve la contraparte a una
     identidad del directorio + marca dedup FASE 1. Entrada por AGENTE (Hermes pasa los campos ya
@@ -514,6 +515,10 @@ def register(
     Hermes. `event_id` correlaciona con otros hechos del mismo mensaje. Asegura el CONSOLIDADO de la
     tx en el acto (`ensure_consolidated`, el vértice de finanzas) y teje sus aristas «contraparte» +
     «mismo_evento» en la misma tx; `run_consolidation` queda como reconciliador (FASE 2 / merges).
+
+    `counterparty_identity_id`: si viene (p. ej. del cierre de un evento del agente, donde la
+    identidad del comercio se creó ANTES en la misma tx), se usa DIRECTO y se saltea
+    `_resolve_identity` — ata el FK por id, determinista, sin depender del match-exacto por nombre.
     Devuelve la fila pública (con `amount` float)."""
     from memex.modules.identidades.module import IdentidadesModule
 
@@ -531,8 +536,14 @@ def register(
     category = cat if cat in FINANCE_CATEGORIES else "otros"
     currency = (currency or "").strip().upper()
 
-    # Identidad del comercio: best-effort contra el directorio (aunque el módulo esté apagado).
-    identity_id = _resolve_identity(IdentidadesModule().provide_domain(conn, user_id), counterparty)
+    # Identidad del comercio: explícita (cierre de evento) o best-effort contra el directorio
+    # (aunque el módulo esté apagado).
+    if counterparty_identity_id is not None:
+        identity_id: int | None = counterparty_identity_id
+    else:
+        identity_id = _resolve_identity(
+            IdentidadesModule().provide_domain(conn, user_id), counterparty
+        )
 
     row = (
         conn.execute(

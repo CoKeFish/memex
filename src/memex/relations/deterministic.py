@@ -160,12 +160,22 @@ def _materialize_cooccurrence(
     return pistas, skipped
 
 
-def _materialize_afiliacion(conn: Connection, user_id: int) -> int:
-    """Una arista REAL persona→org por cada enlace explícito del directorio. Devuelve cuántas."""
+def _materialize_afiliacion(
+    conn: Connection, user_id: int, *, person_ids: Sequence[int] | None = None
+) -> int:
+    """Una arista REAL persona→org por cada enlace explícito del directorio. Con `person_ids` acota
+    a esas personas (uso incremental); sin él, barre todas (full-sweep). Idempotente. Devuelve
+    cuántas."""
+    scope = "" if person_ids is None else " AND person_id = ANY(:pids)"
+    params: dict[str, Any] = {"u": user_id}
+    if person_ids is not None:
+        params["pids"] = list(person_ids)
     n = 0
     for r in conn.execute(
-        text("SELECT person_id, org_id FROM mod_identidades_person_orgs WHERE user_id = :u"),
-        {"u": user_id},
+        text(
+            f"SELECT person_id, org_id FROM mod_identidades_person_orgs WHERE user_id = :u{scope}"
+        ),
+        params,
     ).mappings():
         propose_edge(
             conn,
@@ -360,6 +370,14 @@ def weave_event(conn: Connection, user_id: int, event_id: str) -> int:
     if not event_id:
         return 0
     return _materialize_same_event(conn, user_id, event_ids=[event_id])
+
+
+def weave_afiliacion(conn: Connection, user_id: int, person_id: int) -> int:
+    """INCREMENTAL: teje la arista «afiliado» de las afiliaciones de UNA persona recién enlazada, en
+    la misma tx del caller. Lo llama `identidades.register_card` al crear la afiliación, para no
+    depender del full-sweep. Ambos extremos (persona/org) ya existen. Idempotente. Devuelve
+    cuántas."""
+    return _materialize_afiliacion(conn, user_id, person_ids=[person_id])
 
 
 def weave_finance_consolidated(

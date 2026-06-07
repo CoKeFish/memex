@@ -22,8 +22,10 @@ import json
 import sys
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
+from typing import Any
 
 from dotenv import load_dotenv
+from sqlalchemy.engine import Connection
 
 from memex.db import connection
 from memex.logging import get_logger, setup_logging
@@ -140,23 +142,38 @@ def _cmd_consolidate(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_register(args: argparse.Namespace) -> int:
+def register_from_args(
+    conn: Connection,
+    user_id: int,
+    args: argparse.Namespace,
+    *,
+    event_id: str | None = None,
+    counterparty_identity_id: int | None = None,
+) -> dict[str, Any]:
+    """Mapea `args` (ya parseados) → `finance.register` sobre un `conn` DADO. Lo reusan
+    `_cmd_register` (tx propia) y el cierre de evento del agente (tx compartida, con la identidad
+    del evento). `event_id` pisa `args.event` si viene."""
     occurred_at, precision = _parse_when(args.occurred_at)
+    return register(
+        conn,
+        user_id,
+        amount=Decimal(args.amount),
+        currency=args.currency,
+        direction=args.direction,
+        category=args.category,
+        counterparty=args.counterparty,
+        place=args.place,
+        occurred_at=occurred_at,
+        occurred_at_precision=precision,
+        description=args.description,
+        event_id=event_id if event_id is not None else args.event,
+        counterparty_identity_id=counterparty_identity_id,
+    )
+
+
+def _cmd_register(args: argparse.Namespace) -> int:
     with connection() as conn:
-        row = register(
-            conn,
-            args.user,
-            amount=Decimal(args.amount),
-            currency=args.currency,
-            direction=args.direction,
-            category=args.category,
-            counterparty=args.counterparty,
-            place=args.place,
-            occurred_at=occurred_at,
-            occurred_at_precision=precision,
-            description=args.description,
-            event_id=args.event,
-        )
+        row = register_from_args(conn, args.user, args)
     if args.as_json:
         _emit_json(row)
     else:
