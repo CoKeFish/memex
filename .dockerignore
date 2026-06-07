@@ -1,11 +1,19 @@
 # Build context: nada de venv, caches, ni cosas del PC que no van al servidor.
 .venv/
+**/.venv/
 .git/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
 **/__pycache__/
 **/*.pyc
+
+# Worktrees de git: cada uno trae su .venv + node_modules (cientos de MB) — jamás van al contexto.
+.claude/
+
+# Dependencias/artefactos del front: se instalan/buildean en su pipeline, no se copian del PC.
+**/node_modules/
+frontend/dist/
 
 # Cliente local: vive en el PC del usuario, no en el container del servidor.
 src/memex_local/
