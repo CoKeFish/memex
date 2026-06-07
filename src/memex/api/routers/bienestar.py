@@ -1,8 +1,10 @@
-"""API de SOLO LECTURA del módulo bienestar (la escritura va por la CLI / el agente).
+"""API del módulo bienestar: lectura + gestión de hábitos.
 
-Espeja `routers/finance.py`. Expone registros, resumen, actividad diaria y hábitos con adherencia.
-El `tz` (IANA, default `America/Bogota`) fija la TZ del bucket para que los períodos coincidan con
-el reloj de pared del usuario (mismo patrón que `routers/metrics.py`).
+Los REGISTROS son de solo lectura (la escritura va por la CLI / el agente); los HÁBITOS, en cambio,
+los gestiona el usuario desde el dashboard (alta/baja). Expone registros, resumen, actividad diaria,
+hábitos con adherencia, y `POST`/`DELETE` de hábitos. El `tz` (IANA, default `America/Bogota`) fija
+la TZ del bucket para que los períodos coincidan con el reloj de pared del usuario (mismo patrón que
+`routers/metrics.py`).
 """
 
 from datetime import UTC, datetime, timedelta
@@ -15,7 +17,9 @@ from sqlalchemy import text
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
     BienestarDaily,
+    BienestarHabitCreate,
     BienestarHabitList,
+    BienestarHabitRow,
     BienestarRegistroList,
     BienestarSummary,
 )
@@ -133,3 +137,35 @@ async def habits_endpoint(
     with connection() as conn:
         items = habits_mod.adherence(conn, user_id, tz=zone, periods=periods)
     return {"items": items}
+
+
+@router.post("/habits", response_model=BienestarHabitRow, status_code=201)
+async def create_habit_endpoint(user_id: UserID, body: BienestarHabitCreate) -> dict[str, Any]:
+    """Crea un hábito (lo usa el dashboard). Necesita `activity` o `category`; el dominio valida y
+    responde 422 si falta o la cadencia es inválida."""
+    try:
+        with connection() as conn:
+            row = habits_mod.add_habit(
+                conn,
+                user_id,
+                name=body.name,
+                cadence=body.cadence,
+                target_count=body.target_count,
+                activity=body.activity,
+                category=body.category,
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _log.info("bienestar.habit.created", user_id=user_id, habit_id=row["id"], name=body.name)
+    return row
+
+
+@router.delete("/habits/{habit_id}")
+async def delete_habit_endpoint(habit_id: int, user_id: UserID) -> dict[str, bool]:
+    """Borra un hábito del user. 404 si no existe."""
+    with connection() as conn:
+        ok = habits_mod.delete_habit(conn, user_id, habit_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="hábito no encontrado")
+    _log.info("bienestar.habit.deleted", user_id=user_id, habit_id=habit_id)
+    return {"deleted": True}

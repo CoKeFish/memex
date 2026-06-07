@@ -64,11 +64,6 @@ export function BienestarPage() {
         <div className="flex items-center justify-center gap-2 py-24 text-sm text-muted-foreground">
           <Loader2 className="size-4 animate-spin" /> Cargando bienestar…
         </div>
-      ) : registros.length === 0 && habits.length === 0 ? (
-        <EmptyState
-          title="Sin datos de bienestar"
-          hint="Todavía no hay registros ni hábitos. Registrá con `memex-bienestar register` y definí hábitos con `memex-bienestar habit add` (o desde el agente)."
-        />
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -82,7 +77,7 @@ export function BienestarPage() {
           </div>
 
           <div className="grid gap-5 xl:grid-cols-2">
-            <HabitsPanel habits={habits} />
+            <HabitsPanel habits={habits} onChanged={reload} />
             <Panel>
               <PanelHeader eyebrow="resumen" title="Por categoría" />
               <PanelBody className="space-y-2">

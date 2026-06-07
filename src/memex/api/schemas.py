@@ -383,8 +383,9 @@ class FinanceTransactionList(BaseModel):
 
 
 # ---- Módulo bienestar (registrador determinista) ------------------------------------------------
-# Solo LECTURA: registros, resumen, actividad y hábitos con adherencia (escritura por CLI/agente).
-# JSONB (detail/metadata) → dict; TIMESTAMPTZ → ISO. La adherencia se calcula en lectura.
+# Registros: solo LECTURA (la escritura va por CLI/agente). Hábitos: lectura + alta/baja (el usuario
+# los gestiona desde el dashboard). JSONB (detail/metadata) → dict; TIMESTAMPTZ → ISO. La adherencia
+# se calcula en lectura.
 
 
 class BienestarRegistroRow(BaseModel):
@@ -445,6 +446,30 @@ class BienestarHabitAdherence(BaseModel):
 
 class BienestarHabitList(BaseModel):
     items: list[BienestarHabitAdherence]
+
+
+class BienestarHabitRow(BaseModel):
+    """Un hábito (fila de `mod_bienestar_habits`); lo que devuelve la creación."""
+
+    id: int
+    name: str
+    activity: str
+    category: str | None
+    cadence: str
+    target_count: int
+    active: bool
+    created_at: datetime
+
+
+class BienestarHabitCreate(BaseModel):
+    """Alta de un hábito desde el dashboard. Necesita `activity` (clave de match) o `category` — lo
+    valida el dominio (`add_habit`), que responde 422 si falta."""
+
+    name: str = Field(min_length=1)
+    cadence: Literal["daily", "weekly"]
+    target_count: int = Field(default=1, ge=1)
+    activity: str = ""
+    category: str | None = None
 
 
 # ---- Módulo hackathones (extractor puro) --------------------------------------------------------

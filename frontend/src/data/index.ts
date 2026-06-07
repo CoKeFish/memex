@@ -76,8 +76,9 @@ export * from "./identidades"
 // (corre el paso determinista on-demand).
 export * from "./graph"
 
-// ---- Bienestar (datos reales contra la API: router /bienestar, solo lectura) --
-// fetchBienestarRegistros/Summary/Habits (registros + resumen + hábitos con adherencia/racha).
+// ---- Bienestar (datos reales contra la API: router /bienestar) ----------------
+// fetchBienestarRegistros/Summary/Habits (lectura) + create/deleteBienestarHabit (alta/baja de
+// hábitos desde el dashboard; los registros siguen entrando por la CLI/agente).
 export * from "./bienestar"
 
 // ---- Finance (datos reales contra la API) -------------------------------------

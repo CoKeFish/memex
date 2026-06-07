@@ -90,3 +90,41 @@ def test_habits_endpoint(client: TestClient) -> None:
 
 def test_invalid_tz_422(client: TestClient) -> None:
     assert client.get("/bienestar/daily?tz=Nowhere/Nope").status_code == 422
+
+
+def test_create_habit_endpoint(client: TestClient) -> None:
+    res = client.post(
+        "/bienestar/habits",
+        json={"name": "Gimnasio", "cadence": "weekly", "target_count": 3, "activity": "gimnasio"},
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert body["name"] == "Gimnasio"
+    assert body["cadence"] == "weekly"
+    assert body["target_count"] == 3
+    assert isinstance(body["id"], int)
+    # aparece en el GET de hábitos
+    items = client.get("/bienestar/habits?tz=America/Bogota&periods=7").json()["items"]
+    assert any(i["habit"]["name"] == "Gimnasio" for i in items)
+
+
+def test_create_habit_without_activity_or_category_422(client: TestClient) -> None:
+    # el dominio exige activity O category → 422
+    res = client.post("/bienestar/habits", json={"name": "Vacío", "cadence": "daily"})
+    assert res.status_code == 422
+
+
+def test_delete_habit_endpoint(client: TestClient) -> None:
+    created = client.post(
+        "/bienestar/habits", json={"name": "Yoga", "cadence": "daily", "activity": "yoga"}
+    )
+    habit_id = created.json()["id"]
+    res = client.delete(f"/bienestar/habits/{habit_id}")
+    assert res.status_code == 200
+    assert res.json() == {"deleted": True}
+    items = client.get("/bienestar/habits?tz=America/Bogota").json()["items"]
+    assert all(i["habit"]["id"] != habit_id for i in items)
+
+
+def test_delete_habit_not_found_404(client: TestClient) -> None:
+    assert client.delete("/bienestar/habits/99999").status_code == 404

@@ -1,7 +1,8 @@
-// Superficie de BIENESTAR contra la API real (router /bienestar, solo lectura). Como `finance.ts`:
-// funciones async + transform snake_case → camelCase. La escritura va por la CLI/agente, no por acá.
+// Superficie de BIENESTAR contra la API real (router /bienestar). Como `finance.ts`: funciones async
+// + transform snake_case → camelCase. Los REGISTROS son de lectura (los escribe la CLI/agente); los
+// HÁBITOS los gestiona el usuario desde el dashboard (alta/baja).
 
-import { apiGet } from "@/lib/api"
+import { apiDelete, apiGet, apiPost } from "@/lib/api"
 import { activeDisplayTz } from "@/lib/timezone"
 
 export interface BienestarRegistro {
@@ -94,4 +95,26 @@ export async function fetchBienestarHabits(periods = 14): Promise<BienestarHabit
     streak: h.streak,
     history: h.history,
   }))
+}
+
+export interface HabitCreate {
+  name: string
+  activity: string
+  cadence: "daily" | "weekly"
+  targetCount: number
+}
+
+/** Crea un hábito (lo gestiona el usuario desde el dashboard). El caller refetchea la adherencia. */
+export async function createBienestarHabit(body: HabitCreate): Promise<void> {
+  await apiPost("/bienestar/habits", {
+    name: body.name,
+    activity: body.activity,
+    cadence: body.cadence,
+    target_count: body.targetCount,
+  })
+}
+
+/** Borra un hábito por id. */
+export async function deleteBienestarHabit(id: number): Promise<void> {
+  await apiDelete(`/bienestar/habits/${id}`)
 }
