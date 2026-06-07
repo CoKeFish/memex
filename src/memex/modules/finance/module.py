@@ -35,6 +35,7 @@ from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import CAP_DEBUG_INBOX, CAP_EXTRACT, ExtractionItem, ModuleContext
 from memex.modules.dedup import fetch_internal_calls, forget_inbox_rows
+from memex.modules.finance.consolidate import ensure_consolidated
 from memex.modules.finance.dedup import (
     PRECISION_DATE,
     PRECISION_DATETIME,
@@ -45,6 +46,7 @@ from memex.modules.finance.dedup import (
 )
 from memex.modules.finance.prompt import FINANCE_SYSTEM_PROMPT
 from memex.modules.finance.schema import FINANCE_CATEGORIES, TransactionItem
+from memex.relations.deterministic import weave_finance_consolidated
 
 if TYPE_CHECKING:
     from memex.core.trace import TraceNode
@@ -509,9 +511,10 @@ def register(
     """Registra una transacción DETERMINISTA (sin LLM): inserta + resuelve la contraparte a una
     identidad del directorio + marca dedup FASE 1. Entrada por AGENTE (Hermes pasa los campos ya
     leídos de la factura/texto); el enriquecimiento de dominio (identidad, dedup) corre ACÁ, no en
-    Hermes. `event_id` correlaciona con otros hechos del mismo mensaje. NO teje aristas: el vértice
-    de finanzas es el CONSOLIDADO, que nace en `run_consolidation` (ahí se tejen «contraparte» y
-    «mismo_evento»). Devuelve la fila pública (con `amount` float)."""
+    Hermes. `event_id` correlaciona con otros hechos del mismo mensaje. Asegura el CONSOLIDADO de la
+    tx en el acto (`ensure_consolidated`, el vértice de finanzas) y teje sus aristas «contraparte» +
+    «mismo_evento» en la misma tx; `run_consolidation` queda como reconciliador (FASE 2 / merges).
+    Devuelve la fila pública (con `amount` float)."""
     from memex.modules.identidades.module import IdentidadesModule
 
     if occurred_at is None:
@@ -584,6 +587,10 @@ def register(
             )
         ],
     )
+    # El vértice de finanzas (el consolidado) nace acá, al escribir: aseguramos su consolidado en la
+    # misma tx y tejemos sus aristas (contraparte + mismo_evento). El batch queda de reconciliador.
+    cons_id = ensure_consolidated(conn, user_id, int(row["id"]))
+    weave_finance_consolidated(conn, user_id, [cons_id], [event_id] if event_id else [])
     _log.info(
         "finance.registered",
         user_id=user_id,

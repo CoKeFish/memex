@@ -70,9 +70,10 @@ memex-bienestar register --event "$ev" --category comida --activity almuerzo --d
 ```
 memex conecta el gasto y la comida con una arista de "mismo_evento" automáticamente.
 
-> La arista de "mismo_evento" se teje **sola** al registrar/consolidar — no hace falta llamar nada
-> más para que la conexión exista. `POST /graph/build` solo re-deriva TODO el grafo en frío
-> (respaldo/backfill), no es requisito. Hechos sueltos (un comando, sin `--event`) no necesitan nada.
+> La arista de "mismo_evento" se teje **sola al registrar** — no hace falta nada más para que la
+> conexión exista. `POST /graph/build` solo re-deriva TODO el grafo en frío (respaldo), no es
+> requisito. Un mensaje con UN solo hecho (solo una factura, o solo una comida) **no** necesita
+> `--event`: cada comando es su propio hecho.
 
 ## Qué NO hacer
 - No mandes texto crudo a memex para que "lo procese" — vos estructurás, memex guarda.

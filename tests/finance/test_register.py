@@ -1,5 +1,5 @@
-"""`finance.register` determinista: inserta + resuelve identidad + dedup FASE 1 + `event_id`; y la
-arista cross-module bienestar↔finanzas por `event_id` (vía el productor del grafo)."""
+"""`finance.register` determinista: inserta + identidad + dedup FASE 1 + `event_id`; asegura el
+CONSOLIDADO (vértice de finanzas) al ESCRIBIR y teje sus aristas — sin consolidación batch."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from sqlalchemy import text
 
 from memex.db import connection
 from memex.modules.bienestar.module import register as registrar_bienestar
-from memex.modules.finance.consolidate import run_consolidation
 from memex.modules.finance.module import register
 from memex.relations.deterministic import build_relations
 from memex.relations.edges import list_edges
@@ -74,29 +73,43 @@ def test_register_dedup_marks_pair(conn: Connection) -> None:
     assert pairs == 1
 
 
-def test_cross_module_same_event_edge_incremental() -> None:
-    # un mensaje (event E7) → transacción (finanzas) + registro (bienestar). Tras consolidar hay una
-    # arista bienestar↔finanzas SIN llamar build_relations: la consolidación de finanzas (donde nace
-    # su vértice) la teje. Usa connection() propias porque run_consolidation abre la suya.
+def test_register_creates_consolidated(conn: Connection) -> None:
+    # factura sola (sin evento): el consolidado (vértice de finanzas) nace al registrar, sin batch.
+    row = register(conn, 1, amount=Decimal("42500"), currency="COP", counterparty="Crepes")
+    cons = conn.execute(
+        text(
+            "SELECT c.id FROM mod_finance_consolidated c "
+            "JOIN mod_finance_transaction_links l ON l.consolidated_id = c.id "
+            "WHERE l.transaction_id = :t AND NOT c.deleted"
+        ),
+        {"t": int(row["id"])},
+    ).scalar_one()
+    assert cons is not None
+    assert list_edges(conn, 1, producer="event") == []  # sin evento → ninguna arista de evento
+
+
+def test_cross_module_same_event_edge_at_register() -> None:
+    # un mensaje (event E7) → transacción (finanzas) + registro (bienestar). La arista bienestar↔
+    # finanzas se teje al ESCRIBIR (sin run_consolidation ni build_relations): finance.register
+    # asegura su consolidado y el último en aterrizar teje el mismo_evento. connection() propia para
+    # commitear antes de releer.
     with connection() as c:
         register(c, 1, amount=Decimal("20"), currency="USD", counterparty="Pizzería", event_id="E7")
         registrar_bienestar(c, 1, category="comida", activity="almuerzo", event_id="E7")
-    run_consolidation(1)  # crea el consolidado (vértice de finanzas) Y teje sus aristas
     with connection() as c:
         edges = list_edges(c, 1, producer="event")
     slugs = {(e.src.slug, e.dst.slug) for e in edges}
-    assert ("bienestar", "finance") in slugs  # tejida sin full-sweep
+    assert ("bienestar", "finance") in slugs
     for e in edges:
         assert e.relation_type == "mismo_evento"
         assert e.status == "confirmed"
 
 
 def test_full_sweep_idempotent_after_incremental() -> None:
-    # el full-sweep sigue siendo respaldo: re-correrlo sobre lo ya tejido no duplica.
+    # el full-sweep (build_relations) sigue de respaldo: sobre lo ya tejido al escribir, no duplica.
     with connection() as c:
         register(c, 1, amount=Decimal("20"), currency="USD", counterparty="Pizzería", event_id="E7")
         registrar_bienestar(c, 1, category="comida", activity="almuerzo", event_id="E7")
-    run_consolidation(1)
     with connection() as c:
         before = len(list_edges(c, 1, producer="event"))
         build_relations(c, 1)
@@ -105,18 +118,50 @@ def test_full_sweep_idempotent_after_incremental() -> None:
     assert after == 1
 
 
-def test_contraparte_edge_incremental() -> None:
-    # la arista «contraparte» (consolidado → identidad) también se teje en la consolidación, sin
-    # build_relations.
-    with connection() as c:
-        c.execute(
-            text(
-                "INSERT INTO mod_identidades (user_id, kind, display_name) "
-                "VALUES (1,'organizacion','Rappi')"
-            )
+def test_contraparte_edge_at_register(conn: Connection) -> None:
+    # «contraparte» (consolidado→identidad) se teje al registrar (sin batch) si hay identidad.
+    conn.execute(
+        text(
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1,'organizacion','Rappi')"
         )
-        register(c, 1, amount=Decimal("100"), currency="COP", counterparty="Rappi")
-    run_consolidation(1)
-    with connection() as c:
-        edges = list_edges(c, 1, producer="finance")
+    )
+    register(conn, 1, amount=Decimal("100"), currency="COP", counterparty="Rappi")
+    edges = list_edges(conn, 1, producer="finance")
     assert any(e.relation_type == "contraparte" and e.src.slug == "finance" for e in edges)
+
+
+def test_register_autoconfirmed_dup_one_consolidated(conn: Connection) -> None:
+    # dos cargos idénticos (auto-confirmados en FASE 1) → UN consolidado vivo, ambas tx linkeadas:
+    # la 2ª se UNE al consolidado de la 1ª, no crea un vértice duplicado.
+    when = datetime(2026, 6, 5, 14, 30, tzinfo=UTC)
+    ids = [
+        int(
+            register(
+                conn,
+                1,
+                amount=Decimal("50"),
+                currency="USD",
+                counterparty="Uber",
+                place="centro",
+                occurred_at=when,
+                occurred_at_precision="datetime",
+            )["id"]
+        )
+        for _ in range(2)
+    ]
+    live = conn.execute(
+        text("SELECT count(*) FROM mod_finance_consolidated WHERE user_id = 1 AND NOT deleted")
+    ).scalar_one()
+    assert live == 1
+    cons_ids = {
+        int(r[0])
+        for r in conn.execute(
+            text(
+                "SELECT DISTINCT consolidated_id FROM mod_finance_transaction_links "
+                "WHERE transaction_id = ANY(:ids)"
+            ),
+            {"ids": ids},
+        ).all()
+    }
+    assert len(cons_ids) == 1  # ambas tx en el mismo consolidado

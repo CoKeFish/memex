@@ -183,20 +183,26 @@ class ConsolidationStats:
     merges: int = 0  # consolidados fusionados (tombstoneados) al unirse dos grupos
 
 
-def _load_transactions(conn: Connection, user_id: int) -> list[ConsTx]:
+def _load_transactions(
+    conn: Connection, user_id: int, *, ids: Sequence[int] | None = None
+) -> list[ConsTx]:
+    scope = "" if ids is None else " AND id = ANY(:ids)"
+    params: dict[str, object] = {"uid": user_id}
+    if ids is not None:
+        params["ids"] = list(ids)
     rows = (
         conn.execute(
             text(
-                """
+                f"""
                 SELECT id, direction, amount, currency, category, counterparty,
                        counterparty_identity_id, place, occurred_at, occurred_at_precision,
                        description, created_at
                 FROM mod_finance_transactions
-                WHERE user_id = :uid
+                WHERE user_id = :uid{scope}
                 ORDER BY id
                 """
             ),
-            {"uid": user_id},
+            params,
         )
         .mappings()
         .all()
@@ -326,6 +332,87 @@ def _set_outcomes(conn: Connection, outcome_to_ids: dict[str, list[int]]) -> Non
             )
 
 
+def _consolidate_group(
+    conn: Connection, user_id: int, group_ids: list[int], fields: ConsolidatedFields
+) -> tuple[int, int, int]:
+    """Materializa el consolidado de UN grupo (crea / fusiona consolidados previos / deja estable) y
+    linkea sus transacciones. Estable e idempotente: el `consolidated_id` no cambia salvo merge de
+    grupos. Devuelve `(cons_id, escritos, merges)`. NO setea outcomes (lo hace el caller). Lo usan
+    `run_consolidation` (batch) y `ensure_consolidated` (incremental)."""
+    existing = sorted(
+        {
+            int(r[0])
+            for r in conn.execute(
+                text(
+                    "SELECT DISTINCT consolidated_id FROM mod_finance_transaction_links "
+                    "WHERE transaction_id = ANY(:ids)"
+                ),
+                {"ids": group_ids},
+            ).all()
+        }
+    )
+    written = 0
+    merges = 0
+    if not existing:
+        cons_id = _write_consolidated(conn, user_id, None, fields)
+        written = 1
+    else:
+        cons_id = existing[0]
+        changed = len(existing) > 1  # fusión de grupos → siempre reescribe
+        if changed:  # un par confirmado unió dos grupos previos → fusionar
+            others = existing[1:]
+            conn.execute(
+                text(
+                    "UPDATE mod_finance_transaction_links SET consolidated_id = :keep "
+                    "WHERE consolidated_id = ANY(:others)"
+                ),
+                {"keep": cons_id, "others": others},
+            )
+            conn.execute(
+                text(
+                    "UPDATE mod_finance_consolidated "
+                    "SET deleted = TRUE, updated_at = NOW() WHERE id = ANY(:others)"
+                ),
+                {"others": others},
+            )
+            merges = len(others)
+        else:
+            # ¿cambió la membresía? Si NO, dejamos sus campos tal cual (estable, sin churn).
+            current = {
+                int(r[0])
+                for r in conn.execute(
+                    text(
+                        "SELECT transaction_id FROM mod_finance_transaction_links "
+                        "WHERE consolidated_id = :cid"
+                    ),
+                    {"cid": cons_id},
+                ).all()
+            }
+            changed = set(group_ids) != current
+        if changed:
+            _write_consolidated(conn, user_id, cons_id, fields)
+            written = 1
+    for tid in group_ids:
+        _link(conn, user_id, cons_id, tid)
+    return cons_id, written, merges
+
+
+def _group_outcomes(
+    group_ids: list[int], fields: ConsolidatedFields, pending_ids: set[int]
+) -> dict[str, list[int]]:
+    """Clasifica las tx del grupo en unique/duplicate (las que aún tienen un par 'candidate' sin
+    resolver quedan fuera → pending)."""
+    outcomes: dict[str, list[int]] = {"unique": [], "duplicate": []}
+    for tid in group_ids:
+        if tid in pending_ids:
+            continue
+        if len(group_ids) > 1 and tid != fields.winner_transaction_id:
+            outcomes["duplicate"].append(tid)
+        else:
+            outcomes["unique"].append(tid)
+    return outcomes
+
+
 def run_consolidation(user_id: int) -> ConsolidationStats:
     """Reconstruye la proyección consolidada del user de forma estable e idempotente."""
     stats = ConsolidationStats()
@@ -342,73 +429,14 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
 
         for group_ids in groups:
             stats.groups += 1
-            members = [by_id[i] for i in group_ids]
-            fields = merge_fields(members)
-
-            existing = sorted(
-                {
-                    int(r[0])
-                    for r in conn.execute(
-                        text(
-                            "SELECT DISTINCT consolidated_id FROM mod_finance_transaction_links "
-                            "WHERE transaction_id = ANY(:ids)"
-                        ),
-                        {"ids": group_ids},
-                    ).all()
-                }
-            )
-            if not existing:
-                cons_id = _write_consolidated(conn, user_id, None, fields)
-                stats.consolidated += 1
-            else:
-                cons_id = existing[0]
-                changed = len(existing) > 1  # fusión de grupos → siempre reescribe
-                if changed:  # un par confirmado unió dos grupos previos → fusionar
-                    others = existing[1:]
-                    conn.execute(
-                        text(
-                            "UPDATE mod_finance_transaction_links SET consolidated_id = :keep "
-                            "WHERE consolidated_id = ANY(:others)"
-                        ),
-                        {"keep": cons_id, "others": others},
-                    )
-                    conn.execute(
-                        text(
-                            "UPDATE mod_finance_consolidated "
-                            "SET deleted = TRUE, updated_at = NOW() WHERE id = ANY(:others)"
-                        ),
-                        {"others": others},
-                    )
-                    stats.merges += len(others)
-                else:
-                    # ¿cambió la membresía? Si NO, dejamos sus campos tal cual (estable, sin churn).
-                    current = {
-                        int(r[0])
-                        for r in conn.execute(
-                            text(
-                                "SELECT transaction_id FROM mod_finance_transaction_links "
-                                "WHERE consolidated_id = :cid"
-                            ),
-                            {"cid": cons_id},
-                        ).all()
-                    }
-                    changed = set(group_ids) != current
-                if changed:
-                    _write_consolidated(conn, user_id, cons_id, fields)
-                    stats.consolidated += 1
-
-            for tid in group_ids:
-                _link(conn, user_id, cons_id, tid)
+            fields = merge_fields([by_id[i] for i in group_ids])
+            cons_id, written, merges = _consolidate_group(conn, user_id, group_ids, fields)
+            stats.consolidated += written
+            stats.merges += merges
             touched.add(cons_id)
-
-            # outcomes del grupo (los que aún tienen un par 'candidate' sin resolver → pending).
-            for tid in group_ids:
-                if tid in pending_ids:
-                    continue
-                if len(group_ids) > 1 and tid != fields.winner_transaction_id:
-                    outcomes["duplicate"].append(tid)
-                else:
-                    outcomes["unique"].append(tid)
+            grp = _group_outcomes(group_ids, fields, pending_ids)
+            outcomes["unique"].extend(grp["unique"])
+            outcomes["duplicate"].extend(grp["duplicate"])
 
         _set_outcomes(conn, outcomes)
 
@@ -437,3 +465,38 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
         merges=stats.merges,
     )
     return stats
+
+
+def _confirmed_component(conn: Connection, user_id: int, transaction_id: int) -> list[int]:
+    """La tx + sus vecinos por pares de dedup CONFIRMADOS que la tocan. Los pares de una tx recién
+    registrada son directos (no existía antes), así que basta el vecindario directo: el resto del
+    grupo de cada vecino ya queda representado por su consolidado."""
+    rows = conn.execute(
+        text(
+            """
+            SELECT transaction_b_id AS other FROM mod_finance_dedup_candidates
+            WHERE user_id = :u AND status = 'confirmed' AND transaction_a_id = :t
+            UNION
+            SELECT transaction_a_id AS other FROM mod_finance_dedup_candidates
+            WHERE user_id = :u AND status = 'confirmed' AND transaction_b_id = :t
+            """
+        ),
+        {"u": user_id, "t": transaction_id},
+    ).all()
+    return [transaction_id, *(int(r[0]) for r in rows)]
+
+
+def ensure_consolidated(conn: Connection, user_id: int, transaction_id: int) -> int:
+    """INCREMENTAL: consolida el grupo de UNA transacción recién registrada, en la conexión del
+    caller (misma tx que `finance.register`). Así el vértice de finanzas (el consolidado) nace al
+    escribir, sin esperar al batch. Como FASE 1 puede auto-confirmar un dup, la tx puede UNIRSE a un
+    consolidado existente en vez de crear uno nuevo. Reusa la MISMA lógica de grupo que
+    `run_consolidation` (que sigue como reconciliador de FASE 2 / merges). Devuelve el cons_id."""
+    component = _confirmed_component(conn, user_id, transaction_id)
+    by_id = {t.transaction_id: t for t in _load_transactions(conn, user_id, ids=component)}
+    pairs = [(a, b) for a, b in _confirmed_pairs(conn, user_id) if a in by_id and b in by_id]
+    group_ids = next(g for g in build_groups(sorted(by_id), pairs) if transaction_id in g)
+    fields = merge_fields([by_id[i] for i in group_ids])
+    cons_id, _written, _merges = _consolidate_group(conn, user_id, group_ids, fields)
+    _set_outcomes(conn, _group_outcomes(group_ids, fields, _pending_transaction_ids(conn, user_id)))
+    return cons_id
