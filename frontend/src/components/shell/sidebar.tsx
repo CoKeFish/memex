@@ -1,7 +1,23 @@
+import { ChevronDown } from "lucide-react"
+import { useEffect, useState } from "react"
 import { NavLink } from "react-router-dom"
 import { cn } from "@/lib/utils"
 import { useAlerts } from "@/state/alerts"
-import { NAV } from "./nav"
+import { NAV_GROUPS, type NavItem } from "./nav"
+
+const COLLAPSE_KEY = "memex:nav:collapsed"
+
+function readCollapsed(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSE_KEY)
+    if (!raw) return new Set()
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((x): x is string => typeof x === "string"))
+  } catch {
+    return new Set()
+  }
+}
 
 function BrandMark({ className }: { className?: string }) {
   return (
@@ -29,47 +45,107 @@ export function Brand() {
   )
 }
 
+function NavRow({
+  item,
+  reviewCount,
+  onNavigate,
+}: {
+  item: NavItem
+  reviewCount: number
+  onNavigate?: () => void
+}) {
+  return (
+    <NavLink
+      to={item.path}
+      end={item.path === "/"}
+      onClick={onNavigate}
+      className={({ isActive }) =>
+        cn(
+          "group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
+          isActive
+            ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+            : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
+        )
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <span
+            className={cn(
+              "absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-brand transition-opacity",
+              isActive ? "opacity-100" : "opacity-0",
+            )}
+          />
+          <item.icon className={cn("size-4 shrink-0", isActive && "text-brand")} />
+          <span className="truncate">{item.label}</span>
+          {item.reviewBadge && reviewCount > 0 && (
+            <span className="num ml-auto rounded-full bg-status-review/15 px-1.5 text-[11px] font-medium text-status-review">
+              {reviewCount}
+            </span>
+          )}
+          {item.stub && (
+            <span className="eyebrow ml-auto opacity-60 group-hover:opacity-100">stub</span>
+          )}
+        </>
+      )}
+    </NavLink>
+  )
+}
+
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const { reviewCount } = useAlerts()
+  const [collapsed, setCollapsed] = useState<Set<string>>(readCollapsed)
+
+  useEffect(() => {
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsed]))
+  }, [collapsed])
+
+  function toggle(id: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
   return (
     <nav className="flex flex-col gap-0.5 px-2 py-2">
-      {NAV.map((item) => (
-        <NavLink
-          key={item.path}
-          to={item.path}
-          end={item.path === "/"}
-          onClick={onNavigate}
-          className={({ isActive }) =>
-            cn(
-              "group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
-              isActive
-                ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
-                : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground",
-            )
-          }
-        >
-          {({ isActive }) => (
-            <>
-              <span
-                className={cn(
-                  "absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-brand transition-opacity",
-                  isActive ? "opacity-100" : "opacity-0",
-                )}
-              />
-              <item.icon className={cn("size-4 shrink-0", isActive && "text-brand")} />
-              <span className="truncate">{item.label}</span>
-              {item.reviewBadge && reviewCount > 0 && (
-                <span className="num ml-auto rounded-full bg-status-review/15 px-1.5 text-[11px] font-medium text-status-review">
-                  {reviewCount}
-                </span>
-              )}
-              {item.stub && (
-                <span className="eyebrow ml-auto opacity-60 group-hover:opacity-100">stub</span>
-              )}
-            </>
-          )}
-        </NavLink>
-      ))}
+      {NAV_GROUPS.map((group, i) => {
+        const isCollapsed = group.collapsible === true && collapsed.has(group.id)
+        // Grupo sin header que no es el primero (Cuenta): separador sutil.
+        const standaloneDivider = !group.label && i > 0
+        return (
+          <div
+            key={group.id}
+            className={cn(
+              "flex flex-col gap-0.5",
+              standaloneDivider && "mt-2 border-t border-sidebar-border pt-2",
+            )}
+          >
+            {group.label &&
+              (group.collapsible ? (
+                <button
+                  type="button"
+                  onClick={() => toggle(group.id)}
+                  aria-expanded={!isCollapsed}
+                  className="eyebrow flex items-center gap-1.5 px-3 pb-1 pt-3 text-muted-foreground/70 transition-colors hover:text-foreground"
+                >
+                  <ChevronDown
+                    className={cn("size-3 shrink-0 transition-transform", isCollapsed && "-rotate-90")}
+                  />
+                  <span>{group.label}</span>
+                </button>
+              ) : (
+                <div className="eyebrow px-3 pb-1 pt-3">{group.label}</div>
+              ))}
+            {!isCollapsed &&
+              group.items.map((item) => (
+                <NavRow key={item.path} item={item} reviewCount={reviewCount} onNavigate={onNavigate} />
+              ))}
+          </div>
+        )
+      })}
     </nav>
   )
 }
