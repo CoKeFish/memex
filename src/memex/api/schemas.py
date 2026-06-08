@@ -209,6 +209,27 @@ class FeedbackStatusUpdate(BaseModel):
     status: Literal["open", "reviewed", "dismissed"]
 
 
+class SenderRelevance(BaseModel):
+    """Relevancia agregada de un remitente (sistema de calidad). `relevance_pct` cuenta SOLO los
+    mensajes que produjeron un hecho de dominio; `summarized_only` (se resumió pero sin hecho) e
+    `inert` (ni hecho ni resumen) son buckets aparte para no lavar la señal."""
+
+    sender_key: str
+    sender_label: str
+    messages: int
+    relevant: int
+    summarized_only: int
+    inert: int
+    relevance_pct: float | None = None
+    last_at: datetime | None = None
+    tier_mix: dict[str, int] = Field(default_factory=dict)
+    volume_ratio: float | None = None
+
+
+class SenderRelevanceList(BaseModel):
+    items: list[SenderRelevance] = Field(default_factory=list)
+
+
 class InboxRow(BaseModel):
     id: int
     source_id: int

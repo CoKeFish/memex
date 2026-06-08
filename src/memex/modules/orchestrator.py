@@ -152,15 +152,27 @@ def _done_by_id(conn: Connection, inbox_ids: list[int]) -> dict[int, set[str]]:
     return done
 
 
-def _insert_cursor(conn: Connection, user_id: int, slug: str, inbox_ids: list[int]) -> None:
+def _insert_cursor(
+    conn: Connection,
+    user_id: int,
+    slug: str,
+    inbox_ids: list[int],
+    *,
+    counts: dict[int, int] | None = None,
+) -> None:
+    """Marca el cursor (module_slug, inbox_id). `counts` = hechos públicos por inbox que el módulo
+    produjo (señal de relevancia del sistema de calidad); ausente → 0 (considerado pero sin
+    extraer: empty_input, ruteado-fuera, o solo identidad). ON CONFLICT DO NOTHING preserva el
+    count previo — re-extraer sin `force` no lo pisa (con `force` se borró antes y se reescribe)."""
     if not inbox_ids:
         return
+    by_id = counts or {}
     conn.execute(
         text(
-            "INSERT INTO module_extractions (user_id, module_slug, inbox_id) "
-            "VALUES (:uid, :slug, :iid) ON CONFLICT (module_slug, inbox_id) DO NOTHING"
+            "INSERT INTO module_extractions (user_id, module_slug, inbox_id, item_count) "
+            "VALUES (:uid, :slug, :iid, :cnt) ON CONFLICT (module_slug, inbox_id) DO NOTHING"
         ),
-        [{"uid": user_id, "slug": slug, "iid": i} for i in inbox_ids],
+        [{"uid": user_id, "slug": slug, "iid": i, "cnt": by_id.get(i, 0)} for i in inbox_ids],
     )
 
 
@@ -584,7 +596,16 @@ async def _persist_unit(
                 trace=tracer,
             )
             persisted = await module.persist(ctx, outcome.valid_by_slug[module.slug])
-            _insert_cursor(conn, user_id, module.slug, inbox_ids)
+            # Conteo de hechos públicos POR-MENSAJE (señal de relevancia del sistema de calidad).
+            # read_for_inbox por inbox da la atribución exacta; NO usar `persisted`, que es el total
+            # de la VENTANA y sobre-atribuiría a cada mensaje del lote batch. Solo si el módulo
+            # produjo algo (evita N queries en vano). Misma tx → ve las filas recién persistidas.
+            counts = (
+                {iid: len(module.read_for_inbox(conn, user_id, [iid])) for iid in inbox_ids}
+                if persisted > 0
+                else None
+            )
+            _insert_cursor(conn, user_id, module.slug, inbox_ids, counts=counts)
         items_by_slug[module.slug] = persisted
         stats.items += persisted
         stats.discarded += outcome.discarded_by_slug[module.slug]

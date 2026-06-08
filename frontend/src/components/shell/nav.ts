@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   CalendarDays,
   Filter,
+  Gauge,
   HeartPulse,
   ListChecks,
   PlusCircle,
@@ -92,6 +93,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { path: "/logs", label: "Logs", icon: ScrollText },
       { path: "/metricas", label: "Métricas y costo", icon: DollarSign },
+      { path: "/relevancia", label: "Relevancia", icon: Gauge },
       { path: "/calidad", label: "Calidad y precisión", icon: ShieldCheck },
     ],
   },

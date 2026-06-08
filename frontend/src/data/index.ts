@@ -11,6 +11,10 @@ export * from "./email"
 // fetchFeedback (lista por estado) + setFeedbackStatus (revisado/descartado/reabrir) para /calidad.
 export * from "./feedback"
 
+// ---- Calidad: relevancia por remitente (datos reales: router /quality) ---------
+// fetchSenderRelevance: remitentes rankeados por relevancia (ruido primero) para /relevancia.
+export * from "./quality-senders"
+
 // ---- Media / OCR (datos reales: router /media) --------------------------------
 // fetchMediaList (lista de adjuntos con estado OCR + contexto del mensaje) para /ocr.
 export * from "./media"

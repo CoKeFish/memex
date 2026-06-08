@@ -27,6 +27,7 @@ from memex.api.routers import (
     modules,
     oauth,
     processing,
+    quality,
     sources,
     stats,
 )
@@ -89,3 +90,4 @@ app.include_router(logs.router)
 app.include_router(stats.router)
 app.include_router(modules.router)
 app.include_router(processing.router)
+app.include_router(quality.router)

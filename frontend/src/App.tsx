@@ -21,6 +21,7 @@ import { IngestPage } from "@/pages/ingest"
 import { ProcessingPage } from "@/pages/processing"
 import { FiltersPage } from "@/pages/filters"
 import { QualityPage } from "@/pages/quality"
+import { SenderRelevancePage } from "@/pages/sender-relevance"
 import { OcrMediaPage } from "@/pages/ocr-media"
 import { StubView } from "@/pages/stub"
 
@@ -67,6 +68,7 @@ export default function App() {
         <Route path="filtros" element={<FiltersPage />} />
         <Route path="ocr" element={<OcrMediaPage />} />
         <Route path="calidad" element={<QualityPage />} />
+        <Route path="relevancia" element={<SenderRelevancePage />} />
         <Route path="procesamiento" element={<ProcessingPage />} />
         <Route
           path="*"
