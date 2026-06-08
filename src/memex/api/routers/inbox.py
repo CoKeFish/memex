@@ -16,6 +16,8 @@ from memex.api.schemas import (
     InboxRow,
     InboxStats,
     ProcessResponse,
+    RelevanceMarkInfo,
+    RelevanceMarkRequest,
     ReprocessRequest,
     ReprocessResponse,
     StatsBySource,
@@ -23,6 +25,7 @@ from memex.api.schemas import (
 )
 from memex.classifier.rules import classify
 from memex.core.feedback import InvalidFeedbackError, get_feedback, record_feedback
+from memex.core.relevance_marks import clear_mark, get_mark, set_mark
 from memex.db import connection
 from memex.logging import bind_request_context, get_logger
 
@@ -204,6 +207,7 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
             .all()
         )
         feedback = get_feedback(conn, inbox_id)
+        mark = get_mark(conn, inbox_id)
     # Extracciones: única fuente = read_extractions (de-hardcodeado, itera el registry). Antes este
     # router duplicaba el SQL por módulo y ya había divergido (le faltaba identidades).
     from memex.modules.orchestrator import read_extractions, read_extractions_debug
@@ -228,6 +232,7 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
     }
     data["media"] = [dict(m) for m in media]
     data["feedback"] = feedback
+    data["relevance"] = mark
     data["summarized"] = summary is not None
     data["extracted"] = bool(data["extraction"]["done"])
     return data
@@ -429,6 +434,44 @@ async def feedback_inbox_endpoint(
             )
     except InvalidFeedbackError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.post("/{inbox_id}/relevance", response_model=RelevanceMarkInfo)
+async def set_relevance_endpoint(
+    inbox_id: int, user_id: UserID, body: RelevanceMarkRequest
+) -> dict[str, Any]:
+    """Marca manual de relevancia de un mensaje (override por-mensaje; `is_relevant=False` = ruido).
+
+    Captura, no acción: alimenta la métrica (gana sobre la heurística para ESE mensaje),
+    NO toca filtros ni clasificación. Marcar uno NO condena a todo el remitente. Upsert por mensaje.
+    """
+    with connection() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM inbox WHERE id = :id AND user_id = :uid"),
+            {"id": inbox_id, "uid": user_id},
+        ).scalar()
+        if not exists:
+            raise HTTPException(status_code=404, detail="not found")
+        row = set_mark(
+            conn,
+            user_id=user_id,
+            inbox_id=inbox_id,
+            is_relevant=body.is_relevant,
+            reason=body.reason,
+        )
+    _log.info(
+        "inbox.relevance.mark", user_id=user_id, inbox_id=inbox_id, is_relevant=body.is_relevant
+    )
+    return row
+
+
+@router.delete("/{inbox_id}/relevance", status_code=204)
+async def clear_relevance_endpoint(inbox_id: int, user_id: UserID) -> None:
+    """Borra la marca manual de relevancia (vuelve a la heurística). 404 si no existía."""
+    with connection() as conn:
+        ok = clear_mark(conn, user_id=user_id, inbox_id=inbox_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="sin marca")
 
 
 @router.post("/{inbox_id}/classification", response_model=ClassificationInfo)

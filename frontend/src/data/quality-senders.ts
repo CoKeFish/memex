@@ -16,6 +16,7 @@ export interface SenderRelevance {
   relevant: number
   summarizedOnly: number
   inert: number
+  marked: number
   relevancePct: number | null
   lastAt: string | null
   tierMix: Record<string, number>
@@ -29,6 +30,7 @@ interface SenderRelevanceApi {
   relevant: number
   summarized_only: number
   inert: number
+  marked: number
   relevance_pct: number | null
   last_at: string | null
   tier_mix: Record<string, number>
@@ -47,6 +49,7 @@ function toSender(it: SenderRelevanceApi): SenderRelevance {
     relevant: it.relevant,
     summarizedOnly: it.summarized_only,
     inert: it.inert,
+    marked: it.marked,
     relevancePct: it.relevance_pct,
     lastAt: it.last_at,
     tierMix: it.tier_mix ?? {},

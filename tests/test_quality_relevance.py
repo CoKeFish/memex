@@ -17,6 +17,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from memex.core.relevance_marks import set_mark
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.orchestrator import run_extraction
@@ -232,3 +233,48 @@ def test_quality_senders_endpoint(client: Any, seed_source: dict[str, Any]) -> N
     assert row["messages"] == 1
     assert row["relevant"] == 1
     assert float(row["relevance_pct"]) == 100.0
+
+
+# --- (4) override manual (marca por-mensaje) ------------------------------------- #
+
+
+def test_manual_mark_overrides_heuristic(seed_source: dict[str, Any]) -> None:
+    sid = seed_source["id"]
+    a1 = _seed_msg(sid, "a1", email="a@x.com", tier="batch", minute=0)
+    _extraction(a1, "finance", 1)  # heurística: relevante
+    a2 = _seed_msg(sid, "a2", email="a@x.com", tier="batch", minute=1)
+    _extraction(a2, "identidades", 1)  # heurística: inerte
+    with connection() as c:
+        set_mark(c, user_id=1, inbox_id=a1, is_relevant=False)  # baja a no-relevante
+        set_mark(c, user_id=1, inbox_id=a2, is_relevant=True, reason="sí importaba")  # sube
+    with connection() as c:
+        rows = senders_by_relevance(c, user_id=1)
+    a = next(r for r in rows if r["sender_key"] == "a@x.com")
+    # a1 baja de relevante a inerte; a2 sube de inerte a relevante → se cruzan; 2 marcados.
+    assert (a["messages"], a["relevant"], a["inert"], a["marked"]) == (2, 1, 1, 2)
+
+
+def test_relevance_mark_endpoints(client: Any, seed_source: dict[str, Any]) -> None:
+    sid = seed_source["id"]
+    iid = _seed_msg(sid, "m1", email="c@x.com", tier="batch")
+
+    r = client.post(f"/inbox/{iid}/relevance", json={"is_relevant": False, "reason": "ruido"})
+    assert r.status_code == 200
+    assert r.json()["is_relevant"] is False
+
+    got = client.get(f"/inbox/{iid}").json()["relevance"]
+    assert got["is_relevant"] is False
+    assert got["reason"] == "ruido"
+
+    # upsert: re-marcar reemplaza.
+    r2 = client.post(f"/inbox/{iid}/relevance", json={"is_relevant": True})
+    assert r2.json()["is_relevant"] is True
+
+    # borrar → vuelve a None; borrar de nuevo = 404.
+    assert client.delete(f"/inbox/{iid}/relevance").status_code == 204
+    assert client.get(f"/inbox/{iid}").json()["relevance"] is None
+    assert client.delete(f"/inbox/{iid}/relevance").status_code == 404
+
+
+def test_relevance_mark_unknown_inbox_is_404(client: Any) -> None:
+    assert client.post("/inbox/999999/relevance", json={"is_relevant": False}).status_code == 404

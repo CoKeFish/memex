@@ -1,7 +1,7 @@
 // Superficie de CORREOS contra la API real (no mocks). El resto del dashboard sigue en mocks
 // vía el barrel `@/data`. Estas funciones son async (a diferencia de los getters mock síncronos).
 
-import { apiGet, apiGetBlob, ApiError, apiPost } from "@/lib/api"
+import { apiDelete, apiGet, apiGetBlob, ApiError, apiPost } from "@/lib/api"
 import type {
   ExtractionDebug,
   FeedbackKind,
@@ -12,6 +12,7 @@ import type {
   InboxRow,
   MediaAsset,
   OcrStatus,
+  RelevanceMark,
   Source,
   SourceType,
   TraceNodeDto,
@@ -34,6 +35,22 @@ function toFeedback(f: FeedbackApi): InboxFeedback {
     status: f.status,
     createdAt: f.created_at ?? null,
     updatedAt: f.updated_at ?? null,
+  }
+}
+
+interface RelevanceMarkApi {
+  is_relevant: boolean
+  reason: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+function toRelevanceMark(m: RelevanceMarkApi): RelevanceMark {
+  return {
+    isRelevant: m.is_relevant,
+    reason: m.reason ?? null,
+    createdAt: m.created_at ?? null,
+    updatedAt: m.updated_at ?? null,
   }
 }
 
@@ -214,6 +231,7 @@ interface InboxApiRow {
     ocr_done_at?: string | null
   }[]
   feedback?: FeedbackApi | null
+  relevance?: RelevanceMarkApi | null
 }
 
 function toMediaAsset(m: NonNullable<InboxApiRow["media"]>[number]): MediaAsset {
@@ -288,6 +306,7 @@ function toInboxRow(r: InboxApiRow): InboxRow {
     llm: toLlmUsage(r.llm),
     media,
     feedback: r.feedback ? toFeedback(r.feedback) : null,
+    relevance: r.relevance ? toRelevanceMark(r.relevance) : null,
   }
 }
 
@@ -297,6 +316,22 @@ export async function reportFeedback(
   body: { kinds: string[]; note?: string | null },
 ): Promise<InboxFeedback> {
   return toFeedback(await apiPost<FeedbackApi>(`/inbox/${id}/feedback`, body))
+}
+
+/** Marca / actualiza la relevancia de un mensaje (override por-mensaje) — POST /inbox/{id}/relevance. */
+export async function setRelevanceMark(
+  id: number,
+  isRelevant: boolean,
+  reason: string | null = null,
+): Promise<RelevanceMark> {
+  return toRelevanceMark(
+    await apiPost<RelevanceMarkApi>(`/inbox/${id}/relevance`, { is_relevant: isRelevant, reason }),
+  )
+}
+
+/** Quita la marca de relevancia de un mensaje — DELETE /inbox/{id}/relevance. */
+export async function clearRelevanceMark(id: number): Promise<void> {
+  await apiDelete<void>(`/inbox/${id}/relevance`)
 }
 
 /** Override manual del tier de clasificación — POST /inbox/{id}/classification. */

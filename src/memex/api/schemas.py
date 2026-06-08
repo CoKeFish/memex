@@ -220,6 +220,7 @@ class SenderRelevance(BaseModel):
     relevant: int
     summarized_only: int
     inert: int
+    marked: int
     relevance_pct: float | None = None
     last_at: datetime | None = None
     tier_mix: dict[str, int] = Field(default_factory=dict)
@@ -228,6 +229,20 @@ class SenderRelevance(BaseModel):
 
 class SenderRelevanceList(BaseModel):
     items: list[SenderRelevance] = Field(default_factory=list)
+
+
+class RelevanceMarkRequest(BaseModel):
+    """Marca manual de relevancia (override por-mensaje). `is_relevant=False` = ruido."""
+
+    is_relevant: bool
+    reason: str | None = None
+
+
+class RelevanceMarkInfo(BaseModel):
+    is_relevant: bool
+    reason: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class InboxRow(BaseModel):
@@ -258,6 +273,8 @@ class InboxRow(BaseModel):
     media: list[MediaAssetInfo] = Field(default_factory=list)
     # Feedback manual del usuario sobre este mensaje — solo en el detalle.
     feedback: FeedbackInfo | None = None
+    # Marca manual de relevancia (override por-mensaje del sistema de calidad) — solo en el detalle.
+    relevance: RelevanceMarkInfo | None = None
 
 
 class ProcessResponse(BaseModel):

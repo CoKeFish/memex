@@ -66,6 +66,7 @@ export function SenderRelevancePage() {
                 <th className="px-3 py-2 text-right font-medium">Relevantes</th>
                 <th className="px-3 py-2 text-right font-medium">Solo lectura</th>
                 <th className="px-3 py-2 text-right font-medium">Inertes</th>
+                <th className="px-3 py-2 text-right font-medium">Marcados</th>
                 <th className="px-3 py-2 text-right font-medium">Volumen</th>
                 <th className="px-3 py-2 font-medium">Tiers</th>
                 <th className="px-3 py-2 font-medium">Último</th>
@@ -94,6 +95,9 @@ export function SenderRelevancePage() {
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
                     {r.inert}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                    {r.marked > 0 ? r.marked : "—"}
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
                     {r.volumeRatio === null ? "—" : `${r.volumeRatio}×`}

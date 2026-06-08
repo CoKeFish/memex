@@ -6,6 +6,7 @@ cuántos mensajes, cuántos produjeron un hecho de dominio (señal núcleo: exis
 (valor de lectura — bucket aparte para no lavar la señal) y cuántos quedaron inertes (ni hecho ni
 resumen). El `%` de relevancia cuenta solo los que produjeron hecho; `volume_ratio` = mensajes del
 remitente / media por remitente. Sin umbrales: ordena ruido (inerte) primero y el front re-ordena.
+La marca manual (`relevance_marks`) es un override duro por-mensaje: `COALESCE(is_relevant, hecho)`.
 
 `sender_key` agrupa de forma estable (email normalizado; telegram por `sender.user_id` o, sin
 sender, por chat; social por cuenta) con prefijo de namespace para no colisionar entre fuentes;
@@ -43,15 +44,22 @@ WITH msg AS (
             '(desconocido)'
         ) AS sender_label,
         c.tier AS tier,
-        EXISTS (
-            SELECT 1 FROM module_extractions me
-            WHERE me.inbox_id = i.id AND me.module_slug <> 'identidades' AND me.item_count > 0
-        ) AS produced_fact,
+        -- Relevancia EFECTIVA: la marca manual (override duro por-mensaje) gana sobre la heurística
+        -- determinista (¿produjo un hecho de dominio más allá de identidad?).
+        COALESCE(
+            rm.is_relevant,
+            EXISTS (
+                SELECT 1 FROM module_extractions me
+                WHERE me.inbox_id = i.id AND me.module_slug <> 'identidades' AND me.item_count > 0
+            )
+        ) AS relevant,
         EXISTS (
             SELECT 1 FROM summary_inbox_links sl WHERE sl.inbox_id = i.id
-        ) AS summarized
+        ) AS summarized,
+        (rm.is_relevant IS NOT NULL) AS marked
     FROM inbox i
     LEFT JOIN classifications c ON c.inbox_id = i.id
+    LEFT JOIN relevance_marks rm ON rm.inbox_id = i.id
     WHERE i.user_id = :uid
       {source_filter}
 ),
@@ -60,9 +68,10 @@ agg AS (
         sender_key,
         max(sender_label) AS sender_label,
         count(*) AS messages,
-        count(*) FILTER (WHERE produced_fact) AS relevant,
-        count(*) FILTER (WHERE NOT produced_fact AND summarized) AS summarized_only,
-        count(*) FILTER (WHERE NOT produced_fact AND NOT summarized) AS inert,
+        count(*) FILTER (WHERE relevant) AS relevant,
+        count(*) FILTER (WHERE NOT relevant AND summarized) AS summarized_only,
+        count(*) FILTER (WHERE NOT relevant AND NOT summarized) AS inert,
+        count(*) FILTER (WHERE marked) AS marked,
         max(occurred_at) AS last_at,
         count(*) FILTER (WHERE tier = 'blacklist') AS tier_blacklist,
         count(*) FILTER (WHERE tier = 'batch') AS tier_batch,
@@ -78,6 +87,7 @@ SELECT
     relevant,
     summarized_only,
     inert,
+    marked,
     round(100.0 * relevant / NULLIF(messages, 0), 1) AS relevance_pct,
     last_at,
     jsonb_build_object(

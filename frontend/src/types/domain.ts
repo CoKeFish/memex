@@ -245,6 +245,13 @@ export interface FilterRule {
   enabled: boolean
 }
 
+export interface RelevanceMark {
+  isRelevant: boolean
+  reason: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
 export interface InboxRow {
   id: number
   sourceId: number
@@ -276,6 +283,8 @@ export interface InboxRow {
   media?: MediaAsset[]
   /** Feedback manual del usuario sobre este mensaje — solo en el detalle. */
   feedback?: InboxFeedback | null
+  /** Marca manual de relevancia (override por-mensaje del sistema de calidad) — solo en el detalle. */
+  relevance?: RelevanceMark | null
 }
 
 export type Tier = "blacklist" | "batch" | "individual"

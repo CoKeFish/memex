@@ -19,6 +19,7 @@ import { RelatedData } from "@/components/features/message/related-data"
 import { ReprocessButton } from "@/components/features/message/reprocess-button"
 import { reprocessStepsFor, type ReprocessStep } from "@/components/features/message/reprocess-steps"
 import { FeedbackButton } from "@/components/features/message/feedback-button"
+import { RelevanceButton } from "@/components/features/message/relevance-button"
 import { MessageFilterMenu } from "@/components/features/message/message-filter-menu"
 import { LogRow } from "@/components/features/logs/log-row"
 import {
@@ -186,6 +187,7 @@ function RealDetail({ row, onProcessed }: { row: InboxRow; onProcessed: () => vo
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <MessageFilterMenu row={row} sourceType={source?.type ?? null} onDone={onProcessed} />
+            <RelevanceButton inboxId={row.id} current={row.relevance} onDone={onProcessed} />
             <FeedbackButton inboxId={row.id} current={row.feedback} onDone={onProcessed} />
             <ReprocessButton inboxId={row.id} steps={reprocessStepsForRow(row)} onDone={onProcessed} />
             <Button variant="outline" size="sm" asChild>
