@@ -62,6 +62,12 @@ def test_proyecta_todos_los_tipos() -> None:
         "INSERT INTO mod_bienestar_registros (user_id, category, activity, occurred_at) "
         "VALUES (1, 'comida', 'almuerzo', NOW())"
     )
+    habito = int(
+        _exec(
+            "INSERT INTO mod_bienestar_habits (user_id, name, cadence, activity) "
+            "VALUES (1, 'Gym', 'daily', 'gimnasio') RETURNING id"
+        )
+    )
     with connection() as c:
         verts = list_vertices(c, 1)
     by_slug = {v.slug: v for v in verts}
@@ -75,6 +81,9 @@ def test_proyecta_todos_los_tipos() -> None:
     assert by_slug["identidades:org"].kind == "organizacion"
     assert by_slug["bienestar"].kind == "registro"
     assert by_slug["bienestar"].label == "almuerzo"
+    assert by_slug["bienestar:habito"].kind == "habito"
+    assert by_slug["bienestar:habito"].label == "Gym"
+    assert by_slug["bienestar:habito"].id == habito
 
 
 def test_calendar_excluye_borrados() -> None:

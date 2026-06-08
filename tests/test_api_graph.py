@@ -9,6 +9,9 @@ from typing import Any
 from sqlalchemy import text
 
 from memex.db import connection
+from memex.modules.bienestar.habits import add_habit
+from memex.modules.bienestar.module import register
+from memex.relations.edges import list_edges
 
 
 def _exec(sql: str, **p: Any) -> Any:
@@ -51,6 +54,34 @@ def _hack(name: str, inbox_ids: list[int]) -> int:
             "VALUES (1, :ids, :n) RETURNING id",
             ids=inbox_ids,
             n=name,
+        )
+    )
+
+
+def _registro(activity: str, category: str = "otros") -> int:
+    """Un registro de bienestar (el vértice `registro`). `occurred_at`=NOW()."""
+    return int(
+        _exec(
+            "INSERT INTO mod_bienestar_registros (user_id, category, activity, occurred_at) "
+            "VALUES (1, :cat, :act, NOW()) RETURNING id",
+            cat=category,
+            act=activity,
+        )
+    )
+
+
+def _habito(
+    name: str, *, activity: str = "", category: str | None = None, cadence: str = "daily"
+) -> int:
+    """Un hábito de bienestar (el vértice `bienestar:habito`)."""
+    return int(
+        _exec(
+            "INSERT INTO mod_bienestar_habits (user_id, name, activity, category, cadence) "
+            "VALUES (1, :n, :a, :c, :cad) RETURNING id",
+            n=name,
+            a=activity,
+            c=category,
+            cad=cadence,
         )
     )
 
@@ -146,3 +177,77 @@ def test_get_graph_poda_aristas_huerfanas(client: Any) -> None:
     # también en modo foco: el correo 5 ya no debe mostrar la arista colgante
     focado = client.get("/graph?source_inbox_id=5").json()
     assert focado["edges"] == []
+
+
+def test_cumple_por_actividad(client: Any) -> None:
+    # registro "correr" ↔ hábito "Correr" (match de actividad, insensible a mayúsculas).
+    _registro("correr", "ejercicio")
+    _habito("Correr", activity="Correr")
+    built = client.post("/graph/build").json()
+    assert built["cumple_reales"] == 1
+
+    body = client.get("/graph").json()
+    assert {"registro", "habito"} <= {n["kind"] for n in body["nodes"]}
+    cumple = [e for e in body["edges"] if e["relation_type"] == "cumple"]
+    assert len(cumple) == 1
+    e = cumple[0]
+    assert e["src_slug"] == "bienestar"  # registro → hábito (dirigida)
+    assert e["dst_slug"] == "bienestar:habito"
+    assert e["producer"] == "bienestar"
+    assert e["status"] == "confirmed"
+
+
+def test_cumple_por_categoria(client: Any) -> None:
+    # hábito sin actividad → matchea por categoría.
+    _registro("", "ejercicio")
+    _habito("Ejercicio", category="ejercicio")
+    built = client.post("/graph/build").json()
+    assert built["cumple_reales"] == 1
+
+
+def test_cumple_sin_match(client: Any) -> None:
+    _registro("nadar", "ejercicio")
+    _habito("Correr", activity="correr")
+    built = client.post("/graph/build").json()
+    assert built["cumple_reales"] == 0
+    assert all(e["relation_type"] != "cumple" for e in client.get("/graph").json()["edges"])
+
+
+def test_cumple_idempotente(client: Any) -> None:
+    _registro("correr", "ejercicio")
+    _habito("Correr", activity="correr")
+    client.post("/graph/build")
+    client.post("/graph/build")  # 2da corrida: no duplica la arista
+    edges = client.get("/graph?status=confirmed").json()["edges"]
+    assert len([e for e in edges if e["relation_type"] == "cumple"]) == 1
+
+
+def test_cumple_multiples_habitos(client: Any) -> None:
+    # un registro puede cumplir varios hábitos (por actividad Y por categoría) → varias aristas.
+    _registro("correr", "ejercicio")
+    _habito("Correr", activity="correr")
+    _habito("Hacer ejercicio", category="ejercicio")
+    built = client.post("/graph/build").json()
+    assert built["cumple_reales"] == 2
+
+
+def test_weave_cumple_incremental_registro_despues() -> None:
+    # hábito primero, luego el registro: el weave de `register` teje la arista SIN correr build.
+    with connection() as c:
+        add_habit(c, 1, name="Correr", cadence="daily", activity="correr")
+        register(c, 1, category="ejercicio", activity="Correr")
+    with connection() as c:
+        cumple = [e for e in list_edges(c, 1, status="confirmed") if e.relation_type == "cumple"]
+    assert len(cumple) == 1
+    assert cumple[0].src.slug == "bienestar"
+    assert cumple[0].dst.slug == "bienestar:habito"
+
+
+def test_weave_cumple_incremental_habito_despues() -> None:
+    # registro primero, luego el hábito: el weave de `add_habit` teje la arista SIN correr build.
+    with connection() as c:
+        register(c, 1, category="ejercicio", activity="correr")
+        add_habit(c, 1, name="Correr", cadence="daily", activity="Correr")
+    with connection() as c:
+        cumple = [e for e in list_edges(c, 1, status="confirmed") if e.relation_type == "cumple"]
+    assert len(cumple) == 1

@@ -17,6 +17,8 @@ const KIND_COLOR: Record<string, string> = {
   hackaton: "#a855f7",
   persona: "#14b8a6",
   organizacion: "#f97316",
+  registro: "#eab308",
+  habito: "#ec4899",
 }
 const KIND_LABEL: Record<string, string> = {
   transaccion: "Cobro/pago",
@@ -24,6 +26,8 @@ const KIND_LABEL: Record<string, string> = {
   hackaton: "Hackatón",
   persona: "Persona",
   organizacion: "Organización",
+  registro: "Registro",
+  habito: "Hábito",
 }
 const kindColor = (k: string): string => KIND_COLOR[k] ?? "#64748b"
 const nodeKey = (slug: string, id: number): string => `${slug}#${id}`

@@ -22,7 +22,7 @@ from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
 from memex.modules.bienestar.schema import normalize_activity, normalize_category
-from memex.relations.deterministic import weave_event
+from memex.relations.deterministic import weave_cumple, weave_event
 
 _log = get_logger("memex.modules.bienestar")
 
@@ -55,8 +55,9 @@ def register(
 ) -> dict[str, Any]:
     """Inserta un registro determinista y devuelve la fila pública. `category` se normaliza a la
     lista cerrada (fuera de ella → 'otros'). Sin `occurred_at` usa ahora (UTC, precisión
-    `datetime`). Con `event_id`, teje en el acto las aristas «mismo_evento» del grafo contra los
-    hechos que ya comparten el evento (el full-sweep es respaldo). NO usa LLM ni deduplica."""
+    `datetime`). Teje en el acto las aristas «cumple» del grafo contra los hábitos que el registro
+    satisface; con `event_id`, además las «mismo_evento» contra los hechos que ya comparten el
+    evento (el full-sweep es respaldo). NO usa LLM ni deduplica."""
     if occurred_at is None:
         occurred_at = datetime.now(UTC)
         precision = PRECISION_DATETIME
@@ -96,6 +97,7 @@ def register(
         category=row["category"],
         activity=row["activity"],
     )
+    weave_cumple(conn, user_id, registro_ids=[int(row["id"])])
     if event_id:
         weave_event(conn, user_id, event_id)
     return dict(row)

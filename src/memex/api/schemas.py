@@ -1623,5 +1623,6 @@ class GraphBuildResult(BaseModel):
     afiliacion_reales: int
     pertenencia_reales: int = 0
     contraparte_reales: int = 0
+    cumple_reales: int = 0
     high_fanout_skipped: int
     orphans_pruned: int = 0
