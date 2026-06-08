@@ -23,6 +23,12 @@ from memex.core.sender_tiers import set_override
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.orchestrator import run_extraction
+from memex.quality.candidates import (
+    detect_candidates,
+    list_candidates,
+    run_relevance_detection,
+    set_candidate_status,
+)
 from memex.quality.relevance import senders_by_relevance
 
 _MESSAGES_MARKER = "Mensajes (JSON):\n"
@@ -334,3 +340,84 @@ def test_sender_tier_and_discard_endpoints(client: Any, seed_source: dict[str, A
             text("SELECT count(*) FROM filter_rules WHERE user_id = 1 AND action = 'ignore'")
         ).scalar()
     assert n == 1
+
+
+# --- (6) cola de candidatos (detección automática "por métricas") ---------------- #
+
+
+def _noisy_sender(seed_source: dict[str, Any], email: str, n: int, *, with_fact: int = 0) -> None:
+    """Seed `n` mensajes de `email`; los primeros `with_fact` producen un hecho (relevantes)."""
+    sid = seed_source["id"]
+    for i in range(n):
+        iid = _seed_msg(sid, f"{email}-{i}", email=email, tier="batch", minute=i)
+        _extraction(iid, "finance", 1 if i < with_fact else 0)
+
+
+def test_detect_candidates_flags_noisy_email_senders(seed_source: dict[str, Any]) -> None:
+    _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)  # 0% relevancia → candidato
+    _noisy_sender(seed_source, "boss@x.com", 6, with_fact=6)  # 100% → NO
+    _noisy_sender(seed_source, "rare@x.com", 2, with_fact=0)  # bajo volumen → NO
+    with connection() as c:
+        stats = detect_candidates(c, user_id=1, min_messages=5, max_relevance_pct=10.0)
+        keys = {r["sender_key"] for r in list_candidates(c, user_id=1)}
+    assert stats.candidates == 1
+    assert "spam@x.com" in keys
+    assert "boss@x.com" not in keys
+    assert "rare@x.com" not in keys
+
+
+def test_detect_preserves_dismissed_and_skips_overridden(seed_source: dict[str, Any]) -> None:
+    _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)
+    _noisy_sender(seed_source, "bulk@x.com", 6, with_fact=0)
+    with connection() as c:
+        set_override(c, user_id=1, sender_email="spam@x.com", tier="blacklist")  # ya accionado
+        detect_candidates(c, user_id=1, min_messages=5, max_relevance_pct=10.0)
+        keys = {r["sender_key"] for r in list_candidates(c, user_id=1, status=None)}
+    assert "spam@x.com" not in keys  # accionado → no es candidato
+    assert "bulk@x.com" in keys
+    with connection() as c:
+        set_candidate_status(c, user_id=1, sender_key="bulk@x.com", status="dismissed")
+        detect_candidates(c, user_id=1, min_messages=5, max_relevance_pct=10.0)  # re-detecta
+        status = {r["sender_key"]: r["status"] for r in list_candidates(c, user_id=1, status=None)}
+    assert status["bulk@x.com"] == "dismissed"  # no re-abre
+
+
+def test_candidates_endpoints(client: Any, seed_source: dict[str, Any]) -> None:
+    _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)
+    run_relevance_detection(1)  # defaults de settings (min 5, max 10%)
+    items = client.get("/quality/candidates").json()["items"]
+    assert any(i["sender_key"] == "spam@x.com" for i in items)
+
+    r = client.post(
+        "/quality/candidates/status", json={"sender_key": "spam@x.com", "status": "dismissed"}
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "dismissed"
+
+    open_items = client.get("/quality/candidates?status=open").json()["items"]
+    assert all(i["sender_key"] != "spam@x.com" for i in open_items)
+    bad = client.post("/quality/candidates/status", json={"sender_key": "nope", "status": "open"})
+    assert bad.status_code == 404
+
+
+def test_backfill_item_counts(seed_source: dict[str, Any]) -> None:
+    from memex.quality.backfill import backfill_item_counts
+
+    sid = seed_source["id"]
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO module_settings (user_id, module_slug, enabled) "
+                "VALUES (1, 'finance', TRUE) ON CONFLICT (user_id, module_slug) DO NOTHING"
+            )
+        )
+    m1 = _seed_msg(sid, "m1", email="a@x.com", tier="batch", minute=0, body="pagué $10")
+    asyncio.run(run_extraction(1, client=_OneFactLLM()))
+    # Simular histórico: el cursor se escribió con el conteo correcto → lo reseteamos a 0.
+    with connection() as c:
+        c.execute(
+            text("UPDATE module_extractions SET item_count = 0 WHERE inbox_id = :i"), {"i": m1}
+        )
+    stats = backfill_item_counts(1)
+    assert stats.updated == 1
+    assert _item_count(m1, "finance") == 1

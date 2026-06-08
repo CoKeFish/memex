@@ -33,6 +33,7 @@ from memex.modules.identidades.relations_llm import run_cooccurrence_llm
 from memex.modules.identidades.sync import run_sync as run_identidades_sync
 from memex.modules.orchestrator import run_extraction
 from memex.ocr.worker import run_ocr
+from memex.quality.candidates import run_relevance_detection
 from memex.summarizer.worker import run_summarization
 
 _log = get_logger("memex.scheduler.jobs")
@@ -351,6 +352,7 @@ _REGISTRY: dict[str, Job] = {
     "calendar": Job("calendar", "PT30M", run_calendar_cycle),
     "finance": Job("finance", "PT1H", run_finance_cycle),
     "identidades": Job("identidades", "PT1H", run_identidades_cycle),
+    "relevance": Job("relevance", "P1D", _sync(run_relevance_detection)),
     "log_purge": Job("log_purge", "P1D", _sync(run_log_purge)),
 }
 

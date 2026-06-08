@@ -92,3 +92,58 @@ export async function discardSender(email: string): Promise<{ ruleId: number; cr
   })
   return { ruleId: r.rule_id, created: r.created }
 }
+
+/** Candidato a filtrar detectado por el job (remitente email ruidoso). */
+export interface RelevanceCandidate {
+  senderKey: string
+  senderLabel: string
+  email: string | null
+  messages: number
+  relevant: number
+  inert: number
+  relevancePct: number | null
+  score: number
+  status: string
+  sampleInboxIds: number[]
+}
+
+interface RelevanceCandidateApi {
+  sender_key: string
+  sender_label: string
+  email: string | null
+  messages: number
+  relevant: number
+  inert: number
+  relevance_pct: number | null
+  score: number
+  status: string
+  snapshot: { sample_inbox_ids?: number[] }
+}
+
+function toCandidate(c: RelevanceCandidateApi): RelevanceCandidate {
+  return {
+    senderKey: c.sender_key,
+    senderLabel: c.sender_label,
+    email: c.email,
+    messages: c.messages,
+    relevant: c.relevant,
+    inert: c.inert,
+    relevancePct: c.relevance_pct,
+    score: c.score,
+    status: c.status,
+    sampleInboxIds: c.snapshot?.sample_inbox_ids ?? [],
+  }
+}
+
+/** Candidatos a filtrar detectados por el job — GET /quality/candidates. */
+export async function fetchCandidates(status = "open"): Promise<RelevanceCandidate[]> {
+  const data = await apiGet<{ items: RelevanceCandidateApi[] }>(
+    `/quality/candidates?status=${status}`,
+  )
+  return data.items.map(toCandidate)
+}
+
+/** Mueve el estado de un candidato (confirmed/dismissed) — POST /quality/candidates/status. */
+export async function setCandidateStatus(senderKey: string, status: string): Promise<void> {
+  await apiPost("/quality/candidates/status", { sender_key: senderKey, status })
+}

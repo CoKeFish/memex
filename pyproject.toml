@@ -63,6 +63,7 @@ memex-bienestar = "memex.modules.bienestar.cli:main"
 memex-scheduler = "memex.scheduler.cli:main"
 memex-ingest-scheduler = "memex.ingest_scheduler.cli:main"
 memex-geo = "memex.geo.cli:main"
+memex-quality = "memex.quality.cli:main"
 
 [tool.ruff]
 target-version = "py312"

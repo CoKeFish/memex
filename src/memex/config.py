@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     # valor es el umbral por encima del cual el handler LLM de identidades (relations_llm) releva.
     cooccurrence_cap: int = 8
 
+    # --- Sistema de calidad: detección automática de remitentes no relevantes ("por métricas") ---
+    # El job `relevance` (apagado por default) marca como CANDIDATO a un remitente email con volumen
+    # >= quality_min_messages y % de relevancia <= quality_max_relevance_pct. Sin auto-aplicar: la
+    # acción la confirma el humano (Fase 3). Conservadores a propósito (no proponer filtrar algo que
+    # a veces importa); son LA perilla de calibración — no hay umbral hardcodeado en el código.
+    quality_min_messages: int = 5
+    quality_max_relevance_pct: float = 10.0
+
     # --- Vault de credenciales (ver credentials-vault-architecture / ADR auth+vault) ---
     # Llave maestra ÚNICA del servidor, global, configurada una sola vez (Doppler:
     # MEMEX_SECRET_KEY). Envuelve un DEK por-usuario que cifra los secretos de los ingestors.

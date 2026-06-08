@@ -262,6 +262,32 @@ class SenderDiscardResponse(BaseModel):
     created: bool  # False si ya existía una regla equivalente (idempotente)
 
 
+class RelevanceCandidate(BaseModel):
+    """Candidato a filtrar detectado por el job (remitente email ruidoso, sin accionar)."""
+
+    sender_key: str
+    sender_label: str
+    email: str | None = None
+    messages: int
+    relevant: int
+    inert: int
+    relevance_pct: float | None = None
+    score: int
+    status: str
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class RelevanceCandidateList(BaseModel):
+    items: list[RelevanceCandidate] = Field(default_factory=list)
+
+
+class CandidateStatusRequest(BaseModel):
+    sender_key: str
+    status: Literal["open", "confirmed", "dismissed"]
+
+
 class RelevanceMarkRequest(BaseModel):
     """Marca manual de relevancia (override por-mensaje). `is_relevant=False` = ruido."""
 

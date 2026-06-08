@@ -6,13 +6,16 @@ candidatos llegan en fases posteriores; esta es la vista que las habilita.
 """
 
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
+    CandidateStatusRequest,
+    RelevanceCandidate,
+    RelevanceCandidateList,
     SenderDiscardRequest,
     SenderDiscardResponse,
     SenderRelevanceList,
@@ -23,6 +26,7 @@ from memex.core.filters import create_rule
 from memex.core.sender_tiers import clear_override, set_override
 from memex.db import connection
 from memex.logging import get_logger
+from memex.quality.candidates import InvalidStatusError, list_candidates, set_candidate_status
 from memex.quality.relevance import senders_by_relevance
 
 router = APIRouter(prefix="/quality", tags=["quality"])
@@ -105,3 +109,31 @@ async def discard_sender_endpoint(user_id: UserID, body: SenderDiscardRequest) -
         )
     _log.info("quality.sender_discard", user_id=user_id, sender=email, rule_id=rule_id)
     return {"rule_id": rule_id, "created": True}
+
+
+@router.get("/candidates", response_model=RelevanceCandidateList)
+async def list_candidates_endpoint(
+    user_id: UserID,
+    status: Annotated[Literal["open", "confirmed", "dismissed", "all"], Query()] = "open",
+) -> dict[str, Any]:
+    """Candidatos a filtrar detectados por el job (ruido primero). `all` = todos los estados."""
+    with connection() as conn:
+        items = list_candidates(conn, user_id=user_id, status=None if status == "all" else status)
+    return {"items": items}
+
+
+@router.post("/candidates/status", response_model=RelevanceCandidate)
+async def set_candidate_status_endpoint(
+    user_id: UserID, body: CandidateStatusRequest
+) -> dict[str, Any]:
+    """Mueve el estado de un candidato (confirmed/dismissed). 404 si no existe."""
+    try:
+        with connection() as conn:
+            row = set_candidate_status(
+                conn, user_id=user_id, sender_key=body.sender_key, status=body.status
+            )
+    except InvalidStatusError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    if row is None:
+        raise HTTPException(status_code=404, detail="candidato no encontrado")
+    return row

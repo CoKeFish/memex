@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { Loader2 } from "lucide-react"
+import { Link } from "react-router-dom"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/common/page-header"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
@@ -13,8 +14,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { clearSenderTier, discardSender, fetchSenderRelevance, setSenderTier } from "@/data"
-import type { SenderRelevance } from "@/data"
+import {
+  clearSenderTier,
+  discardSender,
+  fetchCandidates,
+  fetchSenderRelevance,
+  setCandidateStatus,
+  setSenderTier,
+} from "@/data"
+import type { RelevanceCandidate, SenderRelevance } from "@/data"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
 
@@ -47,14 +55,19 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
 }
 
-type PendingAction = { email: string; kind: "no_procesar" | "descartar" }
+type PendingAction = { email: string; kind: "no_procesar" | "descartar"; candidateKey?: string }
 
 export function SenderRelevancePage() {
   const { data, loading, error, reload } = useAsync<SenderRelevance[]>(
     () => fetchSenderRelevance(),
     [],
   )
+  const { data: candidatesData, reload: reloadCandidates } = useAsync<RelevanceCandidate[]>(
+    () => fetchCandidates("open"),
+    [],
+  )
   const rows = data ?? []
+  const candidates = candidatesData ?? []
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -65,6 +78,7 @@ export function SenderRelevancePage() {
       toast.success(msg)
       setPending(null)
       reload()
+      reloadCandidates()
     } catch (e) {
       toast.error("No se pudo", { description: errMsg(e) })
     } finally {
@@ -74,11 +88,17 @@ export function SenderRelevancePage() {
 
   function confirmPending() {
     if (!pending) return
-    if (pending.kind === "no_procesar") {
-      void runAction(() => setSenderTier(pending.email), `No se procesarán: ${pending.email}`)
-    } else {
-      void runAction(() => discardSender(pending.email), `Descartado: ${pending.email}`)
-    }
+    const p = pending
+    const msg = p.kind === "no_procesar" ? `No se procesarán: ${p.email}` : `Descartado: ${p.email}`
+    void runAction(async () => {
+      if (p.kind === "no_procesar") await setSenderTier(p.email)
+      else await discardSender(p.email)
+      if (p.candidateKey) await setCandidateStatus(p.candidateKey, "confirmed")
+    }, msg)
+  }
+
+  function dismissCandidate(key: string, label: string) {
+    void runAction(() => setCandidateStatus(key, "dismissed"), `Sacado de la cola: ${label}`)
   }
 
   return (
@@ -88,6 +108,81 @@ export function SenderRelevancePage() {
         title="Relevancia por remitente"
         description="Qué tan seguido cada remitente produjo un hecho de dominio (relevante) frente a solo leerse o quedar inerte (ruido). Determinista, sin LLM, con el ruido primero. Desde acá podés mandar un remitente a 'no procesar' (se guarda, sin gasto LLM) o descartarlo (drop puro). El % cuenta solo los mensajes con un hecho extraído; 'solo lectura' e 'inertes' van aparte."
       />
+      {candidates.length > 0 && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+          <div className="mb-1 flex items-center gap-2 text-sm font-medium">
+            Candidatos detectados (auto) <Badge variant="secondary">{candidates.length}</Badge>
+          </div>
+          <p className="mb-2 text-xs text-muted-foreground">
+            Remitentes que el sistema marcó como ruidosos (volumen alto, poca relevancia). Confirmá
+            la acción o sacalos de la cola.
+          </p>
+          <div className="space-y-1.5">
+            {candidates.map((c) => {
+              const cemail = c.email
+              return (
+                <div
+                  key={c.senderKey}
+                  className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-card/40 px-3 py-2 text-sm"
+                >
+                  <div className="min-w-0 flex-1">
+                    <span className="font-medium">{c.senderLabel}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {c.messages} msj · {c.relevancePct === null ? "—" : `${c.relevancePct}%`}{" "}
+                      relevancia · {c.inert} inertes
+                    </span>
+                    {c.sampleInboxIds.length > 0 && (
+                      <span className="ml-2 text-xs">
+                        {c.sampleInboxIds.map((id) => (
+                          <Link
+                            key={id}
+                            to={`/datos/${id}`}
+                            className="mr-1.5 underline underline-offset-2 hover:text-primary"
+                          >
+                            #{id}
+                          </Link>
+                        ))}
+                      </span>
+                    )}
+                  </div>
+                  {cemail && (
+                    <div className="flex gap-1">
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={busy}
+                        onClick={() =>
+                          setPending({ email: cemail, kind: "no_procesar", candidateKey: c.senderKey })
+                        }
+                      >
+                        No procesar
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() =>
+                          setPending({ email: cemail, kind: "descartar", candidateKey: c.senderKey })
+                        }
+                      >
+                        Descartar
+                      </Button>
+                    </div>
+                  )}
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => dismissCandidate(c.senderKey, c.senderLabel)}
+                  >
+                    No es ruido
+                  </Button>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
       {error ? (
         <ErrorState detail={error} onRetry={reload} />
       ) : loading && !data ? (
