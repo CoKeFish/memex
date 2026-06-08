@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from memex.modules.bienestar.habits import add_habit
 from memex.modules.bienestar.module import list_registros, register, summary
 
 if TYPE_CHECKING:
@@ -13,7 +14,14 @@ if TYPE_CHECKING:
 _BASE = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
 
 
+def _seed_habits(conn: Connection) -> None:
+    """bienestar es para hábitos: registrar exige un hábito que cubra la categoría."""
+    for cat in ("comida", "higiene", "ejercicio", "grooming", "salud", "otros"):
+        add_habit(conn, 1, name=cat, cadence="daily", category=cat)
+
+
 def _seed(conn: Connection) -> None:
+    _seed_habits(conn)
     register(
         conn, 1, category="comida", activity="almuerzo", occurred_at=_BASE, precision="datetime"
     )
@@ -50,6 +58,7 @@ def test_list_filters_by_category(conn: Connection) -> None:
 
 
 def test_list_filters_by_activity_normalized(conn: Connection) -> None:
+    _seed_habits(conn)
     register(conn, 1, category="ejercicio", activity="Gimnasio")
     rows = list_registros(conn, 1, activity="  gimnasio ")  # insensible a mayúsculas/espacios
     assert len(rows) == 1

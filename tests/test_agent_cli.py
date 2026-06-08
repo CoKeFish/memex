@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from memex.agent_cli import main
 from memex.db import connection
+from memex.modules.bienestar.habits import add_habit
 
 
 def _last_json(out: str) -> Any:
@@ -40,6 +41,8 @@ def test_no_args_shows_help(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_dispatch_bienestar_register(capsys: pytest.CaptureFixture[str]) -> None:
+    with connection() as c:  # es para hábitos: el registro necesita un hábito que lo cubra
+        add_habit(c, 1, name="Comer", cadence="daily", category="comida")
     rc = main(["bienestar", "register", "--category", "comida", "--activity", "almuerzo", "--json"])
     assert rc == 0
     row = _last_json(capsys.readouterr().out)

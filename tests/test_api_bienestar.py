@@ -15,8 +15,11 @@ if TYPE_CHECKING:
 
 def _seed_fixed() -> None:
     """Dos registros el 2026-06-10 (Bogota), uno con event_id. Fechas fijas: las vistas de
-    registros/summary/daily no dependen de 'hoy'."""
+    registros/summary/daily no dependen de 'hoy'. bienestar es para hábitos → sembramos los que
+    cubren las categorías registradas (comida/ejercicio)."""
     with connection() as c:
+        for cat in ("comida", "ejercicio"):
+            add_habit(c, 1, name=cat, cadence="daily", category=cat)
         register(
             c,
             1,

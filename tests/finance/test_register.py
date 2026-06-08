@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import text
 
 from memex.db import connection
+from memex.modules.bienestar.habits import add_habit
 from memex.modules.bienestar.module import register as registrar_bienestar
 from memex.modules.finance.module import register
 from memex.relations.deterministic import build_relations
@@ -95,6 +96,7 @@ def test_cross_module_same_event_edge_at_register() -> None:
     # commitear antes de releer.
     with connection() as c:
         register(c, 1, amount=Decimal("20"), currency="USD", counterparty="Pizzería", event_id="E7")
+        add_habit(c, 1, name="Comer", cadence="daily", category="comida")  # es para hábitos
         registrar_bienestar(c, 1, category="comida", activity="almuerzo", event_id="E7")
     with connection() as c:
         edges = list_edges(c, 1, producer="event")
@@ -109,6 +111,7 @@ def test_full_sweep_idempotent_after_incremental() -> None:
     # el full-sweep (build_relations) sigue de respaldo: sobre lo ya tejido al escribir, no duplica.
     with connection() as c:
         register(c, 1, amount=Decimal("20"), currency="USD", counterparty="Pizzería", event_id="E7")
+        add_habit(c, 1, name="Comer", cadence="daily", category="comida")  # es para hábitos
         registrar_bienestar(c, 1, category="comida", activity="almuerzo", event_id="E7")
     with connection() as c:
         before = len(list_edges(c, 1, producer="event"))

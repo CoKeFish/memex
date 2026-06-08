@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from memex.db import connection
 from memex.modules.bienestar.cli import main
+from memex.modules.bienestar.habits import add_habit
 
 
 def _last_json(out: str) -> Any:
@@ -18,7 +19,15 @@ def _last_json(out: str) -> Any:
     return json.loads(out.strip().splitlines()[-1])
 
 
+def _seed_habits() -> None:
+    """bienestar es para hábitos: registrar exige un hábito activo que cubra la categoría."""
+    with connection() as c:
+        for cat in ("comida", "higiene", "ejercicio", "grooming", "salud", "otros"):
+            add_habit(c, 1, name=cat, cadence="daily", category=cat)
+
+
 def test_cli_register_inserts() -> None:
+    _seed_habits()
     rc = main(
         ["register", "--category", "comida", "--activity", "almuerzo", "--description", "pizza"]
     )
@@ -35,6 +44,7 @@ def test_cli_register_inserts() -> None:
 
 
 def test_cli_register_json(capsys: pytest.CaptureFixture[str]) -> None:
+    _seed_habits()
     rc = main(["register", "--category", "ejercicio", "--activity", "gimnasio", "--json"])
     assert rc == 0
     out = _last_json(capsys.readouterr().out)
@@ -43,6 +53,7 @@ def test_cli_register_json(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_cli_invalid_category_becomes_otros() -> None:
+    _seed_habits()
     assert main(["register", "--category", "inventada", "--activity", "x"]) == 0
     with connection() as c:
         cat = c.execute(text("SELECT category FROM mod_bienestar_registros")).scalar_one()
@@ -50,6 +61,7 @@ def test_cli_invalid_category_becomes_otros() -> None:
 
 
 def test_cli_register_detail_json() -> None:
+    _seed_habits()
     rc = main(
         [
             "register",
@@ -68,6 +80,7 @@ def test_cli_register_detail_json() -> None:
 
 
 def test_cli_summary_json(capsys: pytest.CaptureFixture[str]) -> None:
+    _seed_habits()
     main(["register", "--category", "comida", "--activity", "almuerzo"])
     main(["register", "--category", "comida", "--activity", "cena"])
     capsys.readouterr()  # descartar lo impreso por los register
@@ -79,6 +92,7 @@ def test_cli_summary_json(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_cli_list_json(capsys: pytest.CaptureFixture[str]) -> None:
+    _seed_habits()
     main(["register", "--category", "salud", "--activity", "ibuprofeno"])
     capsys.readouterr()
     rc = main(["list", "--json"])
@@ -119,3 +133,15 @@ def test_cli_adherence_json(capsys: pytest.CaptureFixture[str]) -> None:
     assert len(rows) == 1
     assert rows[0]["habit"]["name"] == "Gym"
     assert rows[0]["current"] >= 1
+
+
+def test_cli_register_rejected_without_habit(capsys: pytest.CaptureFixture[str]) -> None:
+    # sin un hábito que lo cubra, register se rechaza (exit 1); --json trae la lista de hábitos.
+    rc = main(["register", "--category", "comida", "--activity", "almuerzo", "--json"])
+    assert rc == 1
+    err = _last_json(capsys.readouterr().out)
+    assert err["error"] == "no_matching_habit"
+    assert err["habits"] == []
+    with connection() as c:
+        n = c.execute(text("SELECT count(*) FROM mod_bienestar_registros")).scalar_one()
+    assert n == 0

@@ -244,10 +244,13 @@ def test_weave_cumple_incremental_registro_despues() -> None:
 
 
 def test_weave_cumple_incremental_habito_despues() -> None:
-    # registro primero, luego el hábito: el weave de `add_habit` teje la arista SIN correr build.
+    # un hábito NUEVO teje «cumple» contra los registros que ya lo cumplen, SIN correr build. (El
+    # registro ya existía porque cumplía OTRO hábito — registrar exige un hábito activo.)
     with connection() as c:
-        register(c, 1, category="ejercicio", activity="correr")
-        add_habit(c, 1, name="Correr", cadence="daily", activity="Correr")
+        add_habit(c, 1, name="Correr", cadence="daily", activity="correr")
+        register(c, 1, category="ejercicio", activity="correr")  # cumple el hábito de actividad
+        add_habit(c, 1, name="Ejercicio", cadence="daily", category="ejercicio")  # por categoría
     with connection() as c:
         cumple = [e for e in list_edges(c, 1, status="confirmed") if e.relation_type == "cumple"]
-    assert len(cumple) == 1
+    # el registro cumple AMBOS: actividad (al registrar) y categoría (al crear el hábito)
+    assert len(cumple) == 2
