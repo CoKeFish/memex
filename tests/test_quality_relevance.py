@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
+import pytest
 from sqlalchemy import text
 
 from memex.classifier.worker import run_classification
@@ -421,3 +422,54 @@ def test_backfill_item_counts(seed_source: dict[str, Any]) -> None:
     stats = backfill_item_counts(1)
     assert stats.updated == 1
     assert _item_count(m1, "finance") == 1
+
+
+# --- (7) juez LLM de zona gris (opcional, default-off) --------------------------- #
+
+
+class _JudgeLLM:
+    """LLM falso: emite un veredicto de ruido (sin red)."""
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        response_format: ResponseFormat = "text",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResult:
+        return LLMResult(
+            content='{"is_relevant": false, "confidence": 0.9, "reason": "promociones"}',
+            model="fake",
+            usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            cost_usd=Decimal("0"),
+            latency_ms=1,
+            finish_reason="stop",
+        )
+
+
+def test_judge_sender_stores_verdict(
+    seed_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from memex.config import settings
+    from memex.quality.judge_llm import judge_sender
+
+    monkeypatch.setattr(settings, "quality_llm", True)
+    _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)
+    with connection() as c:
+        detect_candidates(c, user_id=1, min_messages=5, max_relevance_pct=10.0)
+    verdict = asyncio.run(judge_sender(1, "spam@x.com", client=_JudgeLLM()))
+    assert verdict is not None
+    assert verdict.is_relevant is False
+    with connection() as c:
+        cand = next(r for r in list_candidates(c, user_id=1) if r["sender_key"] == "spam@x.com")
+    assert cand["llm_verdict"]["is_relevant"] is False
+
+
+def test_judge_endpoint_gated_off(client: Any, seed_source: dict[str, Any]) -> None:
+    _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)
+    run_relevance_detection(1)
+    # MEMEX_QUALITY_LLM default False → 422 (apagado), sin tocar el LLM real.
+    r = client.post("/quality/candidates/judge", json={"sender_key": "spam@x.com"})
+    assert r.status_code == 422

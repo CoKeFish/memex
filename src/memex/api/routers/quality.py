@@ -14,6 +14,8 @@ from sqlalchemy import text
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
     CandidateStatusRequest,
+    JudgeRequest,
+    JudgeResponse,
     RelevanceCandidate,
     RelevanceCandidateList,
     SenderDiscardRequest,
@@ -25,8 +27,10 @@ from memex.api.schemas import (
 from memex.core.filters import create_rule
 from memex.core.sender_tiers import clear_override, set_override
 from memex.db import connection
+from memex.llm import LLMConfigError, LLMQuotaError
 from memex.logging import get_logger
 from memex.quality.candidates import InvalidStatusError, list_candidates, set_candidate_status
+from memex.quality.judge_llm import JudgeUnavailableError, judge_sender
 from memex.quality.relevance import senders_by_relevance
 
 router = APIRouter(prefix="/quality", tags=["quality"])
@@ -137,3 +141,24 @@ async def set_candidate_status_endpoint(
     if row is None:
         raise HTTPException(status_code=404, detail="candidato no encontrado")
     return row
+
+
+@router.post("/candidates/judge", response_model=JudgeResponse)
+async def judge_candidate_endpoint(user_id: UserID, body: JudgeRequest) -> dict[str, Any]:
+    """Juez LLM de relevancia (zona gris) para un candidato — ADVISORY, no acciona. Gateado por
+    MEMEX_QUALITY_LLM; 422 si está apagado, 404 si el candidato no existe o no tiene muestra."""
+    try:
+        verdict = await judge_sender(user_id, body.sender_key)
+    except JudgeUnavailableError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    except LLMConfigError as e:
+        raise HTTPException(status_code=422, detail="LLM no configurado (DEEPSEEK_API_KEY)") from e
+    except LLMQuotaError as e:
+        raise HTTPException(status_code=402, detail="saldo LLM agotado") from e
+    if verdict is None:
+        raise HTTPException(status_code=404, detail="candidato sin muestra o inexistente")
+    return {
+        "is_relevant": verdict.is_relevant,
+        "confidence": verdict.confidence,
+        "reason": verdict.reason,
+    }

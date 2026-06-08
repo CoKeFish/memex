@@ -27,7 +27,7 @@ VALID_STATUS: frozenset[str] = frozenset({"open", "confirmed", "dismissed"})
 
 _CANDIDATE_COLS = (
     "sender_key, sender_label, email, messages, relevant, inert, relevance_pct, "
-    "score, status, snapshot, created_at, updated_at"
+    "score, status, snapshot, llm_verdict, created_at, updated_at"
 )
 
 

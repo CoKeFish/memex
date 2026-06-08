@@ -19,6 +19,7 @@ import {
   discardSender,
   fetchCandidates,
   fetchSenderRelevance,
+  judgeSender,
   setCandidateStatus,
   setSenderTier,
 } from "@/data"
@@ -101,6 +102,10 @@ export function SenderRelevancePage() {
     void runAction(() => setCandidateStatus(key, "dismissed"), `Sacado de la cola: ${label}`)
   }
 
+  function judge(key: string) {
+    void runAction(() => judgeSender(key), "Juez LLM consultado")
+  }
+
   return (
     <div className="space-y-5">
       <PageHeader
@@ -144,6 +149,14 @@ export function SenderRelevancePage() {
                         ))}
                       </span>
                     )}
+                    {c.llmVerdict && (
+                      <span
+                        className={`ml-2 text-xs ${c.llmVerdict.isRelevant ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}
+                      >
+                        · LLM: {c.llmVerdict.isRelevant ? "relevante" : "ruido"}
+                        {c.llmVerdict.reason ? ` — ${c.llmVerdict.reason}` : ""}
+                      </span>
+                    )}
                   </div>
                   {cemail && (
                     <div className="flex gap-1">
@@ -169,6 +182,14 @@ export function SenderRelevancePage() {
                       </Button>
                     </div>
                   )}
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => judge(c.senderKey)}
+                  >
+                    Juzgar (LLM)
+                  </Button>
                   <Button
                     size="xs"
                     variant="ghost"

@@ -105,6 +105,7 @@ export interface RelevanceCandidate {
   score: number
   status: string
   sampleInboxIds: number[]
+  llmVerdict: { isRelevant: boolean; confidence: number; reason: string } | null
 }
 
 interface RelevanceCandidateApi {
@@ -118,6 +119,7 @@ interface RelevanceCandidateApi {
   score: number
   status: string
   snapshot: { sample_inbox_ids?: number[] }
+  llm_verdict: { is_relevant: boolean; confidence: number; reason: string } | null
 }
 
 function toCandidate(c: RelevanceCandidateApi): RelevanceCandidate {
@@ -132,6 +134,13 @@ function toCandidate(c: RelevanceCandidateApi): RelevanceCandidate {
     score: c.score,
     status: c.status,
     sampleInboxIds: c.snapshot?.sample_inbox_ids ?? [],
+    llmVerdict: c.llm_verdict
+      ? {
+          isRelevant: c.llm_verdict.is_relevant,
+          confidence: c.llm_verdict.confidence,
+          reason: c.llm_verdict.reason,
+        }
+      : null,
   }
 }
 
@@ -146,4 +155,15 @@ export async function fetchCandidates(status = "open"): Promise<RelevanceCandida
 /** Mueve el estado de un candidato (confirmed/dismissed) — POST /quality/candidates/status. */
 export async function setCandidateStatus(senderKey: string, status: string): Promise<void> {
   await apiPost("/quality/candidates/status", { sender_key: senderKey, status })
+}
+
+/** Juez LLM de relevancia (zona gris) para un candidato — POST /quality/candidates/judge. */
+export async function judgeSender(
+  senderKey: string,
+): Promise<{ isRelevant: boolean; confidence: number; reason: string }> {
+  const r = await apiPost<{ is_relevant: boolean; confidence: number; reason: string }>(
+    "/quality/candidates/judge",
+    { sender_key: senderKey },
+  )
+  return { isRelevant: r.is_relevant, confidence: r.confidence, reason: r.reason }
 }

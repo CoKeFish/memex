@@ -4,6 +4,7 @@ Subcomandos:
   detect          — corre la detección de candidatos a filtrar (job manual, sin LLM).
   candidates      — lista los candidatos (filtro opcional por estado).
   backfill-counts — recalcula module_extractions.item_count histórico desde las tablas de dominio.
+  judge           — juez LLM de relevancia (zona gris) para un candidato (opcional, gateado).
 
 Conecta directo a Postgres (`memex.db.connection`); pensado para el server (mismo host que la DB).
 
@@ -16,6 +17,7 @@ Ejemplos:
 from __future__ import annotations
 
 import argparse
+import sys
 
 from memex.db import connection
 from memex.logging import setup_logging
@@ -52,6 +54,24 @@ def cmd_backfill_counts(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_judge(args: argparse.Namespace) -> int:
+    import asyncio
+
+    from memex.quality.judge_llm import JudgeUnavailableError, judge_sender
+
+    try:
+        verdict = asyncio.run(judge_sender(args.user_id, args.sender_key))
+    except JudgeUnavailableError as e:
+        print(f"juez apagado: {e}", file=sys.stderr)
+        return 1
+    if verdict is None:
+        print("(candidato sin muestra o inexistente)", file=sys.stderr)
+        return 1
+    veredicto = "relevante" if verdict.is_relevant else "ruido"
+    print(f"veredicto: {veredicto} (conf {verdict.confidence}) — {verdict.reason}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="memex-quality")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -70,6 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_bf = sub.add_parser("backfill-counts", help="recalcula item_count histórico")
     p_bf.add_argument("--user-id", type=int, default=1)
     p_bf.set_defaults(func=cmd_backfill_counts)
+
+    p_judge = sub.add_parser("judge", help="juez LLM de relevancia para un candidato (opcional)")
+    p_judge.add_argument("--user-id", type=int, default=1)
+    p_judge.add_argument("--sender-key", required=True)
+    p_judge.set_defaults(func=cmd_judge)
 
     return p
 

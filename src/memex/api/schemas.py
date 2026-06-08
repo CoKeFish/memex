@@ -275,6 +275,8 @@ class RelevanceCandidate(BaseModel):
     score: int
     status: str
     snapshot: dict[str, Any] = Field(default_factory=dict)
+    # Veredicto ADVISORY del juez LLM (zona gris) o null si no se juzgó.
+    llm_verdict: dict[str, Any] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -286,6 +288,18 @@ class RelevanceCandidateList(BaseModel):
 class CandidateStatusRequest(BaseModel):
     sender_key: str
     status: Literal["open", "confirmed", "dismissed"]
+
+
+class JudgeRequest(BaseModel):
+    sender_key: str
+
+
+class JudgeResponse(BaseModel):
+    """Veredicto ADVISORY del juez LLM (no acciona; informa la cola)."""
+
+    is_relevant: bool
+    confidence: float
+    reason: str
 
 
 class RelevanceMarkRequest(BaseModel):
