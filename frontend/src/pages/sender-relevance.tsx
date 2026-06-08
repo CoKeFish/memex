@@ -1,8 +1,21 @@
+import { useState } from "react"
 import { Loader2 } from "lucide-react"
+import { toast } from "sonner"
 import { PageHeader } from "@/components/common/page-header"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
-import { fetchSenderRelevance } from "@/data"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { clearSenderTier, discardSender, fetchSenderRelevance, setSenderTier } from "@/data"
 import type { SenderRelevance } from "@/data"
+import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
 
 /** Fecha corta `YYYY-MM-DD` desde un ISO. */
@@ -30,19 +43,50 @@ function tierMixLabel(mix: Record<string, number>): string {
   return parts.join(" · ") || "—"
 }
 
+function errMsg(e: unknown): string {
+  return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
+}
+
+type PendingAction = { email: string; kind: "no_procesar" | "descartar" }
+
 export function SenderRelevancePage() {
   const { data, loading, error, reload } = useAsync<SenderRelevance[]>(
     () => fetchSenderRelevance(),
     [],
   )
   const rows = data ?? []
+  const [pending, setPending] = useState<PendingAction | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function runAction(fn: () => Promise<unknown>, msg: string) {
+    setBusy(true)
+    try {
+      await fn()
+      toast.success(msg)
+      setPending(null)
+      reload()
+    } catch (e) {
+      toast.error("No se pudo", { description: errMsg(e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function confirmPending() {
+    if (!pending) return
+    if (pending.kind === "no_procesar") {
+      void runAction(() => setSenderTier(pending.email), `No se procesarán: ${pending.email}`)
+    } else {
+      void runAction(() => discardSender(pending.email), `Descartado: ${pending.email}`)
+    }
+  }
 
   return (
     <div className="space-y-5">
       <PageHeader
         eyebrow="categoría · calidad"
         title="Relevancia por remitente"
-        description="Qué tan seguido cada remitente produjo un hecho de dominio (relevante) frente a solo leerse o quedar inerte (ruido). Determinista, sin LLM, con el ruido primero — es el insumo para decidir a quién dejar de procesar. El % cuenta solo los mensajes con un hecho extraído; 'solo lectura' e 'inertes' van aparte para no inflarlo."
+        description="Qué tan seguido cada remitente produjo un hecho de dominio (relevante) frente a solo leerse o quedar inerte (ruido). Determinista, sin LLM, con el ruido primero. Desde acá podés mandar un remitente a 'no procesar' (se guarda, sin gasto LLM) o descartarlo (drop puro). El % cuenta solo los mensajes con un hecho extraído; 'solo lectura' e 'inertes' van aparte."
       />
       {error ? (
         <ErrorState detail={error} onRetry={reload} />
@@ -68,52 +112,123 @@ export function SenderRelevancePage() {
                 <th className="px-3 py-2 text-right font-medium">Inertes</th>
                 <th className="px-3 py-2 text-right font-medium">Marcados</th>
                 <th className="px-3 py-2 text-right font-medium">Volumen</th>
-                <th className="px-3 py-2 font-medium">Tiers</th>
                 <th className="px-3 py-2 font-medium">Último</th>
+                <th className="px-3 py-2 font-medium">Tiers</th>
+                <th className="px-3 py-2 font-medium">Acciones</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.senderKey} className="border-t align-top">
-                  <td className="px-3 py-2">
-                    <div className="font-medium">{r.senderLabel}</div>
-                    {r.senderLabel !== r.senderKey && (
-                      <div className="text-xs text-muted-foreground">{r.senderKey}</div>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums">{r.messages}</td>
-                  <td
-                    className={`px-3 py-2 text-right font-medium tabular-nums ${pctClass(r.relevancePct)}`}
-                  >
-                    {r.relevancePct === null ? "—" : `${r.relevancePct}%`}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                    {r.relevant}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                    {r.summarizedOnly}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                    {r.inert}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                    {r.marked > 0 ? r.marked : "—"}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
-                    {r.volumeRatio === null ? "—" : `${r.volumeRatio}×`}
-                  </td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">
-                    {tierMixLabel(r.tierMix)}
-                  </td>
-                  <td className="px-3 py-2 text-xs whitespace-nowrap text-muted-foreground">
-                    {shortDate(r.lastAt)}
-                  </td>
-                </tr>
-              ))}
+              {rows.map((r) => {
+                const email = r.email
+                return (
+                  <tr key={r.senderKey} className="border-t align-top">
+                    <td className="px-3 py-2">
+                      <div className="font-medium">{r.senderLabel}</div>
+                      {r.senderLabel !== r.senderKey && (
+                        <div className="text-xs text-muted-foreground">{r.senderKey}</div>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{r.messages}</td>
+                    <td
+                      className={`px-3 py-2 text-right font-medium tabular-nums ${pctClass(r.relevancePct)}`}
+                    >
+                      {r.relevancePct === null ? "—" : `${r.relevancePct}%`}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                      {r.relevant}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                      {r.summarizedOnly}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                      {r.inert}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                      {r.marked > 0 ? r.marked : "—"}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                      {r.volumeRatio === null ? "—" : `${r.volumeRatio}×`}
+                    </td>
+                    <td className="px-3 py-2 text-xs whitespace-nowrap text-muted-foreground">
+                      {shortDate(r.lastAt)}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground">
+                      {tierMixLabel(r.tierMix)}
+                    </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {email === null ? (
+                        <span
+                          className="text-xs text-muted-foreground"
+                          title="Acción disponible para email; para chat, sacá el canal del allowlist."
+                        >
+                          —
+                        </span>
+                      ) : r.overrideTier ? (
+                        <div className="flex items-center gap-1.5">
+                          <Badge variant="secondary" title="No se procesa (tier forzado)">
+                            no procesar
+                          </Badge>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            disabled={busy}
+                            onClick={() => void runAction(() => clearSenderTier(email), `Reactivado: ${email}`)}
+                          >
+                            Reactivar
+                          </Button>
+                        </div>
+                      ) : (
+                        <div className="flex gap-1">
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            disabled={busy}
+                            onClick={() => setPending({ email, kind: "no_procesar" })}
+                          >
+                            No procesar
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            disabled={busy}
+                            onClick={() => setPending({ email, kind: "descartar" })}
+                          >
+                            Descartar
+                          </Button>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
       )}
+
+      <Dialog open={pending !== null} onOpenChange={(o) => !o && !busy && setPending(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {pending?.kind === "descartar" ? "Descartar remitente" : "No procesar remitente"}
+            </DialogTitle>
+            <DialogDescription>
+              {pending?.kind === "descartar"
+                ? `Los próximos mensajes de ${pending?.email} se filtrarán antes de guardarse (drop puro: se olvidan). Reversible en Filtros.`
+                : `Los próximos mensajes de ${pending?.email} se guardarán pero no se procesarán (tier blacklist: sin gasto LLM). No se borran; reversible acá mismo.`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => setPending(null)}>
+              Cancelar
+            </Button>
+            <Button size="sm" disabled={busy} onClick={confirmPending}>
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : null}
+              Confirmar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -5,12 +5,22 @@ LLM, sin mutación, acotado al dueño. La marca manual, la acción "no procesar"
 candidatos llegan en fases posteriores; esta es la vista que las habilita.
 """
 
+import json
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
 
 from memex.api.auth import current_user_id
-from memex.api.schemas import SenderRelevanceList
+from memex.api.schemas import (
+    SenderDiscardRequest,
+    SenderDiscardResponse,
+    SenderRelevanceList,
+    SenderTierInfo,
+    SenderTierRequest,
+)
+from memex.core.filters import create_rule
+from memex.core.sender_tiers import clear_override, set_override
 from memex.db import connection
 from memex.logging import get_logger
 from memex.quality.relevance import senders_by_relevance
@@ -33,3 +43,65 @@ async def list_sender_relevance(
         items = senders_by_relevance(conn, user_id=user_id, limit=limit, source_id=source_id)
     _log.info("quality.senders", user_id=user_id, rows=len(items), source_id=source_id)
     return {"items": items}
+
+
+@router.post("/senders/tier", response_model=SenderTierInfo)
+async def set_sender_tier_endpoint(user_id: UserID, body: SenderTierRequest) -> dict[str, Any]:
+    """No procesar: fuerza el tier de los mensajes futuros de un remitente (típico: blacklist).
+
+    Conserva los mensajes en inbox (no borra); el classifier usa este tier en vez de la heurística.
+    Prospectivo (no re-clasifica lo ya clasificado). Acción asistida: la confirma el usuario.
+    """
+    with connection() as conn:
+        row = set_override(
+            conn,
+            user_id=user_id,
+            sender_email=body.sender_email,
+            tier=body.tier,
+            reason=body.reason,
+        )
+    _log.info("quality.sender_tier.set", user_id=user_id, tier=body.tier, email=body.sender_email)
+    return row
+
+
+@router.delete("/senders/tier", status_code=204)
+async def clear_sender_tier_endpoint(
+    user_id: UserID, sender_email: Annotated[str, Query()]
+) -> None:
+    """Quita el override de tier de un remitente (vuelve a la heurística). 404 si no existía."""
+    with connection() as conn:
+        ok = clear_override(conn, user_id=user_id, sender_email=sender_email)
+    if not ok:
+        raise HTTPException(status_code=404, detail="sin override")
+
+
+@router.post("/senders/discard", response_model=SenderDiscardResponse)
+async def discard_sender_endpoint(user_id: UserID, body: SenderDiscardRequest) -> dict[str, Any]:
+    """Descartar: crea una regla filter_rules ignore para el remitente (drop puro = basura clara).
+
+    Los mensajes futuros se filtran antes de guardarse. Idempotente: reusa una regla equivalente.
+    Reversible desde /filtros.
+    """
+    email = body.sender_email.strip().lower()
+    scope = {"from.email": {"equals": email}}
+    with connection() as conn:
+        existing = conn.execute(
+            text(
+                "SELECT id FROM filter_rules "
+                "WHERE user_id = :uid AND action = 'ignore' AND scope = CAST(:scope AS JSONB)"
+            ),
+            {"uid": user_id, "scope": json.dumps(scope)},
+        ).scalar()
+        if existing is not None:
+            return {"rule_id": int(existing), "created": False}
+        rule_id = create_rule(
+            conn,
+            user_id=user_id,
+            source_type=None,
+            source_id=None,
+            scope=scope,
+            action="ignore",
+            priority=200,
+        )
+    _log.info("quality.sender_discard", user_id=user_id, sender=email, rule_id=rule_id)
+    return {"rule_id": rule_id, "created": True}

@@ -56,10 +56,14 @@ WITH msg AS (
         EXISTS (
             SELECT 1 FROM summary_inbox_links sl WHERE sl.inbox_id = i.id
         ) AS summarized,
-        (rm.is_relevant IS NOT NULL) AS marked
+        (rm.is_relevant IS NOT NULL) AS marked,
+        lower(i.payload->'from'->>'email') AS email,
+        sto.tier AS override_tier
     FROM inbox i
     LEFT JOIN classifications c ON c.inbox_id = i.id
     LEFT JOIN relevance_marks rm ON rm.inbox_id = i.id
+    LEFT JOIN sender_tier_overrides sto
+        ON sto.user_id = i.user_id AND sto.sender_email = lower(i.payload->'from'->>'email')
     WHERE i.user_id = :uid
       {source_filter}
 ),
@@ -72,6 +76,8 @@ agg AS (
         count(*) FILTER (WHERE NOT relevant AND summarized) AS summarized_only,
         count(*) FILTER (WHERE NOT relevant AND NOT summarized) AS inert,
         count(*) FILTER (WHERE marked) AS marked,
+        max(email) AS email,
+        max(override_tier) AS override_tier,
         max(occurred_at) AS last_at,
         count(*) FILTER (WHERE tier = 'blacklist') AS tier_blacklist,
         count(*) FILTER (WHERE tier = 'batch') AS tier_batch,
@@ -88,6 +94,8 @@ SELECT
     summarized_only,
     inert,
     marked,
+    email,
+    override_tier,
     round(100.0 * relevant / NULLIF(messages, 0), 1) AS relevance_pct,
     last_at,
     jsonb_build_object(

@@ -221,6 +221,10 @@ class SenderRelevance(BaseModel):
     summarized_only: int
     inert: int
     marked: int
+    # `email` no-null ⇒ remitente accionable (sender→tier es email-only en v1); `override_tier` = el
+    # tier forzado activo ("muted") o null.
+    email: str | None = None
+    override_tier: str | None = None
     relevance_pct: float | None = None
     last_at: datetime | None = None
     tier_mix: dict[str, int] = Field(default_factory=dict)
@@ -229,6 +233,33 @@ class SenderRelevance(BaseModel):
 
 class SenderRelevanceList(BaseModel):
     items: list[SenderRelevance] = Field(default_factory=list)
+
+
+class SenderTierRequest(BaseModel):
+    """No procesar: fuerza el tier de los mensajes futuros de un remitente (típico: blacklist)."""
+
+    sender_email: str
+    tier: Literal["blacklist", "batch", "individual"] = "blacklist"
+    reason: str | None = None
+
+
+class SenderTierInfo(BaseModel):
+    sender_email: str
+    tier: str
+    reason: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class SenderDiscardRequest(BaseModel):
+    """Acción "descartar": crea una regla `filter_rules` ignore para el remitente (drop puro)."""
+
+    sender_email: str
+
+
+class SenderDiscardResponse(BaseModel):
+    rule_id: int
+    created: bool  # False si ya existía una regla equivalente (idempotente)
 
 
 class RelevanceMarkRequest(BaseModel):

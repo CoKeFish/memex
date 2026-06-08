@@ -16,7 +16,8 @@ from typing import Any
 
 from sqlalchemy import text
 
-from memex.classifier.rules import classify
+from memex.classifier.rules import ClassificationResult, classify
+from memex.core.sender_tiers import load_overrides, sender_email
 from memex.db import connection
 from memex.logging import get_logger
 
@@ -90,9 +91,22 @@ def run_classification(
             .all()
         )
 
+        overrides = load_overrides(conn, user_id)
         for row in rows:
             stats.scanned += 1
-            result = classify(_coerce_payload(row["payload"]))
+            payload = _coerce_payload(row["payload"])
+            email = sender_email(payload)
+            if email is not None and email in overrides:
+                # "No procesar": el usuario forzó el tier de este remitente (acción asistida del
+                # sistema de calidad). Gana sobre la heurística determinista; solo afecta mensajes
+                # nuevos (este worker corre sobre los no-clasificados).
+                result = ClassificationResult(
+                    tier=overrides[email],
+                    reason="sender_override",
+                    metadata={"rule": "sender_override", "sender_email": email},
+                )
+            else:
+                result = classify(payload)
             stats.bump_tier(result.tier)
             if dry_run:
                 continue

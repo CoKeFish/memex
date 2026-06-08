@@ -17,7 +17,9 @@ from typing import Any
 
 from sqlalchemy import text
 
+from memex.classifier.worker import run_classification
 from memex.core.relevance_marks import set_mark
+from memex.core.sender_tiers import set_override
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.orchestrator import run_extraction
@@ -278,3 +280,57 @@ def test_relevance_mark_endpoints(client: Any, seed_source: dict[str, Any]) -> N
 
 def test_relevance_mark_unknown_inbox_is_404(client: Any) -> None:
     assert client.post("/inbox/999999/relevance", json={"is_relevant": False}).status_code == 404
+
+
+# --- (5) acción asistida: sender→tier ("no procesar") + descartar ---------------- #
+
+
+def _sender_row(client: Any, key: str) -> dict[str, Any]:
+    items = client.get("/quality/senders").json()["items"]
+    return next(s for s in items if s["sender_key"] == key)
+
+
+def test_sender_tier_override_applies_in_classification(seed_source: dict[str, Any]) -> None:
+    sid = seed_source["id"]
+    with connection() as c:
+        set_override(c, user_id=1, sender_email="a@x.com", tier="blacklist")
+    a = _seed_msg(sid, "a1", email="a@x.com", tier=None)  # sin clasificar aún
+    b = _seed_msg(sid, "b1", email="b@x.com", tier=None)
+    run_classification(1)
+    with connection() as c:
+        result = c.execute(
+            text("SELECT inbox_id, tier FROM classifications WHERE inbox_id = ANY(:ids)"),
+            {"ids": [a, b]},
+        ).all()
+    tiers: dict[int, str] = {int(iid): str(tier) for iid, tier in result}
+    assert tiers[a] == "blacklist"  # el override del remitente gana
+    assert tiers[b] == "batch"  # heurística normal (sin marcadores de bulk)
+
+
+def test_sender_tier_and_discard_endpoints(client: Any, seed_source: dict[str, Any]) -> None:
+    sid = seed_source["id"]
+    _seed_msg(sid, "m1", email="c@x.com", tier="batch")
+
+    r = client.post("/quality/senders/tier", json={"sender_email": "c@x.com", "tier": "blacklist"})
+    assert r.status_code == 200
+    assert r.json()["tier"] == "blacklist"
+
+    row = _sender_row(client, "c@x.com")
+    assert row["email"] == "c@x.com"
+    assert row["override_tier"] == "blacklist"
+
+    assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 204
+    assert _sender_row(client, "c@x.com")["override_tier"] is None
+    assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 404
+
+    # descartar crea una regla ignore; el segundo llamado es idempotente (reusa la existente).
+    d1 = client.post("/quality/senders/discard", json={"sender_email": "c@x.com"}).json()
+    assert d1["created"] is True
+    d2 = client.post("/quality/senders/discard", json={"sender_email": "c@x.com"}).json()
+    assert d2["created"] is False
+    assert d2["rule_id"] == d1["rule_id"]
+    with connection() as c:
+        n = c.execute(
+            text("SELECT count(*) FROM filter_rules WHERE user_id = 1 AND action = 'ignore'")
+        ).scalar()
+    assert n == 1
