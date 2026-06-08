@@ -12,6 +12,7 @@ from memex.geo.client import (
     GeoPoint,
     GeoProvider,
     ManualLocationSource,
+    PlaceResult,
     TravelEstimate,
     TravelMode,
 )
@@ -41,6 +42,18 @@ class _StubProvider:
     ) -> TravelEstimate:
         self.last_origin = origin
         return TravelEstimate(duration_s=100, distance_m=200, mode=mode)
+
+    async def reverse_geocode(self, point: GeoPoint) -> GeocodeResult:
+        return GeocodeResult(point=point, formatted_address="stub addr")
+
+    async def nearby_place(
+        self,
+        point: GeoPoint,
+        *,
+        radius_m: float = 50.0,
+        included_types: tuple[str, ...] | None = None,
+    ) -> PlaceResult:
+        return PlaceResult(name="Stub Place", formatted_address="stub addr", point=point)
 
     async def aclose(self) -> None:
         return None
