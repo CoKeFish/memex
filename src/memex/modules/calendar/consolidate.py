@@ -18,6 +18,8 @@ es una capa de proyección por encima.
 
 from __future__ import annotations
 
+import asyncio
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -26,6 +28,14 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.db import connection
+from memex.geo import (
+    GeocodeResult,
+    GeoConfigError,
+    GeoError,
+    GeoNotFoundError,
+    build_provider_from_env,
+    geocode_address,
+)
 from memex.logging import get_logger
 from memex.modules.calendar.conflicts import ConflictEvent, find_conflicts
 
@@ -368,6 +378,107 @@ def _set_outcomes(conn: Connection, outcome_to_ids: dict[str, list[int]]) -> Non
             )
 
 
+# --- Geocoding del lugar (automático, gateado por MEMEX_CALENDAR_GEOCODE) ----------- #
+# El `location` del consolidado es texto libre; si el flag está prendido y hay key, se geocodifica a
+# lat/lng al final de cada consolidación. Idempotente (solo lo que falta o cambió de texto) y
+# best-effort (cualquier fallo de Maps NO rompe la consolidación, que ya está commiteada).
+
+_GEOCODE_FLAG = "MEMEX_CALENDAR_GEOCODE"
+
+
+def _is_geocodable(location: str) -> bool:
+    """`True` si el texto vale la pena geocodificar: no vacío y sin pinta de URL/enlace virtual."""
+    low = location.strip().lower()
+    return bool(low) and "://" not in low and "www." not in low
+
+
+def _pending_geocode(conn: Connection, user_id: int) -> list[tuple[int, str]]:
+    """(id, location) de consolidados con lugar geocodificable y coords faltantes o desactualizadas
+    (el `location` cambió desde el último geocode)."""
+    rows = conn.execute(
+        text(
+            """
+            SELECT id, location FROM mod_calendar_consolidated
+            WHERE user_id = :uid AND NOT deleted AND location <> ''
+              AND (geo_lat IS NULL OR geo_geocoded_from IS DISTINCT FROM location)
+            """
+        ),
+        {"uid": user_id},
+    ).all()
+    return [(int(i), str(loc)) for i, loc in rows if _is_geocodable(str(loc))]
+
+
+async def _geocode_pending(
+    rows: list[tuple[int, str]],
+) -> list[tuple[int, str, GeocodeResult | None]]:
+    """Construye el provider y geocodifica cada `(id, location)`. Devuelve `None` para una
+    dirección que no existe (ZERO_RESULTS) → se marca igual y no se reintenta. Un error de
+    proveedor (cuota / caído) se propaga y corta el lote (se reintenta en otra corrida)."""
+    provider = build_provider_from_env()
+    out: list[tuple[int, str, GeocodeResult | None]] = []
+    try:
+        for cons_id, location in rows:
+            try:
+                out.append((cons_id, location, await geocode_address(provider, location)))
+            except GeoNotFoundError:
+                out.append((cons_id, location, None))
+    finally:
+        await provider.aclose()
+    return out
+
+
+def _write_geo_coords(
+    conn: Connection, results: list[tuple[int, str, GeocodeResult | None]]
+) -> int:
+    """Persiste coords por consolidado (o marca `geo_geocoded_from` sin coords si no hubo match,
+    para no reintentar el mismo texto). Devuelve cuántas filas quedaron con coords."""
+    written = 0
+    for cons_id, location, res in results:
+        conn.execute(
+            text(
+                """
+                UPDATE mod_calendar_consolidated SET
+                    geo_lat = :lat, geo_lng = :lng, geo_place_id = :pid,
+                    geo_geocoded_from = :loc, geo_geocoded_at = NOW()
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": cons_id,
+                "loc": location,
+                "lat": res.point.lat if res is not None else None,
+                "lng": res.point.lng if res is not None else None,
+                "pid": res.provider_place_id if res is not None else None,
+            },
+        )
+        if res is not None:
+            written += 1
+    return written
+
+
+def _geocode_consolidated(user_id: int) -> None:
+    """Geocodifica los lugares de los consolidados del user. Gateado por `MEMEX_CALENDAR_GEOCODE=1`
+    (default apagado: no gasta quota de Maps en tests ni en dev por defecto). Best-effort: sin key o
+    con Maps caído, loguea y vuelve sin romper la consolidación. Corre fuera de la tx principal."""
+    if os.environ.get(_GEOCODE_FLAG) != "1":
+        return
+    with connection() as conn:
+        pending = _pending_geocode(conn, user_id)
+    if not pending:
+        return
+    try:
+        results = asyncio.run(_geocode_pending(pending))
+    except GeoConfigError as e:
+        _log.info("calendar.geocode.skip_no_key", error=str(e))
+        return
+    except GeoError as e:
+        _log.warning("calendar.geocode.failed", user_id=user_id, error=str(e))
+        return
+    with connection() as conn:
+        written = _write_geo_coords(conn, results)
+    _log.info("calendar.geocode.done", user_id=user_id, pending=len(pending), geocoded=written)
+
+
 def run_consolidation(user_id: int) -> ConsolidationStats:
     """Reconstruye la proyección consolidada del user de forma estable e idempotente."""
     stats = ConsolidationStats()
@@ -480,4 +591,7 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
         echoes=stats.echoes,
         conflicts=stats.conflicts,
     )
+    # Geocoding del lugar → coords (automático si MEMEX_CALENDAR_GEOCODE=1; best-effort, fuera de la
+    # tx principal: un fallo de Maps no revierte la consolidación ya commiteada).
+    _geocode_consolidated(user_id)
     return stats
