@@ -5,11 +5,9 @@ LLM, sin mutación, acotado al dueño. La marca manual, la acción "no procesar"
 candidatos llegan en fases posteriores; esta es la vista que las habilita.
 """
 
-import json
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import text
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
@@ -18,13 +16,10 @@ from memex.api.schemas import (
     JudgeResponse,
     RelevanceCandidate,
     RelevanceCandidateList,
-    SenderDiscardRequest,
-    SenderDiscardResponse,
     SenderRelevanceList,
     SenderTierInfo,
     SenderTierRequest,
 )
-from memex.core.filters import create_rule
 from memex.core.sender_tiers import clear_override, set_override
 from memex.db import connection
 from memex.llm import LLMConfigError, LLMQuotaError
@@ -81,38 +76,6 @@ async def clear_sender_tier_endpoint(
         ok = clear_override(conn, user_id=user_id, sender_email=sender_email)
     if not ok:
         raise HTTPException(status_code=404, detail="sin override")
-
-
-@router.post("/senders/discard", response_model=SenderDiscardResponse)
-async def discard_sender_endpoint(user_id: UserID, body: SenderDiscardRequest) -> dict[str, Any]:
-    """Descartar: crea una regla filter_rules ignore para el remitente (drop puro = basura clara).
-
-    Los mensajes futuros se filtran antes de guardarse. Idempotente: reusa una regla equivalente.
-    Reversible desde /filtros.
-    """
-    email = body.sender_email.strip().lower()
-    scope = {"from.email": {"equals": email}}
-    with connection() as conn:
-        existing = conn.execute(
-            text(
-                "SELECT id FROM filter_rules "
-                "WHERE user_id = :uid AND action = 'ignore' AND scope = CAST(:scope AS JSONB)"
-            ),
-            {"uid": user_id, "scope": json.dumps(scope)},
-        ).scalar()
-        if existing is not None:
-            return {"rule_id": int(existing), "created": False}
-        rule_id = create_rule(
-            conn,
-            user_id=user_id,
-            source_type=None,
-            source_id=None,
-            scope=scope,
-            action="ignore",
-            priority=200,
-        )
-    _log.info("quality.sender_discard", user_id=user_id, sender=email, rule_id=rule_id)
-    return {"rule_id": rule_id, "created": True}
 
 
 @router.get("/candidates", response_model=RelevanceCandidateList)

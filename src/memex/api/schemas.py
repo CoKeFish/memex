@@ -251,17 +251,6 @@ class SenderTierInfo(BaseModel):
     updated_at: datetime | None = None
 
 
-class SenderDiscardRequest(BaseModel):
-    """Acción "descartar": crea una regla `filter_rules` ignore para el remitente (drop puro)."""
-
-    sender_email: str
-
-
-class SenderDiscardResponse(BaseModel):
-    rule_id: int
-    created: bool  # False si ya existía una regla equivalente (idempotente)
-
-
 class RelevanceCandidate(BaseModel):
     """Candidato a filtrar detectado por el job (remitente email ruidoso, sin accionar)."""
 

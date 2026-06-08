@@ -39,3 +39,18 @@ def test_filters_crud(client: Any, seed_source: dict[str, Any]) -> None:
 def test_filter_invalid_action_is_422(client: Any) -> None:
     r = client.post("/filters", json={"scope": {}, "action": "nope"})
     assert r.status_code == 422
+
+
+def test_filter_create_is_idempotent(client: Any, seed_source: dict[str, Any]) -> None:
+    """Crear una regla idéntica dos veces no duplica: devuelve la misma (bloquear/descartar 2x)."""
+    body = {
+        "source_type": "imap",
+        "scope": {"from.email": {"equals": "dup@x.com"}},
+        "action": "ignore",
+    }
+    a = client.post("/filters", json=body).json()
+    b = client.post("/filters", json=body).json()
+    assert a["id"] == b["id"]
+    rules = client.get("/filters").json()["items"]
+    same = [r for r in rules if r["scope"] == {"from.email": {"equals": "dup@x.com"}}]
+    assert len(same) == 1

@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/dialog"
 import {
   clearSenderTier,
-  discardSender,
+  createFilter,
   fetchCandidates,
   fetchSenderRelevance,
   judgeSender,
@@ -93,7 +93,7 @@ export function SenderRelevancePage() {
     const msg = p.kind === "no_procesar" ? `No se procesarán: ${p.email}` : `Descartado: ${p.email}`
     void runAction(async () => {
       if (p.kind === "no_procesar") await setSenderTier(p.email)
-      else await discardSender(p.email)
+      else await createFilter({ scope: { "from.email": { equals: p.email } }, action: "ignore" })
       if (p.candidateKey) await setCandidateStatus(p.candidateKey, "confirmed")
     }, msg)
   }

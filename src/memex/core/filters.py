@@ -232,7 +232,31 @@ def create_rule(
     priority: int = 100,
     enabled: bool = True,
 ) -> int:
-    """Inserta una `filter_rule` y devuelve su id. El CHECK de la tabla valida `action`."""
+    """Inserta una `filter_rule` y devuelve su id. Idempotente: si ya existe una idéntica
+    (mismo user/source/scope/action), devuelve su id en vez de crear un duplicado — así bloquear o
+    descartar dos veces el mismo remitente no duplica reglas. El CHECK valida `action`."""
+    existing = conn.execute(
+        text(
+            """
+            SELECT id FROM filter_rules
+            WHERE user_id = :uid
+              AND source_type IS NOT DISTINCT FROM :stype
+              AND source_id IS NOT DISTINCT FROM :sid
+              AND action = :action
+              AND scope = CAST(:scope AS JSONB)
+            ORDER BY id LIMIT 1
+            """
+        ),
+        {
+            "uid": user_id,
+            "stype": source_type,
+            "sid": source_id,
+            "action": action,
+            "scope": json.dumps(scope),
+        },
+    ).scalar()
+    if existing is not None:
+        return int(existing)
     new_id = conn.execute(
         text(
             """

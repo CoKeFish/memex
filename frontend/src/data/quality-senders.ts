@@ -85,14 +85,6 @@ export async function clearSenderTier(email: string): Promise<void> {
   await apiDelete<void>(`/quality/senders/tier?sender_email=${encodeURIComponent(email)}`)
 }
 
-/** "Descartar" un remitente: crea una regla ignore (drop puro) — POST /quality/senders/discard. */
-export async function discardSender(email: string): Promise<{ ruleId: number; created: boolean }> {
-  const r = await apiPost<{ rule_id: number; created: boolean }>("/quality/senders/discard", {
-    sender_email: email,
-  })
-  return { ruleId: r.rule_id, created: r.created }
-}
-
 /** Candidato a filtrar detectado por el job (remitente email ruidoso). */
 export interface RelevanceCandidate {
   senderKey: string

@@ -314,7 +314,7 @@ def test_sender_tier_override_applies_in_classification(seed_source: dict[str, A
     assert tiers[b] == "batch"  # heurística normal (sin marcadores de bulk)
 
 
-def test_sender_tier_and_discard_endpoints(client: Any, seed_source: dict[str, Any]) -> None:
+def test_sender_tier_endpoints(client: Any, seed_source: dict[str, Any]) -> None:
     sid = seed_source["id"]
     _seed_msg(sid, "m1", email="c@x.com", tier="batch")
 
@@ -329,18 +329,6 @@ def test_sender_tier_and_discard_endpoints(client: Any, seed_source: dict[str, A
     assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 204
     assert _sender_row(client, "c@x.com")["override_tier"] is None
     assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 404
-
-    # descartar crea una regla ignore; el segundo llamado es idempotente (reusa la existente).
-    d1 = client.post("/quality/senders/discard", json={"sender_email": "c@x.com"}).json()
-    assert d1["created"] is True
-    d2 = client.post("/quality/senders/discard", json={"sender_email": "c@x.com"}).json()
-    assert d2["created"] is False
-    assert d2["rule_id"] == d1["rule_id"]
-    with connection() as c:
-        n = c.execute(
-            text("SELECT count(*) FROM filter_rules WHERE user_id = 1 AND action = 'ignore'")
-        ).scalar()
-    assert n == 1
 
 
 # --- (6) cola de candidatos (detección automática "por métricas") ---------------- #
