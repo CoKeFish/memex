@@ -10,7 +10,7 @@ Arquitectura interna:
 - `protocol`  — el contrato `LocalPlugin` que cada fuente concreta cumple.
 - `discovery` — carga dinámica de plugins desde `~/.memex-local-client/plugins/`.
 - `registry`  — qué plugins están habilitados (persistido en SQLite local).
-- `state`     — SQLite local con runs, dedup, pending_records.
+- `state`     — SQLite local con plugins y runs (los cursores y el dedup viven server-side).
 - `scheduler` — loop principal del daemon, agenda y dispara plugins.
 - `run`       — wrapper sobre `memex.ingestors.runner.run_ingestor` con
                 bookkeeping local.

@@ -1,15 +1,15 @@
 """SQLite local del cliente — estado operativo del daemon.
 
-Tres tablas:
+Dos tablas:
 
 - `plugins`  — qué plugins están instalados/habilitados, con su schedule y
               su última corrida.
 - `runs`     — historial de ciclos de ingestión (uno por intento por plugin),
               con stats y error si lo hubo.
-- `pending`  — buffer de registros que no pudieron entregarse al gateway
-              (transporte caído, retry). Memex deduplica server-side, pero
-              tener un buffer local ahorra re-fetchear desde la fuente
-              cuando el gateway vuelve.
+
+Ante un fallo de entrega al gateway NO se bufferea local: la corrida queda en
+`error` y la próxima re-fetchea desde la fuente; el dedup server-side
+(UNIQUE(source_id, external_id)) absorbe lo repetido.
 
 Los checkpoints (cursores IMAP, etc.) **no viven acá** — viven en memex vía
 `/sources/{id}/checkpoint`, igual que para los ingestors del VPS. Decisión
@@ -53,16 +53,6 @@ CREATE TABLE IF NOT EXISTS runs (
     error_msg      TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_by_plugin ON runs(plugin_name, id DESC);
-
-CREATE TABLE IF NOT EXISTS pending (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    plugin_name    TEXT NOT NULL,
-    payload_json   TEXT NOT NULL,
-    enqueued_at    TEXT NOT NULL,
-    attempts       INTEGER NOT NULL DEFAULT 0,
-    last_error     TEXT
-);
-CREATE INDEX IF NOT EXISTS pending_by_plugin ON pending(plugin_name, id);
 """
 
 

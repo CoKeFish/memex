@@ -30,6 +30,10 @@ UserID = Annotated[int, Depends(current_user_id)]
 
 _log = get_logger("memex.sources")
 
+# Piso del intervalo de agendado: por debajo de esto un fetch_schedule martillaría la fuente (y
+# gastaría API de paga en redes). El daemon además tiene su tick; esto corta el vector por API.
+MIN_FETCH_INTERVAL_S = 60.0
+
 _SOURCE_SELECT = """
     SELECT s.id, s.user_id, s.name, s.type, s.enabled, s.config, s.created_at,
            s.account_id, s.fetch_schedule, a.alias AS account_alias
@@ -221,12 +225,20 @@ async def patch_source(source_id: int, body: SourcePatch, user_id: UserID) -> di
             schedule = fields["fetch_schedule"]
             if schedule is not None:
                 try:
-                    parse_duration(str(schedule))
+                    interval = parse_duration(str(schedule))
                 except ValueError as e:
                     raise HTTPException(
                         status_code=422,
                         detail=f"fetch_schedule inválido (ISO-8601, ej. PT1H): {schedule!r}",
                     ) from e
+                if interval < MIN_FETCH_INTERVAL_S:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"fetch_schedule mínimo {MIN_FETCH_INTERVAL_S:.0f}s — un intervalo más "
+                            "corto martillaría la fuente (y gasta API de paga en redes)"
+                        ),
+                    )
             sets.append("fetch_schedule = :fetch_schedule")
             params["fetch_schedule"] = schedule
         if fields.get("name") is not None:

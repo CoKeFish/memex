@@ -226,3 +226,16 @@ def test_delete_checkpoint_resets(client: Any, seed_source: dict[str, Any]) -> N
     client.put(f"/sources/{sid}/checkpoint", json={"cursor": {"last_uid": 7}})
     assert client.delete(f"/sources/{sid}/checkpoint").status_code == 204
     assert client.get(f"/sources/{sid}/checkpoint").json() == {"cursor": None}
+
+
+def test_patch_source_rejects_sub_minimum_schedule(
+    client: Any, seed_source: dict[str, Any]
+) -> None:
+    """fetch_schedule por debajo del piso (60s) → 422; un intervalo razonable se acepta."""
+    r = client.patch(f"/sources/{seed_source['id']}", json={"fetch_schedule": "PT5S"})
+    assert r.status_code == 422
+    # Un intervalo razonable sigue aceptándose.
+    assert (
+        client.patch(f"/sources/{seed_source['id']}", json={"fetch_schedule": "PT15M"}).status_code
+        == 200
+    )
