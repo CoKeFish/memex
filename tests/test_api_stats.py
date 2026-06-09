@@ -348,3 +348,91 @@ def test_overview_cross_tenant(client: Any, seed_user2: int) -> None:
     _seed_inbox(s2, user_id=seed_user2, external_id="theirs-pending")
     body = client.get("/stats/overview").json()
     assert body["inbox_pending"] == 0
+
+
+# --- /stats/alerts (OBS-4: alertas REALES, no mock) ----------------------------------------------
+
+
+def test_alerts_empty(client: Any) -> None:
+    assert client.get("/stats/alerts").json() == []
+
+
+def test_alerts_failed_source(client: Any) -> None:
+    sid = _seed_source("imap-x")
+    _seed_run(
+        sid,
+        status="failed",
+        error_message="AUTH falló",
+        started_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )
+    items = client.get("/stats/alerts").json()
+    assert len(items) == 1
+    a = items[0]
+    assert a["kind"] == "run-failed"
+    assert a["severity"] == "alta"
+    assert "imap-x" in a["title"]
+    assert a["detail"] == "AUTH falló"
+    assert a["deep_link"] == "/pipeline"
+
+
+def test_alerts_recovered_source_no_alert(client: Any) -> None:
+    """Si la ÚLTIMA corrida fue ok, la fuente NO alerta (aunque antes haya fallado)."""
+    sid = _seed_source("s")
+    _seed_run(sid, status="failed", started_at=datetime(2026, 6, 1, tzinfo=UTC))
+    _seed_run(sid, status="ok", started_at=datetime(2026, 6, 2, tzinfo=UTC))
+    assert client.get("/stats/alerts").json() == []
+
+
+def test_alerts_stale_worker(client: Any) -> None:
+    _seed_worker("summarize", status="running", started_at=datetime.now(UTC) - timedelta(hours=1))
+    items = client.get("/stats/alerts").json()
+    assert [a["kind"] for a in items] == ["worker-stale"]
+    assert "summarize" in items[0]["title"]
+
+
+def test_alerts_worker_error_vs_saldo(client: Any) -> None:
+    """Worker en error → 'run-failed'; si el error delata saldo/cuota → 'saldo' (crítica)."""
+    when = datetime(2026, 6, 1, tzinfo=UTC)
+    _seed_worker("extract", status="error", error="boom genérico", started_at=when)
+    _seed_worker(
+        "summarize", status="error", error="DeepSeek 402 insufficient balance", started_at=when
+    )
+    by_id = {a["id"]: a for a in client.get("/stats/alerts").json()}
+    assert by_id["worker-extract"]["kind"] == "run-failed"
+    assert by_id["worker-extract"]["severity"] == "alta"
+    assert by_id["worker-summarize"]["kind"] == "saldo"
+    assert by_id["worker-summarize"]["severity"] == "critica"
+
+
+def test_alerts_review_backlog(client: Any) -> None:
+    sid = _seed_source("s")
+    iid = _seed_inbox(sid, processed_at=datetime.now(UTC))
+    _seed_failure(iid, status="review")
+    _seed_conflict(status="pending")
+    review = [a for a in client.get("/stats/alerts").json() if a["kind"] == "review"]
+    assert len(review) == 1
+    assert "2" in review[0]["title"]  # 1 dead-letter + 1 conflicto
+    assert review[0]["severity"] == "info"
+    assert review[0]["deep_link"] == "/revision"
+
+
+def test_alerts_sorted_most_severe_first(client: Any) -> None:
+    sid = _seed_source("s")
+    _seed_run(sid, status="failed", started_at=datetime(2026, 6, 1, tzinfo=UTC))  # alta
+    _seed_worker(
+        "summarize",
+        status="error",
+        error="402 insufficient",
+        started_at=datetime(2026, 6, 1, tzinfo=UTC),
+    )  # critica
+    iid = _seed_inbox(sid, processed_at=datetime.now(UTC))
+    _seed_failure(iid, status="review")  # info
+    sevs = [a["severity"] for a in client.get("/stats/alerts").json()]
+    assert sevs[0] == "critica"
+    assert sevs[-1] == "info"
+
+
+def test_alerts_cross_tenant(client: Any, seed_user2: int) -> None:
+    s2 = _seed_source("theirs", user_id=seed_user2)
+    _seed_run(s2, user_id=seed_user2, status="failed", started_at=datetime(2026, 6, 1, tzinfo=UTC))
+    assert client.get("/stats/alerts").json() == []

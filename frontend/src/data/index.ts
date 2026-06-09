@@ -112,22 +112,9 @@ export { getMessageJourney } from "@/mocks/journey"
 // de llm_calls (fetchLogEvents) y los mocks getLogEvents/buildObsTimeline.
 export * from "./logs"
 
-// ---- Getters mock síncronos sobre los seeds existentes ------------------------
+// ---- Getter mock síncrono sobre el seed de cuenta (sin endpoint todavía) ------
 import { account } from "@/mocks/account"
-import { inbox, reviewItems, seedAlerts } from "@/mocks"
-import type { Account, AlertEvent, InboxRow, ReviewItem } from "@/types/domain"
-
-export function getInbox(): InboxRow[] {
-  return inbox
-}
-
-export function getReviewItems(): ReviewItem[] {
-  return reviewItems
-}
-
-export function getSeedAlerts(): AlertEvent[] {
-  return seedAlerts
-}
+import type { Account } from "@/types/domain"
 
 export function getAccount(): Account {
   return account

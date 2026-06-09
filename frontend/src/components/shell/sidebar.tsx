@@ -2,6 +2,8 @@ import { ChevronDown } from "lucide-react"
 import { useEffect, useState } from "react"
 import { NavLink } from "react-router-dom"
 import { cn } from "@/lib/utils"
+import { fetchMe } from "@/data/auth"
+import { useAsync } from "@/lib/use-async"
 import { useAlerts } from "@/state/alerts"
 import { NAV_GROUPS, type NavItem } from "./nav"
 
@@ -151,6 +153,7 @@ export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export function Sidebar() {
+  const { data: me } = useAsync(fetchMe, [])
   return (
     <aside className="hidden w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar md:flex">
       <Brand />
@@ -160,7 +163,9 @@ export function Sidebar() {
       </div>
       <div className="border-t border-sidebar-border px-4 py-3">
         <div className="eyebrow mb-1">single-user</div>
-        <p className="text-xs text-muted-foreground">me@local · datos mock</p>
+        <p className="truncate text-xs text-muted-foreground">
+          {me?.displayName ?? me?.email ?? "local"}
+        </p>
       </div>
     </aside>
   )
