@@ -32,6 +32,27 @@ class Settings(BaseSettings):
     # valor es el umbral por encima del cual el handler LLM de identidades (relations_llm) releva.
     cooccurrence_cap: int = 8
 
+    # --- Clusterización del grafo: cúmulos (detección de comunidades + validador LLM) ---
+    # Detección Louvain (networkx) sobre aristas confirmed + validación LLM por cúmulo. On-demand y
+    # apagado por default. Pistas excluidas (peso 0); subir `cluster_w_pista` tras medir. Ver
+    # relations/clustering.py.
+    cluster_resolution: float = 1.0  # Louvain: >1 cúmulos chicos, <1 grandes
+    cluster_seed: int = 42  # determinismo (con networkx pineado)
+    cluster_min_size: int = 3  # mínimo de vértices de un cúmulo
+    cluster_w_confirmed: float = 1.0  # peso de arista confirmed real
+    cluster_w_cooc_confirmed: float = 0.6  # peso de co-ocurrencia confirmada por LLM
+    cluster_w_pista: float = 0.0  # peso de pista (0 = excluida); knob para medir
+    cluster_pair_weight_max: float = 3.0  # tope al sumar multi-aristas del par
+    cluster_recurse_factor: float = 2.0  # re-clusteriza un oversize a esta x resolution
+    cluster_recurse_max_depth: int = 2  # profundidad de esa recursión
+    cluster_match_jaccard: float = 0.5  # umbral inclusivo detectado vs persistido
+    cluster_stable_jaccard: float = 0.9  # deriva >= esto en confirmed: no re-valida
+    cluster_reject_memo_jaccard: float = 0.85  # cerca de un rechazo memo: se suprime
+    cluster_dissolve_grace: int = 0  # corridas que un confirmed sobrevive sin match
+    cluster_max_members: int = 80  # cúmulo mayor a esto no va al LLM (skip + log)
+    cluster_min_confidence: float = 0.6  # keep exige confianza >= esto
+    cluster_validate_limit: int = 25  # cúmulos por corrida del validador LLM
+
     # --- Sistema de calidad: detección automática de remitentes no relevantes ("por métricas") ---
     # El job `relevance` (apagado por default) marca como CANDIDATO a un remitente email con volumen
     # >= quality_min_messages y % de relevancia <= quality_max_relevance_pct. Sin auto-aplicar: la

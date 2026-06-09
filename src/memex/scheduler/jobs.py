@@ -34,6 +34,9 @@ from memex.modules.identidades.sync import run_sync as run_identidades_sync
 from memex.modules.orchestrator import run_extraction
 from memex.ocr.worker import run_ocr
 from memex.quality.candidates import run_relevance_detection
+from memex.relations.clusters_llm import run_cluster_validation
+from memex.relations.deterministic import build_relations
+from memex.relations.reconcile import detect_and_reconcile
 from memex.summarizer.worker import run_summarization
 
 _log = get_logger("memex.scheduler.jobs")
@@ -341,6 +344,55 @@ async def run_identidades_cycle(user_id: int) -> IdentidadesCycleStats:
     return cycle
 
 
+@dataclass
+class GraphCycleStats:
+    """Roll-up de un ciclo del grafo: build determinista + detección/reconciliación de cúmulos +
+    validación LLM de los pendientes."""
+
+    detected: int = 0
+    new_candidates: int = 0
+    confirmed: int = 0
+    rejected: int = 0
+    errors: int = 0
+    steps_failed: list[str] = field(default_factory=list)
+
+
+def _graph_detect(user_id: int) -> Any:
+    """build_relations + detect_and_reconcile en una tx (sync, para `to_thread`)."""
+    with connection() as conn:
+        build_relations(conn, user_id)
+        return detect_and_reconcile(conn, user_id)
+
+
+async def run_graph_cycle(user_id: int) -> GraphCycleStats:
+    """Ciclo del grafo: build (determinista) → detección + reconciliación de cúmulos (determinista,
+    sync) → validación LLM de los pendientes. Best-effort por PASO: un paso que falla se loguea y no
+    frena el resto. `LLMQuotaError` corta SOLO la validación (lo determinista ya corrió). Arranca
+    APAGADO (no está en `enabled_jobs`)."""
+    cycle = GraphCycleStats()
+    try:
+        r = await asyncio.to_thread(_graph_detect, user_id)
+        cycle.detected = r.detected
+        cycle.new_candidates = r.new_candidates
+    except Exception as e:  # best-effort por paso
+        cycle.errors += 1
+        cycle.steps_failed.append("detect")
+        _log.warning("scheduler.graph.step_failed", step="detect", error=str(e))
+    try:
+        v = await run_cluster_validation(user_id)
+        cycle.confirmed += v.confirmed
+        cycle.rejected += v.rejected
+        cycle.errors += v.errors
+    except LLMQuotaError:
+        cycle.steps_failed.append("validate:no_quota")
+        _log.error("scheduler.graph.aborted_no_quota", step="validate")
+    except Exception as e:
+        cycle.errors += 1
+        cycle.steps_failed.append("validate")
+        _log.warning("scheduler.graph.step_failed", step="validate", error=str(e))
+    return cycle
+
+
 # Registry de jobs. NOTA OCR: su claim de `media_assets` NO usa FOR UPDATE SKIP LOCKED → es seguro
 # solo porque el scheduler corre los jobs EN SERIE. Si algún día se corren en paralelo, agregar
 # SKIP LOCKED al worker de OCR antes de habilitar esa concurrencia.
@@ -353,6 +405,7 @@ _REGISTRY: dict[str, Job] = {
     "finance": Job("finance", "PT1H", run_finance_cycle),
     "identidades": Job("identidades", "PT1H", run_identidades_cycle),
     "relevance": Job("relevance", "P1D", _sync(run_relevance_detection)),
+    "graph": Job("graph", "P1D", run_graph_cycle),
     "log_purge": Job("log_purge", "P1D", _sync(run_log_purge)),
 }
 

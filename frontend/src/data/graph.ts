@@ -39,6 +39,27 @@ export interface GraphBuildResult {
   highFanoutSkipped: number
 }
 
+export interface GraphClusterResult {
+  detected: number
+  newCandidates: number
+  matchedSame: number
+  matchedDrift: number
+  memoSkipped: number
+  deleted: number
+  dissolved: number
+}
+
+export interface GraphClusterValidateResult {
+  clusters: number
+  confirmed: number
+  rejected: number
+  prunedMembers: number
+  skipped: number
+  errors: number
+  llmCalls: number
+  costUsd: number
+}
+
 interface EdgeApiRow {
   id: number
   src_slug: string
@@ -110,5 +131,53 @@ export async function buildGraph(): Promise<GraphBuildResult> {
     pertenenciaReales: r.pertenencia_reales ?? 0,
     contraparteReales: r.contraparte_reales ?? 0,
     highFanoutSkipped: r.high_fanout_skipped,
+  }
+}
+
+/** Detecta los cúmulos (Louvain) y los reconcilia contra lo persistido (POST /graph/cluster, sin
+ *  LLM). Idempotente: re-detectar la misma partición no cambia nada. */
+export async function clusterGraph(): Promise<GraphClusterResult> {
+  const r = await apiPost<{
+    detected: number
+    new_candidates: number
+    matched_same: number
+    matched_drift: number
+    memo_skipped: number
+    deleted: number
+    dissolved: number
+  }>("/graph/cluster")
+  return {
+    detected: r.detected,
+    newCandidates: r.new_candidates,
+    matchedSame: r.matched_same,
+    matchedDrift: r.matched_drift,
+    memoSkipped: r.memo_skipped,
+    deleted: r.deleted,
+    dissolved: r.dissolved,
+  }
+}
+
+/** Valida con el LLM los cúmulos pendientes (POST /graph/cluster/validate): confirma/nombra/poda y
+ *  materializa las aristas `miembro_de`. Usa el LLM → TIENE COSTO. Solo toca los pendientes. */
+export async function validateClusters(): Promise<GraphClusterValidateResult> {
+  const r = await apiPost<{
+    clusters: number
+    confirmed: number
+    rejected: number
+    pruned_members: number
+    skipped: number
+    errors: number
+    llm_calls: number
+    cost_usd: number
+  }>("/graph/cluster/validate")
+  return {
+    clusters: r.clusters,
+    confirmed: r.confirmed,
+    rejected: r.rejected,
+    prunedMembers: r.pruned_members,
+    skipped: r.skipped,
+    errors: r.errors,
+    llmCalls: r.llm_calls,
+    costUsd: r.cost_usd,
   }
 }

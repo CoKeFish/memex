@@ -1,14 +1,23 @@
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import text
 
 from memex.api.auth import current_user_id
-from memex.api.schemas import GraphBuildResult, GraphResponse
+from memex.api.schemas import (
+    GraphBuildResult,
+    GraphClusterResult,
+    GraphClustersResponse,
+    GraphClusterValidateResult,
+    GraphResponse,
+)
 from memex.config import settings
 from memex.db import connection
 from memex.logging import get_logger
+from memex.relations.clusters_llm import run_cluster_validation
 from memex.relations.deterministic import build_relations, vertex_inbox_ids
 from memex.relations.edges import list_edges
+from memex.relations.reconcile import detect_and_reconcile
 from memex.relations.vertices import list_vertices
 
 router = APIRouter(prefix="/graph", tags=["graph"])
@@ -111,4 +120,90 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         "cumple_reales": stats.cumple_reales,
         "high_fanout_skipped": stats.high_fanout_skipped,
         "orphans_pruned": stats.orphans_pruned,
+        "cluster_edges": stats.cluster_edges,
     }
+
+
+@router.post("/cluster", response_model=GraphClusterResult)
+async def cluster_graph(user_id: UserID) -> dict[str, Any]:
+    """Detecta los cúmulos (Louvain) y los reconcilia contra lo persistido. On-demand, SIN LLM e
+    idempotente: re-detectar la misma partición no cambia nada. NO dispara el armado del grafo
+    (POST /graph/build) ni la validación LLM (POST /graph/cluster/validate)."""
+    with connection() as conn:
+        stats = detect_and_reconcile(conn, user_id)
+    _log.info(
+        "graph.cluster.api",
+        user_id=user_id,
+        detected=stats.detected,
+        new_candidates=stats.new_candidates,
+        dissolved=stats.dissolved,
+    )
+    return {
+        "detected": stats.detected,
+        "matched_same": stats.matched_same,
+        "matched_drift": stats.matched_drift,
+        "new_candidates": stats.new_candidates,
+        "memo_skipped": stats.memo_skipped,
+        "deleted": stats.deleted,
+        "dissolved": stats.dissolved,
+    }
+
+
+@router.post("/cluster/validate", response_model=GraphClusterValidateResult)
+async def validate_clusters(
+    user_id: UserID,
+    limit: Annotated[int | None, Query(description="máximo de cúmulos a validar")] = None,
+) -> dict[str, Any]:
+    """Valida con el LLM los cúmulos pendientes (candidate / needs_revalidation): confirma, nombra,
+    describe y poda, y materializa las aristas `miembro_de`. Usa el LLM (cuesta); on-demand. Solo
+    toca los pendientes (un confirmado estable no se re-juzga)."""
+    stats = await run_cluster_validation(user_id, limit=limit)
+    _log.info(
+        "graph.cluster.validate.api",
+        user_id=user_id,
+        confirmed=stats.confirmed,
+        rejected=stats.rejected,
+        errors=stats.errors,
+    )
+    return {
+        "clusters": stats.clusters,
+        "confirmed": stats.confirmed,
+        "rejected": stats.rejected,
+        "pruned_members": stats.pruned_members,
+        "skipped": stats.skipped,
+        "errors": stats.errors,
+        "llm_calls": stats.cost.calls,
+        "cost_usd": float(stats.cost.cost_usd),
+    }
+
+
+@router.get("/clusters", response_model=GraphClustersResponse)
+async def list_clusters(
+    user_id: UserID,
+    status: Annotated[str | None, Query(description="filtra por estado del cúmulo")] = None,
+) -> dict[str, Any]:
+    """Lista los cúmulos del user (opcionalmente filtrados por `status`)."""
+    sql = (
+        "SELECT id, status, name, description, confidence, member_count "
+        "FROM relation_clusters WHERE user_id = :u"
+    )
+    params: dict[str, Any] = {"u": user_id}
+    if status is not None:
+        sql += " AND status = :st"
+        params["st"] = status
+    sql += " ORDER BY status, id"
+    with connection() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+    clusters = [
+        {
+            "id": int(r["id"]),
+            "status": str(r["status"]),
+            "name": str(r["name"]),
+            "description": str(r["description"]),
+            "confidence": float(r["confidence"]) if r["confidence"] is not None else None,
+            "member_count": int(r["member_count"]),
+        }
+        for r in rows
+    ]
+    _log.info("graph.clusters.api", user_id=user_id, clusters=len(clusters))
+    return {"clusters": clusters}

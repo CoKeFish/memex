@@ -24,6 +24,11 @@ dependencies = [
     "pyzipper>=0.4.0",
     "cryptography>=44",
     "argon2-cffi>=23",
+    # Detección de comunidades del grafo de relaciones (cúmulos). louvain_communities es PURO-Python
+    # (sin scipy/build nativo — importa en Windows). PINEADO a 3.6.x a propósito: un bump de minor
+    # reordena las particiones de Louvain → cambia las `signature` de los cúmulos → re-validación
+    # masiva; subir networkx es un evento de re-clusterización DELIBERADO (ver relations/clustering.py).
+    "networkx>=3.6,<3.7",
 ]
 
 [dependency-groups]
@@ -64,6 +69,7 @@ memex-scheduler = "memex.scheduler.cli:main"
 memex-ingest-scheduler = "memex.ingest_scheduler.cli:main"
 memex-geo = "memex.geo.cli:main"
 memex-quality = "memex.quality.cli:main"
+memex-graph = "memex.relations.cli:main"
 
 [tool.ruff]
 target-version = "py312"
@@ -111,6 +117,13 @@ follow_imports = "skip"
 module = "pyzipper"
 ignore_missing_imports = true
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# networkx trae py.typed pero sus anotaciones de community/* son incompletas. Mismos términos que
+# telethon: lo tratamos como `Any` en el único punto de contacto (memex/relations/clustering.py),
+# con nuestras firmas (CandidateCluster/detect_clusters) tipadas hacia afuera.
+module = "networkx.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

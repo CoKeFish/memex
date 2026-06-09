@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
-import { Hammer, Loader2, Maximize2 } from "lucide-react"
+import { Boxes, Hammer, Loader2, Maximize2, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/common/page-header"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { buildGraph, fetchGraph } from "@/data"
+import { buildGraph, clusterGraph, fetchGraph, validateClusters } from "@/data"
 import type { GraphData, GraphEdge, GraphNode } from "@/data/graph"
 import { useAsync } from "@/lib/use-async"
+
+// Color del vértice nativo «cúmulo» (un grupo validado por el LLM) + su arista de membresía.
+const CUMULO_COLOR = "#8b5cf6"
 
 const KIND_COLOR: Record<string, string> = {
   transaccion: "#10b981",
@@ -19,6 +22,7 @@ const KIND_COLOR: Record<string, string> = {
   organizacion: "#f97316",
   registro: "#eab308",
   habito: "#ec4899",
+  cumulo: CUMULO_COLOR,
 }
 const KIND_LABEL: Record<string, string> = {
   transaccion: "Cobro/pago",
@@ -28,6 +32,7 @@ const KIND_LABEL: Record<string, string> = {
   organizacion: "Organización",
   registro: "Registro",
   habito: "Hábito",
+  cumulo: "Cúmulo",
 }
 const kindColor = (k: string): string => KIND_COLOR[k] ?? "#64748b"
 const nodeKey = (slug: string, id: number): string => `${slug}#${id}`
@@ -162,9 +167,10 @@ function fitView(b: Layout["bounds"]): View {
   return { k, x: VW / 2 - cx * k, y: VH / 2 - cy * k }
 }
 
-function edgeStyle(status: string): { stroke: string; width: number; dash?: string } {
-  if (status === "confirmed") return { stroke: "#22c55e", width: 2 }
-  if (status === "rejected") return { stroke: "#ef4444", width: 1.5, dash: "2 4" }
+function edgeStyle(e: GraphEdge): { stroke: string; width: number; dash?: string } {
+  if (e.relationType === "miembro_de") return { stroke: CUMULO_COLOR, width: 2.2 } // membresía de cúmulo
+  if (e.status === "confirmed") return { stroke: "#22c55e", width: 2 }
+  if (e.status === "rejected") return { stroke: "#ef4444", width: 1.5, dash: "2 4" }
   return { stroke: "#94a3b8", width: 1.5, dash: "5 4" } // pista
 }
 
@@ -265,7 +271,7 @@ function GraphCanvas({
           const a = lay.byKey.get(nodeKey(e.srcSlug, e.srcId))
           const b = lay.byKey.get(nodeKey(e.dstSlug, e.dstId))
           if (!a || !b) return null
-          const st = edgeStyle(e.status)
+          const st = edgeStyle(e)
           const lit = !focus || (incident.has(a.key) && incident.has(b.key))
           return (
             <line
@@ -284,7 +290,9 @@ function GraphCanvas({
           )
         })}
         {lay.sims.map((s) => {
-          const r = (6 + Math.min(s.deg, 10) * 0.6) / view.k
+          const isCumulo = s.node.slug === "cumulo"
+          const r =
+            (isCumulo ? 11 + Math.min(s.deg, 16) * 0.7 : 6 + Math.min(s.deg, 10) * 0.6) / view.k
           const isSel = selected === s.key
           const dim = focus && !incident.has(s.key) ? 0.18 : 1
           return (
@@ -300,19 +308,29 @@ function GraphCanvas({
               }}
               style={{ cursor: "pointer" }}
             >
+              {isCumulo && (
+                <circle
+                  r={r + 5 / view.k}
+                  fill={CUMULO_COLOR}
+                  opacity={0.14}
+                  stroke={CUMULO_COLOR}
+                  strokeOpacity={0.5}
+                  strokeWidth={1.2 / view.k}
+                />
+              )}
               <circle
                 r={r}
                 fill={kindColor(s.node.kind)}
                 stroke={isSel ? "#0f172a" : "white"}
                 strokeWidth={(isSel ? 2.5 : 1.5) / view.k}
               />
-              {(labelsAlways || focus === s.key) && (
+              {(labelsAlways || isCumulo || focus === s.key) && (
                 <text
                   y={r + 11 / view.k}
                   textAnchor="middle"
-                  fontSize={10 / view.k}
+                  fontSize={(isCumulo ? 11 : 10) / view.k}
                   className="fill-foreground"
-                  style={{ pointerEvents: "none" }}
+                  style={{ pointerEvents: "none", fontWeight: isCumulo ? 600 : 400 }}
                 >
                   {s.node.label.length > 24 ? `${s.node.label.slice(0, 23)}…` : s.node.label}
                 </text>
@@ -330,6 +348,7 @@ function DetailPanel({ node, edges, nodesByKey }: { node: GraphNode; edges: Grap
   const mine = edges.filter(
     (e) => nodeKey(e.srcSlug, e.srcId) === nodeKey(node.slug, node.id) || nodeKey(e.dstSlug, e.dstId) === nodeKey(node.slug, node.id),
   )
+  const isCumulo = node.slug === "cumulo"
   return (
     <div className="w-full shrink-0 space-y-3 rounded-lg border bg-card p-3 text-sm md:w-72">
       <div>
@@ -346,10 +365,12 @@ function DetailPanel({ node, edges, nodesByKey }: { node: GraphNode; edges: Grap
       </div>
       <div>
         <div className="mb-1 text-xs font-medium text-muted-foreground">
-          Relaciones ({mine.length})
+          {isCumulo ? `Miembros (${mine.length})` : `Relaciones (${mine.length})`}
         </div>
         {mine.length === 0 ? (
-          <p className="text-xs text-muted-foreground">Sin aristas. (Las semánticas llegan con el LLM.)</p>
+          <p className="text-xs text-muted-foreground">
+            {isCumulo ? "Sin miembros." : "Sin aristas. (Las semánticas llegan con el LLM.)"}
+          </p>
         ) : (
           <ul className="space-y-1.5">
             {mine.map((e) => {
@@ -420,6 +441,12 @@ function Legend() {
         </svg>
         Pista
       </span>
+      <span className="inline-flex items-center gap-1.5">
+        <svg width="20" height="6">
+          <line x1="0" y1="3" x2="20" y2="3" stroke={CUMULO_COLOR} strokeWidth="2.2" />
+        </svg>
+        Miembro de cúmulo
+      </span>
     </div>
   )
 }
@@ -433,6 +460,8 @@ export function GraphPage() {
   const [onlyConnected, setOnlyConnected] = useState(true)
   const [selected, setSelected] = useState<string | null>(null)
   const [building, setBuilding] = useState(false)
+  const [clustering, setClustering] = useState(false)
+  const [validating, setValidating] = useState(false)
   const { data, loading, error, reload } = useAsync<GraphData>(
     () => fetchGraph(status === "todas" ? undefined : status, inboxId),
     [status, inboxId],
@@ -474,12 +503,44 @@ export function GraphPage() {
     }
   }
 
+  async function onCluster() {
+    setClustering(true)
+    try {
+      const r = await clusterGraph()
+      toast.success(
+        `Cúmulos: ${r.detected} detectados · ${r.newCandidates} nuevos · ${r.dissolved} disueltos`,
+      )
+      reload()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "No se pudieron detectar los cúmulos")
+    } finally {
+      setClustering(false)
+    }
+  }
+
+  async function onValidate() {
+    if (!window.confirm("¿Validar los cúmulos pendientes con el LLM? Tiene un costo por llamada.")) return
+    setValidating(true)
+    try {
+      const r = await validateClusters()
+      toast.success(
+        `Validados: ${r.confirmed} confirmados · ${r.rejected} rechazados · ` +
+          `${r.prunedMembers} podados ($${r.costUsd.toFixed(4)})`,
+      )
+      reload()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "No se pudo validar (¿DEEPSEEK_API_KEY?)")
+    } finally {
+      setValidating(false)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <PageHeader
         eyebrow="relaciones · grafo"
         title="Grafo de relaciones"
-        description="Cada vértice es una entidad única (cobro/pago, evento, hackatón, persona, organización). Las aristas las forman el inbox (co-ocurrencia = PISTA, sin vouchar) y los datos reales (afiliación/pertenencia del directorio y la contraparte de cada cobro→identidad = REAL); el LLM valida las pistas después. Filtrá «Reales» para ver solo lo confirmado. Rueda = zoom · arrastrá = mover · click en un nodo = ver sus relaciones."
+        description="Cada vértice es una entidad única (cobro/pago, evento, hackatón, persona, organización). Las aristas las forman el inbox (co-ocurrencia = PISTA, sin vouchar) y los datos reales (afiliación/pertenencia del directorio y la contraparte de cada cobro→identidad = REAL). Los CÚMULOS (nodos violeta) son grupos de vértices que el LLM validó como un contexto: «Detectar cúmulos» los arma sobre las aristas reales y «Validar (LLM)» los confirma y nombra. Filtrá «Reales» para ver solo lo confirmado. Rueda = zoom · arrastrá = mover · click en un nodo = ver sus relaciones/miembros."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {inboxId != null && (
@@ -510,6 +571,14 @@ export function GraphPage() {
             <Button size="sm" variant="outline" onClick={onBuild} disabled={building}>
               {building ? <Loader2 className="size-4 animate-spin" /> : <Hammer className="size-4" />}
               Armar grafo
+            </Button>
+            <Button size="sm" variant="outline" onClick={onCluster} disabled={clustering}>
+              {clustering ? <Loader2 className="size-4 animate-spin" /> : <Boxes className="size-4" />}
+              Detectar cúmulos
+            </Button>
+            <Button size="sm" variant="outline" onClick={onValidate} disabled={validating}>
+              {validating ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
+              Validar (LLM)
             </Button>
           </div>
         }

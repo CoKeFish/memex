@@ -6,7 +6,7 @@ Solo LEE (ADR-001/ADR-015): cada módulo sigue dueño de su tabla; esta capa no 
 identidades (`identidades:person`/`identidades:org`) y apunta a lo CONSOLIDADO (calendar y finance,
 no a los crudos) — un vértice por entidad real, no por fila duplicada. inbox NO es vértice: es
 procedencia (`source_inbox_ids`), accesible por drill-down, no un nodo del grafo. Los cúmulos
-(vértices nativos) se sumarán acá cuando existan.
+(vértices NATIVOS del grafo) se proyectan de `relation_clusters` (solo los confirmados).
 """
 
 from __future__ import annotations
@@ -72,6 +72,13 @@ NODE_SOURCES: tuple[NodeSource, ...] = (
         "registro",
     ),
     NodeSource("bienestar:habito", "mod_bienestar_habits", "name", "habito", where="active"),
+    NodeSource(
+        "cumulo",
+        "relation_clusters",
+        "COALESCE(NULLIF(name, ''), '(cúmulo)')",
+        "cumulo",
+        where="status = 'confirmed'",
+    ),
 )
 
 _BY_SLUG: dict[str, NodeSource] = {s.slug: s for s in NODE_SOURCES}

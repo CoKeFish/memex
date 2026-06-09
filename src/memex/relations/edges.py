@@ -59,6 +59,18 @@ PRODUCERS: frozenset[str] = frozenset(
     }
 )
 
+# --- Tipos de relación con semántica fija (las demás `relation_type` son libres) ----- #
+#: Pertenencia de un vértice a un CÚMULO: arista `miembro → cumulo` que materializa la membresía de
+#: un cúmulo confirmado (la forma el validador LLM, `producer='llm'`). Distinta de `pertenece_a`
+#: (jerarquía sub→padre de identidades). El paso de detección la EXCLUYE del grafo a clusterizar.
+RELTYPE_MIEMBRO_DE = "miembro_de"
+#: Tipo de relación de la co-ocurrencia (mismo mensaje); lo usan tanto la pista determinista como la
+#: confirmación del LLM — por eso el peso de clusterización se decide por `(status, relation_type)`.
+RELTYPE_COOCURRENCIA = "co-ocurrencia"
+#: Slug del vértice NATIVO del grafo «cúmulo» (no sale de una tabla `mod_*`: lo proyecta
+#: `relation_clusters`). Es el destino de las aristas `miembro_de`.
+CUMULO_SLUG = "cumulo"
+
 
 @dataclass(frozen=True)
 class Ref:

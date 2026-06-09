@@ -1775,3 +1775,44 @@ class GraphBuildResult(BaseModel):
     cumple_reales: int = 0
     high_fanout_skipped: int
     orphans_pruned: int = 0
+    cluster_edges: int = 0
+
+
+class GraphClusterResult(BaseModel):
+    """Resumen de POST /graph/cluster (detección de cúmulos + reconciliación, sin LLM)."""
+
+    detected: int
+    matched_same: int
+    matched_drift: int
+    new_candidates: int
+    memo_skipped: int
+    deleted: int
+    dissolved: int
+
+
+class GraphClusterValidateResult(BaseModel):
+    """Resumen de POST /graph/cluster/validate (validador LLM de cúmulos)."""
+
+    clusters: int
+    confirmed: int
+    rejected: int
+    pruned_members: int
+    skipped: int
+    errors: int
+    llm_calls: int
+    cost_usd: float
+
+
+class GraphCluster(BaseModel):
+    """Un cúmulo (fila de `relation_clusters`) para GET /graph/clusters."""
+
+    id: int
+    status: str
+    name: str
+    description: str
+    confidence: float | None
+    member_count: int
+
+
+class GraphClustersResponse(BaseModel):
+    clusters: list[GraphCluster]

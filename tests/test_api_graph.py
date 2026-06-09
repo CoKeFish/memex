@@ -11,7 +11,13 @@ from sqlalchemy import text
 from memex.db import connection
 from memex.modules.bienestar.habits import add_habit
 from memex.modules.bienestar.module import register
-from memex.relations.edges import list_edges
+from memex.relations.edges import (
+    PRODUCER_IDENTIDADES,
+    STATUS_CONFIRMED,
+    Ref,
+    list_edges,
+    propose_edge,
+)
 
 
 def _exec(sql: str, **p: Any) -> Any:
@@ -254,3 +260,71 @@ def test_weave_cumple_incremental_habito_despues() -> None:
         cumple = [e for e in list_edges(c, 1, status="confirmed") if e.relation_type == "cumple"]
     # el registro cumple AMBOS: actividad (al registrar) y categoría (al crear el hábito)
     assert len(cumple) == 2
+
+
+# --- cúmulos: POST /graph/cluster, /graph/cluster/validate, GET /graph/clusters ----- #
+
+
+def _person(name: str) -> int:
+    return int(
+        _exec(
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'persona', :n) RETURNING id",
+            n=name,
+        )
+    )
+
+
+def _confirmed_edge(a: int, b: int) -> None:
+    with connection() as c:
+        propose_edge(
+            c,
+            1,
+            Ref("identidades:person", a),
+            Ref("identidades:person", b),
+            producer=PRODUCER_IDENTIDADES,
+            relation_type="afiliado",
+            status=STATUS_CONFIRMED,
+        )
+
+
+def _triangulo() -> None:
+    a, b, c = _person("A"), _person("B"), _person("C")
+    _confirmed_edge(a, b)
+    _confirmed_edge(b, c)
+    _confirmed_edge(a, c)
+
+
+def test_cluster_endpoint_detecta_y_lista(client: Any) -> None:
+    _triangulo()
+    res = client.post("/graph/cluster").json()
+    assert res["detected"] == 1
+    assert res["new_candidates"] == 1
+    clusters = client.get("/graph/clusters").json()["clusters"]
+    assert len(clusters) == 1
+    assert clusters[0]["status"] == "candidate"
+    assert clusters[0]["member_count"] == 3
+
+
+def test_clusters_filtra_por_status(client: Any) -> None:
+    _triangulo()
+    client.post("/graph/cluster")
+    assert len(client.get("/graph/clusters?status=candidate").json()["clusters"]) == 1
+    assert client.get("/graph/clusters?status=confirmed").json()["clusters"] == []
+
+
+def test_validate_endpoint_mapea_stats(client: Any, monkeypatch: Any) -> None:
+    # el validador real usa LLM; se mockea para probar el wiring + mapeo de la respuesta.
+    from memex.api.routers import graph as graph_router
+    from memex.relations.clusters_llm import ClusterValidationStats
+
+    async def _fake(user_id: int, *, limit: int | None = None) -> ClusterValidationStats:
+        return ClusterValidationStats(clusters=2, confirmed=1, rejected=1, pruned_members=3)
+
+    monkeypatch.setattr(graph_router, "run_cluster_validation", _fake)
+    body = client.post("/graph/cluster/validate").json()
+    assert body["clusters"] == 2
+    assert body["confirmed"] == 1
+    assert body["rejected"] == 1
+    assert body["pruned_members"] == 3
+    assert body["cost_usd"] == 0.0

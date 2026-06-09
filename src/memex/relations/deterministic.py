@@ -70,6 +70,7 @@ class RelationStats:
     same_event_reales: int = 0
     cumple_reales: int = 0
     orphans_pruned: int = 0
+    cluster_edges: int = 0  # aristas miembro_de vivas tras materializar los cúmulos confirmados
 
 
 def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
@@ -375,8 +376,9 @@ def prune_orphan_edges(conn: Connection, user_id: int) -> int:
     (consolidado tombstoneado, fila borrada, identidad absorbida en un merge…). Usa la MISMA
     proyección que LEE el grafo (`list_vertices`): prune y lectura nunca divergen. Paso FINAL de
     `build_relations` (tras los materializadores aditivos). Devuelve cuántas borró. NOTA: un
-    `(slug, id)` que hoy no proyecte `list_vertices` se trata como huérfano; al sumar vértices
-    nativos (cúmulos) hay que agregarlos a `NODE_SOURCES` o exceptuarlos acá."""
+    `(slug, id)` que hoy no proyecte `list_vertices` se trata como huérfano; los cúmulos (vértices
+    nativos `cumulo`) YA están en `NODE_SOURCES` (solo confirmados): sus `miembro_de` sobreviven
+    y las de un cúmulo disuelto (que deja de proyectar) se barren acá."""
     live = {v.ref for v in list_vertices(conn, user_id)}
     orphan_ids = [e.id for e in list_edges(conn, user_id) if e.src not in live or e.dst not in live]
     if orphan_ids:
@@ -399,7 +401,12 @@ def build_relations(
     contraparte = _materialize_contraparte(conn, user_id)
     same_event = _materialize_same_event(conn, user_id)
     cumple = _materialize_cumple(conn, user_id)
-    # Paso FINAL: barrer aristas huérfanas (vértices idos por tombstone/borrado/merge).
+    # Re-deriva las aristas `miembro_de` de los cúmulos confirmados (idempotente + GC de podados o
+    # movidos) ANTES del prune. Import local: no acopla networkx al import de este módulo.
+    from memex.relations.cluster_store import materialize_cluster_edges
+
+    cluster_edges = materialize_cluster_edges(conn, user_id)
+    # Paso FINAL: barrer aristas huérfanas (extremo ido: tombstone/borrado/merge/cúmulo disuelto).
     # Idempotente: los materializadores son aditivos y nunca re-crean aristas a vértices muertos.
     pruned = prune_orphan_edges(conn, user_id)
     stats = RelationStats(
@@ -411,6 +418,7 @@ def build_relations(
         same_event_reales=same_event,
         cumple_reales=cumple,
         orphans_pruned=pruned,
+        cluster_edges=cluster_edges,
     )
     _log.info(
         "relation.build.done",
@@ -423,6 +431,7 @@ def build_relations(
         cumple_reales=cumple,
         high_fanout_skipped=skipped,
         orphans_pruned=pruned,
+        cluster_edges=cluster_edges,
     )
     return stats
 
