@@ -139,14 +139,16 @@ def test_ingest_requires_auth_when_enforced(auth_client: Any) -> None:
     assert r2.status_code == 200
 
 
-def test_state_isolates_per_user(client: Any, seed_user2: int, conn: Any) -> None:
+def test_state_isolates_per_user(client: Any, seed_user2: int) -> None:
     """Un plugin con el mismo nombre en otro user no debe ser visible."""
-    other_id = conn.execute(
-        text(
-            "INSERT INTO sources (user_id, name, type) VALUES (:u, 'shared', 'imap') RETURNING id"
-        ),
-        {"u": seed_user2},
-    ).scalar()
+    with connection() as c:
+        other_id = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (:u, 'shared', 'imap') RETURNING id"
+            ),
+            {"u": seed_user2},
+        ).scalar()
     assert isinstance(other_id, int)
     r = client.post("/gateway/plugins/shared/state", json={"source_type": "imap"})
     assert r.status_code == 200

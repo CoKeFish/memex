@@ -33,8 +33,8 @@ repos:
         pass_filenames: false
         args: [src, tests]
 
-      # pytest solo en pre-push — correr 241 tests en cada commit sería
-      # demasiado lento. Bloquea solo cuando vas a empujar código.
+      # pytest solo en pre-push — correr la suite completa (~1.8k tests) en cada
+      # commit sería demasiado lento. Bloquea solo cuando vas a empujar código.
       - id: pytest
         name: pytest (full suite, pre-push)
         entry: uv run pytest -q

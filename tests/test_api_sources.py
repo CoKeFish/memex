@@ -4,6 +4,8 @@ from typing import Any
 
 from sqlalchemy import text
 
+from memex.db import connection
+
 
 def test_create_source(client: Any) -> None:
     r = client.post(
@@ -26,12 +28,13 @@ def test_create_source_duplicate_name_returns_409(client: Any) -> None:
 
 
 def test_list_sources_returns_only_current_user(
-    client: Any, seed_source: dict[str, Any], seed_user2: int, conn: Any
+    client: Any, seed_source: dict[str, Any], seed_user2: int
 ) -> None:
-    conn.execute(
-        text("INSERT INTO sources (user_id, name, type) VALUES (:uid, 'other-src', 'imap')"),
-        {"uid": seed_user2},
-    )
+    with connection() as c:
+        c.execute(
+            text("INSERT INTO sources (user_id, name, type) VALUES (:uid, 'other-src', 'imap')"),
+            {"uid": seed_user2},
+        )
     r = client.get("/sources")
     assert r.status_code == 200
     names = {s["name"] for s in r.json()}
@@ -61,11 +64,12 @@ def test_ensure_source_returns_existing_without_mutating(client: Any) -> None:
     assert second["config"] == first["config"]  # no se sobreescribió
 
 
-def test_ensure_source_isolates_per_user(client: Any, seed_user2: int, conn: Any) -> None:
-    conn.execute(
-        text("INSERT INTO sources (user_id, name, type) VALUES (:uid, 'shared-name', 'imap')"),
-        {"uid": seed_user2},
-    )
+def test_ensure_source_isolates_per_user(client: Any, seed_user2: int) -> None:
+    with connection() as c:
+        c.execute(
+            text("INSERT INTO sources (user_id, name, type) VALUES (:uid, 'shared-name', 'imap')"),
+            {"uid": seed_user2},
+        )
     r = client.post("/sources/ensure", json={"name": "shared-name", "type": "imap"})
     assert r.status_code == 200
     body = r.json()
@@ -86,13 +90,15 @@ def test_put_then_get_checkpoint(client: Any, seed_source: dict[str, Any]) -> No
     assert r.json() == {"cursor": cur}
 
 
-def test_checkpoint_cross_tenant_is_404(client: Any, seed_user2: int, conn: Any) -> None:
-    other_id = conn.execute(
-        text(
-            "INSERT INTO sources (user_id, name, type) VALUES (:uid, 'u2-src', 'imap') RETURNING id"
-        ),
-        {"uid": seed_user2},
-    ).scalar()
+def test_checkpoint_cross_tenant_is_404(client: Any, seed_user2: int) -> None:
+    with connection() as c:
+        other_id = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (:uid, 'u2-src', 'imap') RETURNING id"
+            ),
+            {"uid": seed_user2},
+        ).scalar()
     assert client.get(f"/sources/{other_id}/checkpoint").status_code == 404
     assert client.put(f"/sources/{other_id}/checkpoint", json={"cursor": {}}).status_code == 404
 
@@ -160,14 +166,15 @@ def test_remove_social_account_404_when_absent(client: Any) -> None:
     assert client.delete(f"/sources/{src['id']}/social/accounts/ghost").status_code == 404
 
 
-def test_social_account_cross_tenant_404(client: Any, seed_user2: int, conn: Any) -> None:
-    other_id = conn.execute(
-        text(
-            "INSERT INTO sources (user_id, name, type) "
-            "VALUES (:uid, 'u2-ig', 'instagram') RETURNING id"
-        ),
-        {"uid": seed_user2},
-    ).scalar()
+def test_social_account_cross_tenant_404(client: Any, seed_user2: int) -> None:
+    with connection() as c:
+        other_id = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (:uid, 'u2-ig', 'instagram') RETURNING id"
+            ),
+            {"uid": seed_user2},
+        ).scalar()
     assert (
         client.post(f"/sources/{other_id}/social/accounts", json={"handle": "x"}).status_code == 404
     )
@@ -195,20 +202,23 @@ def test_patch_source_duplicate_name_409(client: Any) -> None:
     assert client.patch(f"/sources/{src['id']}", json={"name": "ocupado"}).status_code == 409
 
 
-def test_delete_source_guards_inbox_then_cascade(client: Any, conn: Any) -> None:
+def test_delete_source_guards_inbox_then_cascade(client: Any) -> None:
     # sin inbox: borra directo (204).
     empty = client.post("/sources", json={"name": "vacia", "type": "imap"}).json()
     assert client.delete(f"/sources/{empty['id']}").status_code == 204
-    # con inbox: 409 sin cascade, 204 con cascade, y queda inaccesible.
+    # con inbox: 409 sin cascade, 204 con cascade, y queda inaccesible. La fila se siembra
+    # COMMITEADA (bloque propio): vía el fixture `conn` (txn abierta) el guard no la vería y
+    # el DELETE del endpoint quedaría bloqueado para siempre en el lock FK de esa txn.
     src = client.post("/sources", json={"name": "con-historial", "type": "imap"}).json()
     sid = src["id"]
-    conn.execute(
-        text(
-            "INSERT INTO inbox (user_id, source_id, external_id, occurred_at, payload) "
-            "VALUES (1, :sid, 'e1', NOW(), '{}'::jsonb)"
-        ),
-        {"sid": sid},
-    )
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO inbox (user_id, source_id, external_id, occurred_at, payload) "
+                "VALUES (1, :sid, 'e1', NOW(), '{}'::jsonb)"
+            ),
+            {"sid": sid},
+        )
     assert client.delete(f"/sources/{sid}").status_code == 409
     assert client.delete(f"/sources/{sid}?cascade=true").status_code == 204
     assert client.get(f"/sources/{sid}").status_code == 404
