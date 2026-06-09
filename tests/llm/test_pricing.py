@@ -63,6 +63,15 @@ def test_chat_and_reasoner_share_flash_pricing() -> None:
     assert compute_cost("deepseek-reasoner", u) == chat
 
 
+def test_v4_flash_preview_shares_flash_pricing() -> None:
+    # `deepseek-v4-flash-preview` (lo que devuelve la API) es alias de v4-flash → misma tarifa, no
+    # $0 (H-4: antes faltaba en la tabla y subcontaba el costo de 81 llamadas reales).
+    u = _usage(prompt=1000, completion=1000, miss=1000)
+    cost = compute_cost("deepseek-v4-flash-preview", u)
+    assert cost > Decimal(0)
+    assert cost == compute_cost("deepseek-v4-flash", u)
+
+
 def test_unknown_model_returns_zero() -> None:
     u = _usage(prompt=1000, completion=1000, miss=1000)
     assert compute_cost("gpt-9000", u) == Decimal(0)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+import pytest
 import structlog
 from sqlalchemy import text
 
@@ -261,3 +262,47 @@ def test_cost_by_source_record_and_log_fields() -> None:
     assert fields["llm_cost_usd"] == "0.13"
     # El bucket None se renderiza "sin_source"; el resto por id-string.
     assert fields["llm_cost_by_source"] == {"7": "0.11", "sin_source": "0.02"}
+
+
+def test_record_llm_call_logs_error_level_on_error_status(
+    seed_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """H-9: una llamada con status='error' emite el evento `llm.call` a nivel ERROR (para que /logs
+    la cuente como error), no a info como las exitosas; e incluye `error_message`."""
+    uid = int(seed_source["user_id"])
+    emitted: list[tuple[str, str, dict[str, Any]]] = []
+
+    class _Spy:
+        def error(self, event: str, **kw: Any) -> None:
+            emitted.append(("error", event, kw))
+
+        def info(self, event: str, **kw: Any) -> None:
+            emitted.append(("info", event, kw))
+
+    monkeypatch.setattr("memex.core.observability._log", _Spy())
+
+    record_llm_call(
+        user_id=uid,
+        purpose="summarize_individual",
+        model="deepseek-chat",
+        prompt_tokens=1,
+        completion_tokens=0,
+        cost_usd=Decimal("0"),
+        latency_ms=10,
+        status="error",
+        error_message="context length exceeded",
+    )
+    record_llm_call(
+        user_id=uid,
+        purpose="summarize_individual",
+        model="deepseek-chat",
+        prompt_tokens=1,
+        completion_tokens=1,
+        cost_usd=Decimal("0"),
+        latency_ms=10,
+        status="ok",
+    )
+
+    assert [(lvl, ev) for lvl, ev, _ in emitted] == [("error", "llm.call"), ("info", "llm.call")]
+    assert emitted[0][2]["status"] == "error"
+    assert emitted[0][2]["error_message"] == "context length exceeded"

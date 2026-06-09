@@ -94,7 +94,8 @@ class ModelPricing:
 
 
 # Defaults verificados 2026-06-03 vs doc oficial de DeepSeek. `deepseek-chat`/`deepseek-reasoner`
-# son alias DEPRECADOS (retiro 2026-07-24) de deepseek-v4-flash → se cobran a tarifa flash.
+# son alias DEPRECADOS (retiro 2026-07-24) de deepseek-v4-flash; `deepseek-v4-flash-preview` es la
+# variante preview de v4-flash → todos se cobran a tarifa flash (sin estos alias el costo era $0).
 _V32 = ModelPricing(
     Decimal("0.028"), Decimal("0.28"), Decimal("0.42")
 )  # histórico V3.2-Exp; deepseek-chat ya NO mapea acá
@@ -106,6 +107,7 @@ MODEL_PRICING: dict[str, ModelPricing] = {
     "deepseek-chat": _FLASH,
     "deepseek-reasoner": _FLASH,
     "deepseek-v4-flash": _FLASH,
+    "deepseek-v4-flash-preview": _FLASH,
     "deepseek-v4-pro": _PRO,
 }
 
