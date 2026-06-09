@@ -48,6 +48,19 @@ def _ok(content: str = "TEXTO OCR", *, model: str = "vision-mini") -> dict[str, 
     }
 
 
+@pytest.mark.asyncio
+async def test_gpt_4o_mini_cost_is_priced() -> None:
+    # H-4: gpt-4o-mini es un modelo OCR REAL y está tabulado (0.15 / 0.60 por 1M) → su costo debe
+    # llegar a OcrResult.cost_usd (de ahí el worker lo persiste en llm_calls.cost_usd), no quedar
+    # en $0 como antes. 800 prompt @0.15 + 40 completion @0.60 por 1M = 0.000144.
+    with respx.mock(base_url=BASE_URL) as router:
+        router.post(CHAT).respond(json=_ok(model="gpt-4o-mini"))
+        async with _client() as c:
+            r = await c.ocr_image(image_bytes=b"x", content_type="image/png", model="gpt-4o-mini")
+    assert r.model == "gpt-4o-mini"
+    assert r.cost_usd > 0
+
+
 def test_satisfies_protocol() -> None:
     assert issubclass(OpenAIVisionClient, OCRClient)
 
