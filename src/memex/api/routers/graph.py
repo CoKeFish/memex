@@ -1,6 +1,6 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from memex.api.auth import current_user_id
@@ -8,6 +8,7 @@ from memex.api.schemas import (
     GraphBuildResult,
     GraphClusterResult,
     GraphClustersResponse,
+    GraphClusterTimeline,
     GraphClusterValidateResult,
     GraphResponse,
 )
@@ -18,6 +19,7 @@ from memex.relations.clusters_llm import run_cluster_partition
 from memex.relations.deterministic import build_relations, vertex_inbox_ids
 from memex.relations.edges import list_edges
 from memex.relations.reconcile import detect_and_reconcile
+from memex.relations.timeline import cluster_timeline
 from memex.relations.vertices import list_vertices
 
 router = APIRouter(prefix="/graph", tags=["graph"])
@@ -210,3 +212,53 @@ async def list_clusters(
     ]
     _log.info("graph.clusters.api", user_id=user_id, clusters=len(clusters))
     return {"clusters": clusters}
+
+
+@router.get("/clusters/{cluster_id}/timeline", response_model=GraphClusterTimeline)
+async def cluster_timeline_view(cluster_id: int, user_id: UserID) -> dict[str, Any]:
+    """Cronología (story) de un cúmulo CONFIRMADO: sus miembros fechados como sucesos ordenados +
+    el elenco (miembros sin fecha: identidades, hábitos). Solo lectura. 404 si no existe / no
+    confirmed. Fechas en hora local (America/Bogota) con `precision` para mostrar hora solo si es
+    real."""
+    with connection() as conn:
+        tl = cluster_timeline(conn, user_id, cluster_id)
+    if tl is None:
+        raise HTTPException(status_code=404, detail="cúmulo no encontrado o no confirmado")
+    _log.info(
+        "graph.cluster.timeline.api",
+        user_id=user_id,
+        cluster_id=cluster_id,
+        events=len(tl.events),
+        actors=len(tl.actors),
+    )
+    return {
+        "cluster": {
+            "id": tl.cluster.id,
+            "name": tl.cluster.name,
+            "description": tl.cluster.description,
+            "confidence": tl.cluster.confidence,
+            "member_count": tl.cluster.member_count,
+        },
+        "events": [
+            {
+                "slug": e.slug,
+                "id": e.id,
+                "kind": e.kind,
+                "label": e.label,
+                "at": e.at,
+                "precision": e.precision,
+                "source_inbox_ids": e.source_inbox_ids,
+            }
+            for e in tl.events
+        ],
+        "actors": [
+            {
+                "slug": a.slug,
+                "id": a.id,
+                "kind": a.kind,
+                "label": a.label,
+                "source_inbox_ids": a.source_inbox_ids,
+            }
+            for a in tl.actors
+        ],
+    }
