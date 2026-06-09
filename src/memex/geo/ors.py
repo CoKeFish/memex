@@ -25,6 +25,7 @@ from memex.geo.client import (
     GeoPoint,
     GeoProviderError,
     GeoQuotaError,
+    PlaceResult,
     TravelEstimate,
     TravelMode,
 )
@@ -142,6 +143,40 @@ class OpenRouteServiceProvider:
             distance_m=int(distance),
             duration_in_traffic_s=None,  # ORS no modela tráfico
             mode=mode,
+        )
+
+    async def reverse_geocode(self, point: GeoPoint) -> GeocodeResult:
+        # Pelias reverse usa `point.lat`/`point.lon` (no `.lng`); `size=1` = solo el mejor match.
+        params = {"point.lat": str(point.lat), "point.lon": str(point.lng), "size": "1"}
+        data = await self._get("/geocode/reverse", params, op="reverse_geocode")
+
+        features = data.get("features")
+        if not isinstance(features, list) or not features:
+            raise GeoNotFoundError(point.as_latlng())
+        first = features[0]
+        props = first.get("properties") if isinstance(first, dict) else None
+        label = (props.get("label") or props.get("name")) if isinstance(props, dict) else None
+        gid = props.get("gid") if isinstance(props, dict) else None
+        confidence = props.get("confidence") if isinstance(props, dict) else None
+        return GeocodeResult(
+            point=point,  # echo del punto consultado (la dirección es lo que importa)
+            formatted_address=str(label or point.as_latlng()),
+            provider_place_id=gid if isinstance(gid, str) else None,
+            confidence=float(confidence) if isinstance(confidence, int | float) else None,
+        )
+
+    async def nearby_place(
+        self,
+        point: GeoPoint,
+        *,
+        radius_m: float = 50.0,
+        included_types: tuple[str, ...] | None = None,
+    ) -> PlaceResult:
+        # ORS/Pelias no hace búsqueda de negocios/POIs. Se levanta igual que el modo TRANSIT.
+        del point, radius_m, included_types
+        raise GeoProviderError(
+            0,
+            "OpenRouteService no busca POIs/negocios; usá Google (Places) para el nombre del lugar",
         )
 
     async def _get(self, path: str, params: dict[str, str], *, op: str) -> dict[str, Any]:

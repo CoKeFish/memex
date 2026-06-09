@@ -30,6 +30,7 @@ from memex.geo import (
     GeoNotFoundError,
     GeoPoint,
     ManualLocationSource,
+    ResolvedPlace,
     TravelEstimate,
     TravelMode,
     build_provider_from_env,
@@ -37,6 +38,8 @@ from memex.geo import (
     estimate_trip_from_source,
     geocode_address,
     known_providers,
+    resolve_place,
+    reverse_geocode,
 )
 from memex.logging import get_logger, setup_logging
 
@@ -121,6 +124,27 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Hora de salida ISO 8601 con zona (ej. 2026-06-03T08:00:00-05:00) para tráfico.",
     )
+
+    place_p = sub.add_parser(
+        "place",
+        parents=[common],
+        help="Coordenadas → dirección + nombre de lugar (POI).",
+        epilog="Una coordenada que empieza con '-' se pasa con '=': --point=-34.6,-58.4.",
+    )
+    place_p.add_argument(
+        "--point", required=True, help="Punto 'lat,lng' a resolver (ej. 4.65,-74.05)."
+    )
+    place_p.add_argument(
+        "--reverse-only",
+        action="store_true",
+        help="Solo dirección (reverse geocoding), sin buscar el nombre del negocio/POI.",
+    )
+    place_p.add_argument(
+        "--radius",
+        type=float,
+        default=50.0,
+        help="Radio en metros para buscar el POI más cercano (default 50).",
+    )
     return parser
 
 
@@ -165,6 +189,32 @@ def _print_trip(estimate: TravelEstimate, *, departure_requested: bool, as_json:
         _say(f"Con tráfico: {_fmt_duration(estimate.duration_in_traffic_s)}")
     elif departure_requested:
         _say("(el proveedor no devolvió estimación con tráfico para esa hora)")
+
+
+def _print_place(place: ResolvedPlace, *, as_json: bool) -> None:
+    if as_json:
+        _say(
+            json.dumps(
+                {
+                    "name": place.name,
+                    "formatted_address": place.formatted_address,
+                    "lat": place.point.lat,
+                    "lng": place.point.lng,
+                    "place_id": place.provider_place_id,
+                    "types": list(place.types),
+                    "in_transit": place.in_transit,
+                }
+            )
+        )
+        return
+    if place.name:
+        _say(place.name)
+    if place.formatted_address:
+        _say(f"  {place.formatted_address}")
+    if place.types:
+        _say(f"  tipos: {', '.join(place.types)}")
+    if not place.name and not place.formatted_address:
+        _say("(sin resultado)")
 
 
 async def _cmd_geocode(args: argparse.Namespace) -> int:
@@ -230,6 +280,28 @@ async def _cmd_trip(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_place(args: argparse.Namespace) -> int:
+    point = _parse_point(args.point)
+    if point is None:
+        _say("--point debe ser 'lat,lng' (ej. 4.65,-74.05).", err=True)
+        return 2
+    provider = build_provider_from_env(provider=args.provider)
+    try:
+        if args.reverse_only:
+            rg = await reverse_geocode(provider, point)
+            place = ResolvedPlace(
+                formatted_address=rg.formatted_address,
+                point=point,
+                provider_place_id=rg.provider_place_id,
+            )
+        else:
+            place = await resolve_place(provider, point, radius_m=args.radius)
+    finally:
+        await provider.aclose()
+    _print_place(place, as_json=args.json)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -241,6 +313,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_cmd_geocode(args))
         if args.cmd == "trip":
             return asyncio.run(_cmd_trip(args))
+        if args.cmd == "place":
+            return asyncio.run(_cmd_place(args))
     except GeoNotFoundError as e:
         _say(f"Sin resultados para {e.query!r}.", err=True)
         return 1

@@ -81,7 +81,7 @@ def _reset_tables() -> None:
                 """
                 TRUNCATE TABLE
                     media_assets, inbox_dedupe_keys, inbox, source_checkpoints,
-                    backfill_jobs, filter_rules, sources, users
+                    backfill_jobs, filter_rules, geo_place_cache, sources, users
                 RESTART IDENTITY CASCADE
                 """
             )

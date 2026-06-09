@@ -11,6 +11,9 @@ Produce las clases de arista (ver `memex.relations.edges`):
 - REALES de contraparte (`producer='finance'`, `status='confirmed'`): cobro/pago CONSOLIDADO →
   identidad del cobrador/pagador (su `counterparty_identity_id` resuelto). El enlace por identidad
   entre finanzas y el directorio — determinista, el conector más valioso del grafo.
+- REALES de cumplimiento (`producer='bienestar'`, `status='confirmed'`): registro de bienestar →
+  hábito que cumple, por match determinista de `activity` (normalizada) o `category` — la misma
+  lógica que la adherencia (`habits._period_counts`).
 
 La provenance vértice→mensaje NO es arista (inbox es atributo): vive en `source_inbox_ids`.
 """
@@ -27,6 +30,7 @@ from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
 from memex.relations.edges import (
+    PRODUCER_BIENESTAR,
     PRODUCER_EVENT,
     PRODUCER_FINANCE,
     PRODUCER_IDENTIDADES,
@@ -48,6 +52,11 @@ DEFAULT_COOCCURRENCE_CAP = 8
 #: está acá: su vértice es el CONSOLIDADO, cuya procedencia es TRANSITIVA (vía links → crudos).
 _DIRECT_SOURCES: tuple[tuple[str, str], ...] = (("hackathones", "mod_hackathones_events"),)
 
+#: Normalización SQL del `activity` para el match registro↔hábito (lower + colapso de whitespace).
+#: Copia DELIBERADA del fragmento de `bienestar` (habits.py / module.py): NO se importa de ahí
+#: porque esos módulos ya importan este paquete → invertir la dependencia crearía un ciclo.
+_NORM_ACTIVITY = "lower(btrim(regexp_replace({x}, '\\s+', ' ', 'g')))"
+
 
 @dataclass(frozen=True)
 class RelationStats:
@@ -59,6 +68,7 @@ class RelationStats:
     pertenencia_reales: int = 0
     contraparte_reales: int = 0
     same_event_reales: int = 0
+    cumple_reales: int = 0
     orphans_pruned: int = 0
 
 
@@ -308,6 +318,58 @@ def _materialize_same_event(
     return n
 
 
+def _materialize_cumple(
+    conn: Connection,
+    user_id: int,
+    *,
+    registro_ids: Sequence[int] | None = None,
+    habit_ids: Sequence[int] | None = None,
+) -> int:
+    """Una arista REAL «cumple» registro→hábito por cada registro de bienestar que satisface un
+    hábito ACTIVO. Match determinista idéntico a la adherencia (`habits._period_counts`): si el
+    hábito define `activity`, iguala la actividad normalizada (insensible a mayúsculas/espacios);
+    si no, iguala la `category`. Dirigida (registro → hábito). Un registro puede cumplir varios
+    hábitos. Con `registro_ids`/`habit_ids` acota a esos lados (uso incremental); sin ellos barre
+    todo (full-sweep). Idempotente. Devuelve cuántas."""
+    scope = ""
+    params: dict[str, Any] = {"u": user_id}
+    if registro_ids is not None:
+        scope += " AND r.id = ANY(:rids)"
+        params["rids"] = list(registro_ids)
+    if habit_ids is not None:
+        scope += " AND h.id = ANY(:hids)"
+        params["hids"] = list(habit_ids)
+    norm_r = _NORM_ACTIVITY.format(x="r.activity")
+    norm_h = _NORM_ACTIVITY.format(x="h.activity")
+    n = 0
+    for r in conn.execute(
+        text(
+            f"""
+            SELECT r.id AS rid, h.id AS hid
+            FROM mod_bienestar_registros r
+            JOIN mod_bienestar_habits h ON h.user_id = r.user_id AND h.active AND (
+                (h.activity <> '' AND {norm_r} = {norm_h})
+                OR (h.activity = '' AND r.category = h.category)
+            )
+            WHERE r.user_id = :u{scope}
+            """
+        ),
+        params,
+    ).mappings():
+        propose_edge(
+            conn,
+            user_id,
+            Ref("bienestar", int(r["rid"])),
+            Ref("bienestar:habito", int(r["hid"])),
+            producer=PRODUCER_BIENESTAR,
+            relation_type="cumple",
+            status=STATUS_CONFIRMED,
+            evidence="cumple",
+        )
+        n += 1
+    return n
+
+
 def prune_orphan_edges(conn: Connection, user_id: int) -> int:
     """Borra de `relation_edges` toda arista con un extremo que ya no resuelve a un vértice vivo
     (consolidado tombstoneado, fila borrada, identidad absorbida en un merge…). Usa la MISMA
@@ -336,6 +398,7 @@ def build_relations(
     pert = _materialize_pertenencia(conn, user_id)
     contraparte = _materialize_contraparte(conn, user_id)
     same_event = _materialize_same_event(conn, user_id)
+    cumple = _materialize_cumple(conn, user_id)
     # Paso FINAL: barrer aristas huérfanas (vértices idos por tombstone/borrado/merge).
     # Idempotente: los materializadores son aditivos y nunca re-crean aristas a vértices muertos.
     pruned = prune_orphan_edges(conn, user_id)
@@ -346,6 +409,7 @@ def build_relations(
         pertenencia_reales=pert,
         contraparte_reales=contraparte,
         same_event_reales=same_event,
+        cumple_reales=cumple,
         orphans_pruned=pruned,
     )
     _log.info(
@@ -356,6 +420,7 @@ def build_relations(
         pertenencia_reales=pert,
         contraparte_reales=contraparte,
         same_event_reales=same_event,
+        cumple_reales=cumple,
         high_fanout_skipped=skipped,
         orphans_pruned=pruned,
     )
@@ -394,3 +459,18 @@ def weave_finance_consolidated(
     contraparte = _materialize_contraparte(conn, user_id, consolidated_ids=cids) if cids else 0
     same_event = _materialize_same_event(conn, user_id, event_ids=eids) if eids else 0
     return contraparte, same_event
+
+
+def weave_cumple(
+    conn: Connection,
+    user_id: int,
+    *,
+    registro_ids: Sequence[int] | None = None,
+    habit_ids: Sequence[int] | None = None,
+) -> int:
+    """INCREMENTAL: teje las aristas «cumple» de UN registro recién creado (`registro_ids`) o de UN
+    hábito recién creado (`habit_ids`), en la misma tx del caller, para no depender del full-sweep.
+    Lo llaman `bienestar.register` (lado registro) y `bienestar.add_habit` (lado hábito). Si el otro
+    lado aún no existe, no crea nada todavía (lo creará quien aterrice último). Idempotente.
+    Devuelve cuántas."""
+    return _materialize_cumple(conn, user_id, registro_ids=registro_ids, habit_ids=habit_ids)

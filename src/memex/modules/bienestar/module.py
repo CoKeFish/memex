@@ -21,8 +21,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
+from memex.modules.bienestar.habits import list_habits
 from memex.modules.bienestar.schema import normalize_activity, normalize_category
-from memex.relations.deterministic import weave_event
+from memex.relations.deterministic import weave_cumple, weave_event
 
 _log = get_logger("memex.modules.bienestar")
 
@@ -40,6 +41,62 @@ _PUBLIC_COLS = (
 _NORM = "lower(btrim(regexp_replace({x}, '\\s+', ' ', 'g')))"
 
 
+def _habit_label(h: Mapping[str, Any]) -> str:
+    """Etiqueta de un hábito para mensajes: nombre + clave de match (actividad o categoría)."""
+    clave = h["activity"] or f"categoría {h['category']}"
+    return f"{h['name']} ({clave})"
+
+
+class NoMatchingHabitError(ValueError):
+    """Se intentó registrar algo que NINGÚN hábito activo cubre. bienestar es PARA HÁBITOS: un
+    registro es el cumplimiento de un hábito, así que esto se RECHAZA (no se guarda) y se devuelve
+    la lista de hábitos válidos para que el agente use uno o cree el que falta. Subclase de
+    `ValueError` para que los callers que ya capturan `ValueError` la muestren igual."""
+
+    def __init__(self, category: str, activity: str, habits: list[dict[str, Any]]) -> None:
+        self.category = category
+        self.activity = activity
+        self.habits = habits
+        super().__init__(self._build_message())
+
+    def _build_message(self) -> str:
+        que = (
+            f"la actividad '{self.activity}'"
+            if self.activity
+            else f"la categoría '{self.category}'"
+        )
+        if not self.habits:
+            return (
+                f"no hay hábitos activos, así que no se puede registrar {que}: "
+                "creá uno con `memex-bienestar habit add`."
+            )
+        validos = "; ".join(_habit_label(h) for h in self.habits)
+        return (
+            f"no existe un hábito activo para {que}. Hábitos válidos: {validos}. "
+            "Usá uno de esos o creá el que falta con `memex-bienestar habit add`."
+        )
+
+
+def _require_matching_habit(conn: Connection, user_id: int, category: str, activity: str) -> None:
+    """Verifica que exista un hábito ACTIVO que el registro cumpla — match por actividad normalizada
+    o por categoría, el MISMO que la adherencia y `_materialize_cumple`. Si no hay, lanza
+    `NoMatchingHabitError` con la lista de hábitos válidos. Solo LEE."""
+    match_act = f"activity <> '' AND {_NORM.format(x='activity')} = {_NORM.format(x=':act')}"
+    matched = conn.execute(
+        text(
+            f"""
+            SELECT 1 FROM mod_bienestar_habits
+            WHERE user_id = :u AND active
+              AND (({match_act}) OR (activity = '' AND category = :cat))
+            LIMIT 1
+            """
+        ),
+        {"u": user_id, "act": activity, "cat": category},
+    ).first()
+    if matched is None:
+        raise NoMatchingHabitError(category, activity, list_habits(conn, user_id))
+
+
 def register(
     conn: Connection,
     user_id: int,
@@ -55,12 +112,20 @@ def register(
 ) -> dict[str, Any]:
     """Inserta un registro determinista y devuelve la fila pública. `category` se normaliza a la
     lista cerrada (fuera de ella → 'otros'). Sin `occurred_at` usa ahora (UTC, precisión
-    `datetime`). Con `event_id`, teje en el acto las aristas «mismo_evento» del grafo contra los
-    hechos que ya comparten el evento (el full-sweep es respaldo). NO usa LLM ni deduplica."""
+    `datetime`). **Rechaza con `NoMatchingHabitError`** si ningún hábito activo cubre el registro
+    (bienestar es para hábitos: un registro es el cumplimiento de un hábito). Si pasa, teje en el
+    acto las aristas «cumple» contra los hábitos que satisface; con `event_id`, además las
+    «mismo_evento» contra los hechos que ya comparten el evento (el full-sweep es respaldo). NO usa
+    LLM ni deduplica."""
     if occurred_at is None:
         occurred_at = datetime.now(UTC)
         precision = PRECISION_DATETIME
     prec = precision if precision in (PRECISION_DATETIME, PRECISION_DATE) else PRECISION_DATETIME
+    cat = normalize_category(category)
+    act = normalize_activity(activity)
+    # bienestar es PARA HÁBITOS: registrar algo que ningún hábito activo cubre se rechaza (no se
+    # guarda un registro huérfano) — devuelve la lista de hábitos válidos para elegir o crear.
+    _require_matching_habit(conn, user_id, cat, act)
     row = (
         conn.execute(
             text(
@@ -76,8 +141,8 @@ def register(
             ),
             {
                 "uid": user_id,
-                "category": normalize_category(category),
-                "activity": normalize_activity(activity),
+                "category": cat,
+                "activity": act,
                 "occurred_at": occurred_at,
                 "precision": prec,
                 "description": description.strip(),
@@ -96,6 +161,7 @@ def register(
         category=row["category"],
         activity=row["activity"],
     )
+    weave_cumple(conn, user_id, registro_ids=[int(row["id"])])
     if event_id:
         weave_event(conn, user_id, event_id)
     return dict(row)

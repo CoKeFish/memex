@@ -16,10 +16,17 @@ from sqlalchemy import text
 
 from memex.agent_cli import main
 from memex.db import connection
+from memex.modules.bienestar.habits import add_habit
 
 
 def _last_json(out: str) -> Any:
     return json.loads(out.strip().splitlines()[-1])
+
+
+def _seed_comida_habit() -> None:
+    """bienestar es para hábitos: los registros de comida del evento necesitan un hábito."""
+    with connection() as c:
+        add_habit(c, 1, name="Comer", cadence="daily", category="comida")
 
 
 def _scalar(sql: str, **params: Any) -> Any:
@@ -75,6 +82,7 @@ def test_read_only_passes_through_during_event() -> None:
 
 
 def test_end_processes_event_and_links_counterparty(capsys: pytest.CaptureFixture[str]) -> None:
+    _seed_comida_habit()
     _stage_invoice()
     assert _scalar("SELECT count(*) FROM mod_finance_transactions") == 0  # nada todavía
     event_id = _open_event_id()
@@ -131,6 +139,7 @@ def test_end_is_atomic_rolls_back_on_invalid_fact(capsys: pytest.CaptureFixture[
 
 
 def test_end_is_idempotent_on_retry(capsys: pytest.CaptureFixture[str]) -> None:
+    _seed_comida_habit()
     assert main(["start"]) == 0
     assert main(["bienestar", "register", "--category", "comida", "--activity", "cena"]) == 0
     assert main(["end"]) == 0
@@ -163,6 +172,7 @@ def test_cancel_discards_staged_facts() -> None:
 
 def test_immediate_register_without_event_persists(capsys: pytest.CaptureFixture[str]) -> None:
     # sin start, el register persiste como siempre (backward-compat).
+    _seed_comida_habit()
     assert main(["bienestar", "register", "--category", "comida", "--activity", "x", "--json"]) == 0
     row = _last_json(capsys.readouterr().out)
     assert row["category"] == "comida"
@@ -195,6 +205,7 @@ def test_counterparty_without_matching_identity_stays_null() -> None:
 def test_end_is_order_independent(capsys: pytest.CaptureFixture[str]) -> None:
     # el agente registra en orden "equivocado" (bienestar → finance → identidad); el cierre ORDENA
     # por dependencia (identidad→finance→bienestar), así que el resultado es idéntico.
+    _seed_comida_habit()
     assert main(["start"]) == 0
     assert main(["bienestar", "register", "--category", "comida", "--activity", "almuerzo"]) == 0
     assert (

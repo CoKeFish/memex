@@ -99,6 +99,7 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         reales=stats.afiliacion_reales,
         pertenencia=stats.pertenencia_reales,
         contraparte=stats.contraparte_reales,
+        cumple=stats.cumple_reales,
         skipped=stats.high_fanout_skipped,
         orphans_pruned=stats.orphans_pruned,
     )
@@ -107,6 +108,7 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         "afiliacion_reales": stats.afiliacion_reales,
         "pertenencia_reales": stats.pertenencia_reales,
         "contraparte_reales": stats.contraparte_reales,
+        "cumple_reales": stats.cumple_reales,
         "high_fanout_skipped": stats.high_fanout_skipped,
         "orphans_pruned": stats.orphans_pruned,
     }

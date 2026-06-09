@@ -14,6 +14,7 @@ from memex.api.routers import (
     filters,
     finance,
     gateway,
+    geo,
     graph,
     hackathones,
     health,
@@ -76,6 +77,7 @@ app.include_router(inbox.router)
 app.include_router(sources.router)
 app.include_router(backfill.router)
 app.include_router(gateway.router)
+app.include_router(geo.router)
 app.include_router(media.router)
 app.include_router(filters.router)
 app.include_router(feedback.router)

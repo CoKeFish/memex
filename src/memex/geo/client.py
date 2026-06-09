@@ -74,6 +74,38 @@ class TravelEstimate:
     mode: TravelMode = TravelMode.DRIVING
 
 
+@dataclass(frozen=True)
+class PlaceResult:
+    """Un POI/negocio cercano a un punto — lo que devuelve `nearby_place` (búsqueda de lugares).
+
+    `name` es el nombre del negocio/lugar (ej. "Juan Valdez Café"); siempre presente (si no hubo
+    match, `nearby_place` levanta `GeoNotFoundError`).
+    """
+
+    name: str
+    formatted_address: str
+    point: GeoPoint
+    provider_place_id: str | None = None
+    types: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResolvedPlace:
+    """Un punto resuelto a algo legible: la dirección y, si la hay/se pidió, el nombre del POI.
+
+    Combina `reverse_geocode` (dirección) + `nearby_place` (negocio). `name=None` = solo dirección
+    (no se encontró/pidió POI). `in_transit=True` = el punto era de movimiento (caminando/en carro):
+    se marca SIN llamar a Maps porque el tránsito no es un lugar.
+    """
+
+    formatted_address: str
+    point: GeoPoint
+    name: str | None = None
+    provider_place_id: str | None = None
+    types: tuple[str, ...] = ()
+    in_transit: bool = False
+
+
 class GeoError(Exception):
     """Base de todos los errores de la capa geo — los callers la atrapan genérica.
 
@@ -145,6 +177,24 @@ class GeoProvider(Protocol):
         `departure_time` (aware) pide una estimación con tráfico para esa hora; los
         proveedores que no lo soporten lo IGNORAN (con warning) y devuelven
         `duration_in_traffic_s=None`. `GeoNotFoundError` si no hay ruta.
+        """
+        ...
+
+    async def reverse_geocode(self, point: GeoPoint) -> GeocodeResult:
+        """Coordenadas → dirección (el inverso de `geocode`). `GeoNotFoundError` si no hay match."""
+        ...
+
+    async def nearby_place(
+        self,
+        point: GeoPoint,
+        *,
+        radius_m: float = 50.0,
+        included_types: tuple[str, ...] | None = None,
+    ) -> PlaceResult:
+        """El POI/negocio más cercano al punto (restaurante, tienda, …).
+
+        `GeoNotFoundError` si no hay ninguno en el radio. Proveedores sin búsqueda de negocios
+        (OpenRouteService) levantan `GeoProviderError`.
         """
         ...
 

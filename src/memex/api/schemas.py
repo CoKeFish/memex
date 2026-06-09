@@ -81,6 +81,56 @@ class GatewayIngestStats(BaseModel):
     filtered: int
 
 
+# ---- Geo / ubicación (gateway de pings GPS) -----------------------------------------------------
+# La app móvil manda pings por POST /gateway/location/pings (append-only, SIN dedup). Coords en
+# grados decimales; `captured_at` tz-aware (la columna es TIMESTAMPTZ). Los campos de movimiento
+# son opcionales (solo exige posición + instante). `LocationFixRow` = read-back de la última.
+
+
+class LocationPingIn(BaseModel):
+    """Un ping GPS entrante. Obligatorio: posición + instante de captura (tz-aware)."""
+
+    captured_at: datetime
+    lat: float = Field(ge=-90.0, le=90.0)
+    lng: float = Field(ge=-180.0, le=180.0)
+    accuracy_m: float | None = Field(default=None, ge=0.0)
+    altitude_m: float | None = None
+    heading: float | None = Field(default=None, ge=0.0, le=360.0)
+    speed_mps: float | None = Field(default=None, ge=0.0)
+    source: Literal["device", "manual", "inferred"] = "device"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _require_tz_aware(self) -> Self:
+        if self.captured_at.tzinfo is None:
+            raise ValueError("captured_at debe incluir zona horaria (tz-aware)")
+        return self
+
+
+class LocationPingBatch(BaseModel):
+    pings: list[LocationPingIn] = Field(default_factory=list)
+
+
+class LocationIngestStats(BaseModel):
+    inserted: int
+
+
+class LocationFixRow(BaseModel):
+    """Un ping almacenado (read-back de la última ubicación)."""
+
+    id: int
+    lat: float
+    lng: float
+    accuracy_m: float | None = None
+    altitude_m: float | None = None
+    heading: float | None = None
+    speed_mps: float | None = None
+    captured_at: datetime
+    received_at: datetime
+    source: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class ClassificationInfo(BaseModel):
     tier: str
     metadata: dict[str, Any] | None = None
@@ -1721,5 +1771,6 @@ class GraphBuildResult(BaseModel):
     afiliacion_reales: int
     pertenencia_reales: int = 0
     contraparte_reales: int = 0
+    cumple_reales: int = 0
     high_fanout_skipped: int
     orphans_pruned: int = 0

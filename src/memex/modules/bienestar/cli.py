@@ -29,7 +29,12 @@ from sqlalchemy.engine import Connection
 from memex.db import connection
 from memex.logging import get_logger, setup_logging
 from memex.modules.bienestar.habits import add_habit, adherence, delete_habit, list_habits
-from memex.modules.bienestar.module import list_registros, register, summary
+from memex.modules.bienestar.module import (
+    NoMatchingHabitError,
+    list_registros,
+    register,
+    summary,
+)
 
 
 def _safe(text_: str) -> str:
@@ -192,6 +197,22 @@ def _cmd_register(args: argparse.Namespace) -> int:
     try:
         with connection() as conn:
             row = register_from_args(conn, args.user, args)
+    except NoMatchingHabitError as e:
+        # bienestar es para hábitos: el registro no cumple ninguno. Devolvemos la lista de hábitos
+        # válidos (estructurada en --json) para que el agente elija uno o cree el que falta.
+        if args.as_json:
+            _emit_json(
+                {
+                    "error": "no_matching_habit",
+                    "message": str(e),
+                    "category": e.category,
+                    "activity": e.activity,
+                    "habits": e.habits,
+                }
+            )
+        else:
+            _say(str(e), err=True)
+        return 1
     except ValueError as e:
         _say(str(e), err=True)
         return 1

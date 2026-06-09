@@ -32,6 +32,9 @@ class CalendarEvent:
     start_time: time | None
     end_time: time | None
     location: str
+    #: Coords del `location` geocodificado (None si no se geocodificó / sin lugar). Habilita mapa.
+    geo_lat: float | None = None
+    geo_lng: float | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +87,8 @@ class CalendarDomainReader:
             self._conn.execute(
                 text(
                     """
-                    SELECT id, title, starts_on, ends_on, start_time, end_time, location
+                    SELECT id, title, starts_on, ends_on, start_time, end_time, location,
+                           geo_lat, geo_lng
                     FROM mod_calendar_consolidated
                     WHERE user_id = :uid AND NOT deleted
                       AND starts_on BETWEEN :start AND :end
@@ -105,6 +109,8 @@ class CalendarDomainReader:
                 start_time=r["start_time"],
                 end_time=r["end_time"],
                 location=str(r["location"]),
+                geo_lat=r["geo_lat"],
+                geo_lng=r["geo_lng"],
             )
             for r in rows
         ]

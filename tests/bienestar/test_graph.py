@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 
+from memex.modules.bienestar.habits import add_habit
 from memex.modules.bienestar.module import register
 from memex.relations.deterministic import build_relations, weave_event
 from memex.relations.edges import list_edges
@@ -17,7 +18,15 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
 
 
+def _seed_habits(conn: Connection) -> None:
+    """bienestar es para hábitos: registrar exige un hábito activo que cubra la categoría. (Las
+    aristas `cumple` que esto teje no afectan a los tests: filtran por producer='event'/slug.)"""
+    for cat in ("comida", "higiene", "ejercicio", "grooming", "salud", "otros"):
+        add_habit(conn, 1, name=cat, cadence="daily", category=cat)
+
+
 def test_bienestar_is_vertex(conn: Connection) -> None:
+    _seed_habits(conn)
     r = register(conn, 1, category="comida", activity="almuerzo")
     verts = list_vertices(conn, 1, slugs=("bienestar",))
     v = next(v for v in verts if v.id == int(r["id"]))
@@ -26,6 +35,7 @@ def test_bienestar_is_vertex(conn: Connection) -> None:
 
 
 def test_event_id_stored(conn: Connection) -> None:
+    _seed_habits(conn)
     a = register(conn, 1, category="comida", activity="almuerzo", event_id="E1")
     b = register(conn, 1, category="higiene", activity="cepillado")
     assert a["event_id"] == "E1"
@@ -33,6 +43,7 @@ def test_event_id_stored(conn: Connection) -> None:
 
 
 def test_same_event_producer_connects(conn: Connection) -> None:
+    _seed_habits(conn)
     a = register(conn, 1, category="comida", activity="almuerzo", event_id="E1")
     b = register(conn, 1, category="ejercicio", activity="caminata", event_id="E1")
     c = register(conn, 1, category="higiene", activity="cepillado", event_id="E2")  # otro evento
@@ -55,6 +66,7 @@ def test_same_event_producer_connects(conn: Connection) -> None:
 
 
 def test_same_event_idempotent(conn: Connection) -> None:
+    _seed_habits(conn)
     register(conn, 1, category="comida", activity="almuerzo", event_id="E1")
     register(conn, 1, category="ejercicio", activity="caminata", event_id="E1")
     build_relations(conn, 1)
@@ -64,6 +76,7 @@ def test_same_event_idempotent(conn: Connection) -> None:
 
 def test_same_event_woven_on_register(conn: Connection) -> None:
     # registrar el segundo hecho del mismo evento teje la arista en el acto, SIN build_relations.
+    _seed_habits(conn)
     a = register(conn, 1, category="comida", activity="almuerzo", event_id="E1")
     b = register(conn, 1, category="ejercicio", activity="caminata", event_id="E1")
     edges = list_edges(conn, 1, producer="event")
@@ -73,6 +86,7 @@ def test_same_event_woven_on_register(conn: Connection) -> None:
 
 def test_weave_event_scoped(conn: Connection) -> None:
     # weave_event acota a UN evento: no toca los pares de otros eventos.
+    _seed_habits(conn)
     a = register(conn, 1, category="comida", activity="almuerzo", event_id="E1")
     b = register(conn, 1, category="ejercicio", activity="caminata", event_id="E1")
     register(conn, 1, category="higiene", activity="cepillado", event_id="E2")

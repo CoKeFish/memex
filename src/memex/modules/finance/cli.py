@@ -4,6 +4,7 @@ Subcomandos:
   register     — registra una transacción determinista (entrada por agente, sin LLM).
   dedup        — FASE 2: resuelve con LLM los pares candidatos (confirmar/rechazar).
   consolidate  — reconstruye la proyección consolidada (grupos + ganador por completitud).
+  geo          — resuelve el lugar GPS (dónde estuviste) de transacciones con hora precisa.
   help         — resumen de los comandos (para que el agente descubra la CLI).
 
 Server-side (corre DENTRO de memex): habla con la DB vía `connection()`, igual que
@@ -20,7 +21,7 @@ import argparse
 import asyncio
 import json
 import sys
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -28,9 +29,11 @@ from dotenv import load_dotenv
 from sqlalchemy.engine import Connection
 
 from memex.db import connection
+from memex.geo import GeoConfigError, GeoError
 from memex.logging import get_logger, setup_logging
 from memex.modules.finance.consolidate import run_consolidation
 from memex.modules.finance.dedup_llm import run_dedup_phase2
+from memex.modules.finance.geo_places import resolve_transaction_places
 from memex.modules.finance.module import register
 
 
@@ -71,6 +74,7 @@ Comandos:
   register     registra una transacción; asegura su consolidado y teje aristas en el acto
   dedup        FASE 2 de dedup con LLM (mantenimiento)
   consolidate  reconstruye la proyección consolidada (reconciliador/mantenimiento)
+  geo          resuelve el lugar GPS de transacciones con hora precisa (on-demand, sin LLM)
   help         muestra esta ayuda
 
 register (entrada del agente):
@@ -99,6 +103,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "consolidate", help="Reconstruye la vista consolidada (grupos + ganador por completitud)."
     )
     cons_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+
+    geo_p = sub.add_parser(
+        "geo",
+        help="Resuelve el lugar GPS de transacciones con hora precisa (on-demand, sin LLM).",
+    )
+    geo_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    geo_p.add_argument("--limit", type=int, default=100, help="Máx transacciones (default 100).")
+    geo_p.add_argument(
+        "--no-poi", action="store_true", help="Solo dirección (no buscar el nombre del negocio)."
+    )
+    geo_p.add_argument(
+        "--max-staleness-min",
+        type=int,
+        default=15,
+        help="Tolerancia en minutos entre el cobro y el ping más cercano (default 15).",
+    )
 
     reg_p = sub.add_parser(
         "register", help="Registra una transacción determinista (entrada por agente, sin LLM)."
@@ -138,6 +158,35 @@ def _cmd_consolidate(args: argparse.Namespace) -> int:
     _say(
         f"\nfinance consolidate: grupos={stats.groups} consolidados={stats.consolidated} "
         f"merges={stats.merges}\n"
+    )
+    return 0
+
+
+def _cmd_geo(args: argparse.Namespace) -> int:
+    try:
+        stats = asyncio.run(
+            resolve_transaction_places(
+                args.user,
+                limit=args.limit,
+                want_poi=not args.no_poi,
+                max_staleness=timedelta(minutes=args.max_staleness_min),
+            )
+        )
+    except GeoConfigError as e:  # subclase de GeoError → atrapar primero
+        _say(
+            f"Config geo inválida: {e}. ¿Corriste con `doppler run -- memex-finance geo`? "
+            "¿Está seteada GMAPS_API_KEY?",
+            err=True,
+        )
+        return 1
+    except GeoError as e:
+        _say(f"Error del proveedor de mapas: {e}", err=True)
+        return 1
+    aborted = " (cortado por cuota/permiso)" if stats.aborted else ""
+    _say(
+        f"\nfinance geo: vistas={stats.scanned} resueltas={stats.resolved} "
+        f"en_transito={stats.in_transit} sin_fix={stats.no_fix} "
+        f"sin_resultado={stats.no_result}{aborted}\n"
     )
     return 0
 
@@ -199,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_dedup(args)
         if args.cmd == "consolidate":
             return _cmd_consolidate(args)
+        if args.cmd == "geo":
+            return _cmd_geo(args)
         if args.cmd == "register":
             return _cmd_register(args)
         log.error("finance.cli.unknown_command", cmd=args.cmd)

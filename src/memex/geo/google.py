@@ -26,6 +26,7 @@ from memex.geo.client import (
     GeoPoint,
     GeoProviderError,
     GeoQuotaError,
+    PlaceResult,
     TravelEstimate,
     TravelMode,
 )
@@ -41,6 +42,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 _BODY_PREVIEW_MAX = 500
 _GEOCODE_PATH = "/maps/api/geocode/json"
 _MATRIX_PATH = "/maps/api/distancematrix/json"
+#: Places API (New): host + endpoint propios (NO maps.googleapis.com). La key va por header
+#: `X-Goog-Api-Key` (no query param) y solo se pide el FieldMask que usamos.
+_PLACES_SEARCH_URL = "https://places.googleapis.com/v1/places:searchNearby"
+_PLACES_FIELD_MASK = "places.displayName,places.formattedAddress,places.types,places.id"
 
 #: TravelMode → valor del param `mode` de Google (OJO: CYCLING ⇒ "bicycling").
 _MODE_PARAM: dict[TravelMode, str] = {
@@ -169,6 +174,73 @@ class GoogleMapsProvider:
             mode=mode,
         )
 
+    async def reverse_geocode(self, point: GeoPoint) -> GeocodeResult:
+        # Mismo Geocoding API que `geocode`, pero con `latlng` en vez de `address`.
+        params = {"latlng": point.as_latlng(), "key": self._config.api_key.get_secret_value()}
+        data = await self._get(_GEOCODE_PATH, params, op="reverse_geocode")
+
+        status = data.get("status")
+        if status != "OK":
+            self._raise_for_api_status(
+                status, query=point.as_latlng(), body=data.get("error_message")
+            )
+
+        results = data.get("results")
+        if not isinstance(results, list) or not results:
+            raise GeoNotFoundError(point.as_latlng())
+        first = results[0] if isinstance(results[0], dict) else {}
+        place_id = first.get("place_id")
+        return GeocodeResult(
+            point=point,
+            formatted_address=str(first.get("formatted_address") or ""),
+            provider_place_id=place_id if isinstance(place_id, str) else None,
+        )
+
+    async def nearby_place(
+        self,
+        point: GeoPoint,
+        *,
+        radius_m: float = 50.0,
+        included_types: tuple[str, ...] | None = None,
+    ) -> PlaceResult:
+        # Places API (New): POST con la key en header, el lugar más cercano (rank DISTANCE).
+        body: dict[str, Any] = {
+            "maxResultCount": 1,
+            "rankPreference": "DISTANCE",
+            "locationRestriction": {
+                "circle": {
+                    "center": {"latitude": point.lat, "longitude": point.lng},
+                    "radius": radius_m,
+                }
+            },
+        }
+        if included_types:
+            body["includedTypes"] = list(included_types)
+        headers = {
+            "X-Goog-Api-Key": self._config.api_key.get_secret_value(),
+            "X-Goog-FieldMask": _PLACES_FIELD_MASK,
+            "Content-Type": "application/json",
+        }
+        data = await self._places_post(body, headers, op="nearby_place")
+
+        places = data.get("places")
+        if not isinstance(places, list) or not places or not isinstance(places[0], dict):
+            raise GeoNotFoundError(point.as_latlng())
+        first = places[0]
+        display = first.get("displayName")
+        name = display.get("text") if isinstance(display, dict) else None
+        if not isinstance(name, str) or not name:
+            raise GeoProviderError(0, "places result missing displayName.text")
+        place_id = first.get("id")
+        types = first.get("types")
+        return PlaceResult(
+            name=name,
+            formatted_address=str(first.get("formattedAddress") or ""),
+            point=point,
+            provider_place_id=place_id if isinstance(place_id, str) else None,
+            types=tuple(t for t in types if isinstance(t, str)) if isinstance(types, list) else (),
+        )
+
     def _raise_for_api_status(self, status: Any, *, query: str, body: Any = None) -> None:
         """Mapea un `status` del body (cuando != OK) al error tipado. Nunca retorna en OK."""
         body_str = body if isinstance(body, str) else None
@@ -179,15 +251,40 @@ class GoogleMapsProvider:
         raise GeoProviderError(0, f"google api status {status!r}", body=body_str)
 
     async def _get(self, path: str, params: dict[str, str], *, op: str) -> dict[str, Any]:
+        return await self._send("GET", path, op=op, log_path=path, params=params)
+
+    async def _places_post(
+        self, body: dict[str, Any], headers: dict[str, str], *, op: str
+    ) -> dict[str, Any]:
+        return await self._send(
+            "POST",
+            _PLACES_SEARCH_URL,
+            op=op,
+            log_path="/v1/places:searchNearby",
+            json=body,
+            headers=headers,
+        )
+
+    async def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        op: str,
+        log_path: str,
+        params: dict[str, str] | None = None,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         started = time.monotonic()
-        resp = await self._request("GET", path, params=params)
+        resp = await self._request(method, url, params=params, json=json, headers=headers)
         latency_ms = int((time.monotonic() - started) * 1000)
         data = resp.json()
         api_status = data.get("status") if isinstance(data, dict) else None
         self._log.info(
             "geo.google.request",
             op=op,
-            path=path,
+            path=log_path,
             http_status=resp.status_code,
             api_status=api_status,
             latency_ms=latency_ms,
@@ -196,7 +293,15 @@ class GoogleMapsProvider:
             raise GeoProviderError(resp.status_code, "unexpected non-object response from google")
         return data
 
-    async def _request(self, method: str, path: str, *, params: dict[str, str]) -> httpx.Response:
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict[str, str] | None = None,
+        json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         """HTTP con retry de 429/5xx/red + backoff; 4xx HTTP-level inmediato.
 
         Los errores LÓGICOS de Google llegan con HTTP 200 (campo `status` del body) y se
@@ -205,11 +310,13 @@ class GoogleMapsProvider:
         last_exc: Exception | None = None
         for attempt in range(self._config.max_retries + 1):
             try:
-                resp = await self._client.request(method, path, params=params)
+                resp = await self._client.request(
+                    method, url, params=params, json=json, headers=headers
+                )
             except (httpx.TransportError, httpx.TimeoutException) as e:
                 last_exc = e
                 self._log.warning(
-                    "geo.google.request.network_error", path=path, exc=str(e), attempt=attempt
+                    "geo.google.request.network_error", path=url, exc=str(e), attempt=attempt
                 )
             else:
                 if resp.status_code == 429 or 500 <= resp.status_code < 600:
@@ -235,4 +342,4 @@ class GoogleMapsProvider:
 
         if isinstance(last_exc, GeoProviderError):
             raise last_exc
-        raise GeoProviderError(0, f"network error on {method} {path}") from last_exc
+        raise GeoProviderError(0, f"network error on {method} {url}") from last_exc

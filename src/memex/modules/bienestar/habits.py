@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.modules.bienestar.schema import normalize_activity, normalize_category
+from memex.relations.deterministic import weave_cumple
 
 #: Misma normalización que el match de actividad en `module.py` (lower + colapso de whitespace). La
 #: hace SIEMPRE la DB (columna y bind).
@@ -35,7 +36,9 @@ def add_habit(
     activity: str = "",
     category: str | None = None,
 ) -> dict[str, Any]:
-    """Crea un hábito. Necesita `activity` (match) O `category`. `cadence` ∈ daily|weekly."""
+    """Crea un hábito. Necesita `activity` (match) O `category`. `cadence` ∈ daily|weekly. Teje en
+    el acto las aristas «cumple» del grafo contra los registros que ya lo satisfacen (el full-sweep
+    es respaldo)."""
     if cadence not in ("daily", "weekly"):
         raise ValueError(f"cadence inválida: {cadence!r}")
     act = normalize_activity(activity)
@@ -64,6 +67,7 @@ def add_habit(
         .mappings()
         .one()
     )
+    weave_cumple(conn, user_id, habit_ids=[int(row["id"])])
     return dict(row)
 
 
