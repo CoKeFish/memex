@@ -21,8 +21,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
-from memex.core.payloads import Address, EmailPayload
-from memex.core.source import Source, SourceRecord
+from pydantic import BaseModel, ConfigDict
+
+from memex.core.payloads import Address, BasePayload, EmailPayload, msgid_dedupe_key
+from memex.core.source import HealthResult, Source, SourceKind, SourceRecord
 from memex.logging import get_logger
 
 # ---------------- LocalPlugin contract -----------------------------------------
@@ -210,17 +212,83 @@ def _split_addresses(s: str) -> list[Address]:
     return out
 
 
+class OutlookConfig(BaseModel):
+    """Config del plugin Outlook (lo que `build_source` lee del TOML local).
+
+    Declara la forma que `config_schema` valida en el borde — el plugin es push-only
+    (no se hace fetch server-side), así que esto sirve al contrato/discovery, no a un
+    SourceFactory de pull.
+    """
+
+    account: str | None = None
+    max_items_per_run: int = 100
+    since_days: int = 7
+    max_body_bytes: int = 524288
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class OutlookCursor(BaseModel):
+    """Checkpoint del source Outlook: el `ReceivedTime` del último correo flusheado.
+
+    `None` (cursor fresco) → el primer fetch arranca en `now - since_days`.
+    """
+
+    last_received_at: datetime | None = None
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
 @dataclass
 class _OutlookSource:
-    """Implementa `memex.core.source.Source` leyendo de Outlook desktop."""
+    """Implementa `memex.core.source.Source[OutlookCursor]` leyendo de Outlook desktop."""
 
     account: str | None
     max_items_per_run: int
     since_days: int
     max_body_bytes: int
-    type: ClassVar[str] = "outlook"
 
-    def fetch(self, checkpoint: dict[str, Any] | None) -> Iterable[SourceRecord]:
+    type: ClassVar[str] = "outlook"
+    kind: ClassVar[SourceKind] = SourceKind.EMAIL
+    payload_schema: ClassVar[type[BasePayload]] = EmailPayload
+    config_schema: ClassVar[type[BaseModel]] = OutlookConfig
+    checkpoint_schema: ClassVar[type[BaseModel]] = OutlookCursor
+
+    async def health_check(self) -> HealthResult:
+        """Verifica que Outlook COM esté disponible sin leer correos. Nunca lanza."""
+        now = datetime.now(UTC)
+        try:
+            pythoncom, win32com = _lazy_com()
+        except Exception as e:  # pragma: no cover - depende de pywin32 (Windows)
+            return HealthResult(
+                status="unhealthy", detail=f"pywin32 no disponible: {e}", checked_at=now
+            )
+        accounts: list[str] = []
+        try:
+            pythoncom.CoInitialize()
+            app = win32com.Dispatch("Outlook.Application")
+            ns = app.GetNamespace("MAPI")
+            accounts = [acc.SmtpAddress for acc in ns.Accounts]
+        except Exception as e:  # pragma: no cover - depende de Outlook (Windows)
+            return HealthResult(
+                status="unhealthy",
+                detail=f"Outlook COM no disponible: {type(e).__name__}: {e}",
+                checked_at=now,
+            )
+        finally:
+            with suppress(Exception):
+                pythoncom.CoUninitialize()
+        if self.account and self.account not in accounts:
+            return HealthResult(
+                status="unhealthy",
+                detail=f"cuenta {self.account!r} no está en Outlook (disponibles: {accounts})",
+                checked_at=now,
+            )
+        return HealthResult(
+            status="healthy", detail=f"outlook ok ({len(accounts)} cuenta(s))", checked_at=now
+        )
+
+    def fetch(self, checkpoint: OutlookCursor) -> Iterable[SourceRecord]:
         log = get_logger("memex_local.outlook").bind(account=self.account or "default")
         pythoncom, win32com = _lazy_com()
         pythoncom.CoInitialize()
@@ -275,15 +343,12 @@ class _OutlookSource:
                 return store.GetDefaultFolder(OL_FOLDER_INBOX)
         raise RuntimeError(f"outlook account not found: {self.account!r}")
 
-    def _compute_since(self, checkpoint: dict[str, Any] | None) -> datetime:
-        if checkpoint and isinstance(checkpoint.get("last_received_at"), str):
-            try:
-                dt = datetime.fromisoformat(checkpoint["last_received_at"])
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
-                return dt.astimezone(UTC)
-            except ValueError:
-                pass
+    def _compute_since(self, checkpoint: OutlookCursor) -> datetime:
+        if checkpoint.last_received_at is not None:
+            dt = checkpoint.last_received_at
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC)
         return datetime.now(UTC) - timedelta(days=self.since_days)
 
     def _to_record(self, item: Any, folder_name: str) -> SourceRecord | None:
@@ -335,14 +400,13 @@ class _OutlookSource:
             raw_headers=headers,
         )
 
+        msgid_key = msgid_dedupe_key(msg_id)
         return SourceRecord(
             external_id=external_id,
             occurred_at=received,
             payload=payload.model_dump(mode="json", by_alias=True),
-            dedupe_keys=[f"msgid:<{msg_id}>"] if msg_id else [],
+            dedupe_keys=[msgid_key] if msgid_key else [],
         )
 
-    def advance_checkpoint(
-        self, checkpoint: dict[str, Any] | None, last: SourceRecord
-    ) -> dict[str, Any]:
-        return {"last_received_at": last.occurred_at.isoformat()}
+    def advance_checkpoint(self, checkpoint: OutlookCursor, last: SourceRecord) -> OutlookCursor:
+        return OutlookCursor(last_received_at=last.occurred_at)

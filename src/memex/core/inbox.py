@@ -36,6 +36,22 @@ def insert_record(
     if owner != user_id:
         raise ValueError(f"source_id {source_id} does not belong to user {user_id}")
 
+    # Dedup por CONTENIDO (antes de insertar): si una clave de alta confianza (`msgid:`) ya
+    # existe para este usuario, es el MISMO correo llegando por otra carpeta/cuenta/fuente →
+    # se rechaza como duplicado sin crear una segunda fila. Solo claves `msgid:` para acotar el
+    # riesgo de falso positivo (telegram/social usan el external_id como clave y ya quedan
+    # cubiertos por UNIQUE(source_id, external_id)).
+    content_keys = [k for k in record.dedupe_keys if k.startswith("msgid:")]
+    if content_keys:
+        seen = conn.execute(
+            text(
+                "SELECT 1 FROM inbox_dedupe_keys WHERE user_id = :uid AND key = ANY(:keys) LIMIT 1"
+            ),
+            {"uid": user_id, "keys": content_keys},
+        ).first()
+        if seen is not None:
+            return InsertResult(inserted=False, id=None, reason="duplicate")
+
     row = conn.execute(
         text(
             """

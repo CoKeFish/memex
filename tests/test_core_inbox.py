@@ -53,6 +53,23 @@ def test_insert_record_rejects_cross_tenant(
         insert_record(conn, user_id=seed_user2, source_id=seed_source["id"], record=_rec())
 
 
+def test_content_dedup_by_msgid_across_external_ids(conn: Any, seed_source: dict[str, Any]) -> None:
+    """El MISMO correo (igual msgid) que llega con distinto external_id —p. ej. en dos
+    carpetas IMAP o por dos cuentas— se rechaza como duplicado por contenido, sin crear una
+    segunda fila en inbox."""
+    sid = seed_source["id"]
+    first = insert_record(
+        conn, user_id=1, source_id=sid, record=_rec("imap:srv:1:5", dedupe_keys=["msgid:abc@x"])
+    )
+    assert first.inserted is True
+    second = insert_record(
+        conn, user_id=1, source_id=sid, record=_rec("imap:srv:2:9", dedupe_keys=["msgid:abc@x"])
+    )
+    assert second.inserted is False
+    assert second.reason == "duplicate"
+    assert conn.execute(text("SELECT COUNT(*) FROM inbox")).scalar() == 1
+
+
 def test_dedupe_keys_persisted(conn: Any, seed_source: dict[str, Any]) -> None:
     rec = _rec("k1", dedupe_keys=["msgid:<a@x>", "imap:1:5"])
     r = insert_record(conn, user_id=1, source_id=seed_source["id"], record=rec)

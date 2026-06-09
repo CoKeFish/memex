@@ -205,3 +205,31 @@ def test_no_media_does_not_touch_store(
     assert resp.json()["inserted"] == 1
     assert fake_store.puts == []
     assert _media_rows() == []
+
+
+def test_gateway_ingest_persists_media(client: Any, fake_store: FakeStore) -> None:
+    """El gateway transporta media (antes la descartaba en silencio): el blob se sube al
+    object store y se registra en media_assets, igual que /ingest e /ingest/batch."""
+    state = client.post("/gateway/plugins/media-gw/state", json={"source_type": "outlook"}).json()
+    real_sha = hashlib.sha256(b"adjunto-gw").hexdigest()
+    record = {
+        "external_id": "g1",
+        "occurred_at": "2026-05-28T12:00:00+00:00",
+        "payload": {"subject": "con adjunto"},
+        "dedupe_keys": [],
+        "media": [_media_item(b"adjunto-gw", sha256="mentira")],
+    }
+    resp = client.post("/gateway/plugins/media-gw/ingest", json={"records": [record]})
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "source_id": state["source_id"],
+        "inserted": 1,
+        "duplicates": 0,
+        "errors": 0,
+        "filtered": 0,
+    }
+    # El blob se subió (antes: 0, se perdía) y quedó la fila con el sha256 recomputado server-side.
+    assert len(fake_store.puts) == 1
+    rows = _media_rows()
+    assert len(rows) == 1
+    assert rows[0]["sha256"] == real_sha

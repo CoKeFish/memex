@@ -53,6 +53,7 @@ class GatewayRecord(BaseModel):
     occurred_at: datetime
     payload: dict[str, Any]
     dedupe_keys: list[str] = Field(default_factory=list)
+    media: list[MediaItem] = Field(default_factory=list)
 
 
 class GatewayStateRequest(BaseModel):
