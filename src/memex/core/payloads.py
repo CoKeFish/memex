@@ -18,6 +18,22 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+def msgid_dedupe_key(message_id: str | None) -> str | None:
+    """Clave de dedup por contenido a partir del Message-ID de un correo.
+
+    Normaliza (quita los ángulos ``<...>`` y espacios) para que el MISMO correo capturado por
+    fuentes distintas — IMAP en dos carpetas, IMAP + Outlook, dos cuentas — produzca la MISMA
+    clave y se deduplique por contenido. Devuelve ``None`` si no hay Message-ID utilizable.
+    La normalización coincide con el `message_id` que ya guardan los parsers (sin ángulos).
+    """
+    if not message_id:
+        return None
+    norm = message_id.strip()
+    if norm.startswith("<") and norm.endswith(">"):
+        norm = norm[1:-1].strip()
+    return f"msgid:{norm}" if norm else None
+
+
 class BasePayload(BaseModel):
     """Marker base for any source-specific payload.
 

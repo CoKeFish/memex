@@ -188,8 +188,9 @@ class SourceContract(Protocol):
 
         Typical implementations: verify auth credentials are valid, target is
         reachable, session file is still authenticated. Should complete in
-        seconds, not minutes. Used by `GET /sources/{id}/health` and by
-        observability dashboards.
+        seconds, not minutes. Used by `POST /accounts/{id}/health-check` (the
+        credential lives on the account, so health is checked per-account) and
+        by observability dashboards.
 
         Must never raise — convert any error to `HealthResult(status="unhealthy",
         detail=str(error), checked_at=now)`.

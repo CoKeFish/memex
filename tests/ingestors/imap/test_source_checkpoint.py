@@ -90,3 +90,26 @@ def test_advance_checkpoint_ignores_malformed_external_id() -> None:
 
     # Malformed external_id left the cursor unchanged.
     assert new_cp is existing
+
+
+def test_advance_checkpoint_is_monotonic_within_uidvalidity() -> None:
+    """Un record con uid MENOR (llegada desordenada / corridas solapadas) no retrocede el cursor."""
+    source = _make_source()
+    existing = ImapCursor(folders={"INBOX": FolderState(uidvalidity=17, last_uid=42)})
+    last = _record("INBOX", uidvalidity=17, uid=30)
+
+    new_cp = source.advance_checkpoint(existing, last)
+
+    assert new_cp.folders["INBOX"] == FolderState(uidvalidity=17, last_uid=42)
+
+
+def test_advance_checkpoint_resets_on_uidvalidity_change() -> None:
+    """Si cambia la uidvalidity (carpeta recreada / migración) el cursor arranca fresco en el uid
+    nuevo, sin tomar el max contra el last_uid de la uidvalidity vieja."""
+    source = _make_source()
+    existing = ImapCursor(folders={"INBOX": FolderState(uidvalidity=17, last_uid=99)})
+    last = _record("INBOX", uidvalidity=18, uid=3)
+
+    new_cp = source.advance_checkpoint(existing, last)
+
+    assert new_cp.folders["INBOX"] == FolderState(uidvalidity=18, last_uid=3)

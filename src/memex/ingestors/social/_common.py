@@ -278,6 +278,7 @@ async def _social_fetch_async(
                     return [], None
 
             kept: list[SourceRecord] = []
+            saw_old = False
             for raw in result.items:
                 try:
                     record = parse_item(raw, account)
@@ -293,8 +294,24 @@ async def _social_fetch_async(
                 if record is None:
                     continue
                 if not is_new_record(record, acct_cursor):
+                    saw_old = True
                     continue
                 kept.append(record)
+
+            # Saturación: los scrapers devuelven los newest-N sin cursor nativo. Si trajo el tope
+            # (results_limit) y NINGUNO era viejo, no se alcanzó el cursor → posibles posts nuevos
+            # más viejos que la ventana se pierden; avisar para subir results_limit o el intervalo.
+            if (
+                not saw_old
+                and acct_cursor is not None
+                and acct_cursor.last_posted_at is not None
+                and len(result.items) >= cfg.results_limit
+            ):
+                acct_log.warning(
+                    "social.fetch.window_saturated",
+                    scraped=len(result.items),
+                    results_limit=cfg.results_limit,
+                )
 
             # oldest-first: el runner avanza el cursor a chunk[-1], así el último
             # flusheado es el más nuevo. Los actores devuelven newest-first.

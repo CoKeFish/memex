@@ -134,6 +134,12 @@ class ImapSource:
         except ValueError:
             return checkpoint
 
+        # Monotónico dentro de la misma uidvalidity: el cursor NUNCA retrocede aunque los records
+        # lleguen desordenados (range/last descendente) o dos corridas se solapen. Si cambió la
+        # uidvalidity (carpeta recreada / servidor migrado) arranca fresco en este uid.
+        prev = checkpoint.folders.get(folder)
+        if prev is not None and prev.uidvalidity == uidvalidity and prev.last_uid > uid:
+            uid = prev.last_uid
         new_folders = dict(checkpoint.folders)
         new_folders[folder] = FolderState(uidvalidity=uidvalidity, last_uid=uid)
         return ImapCursor(folders=new_folders)

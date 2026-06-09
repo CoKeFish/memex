@@ -30,6 +30,10 @@ UserID = Annotated[int, Depends(current_user_id)]
 
 _log = get_logger("memex.sources")
 
+# Piso del intervalo de agendado: por debajo de esto un fetch_schedule martillaría la fuente (y
+# gastaría API de paga en redes). El daemon además tiene su tick; esto corta el vector por API.
+MIN_FETCH_INTERVAL_S = 60.0
+
 _SOURCE_SELECT = """
     SELECT s.id, s.user_id, s.name, s.type, s.enabled, s.config, s.created_at,
            s.account_id, s.fetch_schedule, a.alias AS account_alias
@@ -192,11 +196,12 @@ async def ensure_source(body: SourceCreate, user_id: UserID) -> dict[str, Any]:
 
 @router.patch("/{source_id}", response_model=SourceRow)
 async def patch_source(source_id: int, body: SourcePatch, user_id: UserID) -> dict[str, Any]:
-    """Edición parcial: cuenta (`account_id`), toggle `enabled` y/o `fetch_schedule`.
+    """Edición parcial: `account_id`, `enabled`, `fetch_schedule`, `name` y/o `config`.
 
     `fetch_schedule` como string se valida con `parse_duration` (422 si es ISO-8601 inválido);
     `null` limpia el agendado; ausente no lo toca. El daemon `memex-ingest-scheduler` relee esta
-    columna cada tick.
+    columna cada tick. `name`/`config` permiten corregir una source mal configurada sin recrearla
+    (409 si el nuevo `name` colisiona con otra fuente del usuario).
     """
     fields = body.model_dump(exclude_unset=True)
     sets: list[str] = []
@@ -220,19 +225,75 @@ async def patch_source(source_id: int, body: SourcePatch, user_id: UserID) -> di
             schedule = fields["fetch_schedule"]
             if schedule is not None:
                 try:
-                    parse_duration(str(schedule))
+                    interval = parse_duration(str(schedule))
                 except ValueError as e:
                     raise HTTPException(
                         status_code=422,
                         detail=f"fetch_schedule inválido (ISO-8601, ej. PT1H): {schedule!r}",
                     ) from e
+                if interval < MIN_FETCH_INTERVAL_S:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"fetch_schedule mínimo {MIN_FETCH_INTERVAL_S:.0f}s — un intervalo más "
+                            "corto martillaría la fuente (y gasta API de paga en redes)"
+                        ),
+                    )
             sets.append("fetch_schedule = :fetch_schedule")
             params["fetch_schedule"] = schedule
+        if fields.get("name") is not None:
+            sets.append("name = :name")
+            params["name"] = fields["name"]
+        if fields.get("config") is not None:
+            sets.append("config = CAST(:config AS JSONB)")
+            params["config"] = json.dumps(fields["config"])
         if sets:
-            conn.execute(text(f"UPDATE sources SET {', '.join(sets)} WHERE id = :sid"), params)
+            try:
+                conn.execute(text(f"UPDATE sources SET {', '.join(sets)} WHERE id = :sid"), params)
+            except IntegrityError as e:
+                raise HTTPException(
+                    status_code=409, detail="source with that name already exists for this user"
+                ) from e
         row = _source_row(conn, source_id)
     _log.info("sources.patched", user_id=user_id, source_id=source_id, fields=list(fields.keys()))
     return row
+
+
+@router.get("/{source_id}", response_model=SourceRow)
+async def get_source(source_id: int, user_id: UserID) -> dict[str, Any]:
+    """Lectura individual de una source por id (la lista `GET /sources` trae todas)."""
+    with connection() as conn:
+        _assert_owns_source(conn, user_id, source_id)
+        return _source_row(conn, source_id)
+
+
+@router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_source(
+    source_id: int,
+    user_id: UserID,
+    cascade: Annotated[bool, Query(description="confirma el borrado del inbox/historial")] = False,
+) -> None:
+    """Borra una source. Las FKs ON DELETE CASCADE arrastran inbox/checkpoints/runs/dedupe_keys.
+
+    Guard 409 si la fuente ya ingirió algo (evita perder el historial sin querer): reintentá con
+    `?cascade=true` para confirmar el borrado destructivo.
+    """
+    with connection() as conn:
+        _assert_owns_source(conn, user_id, source_id)
+        if not cascade:
+            n = conn.execute(
+                text("SELECT COUNT(*) FROM inbox WHERE source_id = :sid"), {"sid": source_id}
+            ).scalar()
+            if n:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"la fuente tiene {n} registros en inbox; borrarla arrastra su historial. "
+                        "Reintentá con ?cascade=true para confirmar."
+                    ),
+                )
+        conn.execute(text("DELETE FROM sources WHERE id = :sid"), {"sid": source_id})
+    _log.info("sources.deleted", user_id=user_id, source_id=source_id, cascade=cascade)
 
 
 @router.post("/{source_id}/social/accounts", response_model=SourceRow)
@@ -310,6 +371,18 @@ async def put_checkpoint(source_id: int, body: CheckpointBody, user_id: UserID) 
         source_id=source_id,
     )
     return {"cursor": body.cursor}
+
+
+@router.delete("/{source_id}/checkpoint", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_checkpoint(source_id: int, user_id: UserID) -> None:
+    """Resetea el cursor: borra la fila de source_checkpoints → el próximo fetch incremental
+    arranca desde cero. El dedup UNIQUE(source_id, external_id) evita re-guardar lo ya ingerido."""
+    with connection() as conn:
+        _assert_owns_source(conn, user_id, source_id)
+        conn.execute(
+            text("DELETE FROM source_checkpoints WHERE source_id = :sid"), {"sid": source_id}
+        )
+    _log.info("sources.checkpoint.reset", user_id=user_id, source_id=source_id)
 
 
 def _stats_response(stats: RunStats, *, dry_run: bool) -> dict[str, Any]:

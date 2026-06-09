@@ -171,3 +171,71 @@ def test_social_account_cross_tenant_404(client: Any, seed_user2: int, conn: Any
     assert (
         client.post(f"/sources/{other_id}/social/accounts", json={"handle": "x"}).status_code == 404
     )
+
+
+# ----- editar / borrar source + reset de checkpoint ------------------------ #
+
+
+def test_patch_source_edits_config_and_name(client: Any) -> None:
+    src = client.post(
+        "/sources", json={"name": "imap-mal", "type": "imap", "config": {"server": "viejo"}}
+    ).json()
+    r = client.patch(
+        f"/sources/{src['id']}", json={"name": "imap-bien", "config": {"server": "nuevo"}}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["name"] == "imap-bien"
+    assert body["config"] == {"server": "nuevo"}
+
+
+def test_patch_source_duplicate_name_409(client: Any) -> None:
+    client.post("/sources", json={"name": "ocupado", "type": "imap"})
+    src = client.post("/sources", json={"name": "movible", "type": "imap"}).json()
+    assert client.patch(f"/sources/{src['id']}", json={"name": "ocupado"}).status_code == 409
+
+
+def test_delete_source_guards_inbox_then_cascade(client: Any, conn: Any) -> None:
+    # sin inbox: borra directo (204).
+    empty = client.post("/sources", json={"name": "vacia", "type": "imap"}).json()
+    assert client.delete(f"/sources/{empty['id']}").status_code == 204
+    # con inbox: 409 sin cascade, 204 con cascade, y queda inaccesible.
+    src = client.post("/sources", json={"name": "con-historial", "type": "imap"}).json()
+    sid = src["id"]
+    conn.execute(
+        text(
+            "INSERT INTO inbox (user_id, source_id, external_id, occurred_at, payload) "
+            "VALUES (1, :sid, 'e1', NOW(), '{}'::jsonb)"
+        ),
+        {"sid": sid},
+    )
+    assert client.delete(f"/sources/{sid}").status_code == 409
+    assert client.delete(f"/sources/{sid}?cascade=true").status_code == 204
+    assert client.get(f"/sources/{sid}").status_code == 404
+
+
+def test_get_source_returns_one_and_404(client: Any, seed_source: dict[str, Any]) -> None:
+    r = client.get(f"/sources/{seed_source['id']}")
+    assert r.status_code == 200
+    assert r.json()["id"] == seed_source["id"]
+    assert client.get("/sources/999999").status_code == 404
+
+
+def test_delete_checkpoint_resets(client: Any, seed_source: dict[str, Any]) -> None:
+    sid = seed_source["id"]
+    client.put(f"/sources/{sid}/checkpoint", json={"cursor": {"last_uid": 7}})
+    assert client.delete(f"/sources/{sid}/checkpoint").status_code == 204
+    assert client.get(f"/sources/{sid}/checkpoint").json() == {"cursor": None}
+
+
+def test_patch_source_rejects_sub_minimum_schedule(
+    client: Any, seed_source: dict[str, Any]
+) -> None:
+    """fetch_schedule por debajo del piso (60s) → 422; un intervalo razonable se acepta."""
+    r = client.patch(f"/sources/{seed_source['id']}", json={"fetch_schedule": "PT5S"})
+    assert r.status_code == 422
+    # Un intervalo razonable sigue aceptándose.
+    assert (
+        client.patch(f"/sources/{seed_source['id']}", json={"fetch_schedule": "PT15M"}).status_code
+        == 200
+    )

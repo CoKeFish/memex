@@ -15,7 +15,7 @@ from memex.core.media_types import (
     MEDIA_CONTENT_TYPES,
     make_media_blob,
 )
-from memex.core.payloads import Address, Attachment, EmailPayload
+from memex.core.payloads import Address, Attachment, EmailPayload, msgid_dedupe_key
 from memex.core.source import MediaBlob, SourceRecord
 from memex.logging import get_logger
 
@@ -105,8 +105,9 @@ def parse_email_message(
 
     external_id = f"imap:{server}:{uidvalidity}:{uid}"
     dedupe_keys: list[str] = []
-    if msg_id:
-        dedupe_keys.append(f"msgid:{msg_id}")
+    msgid_key = msgid_dedupe_key(msg_id)
+    if msgid_key:
+        dedupe_keys.append(msgid_key)
     dedupe_keys.append(external_id)
 
     payload_model = EmailPayload(

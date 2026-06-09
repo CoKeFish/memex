@@ -60,9 +60,11 @@ class IngestScheduler:
         user_id: int,
         sources: list[ScheduledSource],
         tick_seconds: float = 5.0,
+        fetch_timeout_seconds: float = 300.0,
     ) -> None:
         self._user_id = user_id
         self._tick_s = tick_seconds
+        self._fetch_timeout_s = fetch_timeout_seconds
         self._stop = asyncio.Event()
         now = time.monotonic()
         self._runtimes: dict[int, _SourceRuntime] = {}
@@ -214,15 +216,21 @@ class IngestScheduler:
         try:
             # `run_fetch_window` ya envuelve la corrida en `ingestion_run(trigger='daemon')`:
             # escribe la fila de `ingestion_runs` y bindea run_id/source_id/trigger a los logs.
-            stats = await run_fetch_window(
-                user_id=self._user_id,
-                source_id=rt.source_id,
-                source_type=rt.source_type,
-                cfg=rt.cfg,
-                account_id=rt.account_id,
-                mode="incremental",
-                dry_run=False,
-                trigger="daemon",
+            # asyncio.wait_for acota la espera del daemon por una fuente: al vencer cancela la
+            # corrida (su ingestion_run queda 'aborted' y se libera el lock) y sigue con las demás
+            # en vez de congelarse. El timeout real del socket IMAP lo pone ImapConfig (timeout_s).
+            stats = await asyncio.wait_for(
+                run_fetch_window(
+                    user_id=self._user_id,
+                    source_id=rt.source_id,
+                    source_type=rt.source_type,
+                    cfg=rt.cfg,
+                    account_id=rt.account_id,
+                    mode="incremental",
+                    dry_run=False,
+                    trigger="daemon",
+                ),
+                timeout=self._fetch_timeout_s,
             )
         except Exception as e:  # incl. HTTPException(502/422): backoff y seguir
             rt.failure_count += 1

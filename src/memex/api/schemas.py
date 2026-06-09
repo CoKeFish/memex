@@ -53,6 +53,7 @@ class GatewayRecord(BaseModel):
     occurred_at: datetime
     payload: dict[str, Any]
     dedupe_keys: list[str] = Field(default_factory=list)
+    media: list[MediaItem] = Field(default_factory=list)
 
 
 class GatewayStateRequest(BaseModel):
@@ -1439,6 +1440,11 @@ class SourcePatch(BaseModel):
     account_id: int | None = None
     enabled: bool | None = None
     fetch_schedule: str | None = None
+    # Editar la config general (server/port/folders IMAP, chats Telegram…) o el nombre de la fuente,
+    # para corregir una source mal configurada sin recrearla (y perder su cursor). `null`/ausente no
+    # la toca. La allowlist social se edita por sus endpoints dedicados (/social/accounts).
+    name: str | None = None
+    config: dict[str, Any] | None = None
 
 
 class SocialAccountAdd(BaseModel):
