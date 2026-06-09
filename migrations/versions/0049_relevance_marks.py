@@ -1,7 +1,7 @@
 """calidad: relevance_marks — override manual de relevancia por mensaje
 
-Revision ID: 0043_relevance_marks
-Revises: 0042_module_item_count
+Revision ID: 0049_relevance_marks
+Revises: 0048_module_item_count
 Create Date: 2026-06-08
 
 El usuario marca UN mensaje como relevante o no relevante; ese juicio gana sobre la heurística
@@ -18,8 +18,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0043_relevance_marks"
-down_revision: str | None = "0042_module_item_count"
+revision: str = "0049_relevance_marks"
+down_revision: str | None = "0048_module_item_count"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

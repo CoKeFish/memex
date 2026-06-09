@@ -1,7 +1,7 @@
 """calidad: item_count en module_extractions (señal de relevancia por mensaje)
 
-Revision ID: 0042_module_item_count
-Revises: 0041_agent_event_staging
+Revision ID: 0048_module_item_count
+Revises: 0047_calendar_geo_coords
 Create Date: 2026-06-08
 
 El cursor `module_extractions` marcaba solo "este módulo ya consideró este mensaje" — se escribe
@@ -22,8 +22,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0042_module_item_count"
-down_revision: str | None = "0041_agent_event_staging"
+revision: str = "0048_module_item_count"
+down_revision: str | None = "0047_calendar_geo_coords"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

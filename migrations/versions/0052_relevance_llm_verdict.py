@@ -1,7 +1,7 @@
 """calidad: llm_verdict en relevance_candidates (juez LLM de zona gris, opcional)
 
-Revision ID: 0046_relevance_llm_verdict
-Revises: 0045_relevance_candidates
+Revision ID: 0052_relevance_llm_verdict
+Revises: 0051_relevance_candidates
 Create Date: 2026-06-08
 
 El juez LLM (opcional, `MEMEX_QUALITY_LLM`, default off) lee una muestra de los mensajes de un
@@ -16,8 +16,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0046_relevance_llm_verdict"
-down_revision: str | None = "0045_relevance_candidates"
+revision: str = "0052_relevance_llm_verdict"
+down_revision: str | None = "0051_relevance_candidates"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

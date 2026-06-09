@@ -1,7 +1,7 @@
 """calidad: relevance_candidates — cola de candidatos a filtrar (detección automática "por métricas")
 
-Revision ID: 0045_relevance_candidates
-Revises: 0044_sender_tier_overrides
+Revision ID: 0051_relevance_candidates
+Revises: 0050_sender_tier_overrides
 Create Date: 2026-06-08
 
 El job `relevance` (apagado por default) llena esta cola con los remitentes EMAIL ruidosos
@@ -19,8 +19,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0045_relevance_candidates"
-down_revision: str | None = "0044_sender_tier_overrides"
+revision: str = "0051_relevance_candidates"
+down_revision: str | None = "0050_sender_tier_overrides"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

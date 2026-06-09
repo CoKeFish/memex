@@ -1,7 +1,7 @@
 """calidad: sender_tier_overrides — "no procesar" un remitente (tier forzado hacia adelante)
 
-Revision ID: 0044_sender_tier_overrides
-Revises: 0043_relevance_marks
+Revision ID: 0050_sender_tier_overrides
+Revises: 0049_relevance_marks
 Create Date: 2026-06-08
 
 Acción asistida del sistema de calidad: el usuario decide que un remitente es de bajo valor y manda
@@ -18,8 +18,8 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0044_sender_tier_overrides"
-down_revision: str | None = "0043_relevance_marks"
+revision: str = "0050_sender_tier_overrides"
+down_revision: str | None = "0049_relevance_marks"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

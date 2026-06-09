@@ -1,4 +1,4 @@
-"""Backfill one-time de `module_extractions.item_count` (señal de relevancia, migración 0042).
+"""Backfill one-time de `module_extractions.item_count` (señal de relevancia, migración 0048).
 
 Cuando se agregó `item_count`, las filas históricas quedaron en 0 → la métrica de relevancia las ve
 como "sin hecho" (inertes), sesgando la detección de candidatos contra remitentes viejos. Este
