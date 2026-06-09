@@ -1,63 +1,83 @@
-# Subsistema geo (ubicación) — diseño
+# Subsistema geo (ubicación)
 
-> **Estado: diseño** (forward-looking). Hoy geo existe **solo como servicio** (geocodificar + rutas,
-> Google/OpenRouteService) y **ningún módulo lo usa todavía**. Este doc describe el subsistema completo
-> que se quiere construir. El servicio ya dejó el *seam* para engancharlo (ver Apéndice).
+> **Estado: parcialmente construido.** El **plano de ubicación** (entrada de GPS por el gateway +
+> almacenamiento + lectura) y la **resolución de lugares** ya están **hechos** (commit `c7759df`,
+> migraciones 0042/0043). Falta lo **reactivo**: el clustering de "lugares donde estuve", el daemon de
+> transporte, la integración con el calendario, y la app móvil. Geo dejó de ser "solo un servicio de
+> mapas".
 
 **Geo NO es un módulo de extracción** como finanzas o calendario (esos sacan datos de los mensajes y
 procesan por lotes). Es un **subsistema de ubicación**: tiene su propia entrada (el GPS del teléfono,
-no el inbox), su propio daemon, y una función que **colabora con el calendario** para avisarte cuándo
-salir.
+no el inbox), su propio almacenamiento, y —a futuro— un daemon que **colabora con el calendario** para
+avisarte cuándo salir.
 
-## Arquitectura
+## Arquitectura (verde = hecho · gris = pendiente · amarillo = almacenamiento)
 
 ```mermaid
 flowchart TB
-  app["APP MÓVIL<br/>manda tu ubicación GPS"]
+  app["App móvil<br/>(pendiente)"]
+  cli["CLI memex-geo<br/>(pruebas)"]
 
   subgraph srv["SERVIDOR (memex)"]
-    gw["Puerta de entrada (gateway)"]
-    ubic[("UBICACIÓN<br/>dónde estás ahora + historial")]
-    serv["SERVICIO geo<br/>geocodificar · distancias · rutas<br/>(Google / OpenRouteService)"]
-    lugares["LUGARES DONDE ESTUVE<br/>(agrupa los puntos GPS — clustering)"]
-    daemon["DAEMON DE TRANSPORTE<br/>¿es hora de salir para tu próximo evento?"]
-    cal["Módulo Calendario<br/>(próximo evento + su lugar)"]
+    gw["Entrada de GPS<br/>POST /gateway/location/pings"]
+    ubic[("UBICACIÓN<br/>pings GPS + historial")]
+    lectura["Lectura<br/>última · en un instante · historial"]
+    lugares_r["Resolución de lugares<br/>coords → dirección/POI<br/>(caché + 'en tránsito')"]
+    serv["Servicio de mapas<br/>geocodificar · rutas · tiempos"]
+    cluster["Clustering → 'lugares donde estuve'"]
+    daemon["Daemon de transporte<br/>'¿hora de salir?'"]
   end
 
+  cal["Módulo Calendario"]
+  maps["Google / OpenRouteService"]
   agente["Agente / push"]
 
-  app -. "GPS en vivo" .-> gw
-  gw -. guarda .-> ubic
-  ubic --> lugares
-  daemon -. "lee dónde estás" .-> ubic
-  daemon -. "lee tu próximo evento" .-> cal
-  daemon -->|"calcula con rutas"| serv
+  app -. "GPS (futuro)" .-> gw
+  gw --> ubic
+  lectura --> ubic
+  ubic -. "base" .-> cluster
+  lugares_r --> serv
+  cli --> serv
+  serv --> maps
+  daemon -. "ubicación (seam listo)" .-> lectura
+  daemon -. "próximo evento" .-> cal
+  daemon --> serv
   daemon -->|"salí a las 2:40"| agente
 
+  classDef done fill:#dcfce7,stroke:#15803d,color:#1f2937;
+  classDef pend fill:#e5e7eb,stroke:#6b7280,color:#374151;
   classDef store fill:#fde68a,stroke:#b45309,color:#1f2937;
+  class gw,lectura,lugares_r,serv done;
   class ubic store;
+  class app,cluster,daemon pend;
 ```
 
 ## Las piezas
 
-- **App móvil** — manda tu **GPS** al servidor. Es una **entrada nueva** (un flujo continuo de
-  "estoy acá ahora", distinto de los mensajes del inbox).
-- **Puerta de entrada (gateway)** — la app pega al **mismo gateway** que usa el cliente local; los
-  pings de ubicación entran por ahí.
-- **Ubicación** — guarda dónde estás *ahora* + el **historial** de puntos.
-- **Lugares donde estuve** — se derivan **agrupando** los puntos GPS por permanencia (*clustering*):
-  cualquier sitio donde te quedaste un rato cuenta, no solo lugares con nombre. Es la fuente fuerte de
-  presencia (mucho mejor que adivinarla de los mensajes).
-- **Servicio geo** — lo que ya existe: geocodificar direcciones y calcular distancias/rutas/tiempos.
-- **Daemon de transporte** — mira tu ubicación + tu próximo evento (del **calendario**) + el tiempo
-  de viaje (del servicio) y, cuando toca, dispara el aviso.
+- **App móvil** *(pendiente)* — mandará tu **GPS** al servidor. Hoy solo existe el **contrato del
+  endpoint** (qué campos manda); la app en sí no está.
+- **Entrada de GPS** *(hecho)* — `POST /gateway/location/pings`: la app pega al gateway y los pings se
+  guardan tal cual (append-only), fuera del pipeline de mensajes. Más `GET /…/latest` para verificar.
+- **Ubicación** *(hecho)* — guarda **todos los pings** (dónde estuviste y cuándo); de ahí salen "dónde
+  estás ahora", "dónde estabas en tal instante" y el historial.
+- **Lectura** *(hecho)* — una capa tipada que entrega la última ubicación, la de un instante dado, o
+  el historial, a quien la necesite.
+- **Resolución de lugares** *(hecho, no estaba en el diseño original)* — convierte coordenadas en una
+  dirección o un negocio cercano, con **caché** (para no repetir llamadas a Maps) y **consciente del
+  movimiento** (si vas rápido, te marca "en tránsito" sin gastar una llamada).
+- **Servicio de mapas** *(hecho, ya existía)* — geocodificar direcciones y calcular distancias/rutas/tiempos.
+- **Lugares donde estuve** *(pendiente)* — se derivarán **agrupando** los pings por permanencia
+  (*clustering*). Hoy solo está la base (leer los pings de un rango); falta el algoritmo y su tabla.
+- **Daemon de transporte** *(pendiente)* — mirará tu ubicación + tu próximo evento (del **calendario**)
+  + el tiempo de viaje (del servicio) y disparará el aviso. El seam para leer tu ubicación **ya está
+  enchufado**, pero nadie lo consume todavía.
 
 ## Decisiones tomadas
 
-1. **El GPS entra por el gateway** — la app móvil manda los pings al gateway, igual que el cliente
-   local manda records. Cada cierto tiempo (frecuencia a definir).
-2. **"Estuve ahí" = clustering** — todo lugar donde te quedaste un rato (agrupando puntos GPS), no
-   solo los geocodificados/con nombre.
+1. **El GPS entra por el gateway** ✅ — implementado: la app móvil manda los pings al gateway, igual
+   que el cliente local manda records.
+2. **"Estuve ahí" = clustering** ⏳ — agrupar los puntos GPS por permanencia (no solo los con nombre).
+   Decidido; falta implementarlo.
 3. **Cálculo determinista en memex, aviso lo decide el agente** — el "salí a las 2:40" es aritmética +
    rutas (sin IA) → lo computa memex; **el agente (Hermes) decide cómo y cuándo** notificarte.
 
@@ -65,41 +85,47 @@ flowchart TB
 
 - **No extrae de mensajes** — su materia prima es el GPS, no el inbox.
 - **Tiene entrada propia** — un flujo de ubicación por el gateway, no el pipeline de ingesta.
-- **Es reactivo, no por lotes** — el daemon de transporte chequea seguido (la utilidad es avisarte a
-  tiempo); los daemons actuales (ingesta, procesamiento) corren por lotes cada tanto.
-- **Es determinista** — encaja con la filosofía de geo (Maps + aritmética, sin LLM).
+- **Será reactivo, no por lotes** — el daemon de transporte chequeará seguido (la utilidad es avisarte
+  a tiempo); los daemons actuales (ingesta, procesamiento) corren por lotes cada tanto.
+- **Es determinista** — Maps + aritmética, sin LLM.
 
 ## A tener presente
 
-- **Ubicación fresca vs batería** — el daemon reactivo necesita GPS reciente, así que depende de que
+- **Ubicación fresca vs batería** — el daemon reactivo necesitará GPS reciente, así que depende de que
   la app mande ubicación con cierta frecuencia; hay un trade-off con la batería del teléfono.
 - **Modo de transporte** — "cuándo salir" cambia según si vas en auto, a pie o en transporte público
   (el servicio ya distingue modos de viaje).
+- **Retención de pings** — hoy `geo_location_pings` crece indefinidamente; falta una política de purga
+  o agregación.
 
-## Estado actual y qué falta
+## Estado: qué está hecho y qué falta
 
-**Hoy (en `src/memex/geo/`):** solo el **servicio** — geocodificar (`geocode_address`) y estimar
-viajes (`estimate_trip` / `estimate_trip_from_source`) sobre proveedores Google / OpenRouteService.
-El servicio ya dejó el enganche: `estimate_trip_from_source` toma una `LocationSource` (en v0 un punto
-manual, `ManualLocationSource`) cuyo reemplazo futuro es **la geolocalización del teléfono, sin
-cambiar la firma** — y está documentado como el seam con *"calendar reachability"*.
+**✅ Hecho (commit `c7759df`, migraciones 0042/0043):**
+- Entrada de GPS por el gateway (`POST /gateway/location/pings`, append-only) + read-back (`GET /…/latest`).
+- Almacenamiento de pings + historial (tabla `geo_location_pings`, multi-tenant).
+- Capa de lectura tipada (`LocationReader`: última / en un instante / historial).
+- **El seam enchufado**: `StoredLocationSource` lee tu último ping y lo da a `estimate_trip_from_source`
+  **sin cambiar su firma** — tu ubicación real ya puede alimentar el "estimar viaje".
+- Resolución de lugares (coords → dirección/POI) con caché global por celda (~11m) y `in_transit`.
 
-**Falta construir:**
-- La **entrada de GPS por el gateway** (endpoint para los pings de la app móvil).
-- El **almacenamiento** de ubicación actual + historial.
-- El **clustering** de puntos → "lugares donde estuve".
-- El **daemon de transporte** (reactivo): leer ubicación + próximo evento del calendario, calcular el
-  leave-by con el servicio, y disparar el aviso vía el agente.
-- La **app móvil** que manda el GPS.
+**⏳ Falta:**
+- **Clustering** de puntos → "lugares donde estuve" (solo está la base de leer pings por rango).
+- **Daemon de transporte** (reactivo): leer ubicación + próximo evento del calendario, calcular el
+  leave-by, y disparar el aviso vía el agente. No hay job en el scheduler.
+- **Integración con el calendario** — el seam está tendido pero **sin consumidor** (calendar no llama
+  a geo todavía).
+- **App móvil** que capture el GPS y mande los pings.
+- **Retención/purga** de los pings.
 
-## Apéndice — el seam que ya existe
+## Apéndice — piezas en el código
 
-| Pieza actual | Rol |
+| Pieza | Rol |
 |---|---|
-| `geo/service.py` | `geocode_address`, `estimate_trip`, `estimate_trip_from_source` (el seam con calendar). Orquestación pura, sin I/O propio. |
-| `geo/client.py` | Tipos del contrato: `GeoProvider`, `GeoPoint`, `GeocodeResult`, `TravelEstimate`, `TravelMode`, y **`LocationSource`** (v0 `ManualLocationSource` → futuro: GPS del teléfono). |
-| `geo/google.py` · `geo/ors.py` · `geo/providers.py` | Proveedores: Google Maps y OpenRouteService (routing). |
-| `geo/cli.py` (`memex-geo`) | CLI de la utilidad. |
-
-El reemplazo clave para este diseño: una `LocationSource` que lea la **última ubicación GPS** que la
-app mandó por el gateway, en vez del punto manual de v0 — sin tocar `estimate_trip_from_source`.
+| `api/routers/geo.py` | Gateway de ubicación: `POST /gateway/location/pings` (ingreso, append-only) + `GET /…/latest` (read-back). Registrado en `app.py`. |
+| `geo/store.py` | Capa SQL pura: `insert_pings`, `latest_ping`, `ping_at`, `pings_in_range` ("base del clustering") + caché de lugares (`get/put_cached_place`). |
+| `geo/domain.py` | `LocationReader` (latest/at/history) + **`StoredLocationSource`** (el seam con GPS real) + `resolve_place_at` (consciente del movimiento). |
+| `geo/service.py` | Orquestación pura: `geocode_address`, `estimate_trip`, `estimate_trip_from_source` (seam con calendar), `reverse_geocode`, `nearby_place`, `resolve_place`. |
+| `geo/client.py` | Contrato: `GeoProvider`, `GeoPoint`, `TravelEstimate`, `PlaceResult`, `ResolvedPlace` (`in_transit`), `LocationSource` (v0 `ManualLocationSource`). |
+| `geo/google.py` · `geo/ors.py` | Proveedores: Google Maps (geocode + rutas + Places) y OpenRouteService (geocode + rutas; sin Places). |
+| `geo/cli.py` (`memex-geo`) | CLI de pruebas: `geocode` / `trip` / `place`. |
+| `migrations/0042_geo_location_pings.py` · `0043_geo_place_cache.py` | Tablas: `geo_location_pings` (por usuario, append-only) y `geo_place_cache` (global, por celda). |
