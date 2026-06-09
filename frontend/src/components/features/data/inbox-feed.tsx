@@ -205,7 +205,12 @@ export function InboxFeed() {
         })}
       </div>
 
-      <Panel className="flex min-h-[640px] flex-col overflow-hidden">
+      {/* Altura ACOTADA al viewport: sin esto el panel crece al contenido y el que scrollea es
+          <main> — el scroller interno (parentRef) queda muerto, la virtualización degenera en
+          render-todo (2.000 filas en el DOM) y la restauración de scroll no tiene a quién apuntar.
+          El calc resta topbar + paddings + header + chips (~278px); el min-h es el piso en
+          ventanas chicas (ahí vuelve a scrollear main, comportamiento previo). */}
+      <Panel className="flex h-[calc(100svh-17.5rem)] min-h-[520px] flex-col overflow-hidden">
         <div className="flex items-center gap-2 border-b border-border p-3">
           <div className="relative flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
