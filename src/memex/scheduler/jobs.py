@@ -34,7 +34,7 @@ from memex.modules.identidades.sync import run_sync as run_identidades_sync
 from memex.modules.orchestrator import run_extraction
 from memex.ocr.worker import run_ocr
 from memex.quality.candidates import run_relevance_detection
-from memex.relations.clusters_llm import run_cluster_validation
+from memex.relations.clusters_llm import run_cluster_partition
 from memex.relations.deterministic import build_relations
 from memex.relations.reconcile import detect_and_reconcile
 from memex.summarizer.worker import run_summarization
@@ -379,8 +379,8 @@ async def run_graph_cycle(user_id: int) -> GraphCycleStats:
         cycle.steps_failed.append("detect")
         _log.warning("scheduler.graph.step_failed", step="detect", error=str(e))
     try:
-        v = await run_cluster_validation(user_id)
-        cycle.confirmed += v.confirmed
+        v = await run_cluster_partition(user_id)
+        cycle.confirmed += v.groups  # "confirmados" del ciclo = contextos (hijos) del partidor
         cycle.rejected += v.rejected
         cycle.errors += v.errors
     except LLMQuotaError:

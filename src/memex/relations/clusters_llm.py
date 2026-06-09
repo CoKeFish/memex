@@ -2,6 +2,12 @@
 llamada al LLM que revisa sus VÉRTICES y sus ARISTAS internas y devuelve veredicto + confianza +
 nombre + descripción + poda. Es el decisor (Fase 4) a nivel cúmulo.
 
+Y es TAMBIÉN el resolvedor de aristas (Fase 4 cableado EN CONTEXTO, no de a pares): al confirmar un
+cúmulo, sus PISTAS internas de co-ocurrencia se promueven en cascada a `confirmed` (con la confianza
+del cúmulo); al podar un miembro o rechazar el cúmulo, esas pistas se `rejected`. Una sola llamada
+amortiza todas las aristas internas. Las aristas `confirmed` deterministas NUNCA se tocan (ver
+`_cascade_edges`).
+
 Molde: `modules/identidades/relations_llm.py` (loop best-effort por unidad, una llamada por cúmulo,
 cliente inyectable, parseo ultra-defensivo, `LLMQuotaError` PROPAGA). Idempotente: solo toca cúmulos
 `candidate`/`needs_revalidation`; un confirmado estable no se re-juzga (costo acotado). Al final
@@ -13,6 +19,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from decimal import Decimal
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -23,16 +30,29 @@ from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.llm.client import LLMQuotaError
 from memex.logging import get_logger
-from memex.relations.cluster_store import materialize_cluster_edges, reject_cluster
+from memex.relations.cluster_store import (
+    StoredCluster,
+    create_child,
+    delete_cluster,
+    load_clusters,
+    mark_dissolved,
+    materialize_cluster_edges,
+    reject_cluster,
+    sync_child,
+)
 from memex.relations.edges import (
+    PRODUCER_INBOX,
+    RELTYPE_COOCURRENCIA,
     RELTYPE_MIEMBRO_DE,
     STATUS_CONFIRMED,
+    STATUS_PISTA,
     STATUS_REJECTED,
     Ref,
     RelationEdge,
     list_edges,
+    resolve_edge,
 )
-from memex.relations.prompt import GRAPH_CLUSTER_VALIDATION_SYSTEM_PROMPT
+from memex.relations.prompt import GRAPH_CLUSTER_PARTITION_SYSTEM_PROMPT
 from memex.relations.vertices import Vertex, list_vertices
 
 _log = get_logger("memex.relations.clusters_llm")
@@ -44,27 +64,19 @@ _INTERNAL_EDGE_CAP = 300
 
 
 @dataclass
-class ClusterValidationStats:
-    """Resumen de una corrida del validador."""
+class ClusterPartitionStats:
+    """Resumen de una corrida del PARTIDOR."""
 
-    clusters: int = 0  # cúmulos con llamada LLM
-    confirmed: int = 0
-    rejected: int = 0
-    pruned_members: int = 0
-    skipped: int = 0  # saltados por tamaño (> cluster_max_members)
+    blobs: int = 0  # blobs con llamada LLM (particionados)
+    groups: int = 0  # contextos (hijos confirmed) creados o sincronizados
+    created: int = 0  # hijos nuevos
+    synced: int = 0  # hijos actualizados EN SITIO (identidad preservada al crecer)
+    dissolved: int = 0  # hijos disueltos (su contexto desapareció del blob)
+    rejected: int = 0  # blobs todo-ruido (memo de rechazo)
+    promoted: int = 0  # pistas intra-grupo promovidas a confirmed
+    skipped: int = 0  # blobs saltados (serialización > tope)
     errors: int = 0
     cost: CostAccum = field(default_factory=CostAccum)
-
-
-@dataclass(frozen=True)
-class ClusterVerdict:
-    """Veredicto parseado del LLM. `verdict=None` = JSON inválido (no memoiza; se reintenta)."""
-
-    verdict: str | None  # 'keep' | 'reject' | None
-    confidence: float
-    name: str
-    description: str
-    prune: list[int]  # ids LOCALES (1..n) válidos
 
 
 @dataclass(frozen=True)
@@ -80,13 +92,13 @@ class _Pending:
 
 
 def _load_pending(conn: Connection, user_id: int, limit: int) -> list[_Pending]:
-    """Cúmulos `candidate` o con `needs_revalidation`, los más grandes primero. Miembros VIVOS (no
-    podados) ordenados → id local estable."""
+    """Blobs `candidate` a particionar, los más grandes primero. Miembros ordenados → id local
+    estable (1..n). `signature` de un candidate = la firma del BLOB."""
     rows = (
         conn.execute(
             text(
                 "SELECT id, signature FROM relation_clusters "
-                "WHERE user_id = :u AND (status = 'candidate' OR needs_revalidation) "
+                "WHERE user_id = :u AND status = 'candidate' "
                 "ORDER BY member_count DESC, id LIMIT :lim"
             ),
             {"u": user_id, "lim": limit},
@@ -152,177 +164,319 @@ def _serialize(members: list[Ref], internal: list[RelationEdge], vmap: dict[Ref,
     return "\n".join(lines)
 
 
-def parse_verdict(content: str, n_members: int) -> ClusterVerdict:
-    """Parsea `{verdict, confidence, name, description, prune}`. ULTRA-DEFENSIVO: basura → veredicto
-    `None` (no memoiza); descarta `prune` fuera de `1..n`, bool-como-int y duplicados; clampa la
-    confianza a 0..1."""
+# --- PARTIDOR (Fase 2): una llamada parte el blob en los N contextos que tenga ------ #
+
+
+@dataclass(frozen=True)
+class PartitionGroup:
+    """Un contexto descubierto: ids locales (1..n) de sus miembros + metadatos del LLM."""
+
+    members: tuple[int, ...]
+    name: str
+    description: str
+    confidence: float
+
+
+@dataclass(frozen=True)
+class PartitionResult:
+    """Partición parseada. `valid=False` = JSON inválido (noop/reintenta, NO memoiza);
+    `valid=True, groups=()` = ruido (sin contexto coherente → memo de rechazo)."""
+
+    groups: tuple[PartitionGroup, ...]
+    valid: bool
+
+
+def _clean_member_ids(raw: object, n: int) -> list[int]:
+    """ids locales válidos (1..n), sin bool-como-int ni duplicados, preservando orden."""
+    out: list[int] = []
+    seen: set[int] = set()
+    if isinstance(raw, list):
+        for x in raw:
+            if isinstance(x, int) and not isinstance(x, bool) and 1 <= x <= n and x not in seen:
+                seen.add(x)
+                out.append(x)
+    return out
+
+
+def parse_partition(content: str, n_members: int) -> PartitionResult:
+    """Parsea `{groups:[{members,name,description,confidence}]}`. ULTRA-DEFENSIVO: basura →
+    `valid=False` (no memoiza). Normaliza determinista: ids 1..n sin bool/duplicados; ordena los
+    grupos por su id mínimo y asigna cada vértice al PRIMER grupo que lo lista (dedup entre grupos);
+    descarta grupos de < 2 miembros; clampa confianza 0..1. `valid=True, groups=()` = ruido."""
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        return ClusterVerdict(None, 0.0, "", "", [])
-    if not isinstance(data, dict):
-        return ClusterVerdict(None, 0.0, "", "", [])
-    verdict = data.get("verdict")
-    if verdict not in ("keep", "reject"):
-        return ClusterVerdict(None, 0.0, "", "", [])
-    conf = data.get("confidence")
-    confidence = (
-        float(conf) if isinstance(conf, int | float) and not isinstance(conf, bool) else 0.0
-    )
-    confidence = max(0.0, min(1.0, confidence))
-    name = data.get("name")
-    description = data.get("description")
-    raw = data.get("prune")
-    prune: list[int] = []
-    if isinstance(raw, list):
-        seen: set[int] = set()
-        for x in raw:
-            if (
-                isinstance(x, int)
-                and not isinstance(x, bool)
-                and 1 <= x <= n_members
-                and x not in seen
-            ):
-                seen.add(x)
-                prune.append(x)
-    return ClusterVerdict(
-        verdict,
-        confidence,
-        name.strip()[:200] if isinstance(name, str) else "",
-        description.strip()[:1000] if isinstance(description, str) else "",
-        prune,
-    )
+        return PartitionResult((), False)
+    if not isinstance(data, dict) or not isinstance(data.get("groups"), list):
+        return PartitionResult((), False)
+    parsed: list[tuple[list[int], str, str, float]] = []
+    for g in data["groups"]:
+        if not isinstance(g, dict):
+            continue
+        members = _clean_member_ids(g.get("members"), n_members)
+        if not members:
+            continue
+        name = g.get("name")
+        desc = g.get("description")
+        conf = g.get("confidence")
+        confidence = (
+            float(conf) if isinstance(conf, int | float) and not isinstance(conf, bool) else 0.0
+        )
+        parsed.append(
+            (
+                members,
+                name.strip()[:200] if isinstance(name, str) else "",
+                desc.strip()[:1000] if isinstance(desc, str) else "",
+                max(0.0, min(1.0, confidence)),
+            )
+        )
+    parsed.sort(key=lambda t: min(t[0]))  # orden canónico → asignación determinista
+    used: set[int] = set()
+    groups: list[PartitionGroup] = []
+    for members, name, desc, confidence in parsed:
+        own = [m for m in sorted(members) if m not in used]
+        if len(own) < 2:  # un split legítimo es ≥ 2; los singletons quedan afuera (pista)
+            continue
+        used.update(own)
+        groups.append(PartitionGroup(tuple(own), name, desc, confidence))
+    return PartitionResult(tuple(groups), True)
 
 
-async def validate_cluster(
+async def partition_cluster(
     llm: LLMClient, members: list[Ref], internal: list[RelationEdge], vmap: dict[Ref, Vertex]
-) -> tuple[ClusterVerdict, LLMResult]:
-    """Una llamada al LLM para validar UN cúmulo. Devuelve el veredicto parseado + el LLMResult."""
+) -> tuple[PartitionResult, LLMResult]:
+    """Una llamada al LLM que PARTE un blob en sus contextos. Devuelve la partición + LLMResult."""
     result = await llm.complete(
         [
-            ChatMessage("system", GRAPH_CLUSTER_VALIDATION_SYSTEM_PROMPT),
+            ChatMessage("system", GRAPH_CLUSTER_PARTITION_SYSTEM_PROMPT),
             ChatMessage("user", _serialize(members, internal, vmap)),
         ],
         response_format="json_object",
         temperature=0.0,
         max_tokens=_MAX_TOKENS,
     )
-    return parse_verdict(result.content, len(members)), result
+    return parse_partition(result.content, len(members)), result
 
 
 # --- aplicación del veredicto ------------------------------------------------------ #
 
 
-def _apply_verdict(
-    conn: Connection, user_id: int, pc: _Pending, verdict: ClusterVerdict
-) -> tuple[str, int]:
-    """Aplica el veredicto en su propia tx. Devuelve `(outcome, podados)` con outcome ∈
-    {keep, reject, noop}. keep exige confianza ≥ umbral y ≥ 2 sobrevivientes; reject memoiza; JSON
-    basura (`verdict=None`) es no-op (queda candidate, reintenta). UPDATE condicional para no pisar
-    un cambio concurrente."""
-    if verdict.verdict is None:
-        return ("noop", 0)
-    prune_refs = {pc.members[i - 1] for i in verdict.prune}
-    survivors = len(pc.members) - len(prune_refs)
-    keep = (
-        verdict.verdict == "keep"
-        and verdict.confidence >= settings.cluster_min_confidence
-        and survivors >= 2
+@dataclass(frozen=True)
+class _Applied:
+    """Resultado de aplicar un veredicto: outcome + conteos de la cascada de aristas."""
+
+    outcome: str  # 'keep' | 'reject' | 'noop'
+    pruned: int = 0
+    promoted: int = 0
+    rejected_edges: int = 0
+
+
+def _cascade_edges(
+    conn: Connection,
+    cluster_id: int,
+    internal: list[RelationEdge],
+    *,
+    survivors: frozenset[Ref] | None,
+    confidence: float,
+) -> tuple[int, int]:
+    """Promueve/rechaza en cascada las PISTAS internas de co-ocurrencia (las ÚNICAS promovibles; las
+    aristas `confirmed` deterministas —contraparte/afiliado/cumple/…— NUNCA se tocan, por eso el
+    filtro estricto `pista + producer=inbox + co-ocurrencia`). Es el decisor de Fase 4 cableado EN
+    CONTEXTO: una pista la confirma el juicio del cúmulo, no de a pares.
+
+    NO-DESTRUCTIVO: solo CONFIRMA lo que el LLM avala; nada se mata por no encajar.
+    - `survivors` set (cúmulo confirmado): pista entre dos sobrevivientes → `confirmed` (estampa la
+      confianza del cúmulo + `evidence='cluster:{id}'`); pista que toca un PODADO → se DEJA `pista`
+      (el LLM dijo "no pertenece a ESTE cúmulo", no "no es relación"; queda para otro contexto).
+    - `survivors=None` (cúmulo rechazado): toda pista interna → `rejected` (el caller ya consultó
+      `cluster_reject_pistas`; el rechazo terminal es opt-in, solo para ruido explícito).
+
+    `resolve_edge` es monótono (no re-evalúa terminales) e idempotente. Devuelve (promovidas,
+    rechazadas)."""
+    conf = Decimal(str(round(confidence, 3)))
+    ev = f"cluster:{cluster_id}"
+    promoted = rejected = 0
+    for e in internal:
+        if not (
+            e.status == STATUS_PISTA
+            and e.producer == PRODUCER_INBOX
+            and e.relation_type == RELTYPE_COOCURRENCIA
+        ):
+            continue
+        if survivors is None:  # cúmulo rechazado (caller gateó cluster_reject_pistas)
+            rejected += int(resolve_edge(conn, e.id, status=STATUS_REJECTED))
+        elif (
+            e.src in survivors
+            and e.dst in survivors
+            and resolve_edge(conn, e.id, status=STATUS_CONFIRMED, confidence=conf, evidence=ev)
+        ):
+            promoted += 1
+        # pista que toca un miembro PODADO: se DEJA como pista (no se mata)
+    return promoted, rejected
+
+
+def _jaccard(a: frozenset[Ref], b: frozenset[Ref]) -> float:
+    union = len(a | b)
+    return len(a & b) / union if union else 1.0
+
+
+def _group_has_confirmed(members: frozenset[Ref], internal: list[RelationEdge]) -> bool:
+    """¿El grupo tiene una arista confirmed REAL entre dos miembros (ancla, no co-ocurrencia)?"""
+    return any(
+        e.status == STATUS_CONFIRMED
+        and e.relation_type != RELTYPE_COOCURRENCIA
+        and e.src in members
+        and e.dst in members
+        for e in internal
     )
-    if not keep:
-        reject_cluster(
-            conn, user_id, pc.id, pc.signature, name=verdict.name, description=verdict.description
-        )
-        return ("reject", 0)
-    rows = conn.execute(
-        text(
-            "UPDATE relation_clusters SET status = 'confirmed', name = :name, description = :desc, "
-            "confidence = :conf, validated_signature = signature, validated_at = NOW(), "
-            "needs_revalidation = FALSE, miss_count = 0, decided_at = NOW(), updated_at = NOW() "
-            "WHERE id = :id AND (status = 'candidate' OR needs_revalidation)"
-        ),
-        {
-            "name": verdict.name,
-            "desc": verdict.description,
-            "conf": round(verdict.confidence, 3),
-            "id": pc.id,
-        },
-    ).rowcount
-    if rows == 0:  # lo cambió otra corrida → no-op
-        return ("noop", 0)
-    for ref in prune_refs:
-        conn.execute(
-            text(
-                "UPDATE relation_cluster_members SET pruned = TRUE "
-                "WHERE cluster_id = :c AND member_slug = :s AND member_id = :i"
-            ),
-            {"c": pc.id, "s": ref.slug, "i": ref.id},
-        )
-    return ("keep", len(prune_refs))
+
+
+def _greedy_match_groups(
+    groups: list[tuple[frozenset[Ref], PartitionGroup]], children: list[StoredCluster]
+) -> dict[int, int]:
+    """Match codicioso 1-a-1 `group → child` por Jaccard ≥ `cluster_match_jaccard`: preserva la
+    IDENTIDAD de un hijo cuando el contexto re-particionado es (casi) el mismo set. Determinista:
+    `(jaccard desc, group_idx, child_id)`."""
+    cands: list[tuple[float, int, int]] = []
+    for gi, (gmembers, _g) in enumerate(groups):
+        for c in children:
+            j = _jaccard(gmembers, c.live_members)
+            if j >= settings.cluster_match_jaccard:
+                cands.append((j, gi, c.id))
+    cands.sort(key=lambda t: (-t[0], t[1], t[2]))
+    matched: dict[int, int] = {}
+    used: set[int] = set()
+    for _j, gi, cid in cands:
+        if gi not in matched and cid not in used:
+            matched[gi] = cid
+            used.add(cid)
+    return matched
+
+
+def _apply_partition(
+    conn: Connection,
+    user_id: int,
+    pc: _Pending,
+    part: PartitionResult,
+    internal: list[RelationEdge],
+) -> tuple[int, int, int, int, int]:
+    """Aplica la partición de UN blob en su tx. Cada contexto con confianza ≥ umbral crea un hijo
+    confirmed NUEVO o sincroniza EN SITIO el hijo que matchea (identidad preservada al crecer);
+    promueve sus pistas intra-grupo; disuelve los hijos viejos del blob que ningún contexto reclama;
+    consume el candidato. Sin contexto confiado → memo de rechazo. JSON basura → no-op (el candidate
+    queda, se reintenta). Devuelve `(created, synced, dissolved, promoted, rejected)`."""
+    if not part.valid:
+        return (0, 0, 0, 0, 0)
+    blob_sig = pc.signature
+    gate = settings.cluster_partition_min_confidence
+    groups: list[tuple[frozenset[Ref], PartitionGroup]] = [
+        (frozenset(pc.members[i - 1] for i in g.members), g)
+        for g in part.groups
+        if g.confidence >= gate
+    ]
+    blob_set = set(pc.members)
+    overlapping = [
+        c for c in load_clusters(conn, user_id, ("confirmed", "stale")) if c.live_members & blob_set
+    ]
+    if not groups:  # blob sin contexto confiado → ruido: memo + disolver los hijos viejos del blob.
+        for c in overlapping:
+            mark_dissolved(conn, user_id, c.id)
+        reject_cluster(conn, user_id, pc.id, blob_sig)
+        return (0, 0, len(overlapping), 0, 1)
+    matched = _greedy_match_groups(groups, overlapping)
+    matched_children: set[int] = set()
+    created = synced = promoted = 0
+    for gi, (gmembers, g) in enumerate(groups):
+        if gi in matched:
+            cid = matched[gi]
+            sync_child(conn, user_id, cid, blob_sig, gmembers, confidence=g.confidence)
+            matched_children.add(cid)
+            synced += 1
+        else:
+            cid = create_child(
+                conn,
+                user_id,
+                blob_sig,
+                gmembers,
+                name=g.name,
+                description=g.description,
+                confidence=g.confidence,
+                has_confirmed_edge=_group_has_confirmed(gmembers, internal),
+            )
+            created += 1
+        p, _ = _cascade_edges(conn, cid, internal, survivors=gmembers, confidence=g.confidence)
+        promoted += p
+    dissolved = 0
+    for c in overlapping:  # hijo viejo del blob que ningún contexto reclamó → su contexto se fue.
+        if c.id not in matched_children:
+            mark_dissolved(conn, user_id, c.id)
+            dissolved += 1
+    delete_cluster(conn, pc.id)  # consume el candidato; los hijos llevan su blob_signature
+    return (created, synced, dissolved, promoted, 0)
 
 
 # --- worker ------------------------------------------------------------------------ #
 
 
-async def run_cluster_validation(
+async def run_cluster_partition(
     user_id: int, *, limit: int | None = None, client: LLMClient | None = None
-) -> ClusterValidationStats:
-    """Valida con el LLM los cúmulos pendientes del user (1 llamada por cúmulo, best-effort). Emite
-    confirmed/rejected + poda y, al final, materializa las aristas `miembro_de`. `client` inyectable
-    (tests con fake). `LLMQuotaError` PROPAGA (el scheduler la captura). Idempotente."""
+) -> ClusterPartitionStats:
+    """Parte con el LLM los blobs `candidate` del user: cada blob → N contextos (hijos confirmed),
+    preservando la identidad de los hijos al re-particionar (sync en sitio), promoviendo las pistas
+    intra-grupo y dejando el resto como pista. Al final materializa `miembro_de`. `client`
+    inyectable (tests con fake). `LLMQuotaError` PROPAGA. Idempotente (un blob ya particionado no es
+    candidate)."""
     limit = limit if limit is not None else settings.cluster_validate_limit
-    stats = ClusterValidationStats()
+    stats = ClusterPartitionStats()
     with connection() as conn:
         pending = _load_pending(conn, user_id, limit)
         vmap = {v.ref: v for v in list_vertices(conn, user_id)}
         all_edges = list_edges(conn, user_id)
     if not pending:
-        _log.info("relation.cluster.validate.empty", user_id=user_id)
+        _log.info("relation.cluster.partition.empty", user_id=user_id)
         return stats
 
     owns_client = client is None
     llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
-    _log.info("relation.cluster.validate.start", user_id=user_id, pending=len(pending))
+    _log.info("relation.cluster.partition.start", user_id=user_id, pending=len(pending))
     try:
         for pc in pending:
             if len(pc.members) > settings.cluster_max_members:
                 stats.skipped += 1
                 _log.info(
-                    "relation.cluster.validate.skip_too_big",
+                    "relation.cluster.partition.skip_too_big",
                     cluster_id=pc.id,
                     members=len(pc.members),
                 )
                 continue
-            if len(pc.members) < 2:  # degenerado (quedó chico tras podas previas) → rechazar
-                with connection() as conn:
-                    reject_cluster(conn, user_id, pc.id, pc.signature)
-                stats.rejected += 1
-                continue
             internal = _internal_edges(all_edges, set(pc.members))
             try:
-                verdict, result = await validate_cluster(llm, pc.members, internal, vmap)
+                part, result = await partition_cluster(llm, pc.members, internal, vmap)
             except LLMQuotaError:
                 raise  # propaga: corta el resto del run
-            except Exception as e:  # best-effort: un cúmulo fallido no frena los demás
+            except Exception as e:  # best-effort: un blob fallido no frena los demás
                 stats.errors += 1
                 _log.error(
-                    "relation.cluster.validate.failed",
+                    "relation.cluster.partition.failed",
                     cluster_id=pc.id,
                     exc_type=type(e).__name__,
                     exc_msg=str(e),
                 )
                 continue
-            stats.clusters += 1
+            stats.blobs += 1
             with connection() as conn:
-                outcome, pruned = _apply_verdict(conn, user_id, pc, verdict)
-            if outcome == "keep":
-                stats.confirmed += 1
-                stats.pruned_members += pruned
-            elif outcome == "reject":
-                stats.rejected += 1
+                created, synced, dissolved, promoted, rejected = _apply_partition(
+                    conn, user_id, pc, part, internal
+                )
+            stats.created += created
+            stats.synced += synced
+            stats.groups += created + synced
+            stats.dissolved += dissolved
+            stats.promoted += promoted
+            stats.rejected += rejected
             record_llm_call(
                 user_id=user_id,
-                purpose="graph_cluster_validation",
+                purpose="graph_cluster_partition",
                 model=result.model,
                 prompt_tokens=result.usage.prompt_tokens,
                 completion_tokens=result.usage.completion_tokens,
@@ -334,7 +488,7 @@ async def run_cluster_validation(
                 metadata={
                     "cluster_id": pc.id,
                     "members": len(pc.members),
-                    "verdict": verdict.verdict,
+                    "groups": created + synced,
                 },
             )
             stats.cost.calls += 1
@@ -349,12 +503,14 @@ async def run_cluster_validation(
         materialize_cluster_edges(conn, user_id)
 
     _log.info(
-        "relation.cluster.validate.end",
+        "relation.cluster.partition.end",
         user_id=user_id,
-        clusters=stats.clusters,
-        confirmed=stats.confirmed,
+        blobs=stats.blobs,
+        created=stats.created,
+        synced=stats.synced,
+        dissolved=stats.dissolved,
         rejected=stats.rejected,
-        pruned_members=stats.pruned_members,
+        promoted=stats.promoted,
         skipped=stats.skipped,
         errors=stats.errors,
         llm_calls=stats.cost.calls,

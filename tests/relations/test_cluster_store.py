@@ -39,8 +39,8 @@ def _seed(
     cid = int(
         conn.execute(
             text(
-                "INSERT INTO relation_clusters (user_id, status, signature, member_count) "
-                "VALUES (1, :st, :sig, :mc) RETURNING id"
+                "INSERT INTO relation_clusters (user_id, status, signature, blob_signature, "
+                "member_count) VALUES (1, :st, :sig, :sig, :mc) RETURNING id"
             ),
             {"st": status, "sig": sig, "mc": len(members)},
         ).scalar_one()

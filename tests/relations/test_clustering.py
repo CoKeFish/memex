@@ -6,6 +6,7 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from memex.config import settings
 from memex.relations.clustering import build_cluster_graph, cluster_signature, detect_clusters
 from memex.relations.edges import (
     PRODUCER_IDENTIDADES,
@@ -76,8 +77,8 @@ def test_min_size_descarta_pares(conn: Connection) -> None:
     assert detect_clusters(g) == []
 
 
-def test_pistas_excluidas_por_default(conn: Connection) -> None:
-    # w_pista=0 → un triángulo de PISTAS de co-ocurrencia no produce aristas ni cúmulos.
+def test_pistas_participan_por_default(conn: Connection) -> None:
+    # w_pista por default > 0 (Slice 2) → un triángulo de PISTAS de co-ocurrencia SÍ forma cúmulo.
     p = [_person(conn, f"P{i}") for i in range(3)]
     for i in range(3):
         _edge(
@@ -89,8 +90,27 @@ def test_pistas_excluidas_por_default(conn: Connection) -> None:
             producer=PRODUCER_INBOX,
         )
     g = build_cluster_graph(conn, 1)
+    clusters = detect_clusters(g)
+    assert len(clusters) == 1
+    assert frozenset(clusters[0].members) == frozenset(p)
+
+
+def test_pistas_excluidas_con_w_pista_cero(conn: Connection) -> None:
+    # `cluster_w_pista=0` apaga las pistas: el mismo triángulo no produce aristas ni cúmulos.
+    cfg = settings.model_copy(update={"cluster_w_pista": 0.0})
+    p = [_person(conn, f"P{i}") for i in range(3)]
+    for i in range(3):
+        _edge(
+            conn,
+            p[i],
+            p[(i + 1) % 3],
+            status=STATUS_PISTA,
+            rt=RELTYPE_COOCURRENCIA,
+            producer=PRODUCER_INBOX,
+        )
+    g = build_cluster_graph(conn, 1, cfg)
     assert g.number_of_edges() == 0
-    assert detect_clusters(g) == []
+    assert detect_clusters(g, cfg) == []
 
 
 def test_cooccurrencia_confirmada_si_participa(conn: Connection) -> None:
