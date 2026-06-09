@@ -96,11 +96,17 @@ def _coerce_payload(raw: Any) -> dict[str, Any]:
 
 
 def _load_workset(
-    user_id: int, source_id: int | None, tier: str | None, limit: int
+    user_id: int,
+    source_id: int | None,
+    tier: str | None,
+    limit: int,
+    inbox_ids: list[int] | None = None,
 ) -> list[WorkRow]:
     """Mensajes con tier batch/individual cuyo inbox_id NO está en ningún summary link.
 
     `limit` corta a nivel de MENSAJE (no de ventana): ver nota en `_DEFAULT_LIMIT`.
+    `inbox_ids` acota a un set explícito (reproceso por lote): conserva los mismos filtros de
+    tier/gates, así blacklist se sigue saltando y batch se sigue ventaneando (igual que el daemon).
     """
     params: dict[str, Any] = {
         "uid": user_id,
@@ -115,6 +121,9 @@ def _load_workset(
     if tier is not None:
         filters += " AND c.tier = :tier"
         params["tier"] = tier
+    if inbox_ids is not None:
+        filters += " AND i.id = ANY(:iids)"
+        params["iids"] = inbox_ids
 
     with connection() as conn:
         rows = (
@@ -301,6 +310,38 @@ async def _process_window(
     stats.bump_tier(window.tier, len(window.rows))
 
 
+def _force_clear_summaries(user_id: int, inbox_ids: list[int]) -> list[int]:
+    """Borra los summaries que tocan a `inbox_ids` y devuelve el set EXPANDIDO (targets +
+    co-miembros de sus ventanas) para re-resumir la ventana COMPLETA sin dejar co-miembros
+    huérfanos. Espeja a nivel lote el `force` per-mensaje de `summarize_inbox`.
+
+    Captura los co-miembros ANTES de borrar (el DELETE hace cascade a los links): así, tras
+    borrar, `_load_workset(inbox_ids=expandido)` re-selecciona la ventana entera y `plan_windows`
+    la reagrupa. Residual: un co-miembro hoy gateado (OCR pendiente / en review) no se reconstruye
+    esta corrida y sana en la próxima (contrato best-effort/idempotente del worker).
+    """
+    with connection() as conn:
+        affected = (
+            conn.execute(
+                text(
+                    "SELECT DISTINCT inbox_id FROM summary_inbox_links WHERE summary_id IN "
+                    "(SELECT summary_id FROM summary_inbox_links WHERE inbox_id = ANY(:iids))"
+                ),
+                {"iids": inbox_ids},
+            )
+            .scalars()
+            .all()
+        )
+        conn.execute(
+            text(
+                "DELETE FROM summaries WHERE user_id = :uid AND id IN "
+                "(SELECT summary_id FROM summary_inbox_links WHERE inbox_id = ANY(:iids))"
+            ),
+            {"uid": user_id, "iids": inbox_ids},
+        )
+    return sorted(set(inbox_ids) | {int(x) for x in affected})
+
+
 async def run_summarization(
     user_id: int,
     *,
@@ -309,16 +350,26 @@ async def run_summarization(
     limit: int = _DEFAULT_LIMIT,
     max_window_size: int = MAX_WINDOW_SIZE,
     max_gap_seconds: int = MAX_GAP_SECONDS,
+    inbox_ids: list[int] | None = None,
+    force: bool = False,
     client: LLMClient | None = None,
 ) -> SummarizeStats:
     """Resume el work-set no-resumido del user. `client` inyectable (tests con fake).
 
     `max_window_size`/`max_gap_seconds` son las perillas de ventaneo (ver `plan_windows`).
+    `inbox_ids` acota a un set explícito (reproceso por lote, vía `reprocess`): respeta los mismos
+    tiers que el daemon (salta blacklist, ventanea batch). `force` re-resume esos ids aunque ya
+    tengan summary (los borra primero, expandiendo a la ventana completa).
     Best-effort por ventana: una ventana que falla se loguea + registra y NO frena las demás.
     """
     stats = SummarizeStats()
+    load_ids = inbox_ids
+    if force and inbox_ids:
+        load_ids = _force_clear_summaries(user_id, inbox_ids)
+    # Un set explícito no debe cortarse por el LIMIT a nivel de mensaje.
+    eff_limit = max(limit, len(load_ids)) if load_ids is not None else limit
     windows = plan_windows(
-        _load_workset(user_id, source_id, tier, limit),
+        _load_workset(user_id, source_id, tier, eff_limit, load_ids),
         max_window_size=max_window_size,
         max_gap_seconds=max_gap_seconds,
     )

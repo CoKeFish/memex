@@ -758,6 +758,8 @@ async def run_extraction(
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
     batching_policy: str = "grouped",
     group_size: int = _GROUP_SIZE_DEFAULT,
+    inbox_ids: list[int] | None = None,
+    force: bool = False,
     client: LLMClient | None = None,
 ) -> ExtractStats:
     """Corre la extracción sobre el work-set clasificado no-extraído del user.
@@ -765,6 +767,9 @@ async def run_extraction(
     Perillas (flags de CLI; ADR-015 §2): `max_window_size`/`max_gap_seconds` (ventaneo),
     `route_chunk_size` (sub-pasadas de ruteo con muchos módulos), `batching_policy`
     (`per_module`/`grouped`/`all`) + `group_size` (módulos por llamada de extracción).
+    `inbox_ids` acota a un set explícito (reproceso por lote, vía `reprocess`): respeta los mismos
+    tiers que el daemon (el work-set ya filtra blacklist). `force` re-extrae esos ids aunque ya
+    tengan cursor (borra cursor + filas por módulo primero, espejo de `extract_inbox`).
     `client` inyectable (tests con fake). Best-effort por ventana.
     """
     stats = ExtractStats()
@@ -776,9 +781,22 @@ async def run_extraction(
         return stats
     active_by_slug = {m.slug: m for m in active}
 
+    if force and inbox_ids:
+        with connection() as conn:
+            conn.execute(
+                text("DELETE FROM module_extractions WHERE inbox_id = ANY(:iids)"),
+                {"iids": inbox_ids},
+            )
+            # De-hardcodeado: cada módulo borra sus filas por `forget_inbox` (igual que
+            # `extract_inbox` en force). Se iteran TODOS los registrados, no solo los activos.
+            for slug in known_modules():
+                resolve(slug)().forget_inbox(conn, user_id, inbox_ids)
+
+    # Un set explícito no debe cortarse por el LIMIT a nivel de mensaje.
+    eff_limit = max(limit, len(inbox_ids)) if inbox_ids else limit
     with connection() as conn:
         workset = load_module_workset(
-            conn, user_id, source_id=source_id, modules=active, limit=limit
+            conn, user_id, source_id=source_id, modules=active, limit=eff_limit, inbox_ids=inbox_ids
         )
     windows = plan_windows(
         workset, max_window_size=max_window_size, max_gap_seconds=max_gap_seconds

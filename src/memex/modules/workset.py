@@ -55,8 +55,13 @@ def load_module_workset(
     source_id: int | None,
     modules: list[InterestModule],
     limit: int,
+    inbox_ids: list[int] | None = None,
 ) -> list[WorkRow]:
-    """Mensajes clasificados pendientes para AL MENOS UN módulo activo (ver módulo docstring)."""
+    """Mensajes clasificados pendientes para AL MENOS UN módulo activo (ver módulo docstring).
+
+    `inbox_ids` acota a un set explícito (reproceso por lote): conserva el filtro de tier/gates,
+    así blacklist se sigue saltando (igual que el daemon).
+    """
     clauses: list[str] = []
     params: dict[str, Any] = {
         "uid": user_id,
@@ -84,6 +89,11 @@ def load_module_workset(
         source_filter = "AND i.source_id = :sid"
         params["sid"] = source_id
 
+    inbox_filter = ""
+    if inbox_ids is not None:
+        inbox_filter = "AND i.id = ANY(:iids)"
+        params["iids"] = inbox_ids
+
     pending_or = " OR ".join(clauses)
     rows = (
         conn.execute(
@@ -108,6 +118,7 @@ def load_module_workset(
                   )
                   AND {not_in_review_sql("i.id")}
                   {source_filter}
+                  {inbox_filter}
                   AND ({pending_or})
                 ORDER BY i.source_id, i.occurred_at
                 LIMIT :limit
