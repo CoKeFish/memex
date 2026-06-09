@@ -1,6 +1,5 @@
 import { PageHeader } from "@/components/common/page-header"
 import { FiltersManager } from "@/components/features/control/filters-manager"
-import { SocialMonitor } from "@/components/features/control/social-monitor"
 
 export function FiltersPage() {
   return (
@@ -8,9 +7,8 @@ export function FiltersPage() {
       <PageHeader
         eyebrow="vista · filtros"
         title="Filtros"
-        description="Qué entra y qué se descarta. Reglas de filtro pre-ingest (cortan los próximos, no los ya recibidos) y las redes sociales monitoreadas vía API (a quién seguir por red)."
+        description="Qué entra y qué se descarta: reglas de filtro pre-ingest que cortan los próximos registros (no los ya recibidos)."
       />
-      <SocialMonitor />
       <FiltersManager />
     </div>
   )

@@ -6,16 +6,14 @@ import {
   IngestRunsPanel,
   IngestSchedulerPanel,
 } from "@/components/features/control/ingest-schedule-control"
+import { SocialMonitor } from "@/components/features/control/social-monitor"
 
 export function IngestPage() {
   return (
     <div className="space-y-5">
-      <PageHeader
-        eyebrow="vista · carga"
-        title="Carga / ingesta"
-        description="Traer datos a demanda (correo, Telegram, redes): incremental para todas; por rango o cantidad solo para correo. Más ingesta puntual. El dry-run muestra cuántos serían nuevos: lo ya guardado se ignora, no se duplica. Prendé la ingesta automática y agendá cada cuánto se trae cada fuente; cada corrida queda en el historial con su origen."
-      />
+      <PageHeader eyebrow="vista · carga" title="Carga / ingesta" />
       <FetchControl />
+      <SocialMonitor />
       <IngestSchedulerPanel />
       <IngestRunsPanel />
       <Panel>
