@@ -6,7 +6,7 @@ import { useState } from "react"
 import { Link } from "react-router-dom"
 import { Download, Loader2, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
-import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
+import { CollapsiblePanel } from "@/components/common/collapsible-panel"
 import { StatusBadge } from "@/components/common/led"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { Button } from "@/components/ui/button"
@@ -58,39 +58,37 @@ export function SocialMonitor() {
   }, [])
 
   return (
-    <Panel className="overflow-hidden">
-      <PanelHeader
-        eyebrow="filtros · redes"
-        title="Redes sociales monitoreadas"
-        sub="Cuentas seguidas por red (vía Apify). Agregá o quitá cuentas; entran en la próxima corrida."
-      />
-      <PanelBody className="space-y-4">
-        {error ? (
-          <ErrorState detail={error} onRetry={reload} />
-        ) : loading && !data ? (
-          <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" /> Cargando redes…
-          </div>
-        ) : !data || data.sources.length === 0 ? (
-          <EmptyState
-            title="Sin redes configuradas"
-            hint="Creá una cuenta social y su token de Apify en Cuenta; después volvé acá para elegir a quién seguir."
-          />
-        ) : (
-          <div className="space-y-3">
-            {data.sources.map((src) => (
-              <SocialCard
-                key={src.id}
-                src={src}
-                account={data.accounts.find((a) => a.id === src.accountId) ?? null}
-                health={data.pipeline.find((s) => s.sourceId === src.id) ?? null}
-                onChanged={reload}
-              />
-            ))}
-          </div>
-        )}
-      </PanelBody>
-    </Panel>
+    <CollapsiblePanel
+      eyebrow="ingesta · redes"
+      title="Ingesta de redes"
+      sub="Cuentas seguidas por red (vía Apify). Agregá o quitá cuentas; entran en la próxima corrida."
+      bodyClassName="space-y-4"
+    >
+      {error ? (
+        <ErrorState detail={error} onRetry={reload} />
+      ) : loading && !data ? (
+        <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" /> Cargando redes…
+        </div>
+      ) : !data || data.sources.length === 0 ? (
+        <EmptyState
+          title="Sin redes configuradas"
+          hint="Creá una cuenta social y su token de Apify en Cuenta; después volvé acá para elegir a quién seguir."
+        />
+      ) : (
+        <div className="space-y-3">
+          {data.sources.map((src) => (
+            <SocialCard
+              key={src.id}
+              src={src}
+              account={data.accounts.find((a) => a.id === src.accountId) ?? null}
+              health={data.pipeline.find((s) => s.sourceId === src.id) ?? null}
+              onChanged={reload}
+            />
+          ))}
+        </div>
+      )}
+    </CollapsiblePanel>
   )
 }
 
