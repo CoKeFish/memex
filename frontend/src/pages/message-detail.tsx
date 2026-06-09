@@ -14,6 +14,7 @@ import { JourneyTimeline } from "@/components/features/message/journey-timeline"
 import { LlmTrace } from "@/components/features/message/llm-trace"
 import { TraceTree } from "@/components/features/message/trace-tree"
 import { MediaOcr, UnstoredAttachments, type DeclaredAttachment } from "@/components/features/message/media-ocr"
+import { ProcessingWindow } from "@/components/features/message/processing-window"
 import { fmtCost, groupCallsIntoRuns } from "@/components/features/message/llm-trace-runs"
 import { RelatedData } from "@/components/features/message/related-data"
 import { ReprocessButton } from "@/components/features/message/reprocess-button"
@@ -33,9 +34,10 @@ import {
   type ProcessScope,
 } from "@/data"
 import { ApiError } from "@/lib/api"
+import { loadFeedReturn } from "@/lib/feed-return"
 import { useAsync } from "@/lib/use-async"
 import { renderPayload } from "@/lib/render-payload"
-import { sourceMeta } from "@/lib/inbox-format"
+import { sourceMeta, summarizeRow } from "@/lib/inbox-format"
 import { formatDateOnly } from "@/lib/format"
 import {
   ATTACHMENT_ICON,
@@ -77,9 +79,12 @@ function statusOf(row: InboxRow): { tone: Tone; label: string } {
 }
 
 function BackLink() {
+  // Volver con los MISMOS filtros con los que se salió del feed (el ancla de scroll la
+  // restaura el propio feed desde sessionStorage; acá solo se reconstruye la URL).
+  const saved = loadFeedReturn()
   return (
     <Button variant="ghost" size="sm" className="h-8" asChild>
-      <Link to="/datos">
+      <Link to={saved?.search ? `/datos?${saved.search}` : "/datos"}>
         <ArrowLeft className="size-4" /> Datos
       </Link>
     </Button>
@@ -146,13 +151,12 @@ function RealDetail({ row, onProcessed }: { row: InboxRow; onProcessed: () => vo
   const rendered = renderPayload(row.payload, row.ocrText ?? "")
   const cls = row.classification
   const subject = emailSubject(row.payload)
-  // El asunto se muestra aparte (debajo del título); recortamos el cuerpo desde el body_text real
-  // para no duplicar el "Asunto:" (el asunto puede tener saltos de línea, así que no sirve un regex).
-  const rawBody = bodyTextOf(row.payload)
-  const bodyText =
-    rawBody && rendered.body.includes(rawBody)
-      ? rendered.body.slice(rendered.body.indexOf(rawBody))
-      : rendered.body
+  // El panel del cuerpo muestra el body CRUDO del payload: el asunto va aparte, los adjuntos
+  // tienen su columna y el OCR sus tarjetas — el render completo (asunto + manifest de adjuntos
+  // + OCR) se audita en "Input al LLM", no acá.
+  const bodyText = bodyTextOf(row.payload)
+  // Chat/social no se disfrazan de correo: mensaje inline con su contexto de grupo.
+  const isChat = ["chat", "social"].includes(summarizeRow(row).kind)
 
   const declared = declaredAttachments(row.payload)
   const media = row.media ?? []
@@ -205,40 +209,46 @@ function RealDetail({ row, onProcessed }: { row: InboxRow; onProcessed: () => vo
           </pre>
         ) : (
           <div className={cn("mt-3 grid gap-3", hasAttachments && "lg:grid-cols-[4fr_3fr]")}>
-            {/* Cuerpo: nombre + asunto + el toggle "cuerpo del correo" SIEMPRE arriba (así se colapsa
-                sin scrollear todo el texto). Colapsado = preview que rellena la columna con
-                degradado y también expande al clic; expandido = texto completo. */}
+            {/* Cuerpo: correo = nombre + asunto + toggle "cuerpo del correo" SIEMPRE arriba (así se
+                colapsa sin scrollear todo el texto; colapsado = preview con degradado). Chat/social
+                = el mensaje inline completo (un chat de una línea ocupa una línea). */}
             <div className="flex min-w-0 flex-col rounded-md border border-border bg-muted/20 p-3">
-              {rendered.sender && <div className="text-sm font-medium">{rendered.sender}</div>}
-              {subject && (
-                <div className="mt-0.5 break-words text-sm text-muted-foreground">{subject}</div>
-              )}
-              <button
-                type="button"
-                onClick={() => setShowBody((v) => !v)}
-                className="eyebrow mt-2 flex items-center gap-1 self-start hover:text-foreground"
-              >
-                cuerpo del correo {showBody ? "▴" : "▾"}
-              </button>
-              {showBody ? (
-                <p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted-foreground">
-                  {bodyText || "(sin texto)"}
-                </p>
+              {isChat ? (
+                <ChatMessageBody row={row} />
               ) : (
-                // Preview ABSOLUTO: no aporta altura, así la fila la marca la columna de adjuntos y
-                // el cuerpo se recorta para rellenar el espacio (flex-1) con un degradado abajo.
-                <button
-                  type="button"
-                  onClick={() => setShowBody(true)}
-                  className="relative mt-2 min-h-[4rem] flex-1 text-left"
-                >
-                  <div className="absolute inset-0 overflow-hidden">
-                    <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                <>
+                  {rendered.sender && <div className="text-sm font-medium">{rendered.sender}</div>}
+                  {subject && (
+                    <div className="mt-0.5 break-words text-sm text-muted-foreground">{subject}</div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowBody((v) => !v)}
+                    className="eyebrow mt-2 flex items-center gap-1 self-start hover:text-foreground"
+                  >
+                    cuerpo del correo {showBody ? "▴" : "▾"}
+                  </button>
+                  {showBody ? (
+                    <p className="mt-2 whitespace-pre-wrap break-words text-sm text-muted-foreground">
                       {bodyText || "(sin texto)"}
                     </p>
-                  </div>
-                  <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-card via-card/80 to-transparent" />
-                </button>
+                  ) : (
+                    // Preview ABSOLUTO: no aporta altura, así la fila la marca la columna de adjuntos y
+                    // el cuerpo se recorta para rellenar el espacio (flex-1) con un degradado abajo.
+                    <button
+                      type="button"
+                      onClick={() => setShowBody(true)}
+                      className="relative mt-2 min-h-[4rem] flex-1 text-left"
+                    >
+                      <div className="absolute inset-0 overflow-hidden">
+                        <p className="whitespace-pre-wrap break-words text-sm text-muted-foreground">
+                          {bodyText || "(sin texto)"}
+                        </p>
+                      </div>
+                      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-card via-card/80 to-transparent" />
+                    </button>
+                  )}
+                </>
               )}
             </div>
 
@@ -259,7 +269,59 @@ function RealDetail({ row, onProcessed }: { row: InboxRow; onProcessed: () => vo
         )}
       </Panel>
 
+      <ProcessingWindow row={row} source={source} />
       <PipelinePanel row={row} onProcessed={onProcessed} />
+    </div>
+  )
+}
+
+/** Cuerpo de un mensaje de chat/social: remitente + contexto del grupo/cuenta + el texto inline
+ * (sin el colapsable de correo), con reenviado/respuesta/media cuando los hay. */
+function ChatMessageBody({ row }: { row: InboxRow }) {
+  const p = row.payload as unknown as Record<string, unknown>
+  const s = summarizeRow(row)
+  const text = str(p.text)
+  const caption = str(p.media_caption)
+  const chatKind = str(p.chat_kind)
+  const postUrl = str(p.url)
+  return (
+    <div className="min-w-0">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="text-sm font-medium">{s.sender}</span>
+        {s.context && <span className="text-xs text-muted-foreground">en {s.context}</span>}
+        {chatKind && (
+          <span className="num rounded bg-muted px-1 py-px text-[10px] text-muted-foreground">
+            {chatKind}
+          </span>
+        )}
+        {postUrl && (
+          <a
+            href={postUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="num text-[11px] text-muted-foreground underline hover:text-foreground"
+          >
+            ver post
+          </a>
+        )}
+      </div>
+      {str(p.forwarded_from) && (
+        <div className="mt-1 text-[11px] text-muted-foreground">
+          ↪ reenviado de {str(p.forwarded_from)}
+        </div>
+      )}
+      {p.reply_to_message_id != null && (
+        <div className="mt-1 text-[11px] text-muted-foreground">↩ en respuesta a otro mensaje</div>
+      )}
+      <p className="mt-2 whitespace-pre-wrap break-words text-sm text-foreground/90">
+        {text || caption || (s.hasMedia ? "" : "(sin texto)")}
+        {s.hasMedia && (
+          <span className="num ml-1.5 rounded bg-muted px-1 py-px text-[10px] text-muted-foreground">
+            [{s.mediaLabel}]
+          </span>
+        )}
+      </p>
+      {text && caption && <p className="mt-1 text-xs italic text-muted-foreground">{caption}</p>}
     </div>
   )
 }
@@ -491,6 +553,15 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
             <span className="text-xs text-muted-foreground">Clasificá primero.</span>
           ) : summary ? (
             <div className="space-y-2">
+              {/* El caso "¿por qué el resumen menciona algo ajeno a este correo?": un resumen batch
+                  cubre la ventana ENTERA (ver panel "lote de procesamiento"), no solo este mensaje. */}
+              {summary.tier === "batch" && (
+                <p className="num text-[11px] text-chart-4">
+                  resumen del LOTE
+                  {Number(summary.metadata?.n) > 1 ? ` · ${Number(summary.metadata?.n)} mensajes` : ""} —
+                  cubre toda su ventana conversacional, no solo este mensaje
+                </p>
+              )}
               <p className="whitespace-pre-wrap rounded-md border border-border bg-muted/20 p-2.5 text-sm text-muted-foreground">
                 {summary.content}
               </p>

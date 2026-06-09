@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { Inbox, Loader2, Search } from "lucide-react"
@@ -8,13 +8,15 @@ import { Panel } from "@/components/common/panel"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { Led } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
+import { TierTag } from "@/components/common/tier-tag"
 import { Input } from "@/components/ui/input"
 import { fetchInbox, fetchInboxStats, fetchSources } from "@/data"
+import { consumeFeedReturn, saveFeedReturn, type FeedReturnState } from "@/lib/feed-return"
 import { useAsync } from "@/lib/use-async"
 import { useAutoRefresh } from "@/state/auto-refresh"
 import { dayLabel, initials, sourceMeta, summarizeRow } from "@/lib/inbox-format"
-import { inboxStatus, tierLabel, tierTone, toneText } from "@/lib/status"
-import type { InboxRow, Source, Tier } from "@/types/domain"
+import { inboxStatus } from "@/lib/status"
+import type { InboxRow, Source } from "@/types/domain"
 
 const MAX = 2000
 type SourceStats = Record<string, { total: number; pending: number; errored: number }>
@@ -25,11 +27,24 @@ type FeedItem =
 
 export function InboxFeed() {
   const navigate = useNavigate()
-  const [params] = useSearchParams()
+  // Filtros EN LA URL (única fuente de verdad): sobreviven al ir-y-volver del detalle y el atajo
+  // "?source=" de /carga sale gratis. Mutaciones con replace (no ensucian el historial) y en forma
+  // funcional (la no-funcional captura el search del render y puede pisar params concurrentes).
+  const [params, setSearchParams] = useSearchParams()
   const { now } = useAutoRefresh()
-  const [q, setQ] = useState("")
-  // Preselección por ?source= (atajo "Ver en datos" desde /carga); por defecto, todas.
-  const [sourceId, setSourceId] = useState(() => params.get("source") ?? "all")
+  const sourceId = params.get("source") ?? "all"
+  const q = params.get("q") ?? ""
+  const currentSearch = params.toString()
+  const setParam = (key: "source" | "q", value: string | null) =>
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev)
+        if (value) next.set(key, value)
+        else next.delete(key) // limpiar = borrar la clave (sin "q=" ni "source=all" residuales)
+        return next
+      },
+      { replace: true },
+    )
 
   const { data: sources } = useAsync<Source[]>(() => fetchSources(), [])
   const { data: stats } = useAsync<{ sources: SourceStats }>(() => fetchInboxStats(), [])
@@ -55,7 +70,7 @@ export function InboxFeed() {
       .filter((r) => {
         if (!needle) return true
         const s = summarizeRow(r)
-        return `${s.sender} ${s.title} ${s.snippet}`.toLowerCase().includes(needle)
+        return `${s.sender} ${s.context} ${s.title} ${s.snippet}`.toLowerCase().includes(needle)
       })
       .sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime())
   }, [rowsRaw, q])
@@ -90,6 +105,69 @@ export function InboxFeed() {
     getItemKey: (i) => items[i].key,
     overscan: 16,
   })
+  const vItems = virt.getVirtualItems()
+
+  // --- ida-y-vuelta al detalle: guardar el ancla al desmontar + restaurar one-shot ----------
+  // El cleanup de desmontar no ve el último render → patrón "latest ref": un effect sin deps
+  // refresca la closure en cada commit y el cleanup del effect [] la invoca al salir de la vista.
+  const saveRef = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    saveRef.current = () => {
+      const el = parentRef.current
+      // Sin data cargada no se pisa lo guardado (cubre además el desmontaje sintético de
+      // StrictMode en dev, que ocurre antes de que llegue el primer fetch).
+      if (!el || !rowsRaw) return
+      const scrollTop = el.scrollTop
+      const vi = vItems.find((v) => v.end > scrollTop)
+      saveFeedReturn({
+        search: currentSearch,
+        anchorKey: vi ? (items[vi.index]?.key ?? null) : null,
+        anchorDelta: vi ? scrollTop - vi.start : 0,
+        scrollTop,
+      })
+    }
+  })
+  useEffect(() => () => saveRef.current?.(), [])
+
+  // Restauración: espera la primera data, consume el estado guardado (one-shot) y solo aplica si
+  // el filtro coincide. Loop de rAF porque con alturas dinámicas un scrollToIndex único queda
+  // corto (las filas reales se miden al montarse y los offsets se re-acomodan); se itera hasta
+  // que el scroll se estabiliza y recién ahí se suma el delta dentro del ancla. `pendingRef` se
+  // anula al COMPLETAR (no antes): el doble-effect de StrictMode cancela el primer loop y el
+  // segundo lo reintenta desde el estado ya consumido en memoria.
+  const pendingRef = useRef<FeedReturnState | null | undefined>(undefined)
+  useEffect(() => {
+    if (loading || !rowsRaw || items.length === 0) return
+    if (pendingRef.current === undefined) pendingRef.current = consumeFeedReturn()
+    const pending = pendingRef.current
+    if (!pending) return
+    if (pending.search !== currentSearch) {
+      pendingRef.current = null
+      return
+    }
+    const idx = pending.anchorKey ? items.findIndex((i) => i.key === pending.anchorKey) : -1
+    let raf = 0
+    let prevTop = Number.NaN
+    let stable = 0
+    let frames = 0
+    const step = () => {
+      // Ancla desaparecida (la data cambió entre visitas) → mejor esfuerzo por offset absoluto.
+      if (idx >= 0) virt.scrollToIndex(idx, { align: "start" })
+      else virt.scrollToOffset(pending.scrollTop)
+      const top = parentRef.current?.scrollTop ?? 0
+      stable = Math.abs(top - prevTop) <= 2 ? stable + 1 : 0
+      prevTop = top
+      frames += 1
+      if (stable >= 2 || frames >= 24) {
+        if (idx >= 0 && parentRef.current) parentRef.current.scrollTop = top + pending.anchorDelta
+        pendingRef.current = null
+        return
+      }
+      raf = requestAnimationFrame(step)
+    }
+    raf = requestAnimationFrame(step)
+    return () => cancelAnimationFrame(raf)
+  }, [loading, rowsRaw, items, currentSearch, virt])
 
   const rail = useMemo(() => {
     const s = stats?.sources ?? {}
@@ -105,7 +183,7 @@ export function InboxFeed() {
       <div className="flex flex-wrap items-center gap-2">
         <SourceChip
           active={sourceId === "all"}
-          onClick={() => setSourceId("all")}
+          onClick={() => setParam("source", null)}
           icon={Inbox}
           tone="text-brand"
           label="Todas"
@@ -117,7 +195,7 @@ export function InboxFeed() {
             <SourceChip
               key={id}
               active={sourceId === String(id)}
-              onClick={() => setSourceId(String(id))}
+              onClick={() => setParam("source", String(id))}
               icon={m.icon}
               tone={m.tone}
               label={m.label}
@@ -134,7 +212,7 @@ export function InboxFeed() {
             <Input
               placeholder="Buscar remitente, asunto o texto…"
               value={q}
-              onChange={(e) => setQ(e.target.value)}
+              onChange={(e) => setParam("q", e.target.value || null)}
               className="h-9 pl-8"
             />
           </div>
@@ -154,7 +232,7 @@ export function InboxFeed() {
         ) : (
           <div ref={parentRef} className="flex-1 overflow-y-auto">
             <div style={{ height: virt.getTotalSize(), position: "relative", width: "100%" }}>
-              {virt.getVirtualItems().map((vi) => {
+              {vItems.map((vi) => {
                 const it = items[vi.index]
                 return (
                   <div
@@ -249,23 +327,6 @@ function StatusDot({ row }: { row: InboxRow }) {
   )
 }
 
-/** Tag compacto del tier ("el filtro en el que entró": Blacklist / Lote / Individual). */
-function TierTag({ tier }: { tier: string }) {
-  const t = tier as Tier
-  return (
-    <span
-      className={cn(
-        "num shrink-0 rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide",
-        toneText[tierTone[t] ?? "neutral"],
-      )}
-      style={{ backgroundColor: "color-mix(in oklch, currentColor 14%, transparent)" }}
-      title={`Clasificación: ${tierLabel[t] ?? tier}`}
-    >
-      {tierLabel[t] ?? tier}
-    </span>
-  )
-}
-
 /** Fila especializada por tipo: el correo se ve distinto al chat/social, y un mensaje corto ocupa
  * lo mínimo (altura adaptativa al contenido vía measureElement). */
 function FeedRow({ row, source, onClick }: { row: InboxRow; source?: Source; onClick: () => void }) {
@@ -292,6 +353,11 @@ function FeedRow({ row, source, onClick }: { row: InboxRow; source?: Source; onC
           {initials(s.sender)}
         </div>
         <span className={cn("shrink-0 text-xs font-medium", m.tone)}>{s.sender}</span>
+        {s.context && (
+          <span className="max-w-[12rem] shrink-0 truncate text-[11px] text-muted-foreground">
+            · {s.context}
+          </span>
+        )}
         <span className="truncate text-sm text-foreground/85">
           {s.title || (s.hasMedia ? `[${s.mediaLabel}]` : "(mensaje)")}
         </span>

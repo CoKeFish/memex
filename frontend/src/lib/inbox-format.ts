@@ -97,6 +97,10 @@ export type RowKind = "email" | "chat" | "social" | "other"
 export interface RowSummary {
   kind: RowKind
   sender: string
+  /** Chat: el grupo/canal de origen (chat_title) cuando el remitente es una persona — una fuente
+   * telegram mezcla varios chats y sin esto no se distingue de cuál viene cada mensaje. Vacío si
+   * el remitente YA es el chat (canales sin sender) o para email/social. */
+  context: string
   /** Email: asunto. Chat/social: el texto del mensaje (no hay asunto). */
   title: string
   /** Email: cuerpo limpio (cuando hay asunto). Chat/social: vacío. */
@@ -129,6 +133,7 @@ export function summarizeRow(row: InboxRow): RowSummary {
     return {
       kind: "email",
       sender,
+      context: "",
       title: subject || (body ? body.slice(0, 90) : "(sin asunto)"),
       snippet: subject ? body : "",
       hasMedia: attachments.length > 0,
@@ -137,16 +142,18 @@ export function summarizeRow(row: InboxRow): RowSummary {
     }
   }
 
-  // Telegram: chat/sender + text/caption.
+  // Telegram: chat/sender + text/caption. `context` = el grupo, solo cuando el remitente es una
+  // persona (si cae al fallback chat_title quedaría "Grupo X · Grupo X").
   if ("chat_id" in p || "chat_kind" in p) {
-    const sender =
-      str(rec(p.sender).display_name) || str(rec(p.sender).username) || str(p.chat_title) || "Telegram"
+    const person = str(rec(p.sender).display_name) || str(rec(p.sender).username)
+    const sender = person || str(p.chat_title) || "Telegram"
     const text = cleanText(str(p.text) || str(p.media_caption))
     const media = str(p.media_kind)
     const hasMedia = !!media && media !== "none"
     return {
       kind: "chat",
       sender,
+      context: person ? str(p.chat_title) : "",
       title: text,
       snippet: "",
       hasMedia,
@@ -164,6 +171,7 @@ export function summarizeRow(row: InboxRow): RowSummary {
     return {
       kind: "social",
       sender,
+      context: "",
       title: text,
       snippet: "",
       hasMedia,
@@ -177,6 +185,7 @@ export function summarizeRow(row: InboxRow): RowSummary {
   return {
     kind: "other",
     sender,
+    context: "",
     title: cleanText(JSON.stringify(p)).slice(0, 90),
     snippet: "",
     hasMedia: false,

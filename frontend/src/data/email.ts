@@ -10,6 +10,7 @@ import type {
   InboxLlmUsage,
   InboxPayload,
   InboxRow,
+  InboxWindow,
   MediaAsset,
   OcrStatus,
   RelevanceMark,
@@ -192,7 +193,13 @@ interface InboxApiRow {
   classification?: { tier: string; metadata?: Record<string, unknown> | null } | null
   summarized?: boolean
   extracted?: boolean
-  summary?: { id?: number | null; tier: string; content: string; created_at?: string | null } | null
+  summary?: {
+    id?: number | null
+    tier: string
+    content: string
+    created_at?: string | null
+    metadata?: Record<string, unknown> | null
+  } | null
   extraction?: InboxExtraction | null
   extraction_debug?: ExtractionDebug | null
   /** Árbol de traza jerárquica (camelCase, ya en la forma que consume el front). null ⇒ fallback. */
@@ -298,7 +305,13 @@ function toInboxRow(r: InboxApiRow): InboxRow {
     summarized: r.summarized ?? false,
     extracted: r.extracted ?? false,
     summary: r.summary
-      ? { id: r.summary.id ?? null, tier: r.summary.tier, content: r.summary.content, createdAt: r.summary.created_at ?? null }
+      ? {
+          id: r.summary.id ?? null,
+          tier: r.summary.tier,
+          content: r.summary.content,
+          createdAt: r.summary.created_at ?? null,
+          metadata: r.summary.metadata ?? null,
+        }
       : null,
     extraction: r.extraction ?? null,
     extractionDebug: r.extraction_debug ?? null,
@@ -318,14 +331,12 @@ export async function reportFeedback(
   return toFeedback(await apiPost<FeedbackApi>(`/inbox/${id}/feedback`, body))
 }
 
-/** Marca / actualiza la relevancia de un mensaje (override por-mensaje) — POST /inbox/{id}/relevance. */
-export async function setRelevanceMark(
-  id: number,
-  isRelevant: boolean,
-  reason: string | null = null,
-): Promise<RelevanceMark> {
+/** Marca / actualiza la relevancia de un mensaje (override por-mensaje) — POST /inbox/{id}/relevance.
+ * Sin motivo: el campo se retiró del diálogo (nada lo consumía); el upsert backend pisa con null
+ * los motivos viejos al re-marcar — aceptado. */
+export async function setRelevanceMark(id: number, isRelevant: boolean): Promise<RelevanceMark> {
   return toRelevanceMark(
-    await apiPost<RelevanceMarkApi>(`/inbox/${id}/relevance`, { is_relevant: isRelevant, reason }),
+    await apiPost<RelevanceMarkApi>(`/inbox/${id}/relevance`, { is_relevant: isRelevant, reason: null }),
   )
 }
 
@@ -481,4 +492,17 @@ export async function fetchInboxItem(id: number): Promise<InboxRow | null> {
     if (e instanceof ApiError && e.status === 404) return null
     throw e
   }
+}
+
+interface InboxWindowApi {
+  mode: "summary" | "prospective" | "none"
+  summary_id?: number | null
+  members: InboxApiRow[]
+}
+
+/** Lote de procesamiento de un mensaje — GET /inbox/{id}/window: con quiénes se resumió
+ * (mode "summary") o se resumiría hoy (mode "prospective"). Orden conversacional. */
+export async function fetchInboxWindow(id: number): Promise<InboxWindow> {
+  const r = await apiGet<InboxWindowApi>(`/inbox/${id}/window`)
+  return { mode: r.mode, summaryId: r.summary_id ?? null, members: r.members.map(toInboxRow) }
 }

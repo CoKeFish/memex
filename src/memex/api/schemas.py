@@ -148,6 +148,9 @@ class SummaryInfo(BaseModel):
     tier: str
     content: str
     created_at: datetime | None = None
+    # `summaries.metadata` (source_id, n, truncated…): `n` es el tamaño real del lote al persistir
+    # — el front lo usa para avisar "resumen del lote · n mensajes" en tier batch.
+    metadata: dict[str, Any] | None = None
 
 
 class ExtractionInfo(BaseModel):
@@ -484,6 +487,20 @@ class FilterRuleList(BaseModel):
 class InboxList(BaseModel):
     items: list[InboxRow]
     next_cursor: int | None = None
+
+
+class InboxWindow(BaseModel):
+    """Lote de procesamiento de un mensaje (GET /inbox/{id}/window).
+
+    `mode`: "summary" = co-miembros del resumen YA hecho (el lote que se procesó junto);
+    "prospective" = la ventana que `plan_windows` armaría hoy sobre el work-set no-resumido
+    (lo mismo que haría «Resumir su lote»); "none" = sin lote (blacklist / sin clasificar).
+    `members` va en orden conversacional (occurred_at), incluye al propio mensaje.
+    """
+
+    mode: Literal["summary", "prospective", "none"]
+    summary_id: int | None = None
+    members: list[InboxRow] = Field(default_factory=list)
 
 
 class StatsBySource(BaseModel):

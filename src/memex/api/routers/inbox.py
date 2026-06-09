@@ -15,6 +15,7 @@ from memex.api.schemas import (
     InboxList,
     InboxRow,
     InboxStats,
+    InboxWindow,
     ProcessResponse,
     RelevanceMarkInfo,
     RelevanceMarkRequest,
@@ -34,6 +35,35 @@ router = APIRouter(prefix="/inbox", tags=["inbox"])
 UserID = Annotated[int, Depends(current_user_id)]
 
 _log = get_logger("memex.api.inbox")
+
+#: SELECT de "fila de lista" (inbox + tier + avance real del pipeline). Compartido por la lista
+#: y por los miembros del lote (/window) para que ambas devuelvan el MISMO shape de fila.
+#: `{where}`/`{order}` se interpolan con cláusulas armadas localmente (nunca input del usuario).
+_LIST_ROW_SQL = """
+    SELECT i.id, i.source_id, i.external_id, i.occurred_at, i.received_at,
+           i.payload, i.processed_at, i.process_error, i.attempts,
+           c.tier AS _tier, c.metadata AS _cmeta,
+           EXISTS (SELECT 1 FROM summary_inbox_links sl
+                   WHERE sl.inbox_id = i.id) AS _summarized,
+           EXISTS (SELECT 1 FROM module_extractions me
+                   WHERE me.inbox_id = i.id) AS _extracted
+    FROM inbox i
+    LEFT JOIN classifications c ON c.inbox_id = i.id
+    WHERE {where}
+    ORDER BY {order}
+    LIMIT :limit
+"""
+
+
+def _map_list_row(r: Any) -> dict[str, Any]:
+    """Fila cruda del `_LIST_ROW_SQL` → dict con `classification`/`summarized`/`extracted`."""
+    d = dict(r)
+    tier = d.pop("_tier", None)
+    cmeta = d.pop("_cmeta", None)
+    d["classification"] = {"tier": tier, "metadata": cmeta} if tier else None
+    d["summarized"] = bool(d.pop("_summarized", False))
+    d["extracted"] = bool(d.pop("_extracted", False))
+    return d
 
 
 @router.get("", response_model=InboxList)
@@ -70,31 +100,10 @@ async def list_inbox(
     #  - classifications: el tier (blacklist/batch/individual) = "en qué filtro entró".
     #  - summary/extraction (EXISTS): avance real del pipeline. `inbox.processed_at` quedó en desuso
     #    (casi nunca se setea), así que el estado se deriva de clasificación + resumen/extracción.
-    sql = f"""
-        SELECT i.id, i.source_id, i.external_id, i.occurred_at, i.received_at,
-               i.payload, i.processed_at, i.process_error, i.attempts,
-               c.tier AS _tier, c.metadata AS _cmeta,
-               EXISTS (SELECT 1 FROM summary_inbox_links sl
-                       WHERE sl.inbox_id = i.id) AS _summarized,
-               EXISTS (SELECT 1 FROM module_extractions me
-                       WHERE me.inbox_id = i.id) AS _extracted
-        FROM inbox i
-        LEFT JOIN classifications c ON c.inbox_id = i.id
-        WHERE {" AND ".join(where)}
-        ORDER BY i.id
-        LIMIT :limit
-    """
+    sql = _LIST_ROW_SQL.format(where=" AND ".join(where), order="i.id")
     with connection() as conn:
         rows = conn.execute(text(sql), params).mappings().all()
-    items: list[dict[str, Any]] = []
-    for r in rows:
-        d = dict(r)
-        tier = d.pop("_tier", None)
-        cmeta = d.pop("_cmeta", None)
-        d["classification"] = {"tier": tier, "metadata": cmeta} if tier else None
-        d["summarized"] = bool(d.pop("_summarized", False))
-        d["extracted"] = bool(d.pop("_extracted", False))
-        items.append(d)
+    items = [_map_list_row(r) for r in rows]
     next_cursor = items[-1]["id"] if len(items) == limit else None
     return {"items": items, "next_cursor": next_cursor}
 
@@ -157,11 +166,12 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
 
     # Resultados de fases posteriores (resumen + extracciones), para el detalle.
     with connection() as conn:
+        # `metadata.n` = tamaño real del lote al persistir (el front avisa "resumen del lote · n").
         summary = (
             conn.execute(
                 text(
                     """
-                    SELECT s.id, s.tier, s.content, s.created_at
+                    SELECT s.id, s.tier, s.content, s.created_at, s.metadata
                     FROM summaries s
                     JOIN summary_inbox_links sl ON sl.summary_id = s.id
                     WHERE sl.inbox_id = :id AND s.user_id = :uid
@@ -236,6 +246,38 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
     data["summarized"] = summary is not None
     data["extracted"] = bool(data["extraction"]["done"])
     return data
+
+
+@router.get("/{inbox_id}/window", response_model=InboxWindow)
+async def get_inbox_window(inbox_id: int, user_id: UserID) -> dict[str, Any]:
+    """Lote de procesamiento del mensaje: con quiénes se resumió (o se resumiría) junto.
+
+    Solo lectura, sin LLM. La semántica de `mode` vive en `summarizer.worker.inbox_window`;
+    acá solo se hidratan los miembros con el shape de fila de la lista (orden conversacional).
+    """
+    from memex.summarizer.worker import inbox_window
+
+    try:
+        win = inbox_window(user_id, inbox_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="not found") from None
+
+    member_ids: list[int] = win["member_ids"]
+    members: list[dict[str, Any]] = []
+    if member_ids:
+        sql = _LIST_ROW_SQL.format(
+            where="i.user_id = :uid AND i.id = ANY(:iids)", order="i.occurred_at, i.id"
+        )
+        with connection() as conn:
+            rows = (
+                conn.execute(
+                    text(sql), {"uid": user_id, "iids": member_ids, "limit": len(member_ids)}
+                )
+                .mappings()
+                .all()
+            )
+        members = [_map_list_row(r) for r in rows]
+    return {"mode": win["mode"], "summary_id": win["summary_id"], "members": members}
 
 
 def _coerce_payload(raw: Any) -> dict[str, Any]:
