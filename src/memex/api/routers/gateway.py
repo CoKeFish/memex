@@ -41,6 +41,7 @@ from memex.api.schemas import (
 from memex.core import checkpoint
 from memex.db import connection
 from memex.logging import get_logger
+from memex.sources import kind_types
 
 router = APIRouter(prefix="/gateway", tags=["gateway"])
 
@@ -100,6 +101,15 @@ async def plugin_state(
     user_id: UserID,
 ) -> dict[str, Any]:
     _validate_plugin_name(plugin_name)
+    # Validar el source_type contra los tipos con SourceKind registrado: un tipo desconocido crearía
+    # una source "zombie" que el work-set de extracción (enumera por kind_types) nunca procesaría.
+    if body.source_type not in kind_types():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"source_type {body.source_type!r} desconocido (conocidos: {sorted(kind_types())})"
+            ),
+        )
     with connection() as conn:
         source_id, created = _ensure_source(
             conn, user_id=user_id, name=plugin_name, source_type=body.source_type

@@ -153,3 +153,10 @@ def test_state_isolates_per_user(client: Any, seed_user2: int, conn: Any) -> Non
     mine = r.json()
     assert mine["source_id"] != other_id
     assert mine["created"] is True
+
+
+def test_state_rejects_unknown_source_type(client: Any) -> None:
+    """Un source_type sin SourceKind registrado se rechaza (400): evita crear una source 'zombie'
+    que el work-set de extracción nunca procesaría."""
+    r = client.post("/gateway/plugins/weird/state", json={"source_type": "nope"})
+    assert r.status_code == 400
