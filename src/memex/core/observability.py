@@ -275,7 +275,12 @@ def record_llm_call(
             },
         ).scalar_one()
 
-    _log.info(
+    # Una falla de LLM se emite a nivel ERROR (no info) para que /logs la cuente: antes TODA
+    # `llm.call` iba a info y las fallas (status='error') no aparecían en log_events (H-9). Esta es
+    # la línea central que garantiza que cada fila status='error' tenga su log_event de error; los
+    # paths que ya emiten su propio _log.error/_log.warning siguen igual (mayor detalle, no daño).
+    log = _log.error if status == "error" else _log.info
+    log(
         "llm.call",
         purpose=purpose,
         model=model,
@@ -285,6 +290,7 @@ def record_llm_call(
         cost_usd=str(cost_usd),
         latency_ms=latency_ms,
         status=status,
+        error_message=error_message,
         inbox_id=inbox_id,
         source_id=source_id,
     )

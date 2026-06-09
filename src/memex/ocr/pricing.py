@@ -29,10 +29,12 @@ class OcrPricing:
     output: Decimal
 
 
-#: Sembrá acá el/los modelos que uses, con precio verificado del proveedor. Ejemplo (comentado
-#: para no afirmar un precio volátil):
-#:   "gpt-4o-mini": OcrPricing(Decimal("0.15"), Decimal("0.60")).
-MODEL_PRICING: dict[str, OcrPricing] = {}
+#: Sembrá acá el/los modelos que uses, con precio verificado del proveedor (USD por 1M tokens).
+#: gpt-4o-mini = tarifa estándar OpenAI (input 0.15 / output 0.60); es el modelo OCR default. Para
+#: otro proveedor/modelo (p. ej. un vision open-source), sumá su fila con el precio verificado.
+MODEL_PRICING: dict[str, OcrPricing] = {
+    "gpt-4o-mini": OcrPricing(Decimal("0.15"), Decimal("0.60")),
+}
 
 
 def compute_ocr_cost(model: str, usage: LLMUsage) -> Decimal:
