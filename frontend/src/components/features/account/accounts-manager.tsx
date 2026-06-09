@@ -143,6 +143,7 @@ function AddAccountForm({
       <label className="space-y-1">
         <span className="eyebrow">alias</span>
         <input
+          name="account-alias"
           required
           value={alias}
           onChange={(e) => setAlias(e.target.value)}
@@ -152,7 +153,7 @@ function AddAccountForm({
       </label>
       <label className="space-y-1">
         <span className="eyebrow">proveedor</span>
-        <select value={provider} onChange={(e) => setProvider(e.target.value)} className={`${inputCls} w-44`}>
+        <select name="provider" value={provider} onChange={(e) => setProvider(e.target.value)} className={`${inputCls} w-44`}>
           {PROVIDERS.map((p) => (
             <option key={p.value} value={p.value}>
               {p.label}
@@ -306,7 +307,7 @@ function CredentialForm({
 
   return (
     <form onSubmit={submit} className="mt-2 flex flex-wrap items-end gap-2 border-t border-border pt-2">
-      <select value={name} onChange={(e) => setName(e.target.value)} className={`${inputCls} w-32`}>
+      <select name="secret-name" value={name} onChange={(e) => setName(e.target.value)} className={`${inputCls} w-32`}>
         {names.map((n) => (
           <option key={n} value={n}>
             {n}
@@ -315,6 +316,7 @@ function CredentialForm({
       </select>
       <input
         type="password"
+        name="credential-value"
         required
         value={value}
         onChange={(e) => setValue(e.target.value)}

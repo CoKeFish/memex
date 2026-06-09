@@ -59,6 +59,7 @@ export function LoginPage() {
             <span className="eyebrow">email</span>
             <input
               type="email"
+              name="email"
               required
               autoComplete="email"
               value={email}
@@ -71,6 +72,7 @@ export function LoginPage() {
               <span className="eyebrow">nombre (opcional)</span>
               <input
                 type="text"
+                name="displayName"
                 value={displayName}
                 onChange={(e) => setDisplayName(e.target.value)}
                 className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-brand"
@@ -81,6 +83,7 @@ export function LoginPage() {
             <span className="eyebrow">contraseña</span>
             <input
               type="password"
+              name="password"
               required
               minLength={mode === "signup" ? 8 : undefined}
               autoComplete={mode === "login" ? "current-password" : "new-password"}

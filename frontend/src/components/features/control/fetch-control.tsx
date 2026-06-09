@@ -561,6 +561,7 @@ export function AdHocIngest() {
           </Field>
           <Field label="Registro (JSON)">
             <textarea
+              name="adhoc-json"
               value={text}
               onChange={(e) => { setText(e.target.value); setResult(null) }}
               rows={5}

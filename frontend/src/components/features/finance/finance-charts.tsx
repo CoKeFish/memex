@@ -1,4 +1,5 @@
-import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts"
+import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, Tooltip, XAxis, YAxis } from "recharts"
+import { MeasuredBox } from "@/components/common/measured-box"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { formatMoney, formatPct } from "@/lib/format"
 import { CATEGORIES, CATEGORY_LABEL, financeByCategory, financeByMerchant, financeByMonth } from "@/data"
@@ -40,9 +41,9 @@ export function MonthlyTrend({ expenses, currency }: { expenses: FinanceTransact
     <Panel>
       <PanelHeader eyebrow="finanzas · tendencia" title="Gasto mensual" sub={`Apilado por tipo de gasto · ${currency}`} />
       <PanelBody>
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data} margin={{ top: 4, right: 8, left: -8, bottom: 0 }}>
+        <MeasuredBox className="h-64 w-full">
+          {({ w, h }) => (
+            <BarChart width={w} height={h} data={data} margin={{ top: 4, right: 8, left: -8, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
               <XAxis dataKey="label" tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} tickLine={false} axisLine={false} />
               <YAxis tick={{ fontSize: 11, fill: "var(--muted-foreground)" }} tickLine={false} axisLine={false} width={42} tickFormatter={axisMoney} />
@@ -51,8 +52,8 @@ export function MonthlyTrend({ expenses, currency }: { expenses: FinanceTransact
                 <Bar key={c.key} dataKey={c.key} stackId="1" fill={c.chart} />
               ))}
             </BarChart>
-          </ResponsiveContainer>
-        </div>
+          )}
+        </MeasuredBox>
       </PanelBody>
     </Panel>
   )
@@ -66,17 +67,17 @@ export function CategoryBreakdown({ expenses, currency }: { expenses: FinanceTra
       <PanelHeader eyebrow="finanzas · categorías" title="Por tipo de gasto" sub={`Todo el periodo · ${currency}`} />
       <PanelBody>
         <div className="grid items-center gap-4 sm:grid-cols-[170px_1fr]">
-          <div className="h-44">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
+          <MeasuredBox className="h-44 w-full">
+            {({ w, h }) => (
+              <PieChart width={w} height={h}>
                 <Pie data={rows} dataKey="total" nameKey="label" innerRadius={48} outerRadius={72} paddingAngle={2} stroke="none">
                   {rows.map((r) => (
                     <Cell key={r.category} fill={r.chart} />
                   ))}
                 </Pie>
               </PieChart>
-            </ResponsiveContainer>
-          </div>
+            )}
+          </MeasuredBox>
           <ul className="space-y-1.5">
             {rows.map((r) => (
               <li key={r.category} className="flex items-center justify-between gap-3 text-sm">

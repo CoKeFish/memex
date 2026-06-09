@@ -65,6 +65,7 @@ export function HabitsPanel({
   }
 
   async function remove(id: number, label: string) {
+    if (!confirm(`¿Borrar el hábito "${label}"?`)) return
     setBusy(true)
     try {
       await deleteBienestarHabit(id)

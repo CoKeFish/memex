@@ -1,6 +1,6 @@
-import { useLayoutEffect, useRef, useState } from "react"
 import { Area, AreaChart, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts"
 import { EmptyState } from "@/components/common/data-state"
+import { MeasuredBox } from "@/components/common/measured-box"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { formatUsd } from "@/lib/format"
 import { moduleChart, moduleLabel } from "@/lib/metrics"
@@ -41,32 +41,15 @@ function TrendTooltip({ active, payload, label }: { active?: boolean; payload?: 
 
 type TrendRow = Record<string, number | string>
 
-/** Área apilada con dimensiones MEDIDAS (sin `ResponsiveContainer`): el chart siempre recibe un
- *  tamaño positivo, así que nunca dispara el warning "width(-1)/height(-1)" de Recharts (que
- *  `ResponsiveContainer` loguea en su primer render con tamaño -1, y StrictMode amplifica al
- *  re-montar). `useLayoutEffect` mide antes del paint (sin parpadeo) y un ResizeObserver lo mantiene
- *  responsivo. Se monta solo cuando hay datos, así su efecto corre con el contenedor ya en layout. */
+/** Área apilada con dimensiones MEDIDAS vía `MeasuredBox` (en vez de `ResponsiveContainer`, que en su
+ *  primer render con tamaño -1 loguea el warning "width(-1)/height(-1)" de Recharts). */
 function StackedArea({ data, modules }: { data: TrendRow[]; modules: string[] }) {
-  const ref = useRef<HTMLDivElement>(null)
-  const [size, setSize] = useState<{ w: number; h: number } | null>(null)
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    const measure = () => {
-      const { width, height } = el.getBoundingClientRect()
-      if (width > 0 && height > 0) setSize({ w: width, h: height })
-    }
-    measure()
-    const ro = new ResizeObserver(measure)
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [])
   return (
-    <div ref={ref} className="h-64 w-full">
-      {size && (
+    <MeasuredBox className="h-64 w-full">
+      {({ w, h }) => (
         <AreaChart
-          width={size.w}
-          height={size.h}
+          width={w}
+          height={h}
           data={data}
           margin={{ top: 4, right: 8, left: -12, bottom: 0 }}
         >
@@ -100,7 +83,7 @@ function StackedArea({ data, modules }: { data: TrendRow[]; modules: string[] })
           ))}
         </AreaChart>
       )}
-    </div>
+    </MeasuredBox>
   )
 }
 

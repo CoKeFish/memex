@@ -216,6 +216,7 @@ export function DirectoryPanel({
       />
       <div className="space-y-2 border-b border-border px-4 py-2.5">
         <input
+          name="identity-search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Buscar por nombre o alias…"
@@ -223,6 +224,7 @@ export function DirectoryPanel({
         />
         <div className="flex gap-2">
           <select
+            name="identity-kind-filter"
             value={kind}
             onChange={(e) => setKind(e.target.value as IdentityKind | "")}
             className={cn(inputCls, "w-1/2")}
@@ -232,6 +234,7 @@ export function DirectoryPanel({
             <option value="organizacion">Organizaciones</option>
           </select>
           <select
+            name="identity-estado-filter"
             value={estado}
             onChange={(e) => setEstado(e.target.value as "" | "interes" | "detectada")}
             className={cn(inputCls, "w-1/2")}
@@ -249,12 +252,14 @@ export function DirectoryPanel({
           }}
         >
           <input
+            name="new-identity-name"
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             placeholder="Nueva identidad (nombre)…"
             className={inputCls}
           />
           <select
+            name="new-identity-kind"
             value={newKind}
             onChange={(e) => setNewKind(e.target.value as IdentityKind)}
             className={cn(inputCls, "w-32")}
@@ -463,6 +468,7 @@ function ParentPicker({
   return (
     <div className="mt-1">
       <input
+        name="parent-org-search"
         value={q}
         onChange={(e) => setQ(e.target.value)}
         placeholder="Buscar organización padre…"
@@ -605,6 +611,7 @@ export function IdentityDetailPanel({
           <button
             type="button"
             onClick={() => {
+              if (!confirm(`¿Eliminar la identidad "${identity.displayName || "(sin nombre)"}"?`)) return
               void deleteIdentity(identity.id).then(() => {
                 onChanged()
                 onDeleted()
@@ -692,6 +699,7 @@ export function IdentityDetailPanel({
         <div>
           <div className="eyebrow mb-1">Alias</div>
           <input
+            name="alias"
             value={aliasValue}
             onChange={(e) => setAliasText(e.target.value)}
             placeholder="alias separados por coma…"
@@ -710,6 +718,7 @@ export function IdentityDetailPanel({
         <div>
           <div className="eyebrow mb-1">Notas</div>
           <textarea
+            name="notas"
             value={notesValue}
             onChange={(e) => setNotes(e.target.value)}
             rows={2}
@@ -751,12 +760,14 @@ export function IdentityDetailPanel({
             }}
           >
             <input
+              name="identifier-platform"
               value={idfPlatform}
               onChange={(e) => setIdfPlatform(e.target.value)}
               placeholder="plataforma (x, email…)"
               className={cn(inputCls, "w-1/3")}
             />
             <select
+              name="identifier-kind"
               value={idfKind}
               onChange={(e) => setIdfKind(e.target.value as IdentityIdentifier["kind"])}
               className={cn(inputCls, "w-28")}
@@ -768,6 +779,7 @@ export function IdentityDetailPanel({
               ))}
             </select>
             <input
+              name="identifier-value"
               value={idfValue}
               onChange={(e) => setIdfValue(e.target.value)}
               placeholder="valor"
@@ -879,18 +891,21 @@ function SitesSection({
         }}
       >
         <input
+          name="site-label"
           value={label}
           onChange={(e) => setLabel(e.target.value)}
           placeholder="etiqueta"
           className={cn(inputCls, "w-24")}
         />
         <input
+          name="site-address"
           value={address}
           onChange={(e) => setAddress(e.target.value)}
           placeholder="dirección"
           className={inputCls}
         />
         <input
+          name="site-country"
           value={country}
           onChange={(e) => setCountry(e.target.value)}
           placeholder="país"
