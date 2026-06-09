@@ -25,9 +25,9 @@ from memex.classifier.rules import classify
 from memex.db import connection
 from memex.logging import get_logger
 from memex.media_backfill import backfill_inbox_media
-from memex.modules.orchestrator import extract_inbox
+from memex.modules.orchestrator import extract_inbox, run_extraction
 from memex.ocr.worker import run_ocr
-from memex.summarizer.worker import summarize_inbox
+from memex.summarizer.worker import run_summarization, summarize_inbox
 
 _log = get_logger("memex.reprocess")
 
@@ -117,32 +117,57 @@ def _classify_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[s
 
 
 async def _summarize_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[str, Any]:
-    ok = errors = 0
-    cost = 0.0
-    for iid in inbox_ids:
+    """Resume respetando los tiers, igual que el daemon (salta blacklist, ventanea batch).
+
+    Lote (>1) → `run_summarization(inbox_ids=...)`: un solo cliente LLM para todo el lote. Un solo
+    mensaje (botón "Reprocesar" de /datos/:id) → vía per-mensaje, que honra el click explícito y
+    refresca su resumen aunque sea blacklist.
+    """
+    if len(inbox_ids) == 1:
         try:
-            r = await summarize_inbox(user_id, iid, scope="individual", force=force)
-            ok += 1
-            cost += float(r.get("cost_usd", 0) or 0)
-        except Exception as e:  # best-effort por mensaje (no clasificado, sin LLM, etc.)
-            errors += 1
-            _log.warning("reprocess.summarize_failed", inbox_id=iid, error=str(e))
-    return {"ok": ok, "errors": errors, "cost_usd": cost}
+            r = await summarize_inbox(user_id, inbox_ids[0], scope="individual", force=force)
+            return {"ok": 1, "errors": 0, "cost_usd": float(r.get("cost_usd", 0) or 0)}
+        except Exception as e:  # best-effort (no clasificado, sin LLM, etc.)
+            _log.warning("reprocess.summarize_failed", inbox_id=inbox_ids[0], error=str(e))
+            return {"ok": 0, "errors": 1, "cost_usd": 0.0}
+    stats = await run_summarization(user_id, inbox_ids=inbox_ids, force=force)
+    return {
+        "ok": stats.summaries,
+        "summaries": stats.summaries,
+        "messages": stats.messages,
+        "skipped": stats.skipped,
+        "errors": stats.errors,
+        "cost_usd": float(stats.cost.total.cost_usd),
+    }
 
 
 async def _extract_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[str, Any]:
-    ok = errors = items = 0
-    cost = 0.0
-    for iid in inbox_ids:
+    """Extrae respetando los tiers, igual que el daemon (salta blacklist, ventanea batch).
+
+    Lote (>1) → `run_extraction(inbox_ids=...)`: un solo cliente LLM. Un solo mensaje → vía
+    per-mensaje (`extract_inbox`), que honra el click explícito y preserva la traza de /datos/:id.
+    """
+    if len(inbox_ids) == 1:
         try:
-            r = await extract_inbox(user_id, iid, scope="individual", force=force)
-            ok += 1
-            items += int(r.get("items", 0) or 0)
-            cost += float(r.get("cost_usd", 0) or 0)
-        except Exception as e:  # best-effort por mensaje
-            errors += 1
-            _log.warning("reprocess.extract_failed", inbox_id=iid, error=str(e))
-    return {"ok": ok, "errors": errors, "items": items, "cost_usd": cost}
+            r = await extract_inbox(user_id, inbox_ids[0], scope="individual", force=force)
+            return {
+                "ok": 1,
+                "errors": 0,
+                "items": int(r.get("items", 0) or 0),
+                "cost_usd": float(r.get("cost_usd", 0) or 0),
+            }
+        except Exception as e:  # best-effort
+            _log.warning("reprocess.extract_failed", inbox_id=inbox_ids[0], error=str(e))
+            return {"ok": 0, "errors": 1, "items": 0, "cost_usd": 0.0}
+    stats = await run_extraction(user_id, inbox_ids=inbox_ids, force=force)
+    return {
+        "ok": stats.windows,
+        "items": stats.items,
+        "windows": stats.windows,
+        "discarded": stats.discarded,
+        "errors": stats.errors,
+        "cost_usd": float(stats.cost.total.cost_usd),
+    }
 
 
 async def reprocess(
