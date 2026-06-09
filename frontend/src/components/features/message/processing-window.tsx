@@ -94,15 +94,17 @@ function Conversation({
       const s = summarizeRow(m)
       const day = dayLabel(m.occurredAt, now)
       const at = new Date(m.occurredAt).getTime()
-      // Cabecera de burbuja solo al cambiar de remitente, de día, o tras una pausa > 5 min.
-      const header = day !== prevDay || s.sender !== prevSender || at - prevAt > 5 * 60_000
+      // Cabecera de burbuja al cambiar de remitente/día o tras una pausa > 5 min; el mensaje
+      // ACTUAL siempre la lleva (ahí vive el marcador «este mensaje», aun agrupado).
+      const header =
+        day !== prevDay || s.sender !== prevSender || at - prevAt > 5 * 60_000 || m.id === currentId
       out.push({ m, s, header, sep: day !== prevDay ? day : null })
       prevDay = day
       prevSender = s.sender
       prevAt = at
     }
     return out
-  }, [members, now])
+  }, [members, now, currentId])
 
   return (
     <div className="space-y-0.5">
