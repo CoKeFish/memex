@@ -132,9 +132,9 @@ testpaths = ["tests"]
 # Para depurar un test con -s/pdb sin workers: agregar `-n0` al comando.
 addopts = "-ra --tb=short --strict-markers -n auto"
 # Backstop anti-cuelgue (pytest-timeout): ningún test legítimo se acerca a 120s — el peor caso
-# real es el primer test de cada worker, que paga el setup de sesión (CREATE DATABASE +
-# migraciones). Un test colgado mata su worker con stack dump en vez de colgar la suite
-# (y el pre-push) para siempre.
+# real es el primer test de cada worker, que paga el setup de sesión (construir la plantilla
+# migrada la primera vez + clonarla). Un test colgado mata su worker con stack dump en vez de
+# colgar la suite (y el pre-push) para siempre.
 timeout = 120
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
