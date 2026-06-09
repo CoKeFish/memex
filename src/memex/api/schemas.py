@@ -1829,10 +1829,13 @@ class GraphClusterResult(BaseModel):
 class GraphClusterValidateResult(BaseModel):
     """Resumen de POST /graph/cluster/validate (validador LLM de cúmulos)."""
 
-    clusters: int
-    confirmed: int
+    blobs: int
+    groups: int
+    created: int
+    synced: int
+    dissolved: int
     rejected: int
-    pruned_members: int
+    promoted: int
     skipped: int
     errors: int
     llm_calls: int

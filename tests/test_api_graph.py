@@ -314,17 +314,17 @@ def test_clusters_filtra_por_status(client: Any) -> None:
 
 
 def test_validate_endpoint_mapea_stats(client: Any, monkeypatch: Any) -> None:
-    # el validador real usa LLM; se mockea para probar el wiring + mapeo de la respuesta.
+    # el partidor real usa LLM; se mockea para probar el wiring + mapeo de la respuesta.
     from memex.api.routers import graph as graph_router
-    from memex.relations.clusters_llm import ClusterValidationStats
+    from memex.relations.clusters_llm import ClusterPartitionStats
 
-    async def _fake(user_id: int, *, limit: int | None = None) -> ClusterValidationStats:
-        return ClusterValidationStats(clusters=2, confirmed=1, rejected=1, pruned_members=3)
+    async def _fake(user_id: int, *, limit: int | None = None) -> ClusterPartitionStats:
+        return ClusterPartitionStats(blobs=2, groups=3, created=2, synced=1, rejected=1, promoted=4)
 
-    monkeypatch.setattr(graph_router, "run_cluster_validation", _fake)
+    monkeypatch.setattr(graph_router, "run_cluster_partition", _fake)
     body = client.post("/graph/cluster/validate").json()
-    assert body["clusters"] == 2
-    assert body["confirmed"] == 1
-    assert body["rejected"] == 1
-    assert body["pruned_members"] == 3
+    assert body["blobs"] == 2
+    assert body["groups"] == 3
+    assert body["created"] == 2
+    assert body["promoted"] == 4
     assert body["cost_usd"] == 0.0

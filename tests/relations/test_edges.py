@@ -70,14 +70,29 @@ def test_status_por_defecto_es_pista() -> None:
 def test_resolve_es_monotonico() -> None:
     eid = _propose(producer=PRODUCER_INBOX)  # nace pista
     with connection() as c:
-        assert resolve_edge(c, eid, status="confirmed", producer=PRODUCER_LLM) is True
+        assert resolve_edge(c, eid, status="confirmed") is True
     # una arista terminal NO se re-evalúa → noop
     with connection() as c:
-        assert resolve_edge(c, eid, status="rejected", producer=PRODUCER_LLM) is False
+        assert resolve_edge(c, eid, status="rejected") is False
     with connection() as c:
-        edge = get_edge(c, 1, A, B, producer=PRODUCER_LLM)  # tras validar, el productor es llm
+        edge = get_edge(c, 1, A, B, producer=PRODUCER_INBOX)  # resolver NO reescribe el productor
     assert edge is not None
     assert edge.status == "confirmed"
+
+
+def test_resolve_conserva_productor_y_no_colisiona() -> None:
+    # pista del inbox + arista confirmed del LLM (overflow de identidades) sobre el MISMO par y
+    # relation_type → coexisten por productor distinto. Resolver la pista NO reescribe su productor
+    # (lo haría chocaría con la UNIQUE de la arista llm). Estampa `evidence`.
+    eid = _propose(producer=PRODUCER_INBOX, relation_type="co-ocurrencia")  # pista inbox
+    _propose(producer=PRODUCER_LLM, relation_type="co-ocurrencia", status="confirmed")  # llm
+    with connection() as c:
+        assert resolve_edge(c, eid, status="confirmed", evidence="cluster:7") is True
+    with connection() as c:
+        pista = get_edge(c, 1, A, B, producer=PRODUCER_INBOX, relation_type="co-ocurrencia")
+        llm = get_edge(c, 1, A, B, producer=PRODUCER_LLM, relation_type="co-ocurrencia")
+    assert pista is not None and pista.status == "confirmed" and pista.evidence == "cluster:7"
+    assert llm is not None and llm.status == "confirmed"  # ambas coexisten, sin IntegrityError
 
 
 def test_anti_self_loop() -> None:

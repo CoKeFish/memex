@@ -20,7 +20,7 @@ from decimal import Decimal
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from memex.relations.clustering import CandidateCluster
+from memex.relations.clustering import CandidateCluster, cluster_signature
 from memex.relations.edges import (
     CUMULO_SLUG,
     PRODUCER_LLM,
@@ -44,7 +44,8 @@ class StoredCluster:
     description: str
     confidence: Decimal | None
     member_count: int
-    signature: str
+    signature: str  # hash del set de miembros de ESTE cúmulo (el GRUPO, en un confirmed)
+    blob_signature: str  # hash del BLOB detectado del que salió (clave de "blob ya particionado")
     validated_signature: str | None
     has_confirmed_edge: bool
     needs_revalidation: bool
@@ -88,6 +89,7 @@ def _row_to_cluster(r: object, members: set[Ref], pruned: set[Ref]) -> StoredClu
         confidence=m["confidence"],  # type: ignore[index]
         member_count=int(m["member_count"]),  # type: ignore[index]
         signature=str(m["signature"]),  # type: ignore[index]
+        blob_signature=str(m["blob_signature"]),  # type: ignore[index]
         validated_signature=(
             str(m["validated_signature"]) if m["validated_signature"] is not None else None  # type: ignore[index]
         ),
@@ -151,8 +153,8 @@ def insert_candidate(
         text(
             """
             INSERT INTO relation_clusters
-              (user_id, status, signature, member_count, has_confirmed_edge, run_id)
-            VALUES (:u, 'candidate', :sig, :mc, :hce, :rid)
+              (user_id, status, signature, blob_signature, member_count, has_confirmed_edge, run_id)
+            VALUES (:u, 'candidate', :sig, :sig, :mc, :hce, :rid)
             ON CONFLICT (user_id, signature) WHERE status IN ('candidate','rejected') DO NOTHING
             RETURNING id
             """
@@ -338,3 +340,123 @@ def materialize_cluster_edges(conn: Connection, user_id: int) -> int:
                 text("DELETE FROM relation_edges WHERE id = ANY(:ids)"), {"ids": stale_ids}
             )
     return n
+
+
+# --- PARTIDOR (Fase 2b): hijos confirmed por blob, con identidad preservada ----------- #
+
+
+def blob_partitioned(conn: Connection, user_id: int, blob_signature: str) -> bool:
+    """¿El blob (por su firma) YA fue particionado? Hay hijos `confirmed`/`stale` con ese
+    `blob_signature`, o un memo `rejected` con esa firma (blob todo-ruido). Si sí, re-detectar el
+    MISMO blob es estable; un blob que derivó cambia de firma → ya no está manejado.
+    """
+    row = conn.execute(
+        text(
+            "SELECT 1 FROM relation_clusters WHERE user_id = :u AND ("
+            "  (blob_signature = :b AND status IN ('confirmed','stale')) "
+            "  OR (signature = :b AND status = 'rejected')) LIMIT 1"
+        ),
+        {"u": user_id, "b": blob_signature},
+    ).scalar()
+    return row is not None
+
+
+def touch_blob(conn: Connection, user_id: int, blob_signature: str) -> None:
+    """Blob estable (re-detectado igual): refresca `last_seen` de sus hijos confirmed/stale."""
+    conn.execute(
+        text(
+            "UPDATE relation_clusters SET last_seen_at = NOW(), miss_count = 0, updated_at = NOW() "
+            "WHERE user_id = :u AND blob_signature = :b AND status IN ('confirmed','stale')"
+        ),
+        {"u": user_id, "b": blob_signature},
+    )
+
+
+def create_child(
+    conn: Connection,
+    user_id: int,
+    blob_signature: str,
+    members: frozenset[Ref],
+    *,
+    name: str,
+    description: str,
+    confidence: float,
+    has_confirmed_edge: bool,
+) -> int:
+    """Crea un cúmulo `confirmed` (UN contexto que el LLM encontró dentro de un blob). `signature` =
+    hash del GRUPO; `blob_signature` = el del blob padre. Devuelve su id."""
+    sig = cluster_signature(members)
+    cid = int(
+        conn.execute(
+            text(
+                """
+                INSERT INTO relation_clusters
+                  (user_id, status, name, description, confidence, member_count, signature,
+                   blob_signature, validated_signature, has_confirmed_edge, validated_at,
+                   decided_at)
+                VALUES (:u, 'confirmed', :name, :desc, :conf, :mc, :sig, :bsig, :sig, :hce,
+                        NOW(), NOW())
+                RETURNING id
+                """
+            ),
+            {
+                "u": user_id,
+                "name": name,
+                "desc": description,
+                "conf": round(confidence, 3),
+                "mc": len(members),
+                "sig": sig,
+                "bsig": blob_signature,
+                "hce": has_confirmed_edge,
+            },
+        ).scalar_one()
+    )
+    _insert_members(conn, user_id, cid, members)
+    return cid
+
+
+def sync_child(
+    conn: Connection,
+    user_id: int,
+    child_id: int,
+    blob_signature: str,
+    members: frozenset[Ref],
+    *,
+    confidence: float,
+) -> None:
+    """Actualiza un hijo confirmed EN SITIO (preserva id Y nombre = identidad estable): set-diff de
+    miembros + firma del grupo + `blob_signature` + confianza + revalidado. NO toca name/description
+    (la identidad del cúmulo se conserva mientras crece con la ingesta aditiva)."""
+    existing = {
+        Ref(str(r["member_slug"]), int(r["member_id"]))
+        for r in conn.execute(
+            text(
+                "SELECT member_slug, member_id FROM relation_cluster_members WHERE cluster_id = :c"
+            ),
+            {"c": child_id},
+        ).mappings()
+    }
+    _insert_members(conn, user_id, child_id, frozenset(members - existing))
+    for ref in existing - members:
+        conn.execute(
+            text(
+                "DELETE FROM relation_cluster_members "
+                "WHERE cluster_id = :c AND member_slug = :s AND member_id = :i"
+            ),
+            {"c": child_id, "s": ref.slug, "i": ref.id},
+        )
+    conn.execute(
+        text(
+            "UPDATE relation_clusters SET signature = :sig, blob_signature = :bsig, "
+            "member_count = :mc, confidence = :conf, validated_signature = :sig, "
+            "validated_at = NOW(), last_seen_at = NOW(), miss_count = 0, "
+            "needs_revalidation = FALSE, updated_at = NOW() WHERE id = :id"
+        ),
+        {
+            "sig": cluster_signature(members),
+            "bsig": blob_signature,
+            "mc": len(members),
+            "conf": round(confidence, 3),
+            "id": child_id,
+        },
+    )

@@ -69,8 +69,9 @@ def test_proyecta_todos_los_tipos() -> None:
         )
     )
     _exec(
-        "INSERT INTO relation_clusters (user_id, status, name, signature, member_count) "
-        "VALUES (1, 'confirmed', 'Mi contexto', :sig, 2)",
+        "INSERT INTO relation_clusters (user_id, status, name, signature, blob_signature, "
+        "member_count) "
+        "VALUES (1, 'confirmed', 'Mi contexto', :sig, :sig, 2)",
         sig="0" * 64,
     )
     with connection() as c:
@@ -95,18 +96,21 @@ def test_proyecta_todos_los_tipos() -> None:
 
 def test_cumulo_proyecta_solo_confirmed() -> None:
     _exec(
-        "INSERT INTO relation_clusters (user_id, status, name, signature, member_count) "
-        "VALUES (1, 'confirmed', 'C1', :s, 2)",
+        "INSERT INTO relation_clusters (user_id, status, name, signature, blob_signature, "
+        "member_count) "
+        "VALUES (1, 'confirmed', 'C1', :s, :s, 2)",
         s="1" * 64,
     )
     _exec(
-        "INSERT INTO relation_clusters (user_id, status, name, signature, member_count) "
-        "VALUES (1, 'candidate', 'C2', :s, 2)",
+        "INSERT INTO relation_clusters (user_id, status, name, signature, blob_signature, "
+        "member_count) "
+        "VALUES (1, 'candidate', 'C2', :s, :s, 2)",
         s="2" * 64,
     )
     _exec(
-        "INSERT INTO relation_clusters (user_id, status, name, signature, member_count) "
-        "VALUES (1, 'dissolved', 'C3', :s, 2)",
+        "INSERT INTO relation_clusters (user_id, status, name, signature, blob_signature, "
+        "member_count) "
+        "VALUES (1, 'dissolved', 'C3', :s, :s, 2)",
         s="3" * 64,
     )
     with connection() as c:

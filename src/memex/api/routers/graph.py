@@ -14,7 +14,7 @@ from memex.api.schemas import (
 from memex.config import settings
 from memex.db import connection
 from memex.logging import get_logger
-from memex.relations.clusters_llm import run_cluster_validation
+from memex.relations.clusters_llm import run_cluster_partition
 from memex.relations.deterministic import build_relations, vertex_inbox_ids
 from memex.relations.edges import list_edges
 from memex.relations.reconcile import detect_and_reconcile
@@ -152,24 +152,27 @@ async def cluster_graph(user_id: UserID) -> dict[str, Any]:
 @router.post("/cluster/validate", response_model=GraphClusterValidateResult)
 async def validate_clusters(
     user_id: UserID,
-    limit: Annotated[int | None, Query(description="máximo de cúmulos a validar")] = None,
+    limit: Annotated[int | None, Query(description="máximo de blobs a particionar")] = None,
 ) -> dict[str, Any]:
-    """Valida con el LLM los cúmulos pendientes (candidate / needs_revalidation): confirma, nombra,
-    describe y poda, y materializa las aristas `miembro_de`. Usa el LLM (cuesta); on-demand. Solo
-    toca los pendientes (un confirmado estable no se re-juzga)."""
-    stats = await run_cluster_validation(user_id, limit=limit)
+    """Parte con el LLM los blobs `candidate`: cada blob → N contextos (hijos confirmed),
+    preservando la identidad de los hijos al re-particionar, promoviendo las pistas intra-grupo y
+    materializando las aristas `miembro_de`. Usa el LLM (cuesta); on-demand. Solo los pendientes."""
+    stats = await run_cluster_partition(user_id, limit=limit)
     _log.info(
-        "graph.cluster.validate.api",
+        "graph.cluster.partition.api",
         user_id=user_id,
-        confirmed=stats.confirmed,
-        rejected=stats.rejected,
+        blobs=stats.blobs,
+        groups=stats.groups,
         errors=stats.errors,
     )
     return {
-        "clusters": stats.clusters,
-        "confirmed": stats.confirmed,
+        "blobs": stats.blobs,
+        "groups": stats.groups,
+        "created": stats.created,
+        "synced": stats.synced,
+        "dissolved": stats.dissolved,
         "rejected": stats.rejected,
-        "pruned_members": stats.pruned_members,
+        "promoted": stats.promoted,
         "skipped": stats.skipped,
         "errors": stats.errors,
         "llm_calls": stats.cost.calls,

@@ -26,7 +26,7 @@ from sqlalchemy import text
 from memex.db import connection
 from memex.llm.client import LLMError
 from memex.logging import get_logger, setup_logging
-from memex.relations.clusters_llm import run_cluster_validation
+from memex.relations.clusters_llm import run_cluster_partition
 from memex.relations.deterministic import build_relations
 from memex.relations.reconcile import detect_and_reconcile
 
@@ -104,10 +104,11 @@ def _cmd_cluster(args: argparse.Namespace) -> int:
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
-    stats = asyncio.run(run_cluster_validation(args.user, limit=args.limit))
+    stats = asyncio.run(run_cluster_partition(args.user, limit=args.limit))
     _say(
-        f"\ngraph validate: cumulos={stats.clusters} confirmados={stats.confirmed} "
-        f"rechazados={stats.rejected} podados={stats.pruned_members} saltados={stats.skipped} "
+        f"\ngraph validate: blobs={stats.blobs} contextos={stats.groups} "
+        f"(nuevos={stats.created} sincronizados={stats.synced}) disueltos={stats.dissolved} "
+        f"ruido={stats.rejected} pistas_promovidas={stats.promoted} saltados={stats.skipped} "
         f"errores={stats.errors} llm_calls={stats.cost.calls} costo_usd={stats.cost.cost_usd}\n"
     )
     return 1 if stats.errors else 0
@@ -117,12 +118,12 @@ def _cmd_cycle(args: argparse.Namespace) -> int:
     with connection() as conn:
         b = build_relations(conn, args.user)
         r = detect_and_reconcile(conn, args.user)
-    v = asyncio.run(run_cluster_validation(args.user))
+    v = asyncio.run(run_cluster_partition(args.user))
     _say(
         f"\ngraph cycle: [build] pistas={b.cooccurrence_pistas} cluster_edges={b.cluster_edges} | "
         f"[detect] detectados={r.detected} nuevos={r.new_candidates} disueltos={r.dissolved} | "
-        f"[validate] confirmados={v.confirmed} rechazados={v.rejected} podados={v.pruned_members} "
-        f"errores={v.errors}\n"
+        f"[partition] contextos={v.groups} (nuevos={v.created} sync={v.synced}) "
+        f"promovidas={v.promoted} ruido={v.rejected} errores={v.errors}\n"
     )
     return 1 if v.errors else 0
 

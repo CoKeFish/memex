@@ -1,7 +1,8 @@
-"""Validador LLM de cúmulos (LLMClient FALSO, sin red). Cubre: parseo ultra-defensivo
-(`parse_verdict`); el worker `run_cluster_validation` (keep confirma+nombra+poda+materializa;
-reject memoiza; gate de confianza; poda que deja <2 → reject; JSON basura → candidate sin memo; skip
-por tamaño; solo valida pendientes; `LLMQuotaError` propaga)."""
+"""PARTIDOR LLM de cúmulos (LLMClient FALSO, sin red). Cubre: parseo ultra-defensivo
+(`parse_partition`); el worker `run_cluster_partition` (crea hijos por contexto, promueve pistas
+intra-grupo, separa contextos, deja inter-grupo/ruido como pista, gate de confianza, memo de ruido,
+preserva identidad al re-particionar, skip por tamaño, `LLMQuotaError` propaga, no toca det.).
+"""
 
 from __future__ import annotations
 
@@ -17,9 +18,16 @@ from memex.config import settings
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.llm.client import LLMQuotaError
-from memex.relations.clustering import cluster_signature
-from memex.relations.clusters_llm import parse_verdict, run_cluster_validation
-from memex.relations.edges import RELTYPE_MIEMBRO_DE, Ref, list_edges
+from memex.relations.cluster_store import create_child, insert_candidate
+from memex.relations.clustering import CandidateCluster, cluster_signature
+from memex.relations.clusters_llm import parse_partition, run_cluster_partition
+from memex.relations.edges import (
+    PRODUCER_IDENTIDADES,
+    PRODUCER_INBOX,
+    Ref,
+    list_edges,
+    propose_edge,
+)
 
 
 class FakeLLM:
@@ -78,187 +86,229 @@ def _person(conn: Connection, name: str) -> Ref:
     return Ref("identidades:person", int(pid))
 
 
-def _seed_cluster(conn: Connection, status: str, members: list[Ref]) -> int:
-    sig = cluster_signature(members)
-    cid = int(
-        conn.execute(
-            text(
-                "INSERT INTO relation_clusters (user_id, status, signature, member_count) "
-                "VALUES (1, :st, :sig, :mc) RETURNING id"
-            ),
-            {"st": status, "sig": sig, "mc": len(members)},
-        ).scalar_one()
-    )
-    for r in members:
-        conn.execute(
-            text(
-                "INSERT INTO relation_cluster_members "
-                "(user_id, cluster_id, member_slug, member_id) VALUES (1, :c, :s, :i)"
-            ),
-            {"c": cid, "s": r.slug, "i": r.id},
-        )
+def _seed_candidate(conn: Connection, members: list[Ref]) -> int:
+    """Un blob `candidate` (lo que detección produce) usando la vía de producción."""
+    ordered = tuple(sorted(members, key=lambda r: (r.slug, r.id)))
+    cc = CandidateCluster(ordered, cluster_signature(ordered), False)
+    cid = insert_candidate(conn, 1, cc)
+    assert cid is not None
     return cid
 
 
-def _cluster_row(cid: int) -> dict[str, Any]:
+def _seed_confirmed_child(conn: Connection, members: list[Ref], *, name: str, blob_sig: str) -> int:
+    """Un hijo `confirmed` existente (para los tests de re-partición/identidad)."""
+    return create_child(
+        conn,
+        1,
+        blob_sig,
+        frozenset(members),
+        name=name,
+        description="",
+        confidence=0.9,
+        has_confirmed_edge=False,
+    )
+
+
+def _pista(conn: Connection, a: Ref, b: Ref) -> int:
+    """Una pista de co-ocurrencia (producer=inbox) entre dos miembros — candidata a promoción."""
+    return propose_edge(
+        conn, 1, a, b, producer=PRODUCER_INBOX, relation_type="co-ocurrencia", evidence="inbox:99"
+    )
+
+
+def _edges_by_id() -> dict[int, Any]:
     with connection() as c:
-        row = (
-            c.execute(
-                text("SELECT status, name, confidence FROM relation_clusters WHERE id = :c"),
-                {"c": cid},
-            )
-            .mappings()
-            .one()
-        )
-    return dict(row)
+        return {e.id: e for e in list_edges(c, 1)}
 
 
-# --- parse_verdict (puro) ---------------------------------------------------------- #
+def _confirmed_rows() -> list[dict[str, Any]]:
+    with connection() as c:
+        return [
+            dict(r)
+            for r in c.execute(
+                text(
+                    "SELECT id, status, name, member_count, blob_signature FROM relation_clusters "
+                    "WHERE user_id = 1 AND status = 'confirmed' ORDER BY id"
+                )
+            ).mappings()
+        ]
 
 
-def test_parse_keep() -> None:
-    v = parse_verdict(
-        '{"verdict":"keep","confidence":0.8,"name":"X","description":"d","prune":[1,2]}', 3
+# --- parse_partition (puro) -------------------------------------------------------- #
+
+
+def test_parse_partition_dos_grupos_orden_canonico() -> None:
+    r = parse_partition(
+        '{"groups":[{"members":[4,3],"name":"B","description":"d2","confidence":0.8},'
+        '{"members":[2,1],"name":"A","description":"d1","confidence":0.9}]}',
+        4,
     )
-    assert (v.verdict, v.confidence, v.name, v.description, v.prune) == (
-        "keep",
-        0.8,
-        "X",
-        "d",
-        [1, 2],
+    assert r.valid is True
+    assert [(g.members, g.name) for g in r.groups] == [((1, 2), "A"), ((3, 4), "B")]
+
+
+def test_parse_partition_basura_es_invalida() -> None:
+    assert parse_partition("no soy json", 3).valid is False
+    assert parse_partition('{"sin":"groups"}', 3).valid is False
+    assert parse_partition('{"groups":"x"}', 3).valid is False
+
+
+def test_parse_partition_vacio_es_ruido() -> None:
+    r = parse_partition('{"groups":[]}', 3)
+    assert r.valid is True and r.groups == ()
+
+
+def test_parse_partition_asigna_al_primero_y_descarta_singleton() -> None:
+    r = parse_partition(
+        '{"groups":[{"members":[1,2],"name":"A","description":"","confidence":0.9},'
+        '{"members":[2,3],"name":"B","description":"","confidence":0.9}]}',
+        3,
     )
+    assert [g.members for g in r.groups] == [(1, 2)]
 
 
-def test_parse_garbage_is_none() -> None:
-    assert parse_verdict("no soy json", 3).verdict is None
-    assert parse_verdict('{"sin":"verdict"}', 3).verdict is None
-    assert parse_verdict('{"verdict":"maybe"}', 3).verdict is None  # valor inválido
+def test_parse_partition_filtra_ids_y_clampa_confianza() -> None:
+    r = parse_partition(
+        '{"groups":[{"members":[0,9,1,2,true],"name":"A","description":"","confidence":2}]}', 3
+    )
+    assert len(r.groups) == 1
+    assert r.groups[0].members == (1, 2) and r.groups[0].confidence == 1.0
 
 
-def test_parse_prune_filtra_y_clampa() -> None:
-    # 0 y 4 fuera de 1..3; 2 duplicado; true es bool; confianza 2 → clamp 1.0.
-    v = parse_verdict('{"verdict":"reject","confidence":2,"prune":[0,4,2,2,true]}', 3)
-    assert v.verdict == "reject"
-    assert v.confidence == 1.0
-    assert v.prune == [2]
+# --- worker: run_cluster_partition (LLM falso) ------------------------------------- #
 
-
-# --- worker (LLM falso) ------------------------------------------------------------ #
+_G3 = '{"groups":[{"members":[1,2,3],"name":"Ctx","description":"d","confidence":0.9}]}'
 
 
 @pytest.mark.asyncio
-async def test_keep_confirma_nombra_poda_materializa() -> None:
+async def test_particion_crea_hijo_y_promueve_pistas() -> None:
     with connection() as c:
         p = [_person(c, f"P{i}") for i in range(3)]
-        cid = _seed_cluster(c, "candidate", p)
+        _seed_candidate(c, p)
+        e01 = _pista(c, p[0], p[1])
+        e12 = _pista(c, p[1], p[2])
+    stats = await run_cluster_partition(1, client=FakeLLM(_G3))
+    assert (stats.blobs, stats.groups, stats.created, stats.promoted) == (1, 1, 1, 2)
+    rows = _confirmed_rows()
+    assert len(rows) == 1 and rows[0]["name"] == "Ctx" and rows[0]["member_count"] == 3
+    edges = _edges_by_id()
+    assert edges[e01].status == "confirmed" and edges[e12].status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_particion_separa_dos_contextos() -> None:
+    with connection() as c:
+        p = [_person(c, f"P{i}") for i in range(4)]
+        _seed_candidate(c, p)
+        e01 = _pista(c, p[0], p[1])  # intra-grupo A → promueve
+        e23 = _pista(c, p[2], p[3])  # intra-grupo B → promueve
+        e12 = _pista(c, p[1], p[2])  # INTER-grupo → queda pista (no se mata)
     fake = FakeLLM(
-        '{"verdict":"keep","confidence":0.9,"name":"Proyecto X","description":"d","prune":[3]}'
+        '{"groups":[{"members":[1,2],"name":"A","description":"","confidence":0.9},'
+        '{"members":[3,4],"name":"B","description":"","confidence":0.9}]}'
     )
-    stats = await run_cluster_validation(1, client=fake)
-    assert (stats.confirmed, stats.rejected, stats.pruned_members) == (1, 0, 1)
-    row = _cluster_row(cid)
-    assert row["status"] == "confirmed"
-    assert row["name"] == "Proyecto X"
-    assert float(row["confidence"]) == 0.9
-    with connection() as c:
-        edges = [e for e in list_edges(c, 1) if e.relation_type == RELTYPE_MIEMBRO_DE]
-        purpose = c.execute(text("SELECT purpose FROM llm_calls WHERE user_id = 1")).scalar_one()
-    assert {(e.src.slug, e.src.id) for e in edges} == {(p[0].slug, p[0].id), (p[1].slug, p[1].id)}
-    assert all(
-        (e.dst.slug, e.dst.id) == ("cumulo", cid) for e in edges
-    )  # miembro 3 podado: sin arista
-    assert purpose == "graph_cluster_validation"
+    stats = await run_cluster_partition(1, client=fake)
+    assert (stats.blobs, stats.created, stats.groups, stats.promoted) == (1, 2, 2, 2)
+    assert len(_confirmed_rows()) == 2
+    edges = _edges_by_id()
+    assert edges[e01].status == "confirmed" and edges[e23].status == "confirmed"
+    assert edges[e12].status == "pista"  # inter-contexto → sin matar
 
 
 @pytest.mark.asyncio
-async def test_reject_memoiza() -> None:
+async def test_grupo_bajo_umbral_no_se_confirma() -> None:
+    # confianza < cluster_partition_min_confidence (0.75) → no es contexto confiado → ruido.
     with connection() as c:
-        cid = _seed_cluster(c, "candidate", [_person(c, f"P{i}") for i in range(3)])
-    fake = FakeLLM('{"verdict":"reject","confidence":0.2,"name":"","description":"","prune":[]}')
-    stats = await run_cluster_validation(1, client=fake)
-    assert (stats.confirmed, stats.rejected) == (0, 1)
-    assert _cluster_row(cid)["status"] == "rejected"
+        p = [_person(c, f"P{i}") for i in range(3)]
+        _seed_candidate(c, p)
+        e01 = _pista(c, p[0], p[1])
+    fake = FakeLLM('{"groups":[{"members":[1,2,3],"name":"X","description":"","confidence":0.5}]}')
+    stats = await run_cluster_partition(1, client=fake)
+    assert (stats.created, stats.groups, stats.rejected) == (0, 0, 1)
+    assert _edges_by_id()[e01].status == "pista"  # ni se promovió ni se mató
 
 
 @pytest.mark.asyncio
-async def test_gate_de_confianza_rechaza() -> None:
+async def test_particion_vacia_es_memo_y_no_mata_pistas() -> None:
     with connection() as c:
-        cid = _seed_cluster(c, "candidate", [_person(c, f"P{i}") for i in range(3)])
-    fake = FakeLLM('{"verdict":"keep","confidence":0.3,"name":"X","description":"d","prune":[]}')
-    stats = await run_cluster_validation(1, client=fake)
-    assert (stats.confirmed, stats.rejected) == (0, 1)
-    assert _cluster_row(cid)["status"] == "rejected"
+        p = [_person(c, f"P{i}") for i in range(3)]
+        cid = _seed_candidate(c, p)
+        e01 = _pista(c, p[0], p[1])
+    stats = await run_cluster_partition(1, client=FakeLLM('{"groups":[]}'))
+    assert (stats.blobs, stats.groups, stats.rejected) == (1, 0, 1)
+    with connection() as c:
+        st = c.execute(
+            text("SELECT status FROM relation_clusters WHERE id = :c"), {"c": cid}
+        ).scalar_one()
+    assert st == "rejected"  # memo
+    assert _edges_by_id()[e01].status == "pista"  # NO-destructivo
 
 
 @pytest.mark.asyncio
-async def test_poda_deja_menos_de_dos_rechaza() -> None:
+async def test_json_basura_deja_el_candidate() -> None:
     with connection() as c:
-        cid = _seed_cluster(c, "candidate", [_person(c, f"P{i}") for i in range(3)])
-    fake = FakeLLM('{"verdict":"keep","confidence":0.9,"name":"X","description":"d","prune":[2,3]}')
-    stats = await run_cluster_validation(1, client=fake)
-    assert stats.rejected == 1  # sobreviviría 1 < 2 → no se confirma
-    assert _cluster_row(cid)["status"] == "rejected"
+        p = [_person(c, f"P{i}") for i in range(3)]
+        cid = _seed_candidate(c, p)
+    stats = await run_cluster_partition(1, client=FakeLLM("no soy json"))
+    assert (stats.blobs, stats.groups, stats.rejected) == (1, 0, 0)
+    with connection() as c:
+        st = c.execute(
+            text("SELECT status FROM relation_clusters WHERE id = :c"), {"c": cid}
+        ).scalar_one()
+    assert st == "candidate"  # queda, se reintenta
 
 
 @pytest.mark.asyncio
-async def test_json_basura_queda_candidate_sin_memo() -> None:
+async def test_reparticion_preserva_identidad() -> None:
+    # un hijo confirmed existente {P0,P1} + un blob derivado {P0,P1,P2}: el grupo que matchea se
+    # SINCRONIZA en sitio (mismo id, mismo nombre), no se crea uno nuevo.
     with connection() as c:
-        cid = _seed_cluster(c, "candidate", [_person(c, f"P{i}") for i in range(3)])
-    fake = FakeLLM("no soy json")
-    stats = await run_cluster_validation(1, client=fake)
-    assert (stats.confirmed, stats.rejected, stats.clusters) == (0, 0, 1)
-    assert _cluster_row(cid)["status"] == "candidate"  # se reintenta la próxima
+        p = [_person(c, f"P{i}") for i in range(3)]
+        child_id = _seed_confirmed_child(c, [p[0], p[1]], name="Original", blob_sig="oldblob")
+        _seed_candidate(c, p)
+    g = '{"groups":[{"members":[1,2,3],"name":"Renombrado","description":"","confidence":0.9}]}'
+    stats = await run_cluster_partition(1, client=FakeLLM(g))
+    assert (stats.created, stats.synced) == (0, 1)
+    rows = _confirmed_rows()
+    assert len(rows) == 1
+    assert rows[0]["id"] == child_id  # MISMO id → identidad preservada
+    assert rows[0]["name"] == "Original"  # el nombre NO se pisa al crecer
+    assert rows[0]["member_count"] == 3  # creció con P2
+
+
+@pytest.mark.asyncio
+async def test_no_toca_aristas_confirmed_deterministas() -> None:
+    with connection() as c:
+        p = [_person(c, f"P{i}") for i in range(3)]
+        _seed_candidate(c, p)
+        det = propose_edge(
+            c,
+            1,
+            p[0],
+            p[1],
+            producer=PRODUCER_IDENTIDADES,
+            relation_type="afiliado",
+            status="confirmed",
+        )
+    stats = await run_cluster_partition(1, client=FakeLLM(_G3))
+    assert stats.promoted == 0  # no hay pistas; la confirmed determinista no cuenta
+    det_edge = _edges_by_id()[det]
+    assert det_edge.status == "confirmed" and det_edge.producer == PRODUCER_IDENTIDADES
 
 
 @pytest.mark.asyncio
 async def test_skip_por_tamano(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "cluster_max_members", 2)
     with connection() as c:
-        _seed_cluster(c, "candidate", [_person(c, f"P{i}") for i in range(3)])
-    fake = FakeLLM('{"verdict":"keep","confidence":0.9,"name":"X","description":"d","prune":[]}')
-    stats = await run_cluster_validation(1, client=fake)
-    assert stats.skipped == 1
-    assert fake.calls == 0
-
-
-@pytest.mark.asyncio
-async def test_solo_valida_pendientes() -> None:
-    # un cúmulo ya confirmed (sin needs_revalidation) NO se re-valida → ni llama al LLM.
-    with connection() as c:
-        _seed_cluster(c, "confirmed", [_person(c, f"P{i}") for i in range(3)])
-    fake = FakeLLM('{"verdict":"keep","confidence":0.9,"name":"X","description":"d","prune":[]}')
-    stats = await run_cluster_validation(1, client=fake)
-    assert (stats.clusters, fake.calls) == (0, 0)
+        _seed_candidate(c, [_person(c, f"P{i}") for i in range(3)])
+    fake = FakeLLM(_G3)
+    stats = await run_cluster_partition(1, client=fake)
+    assert stats.skipped == 1 and fake.calls == 0
 
 
 @pytest.mark.asyncio
 async def test_quota_propaga() -> None:
     with connection() as c:
-        _seed_cluster(c, "candidate", [_person(c, f"P{i}") for i in range(3)])
+        _seed_candidate(c, [_person(c, f"P{i}") for i in range(3)])
     with pytest.raises(LLMQuotaError):
-        await run_cluster_validation(1, client=QuotaLLM())
-
-
-@pytest.mark.asyncio
-async def test_reject_colision_con_memo_no_revienta() -> None:
-    # Un confirmed con needs_revalidation cuya firma coincide con un memo rejected existente, al ser
-    # rechazado, se BORRA (no UPDATE a rejected → evitaría el choque del índice único parcial).
-    with connection() as c:
-        p = [_person(c, f"P{i}") for i in range(3)]
-        _seed_cluster(c, "rejected", p)  # memo con esa firma
-        cid = _seed_cluster(c, "confirmed", p)  # misma membresía → misma firma
-        c.execute(
-            text("UPDATE relation_clusters SET needs_revalidation = TRUE WHERE id = :i"), {"i": cid}
-        )
-    fake = FakeLLM('{"verdict":"reject","confidence":0.2,"name":"","description":"","prune":[]}')
-    stats = await run_cluster_validation(1, client=fake)
-    assert stats.rejected == 1
-    with connection() as c:
-        exists = c.execute(
-            text("SELECT 1 FROM relation_clusters WHERE id = :i"), {"i": cid}
-        ).scalar()
-        n_rejected = c.execute(
-            text("SELECT count(*) FROM relation_clusters WHERE user_id = 1 AND status = 'rejected'")
-        ).scalar_one()
-    assert exists is None  # el confirmed se borró (el memo ya registraba el rechazo)
-    assert n_rejected == 1  # sin IntegrityError, sin duplicar el memo
+        await run_cluster_partition(1, client=QuotaLLM())

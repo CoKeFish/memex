@@ -9,7 +9,7 @@ from sqlalchemy.engine import Connection
 
 from memex.db import connection
 from memex.llm.client import LLMQuotaError
-from memex.relations.clusters_llm import ClusterValidationStats
+from memex.relations.clusters_llm import ClusterPartitionStats
 from memex.relations.edges import PRODUCER_IDENTIDADES, STATUS_CONFIRMED, Ref, propose_edge
 from memex.scheduler import jobs as jobs_mod
 from memex.scheduler.config import SchedulerSettings, build_jobs
@@ -60,10 +60,10 @@ def test_graph_job_se_habilita() -> None:
 async def test_run_graph_cycle_encadena(monkeypatch: pytest.MonkeyPatch) -> None:
     _seed_triangle()
 
-    async def _fake(user_id: int, *, limit: int | None = None) -> ClusterValidationStats:
-        return ClusterValidationStats(clusters=1, confirmed=1)
+    async def _fake(user_id: int, *, limit: int | None = None) -> ClusterPartitionStats:
+        return ClusterPartitionStats(blobs=1, groups=1)
 
-    monkeypatch.setattr(jobs_mod, "run_cluster_validation", _fake)
+    monkeypatch.setattr(jobs_mod, "run_cluster_partition", _fake)
     cycle = await jobs_mod.run_graph_cycle(1)
     assert cycle.detected == 1
     assert cycle.new_candidates == 1
@@ -77,10 +77,10 @@ async def test_run_graph_cycle_quota_corta_solo_validacion(
 ) -> None:
     _seed_triangle()
 
-    async def _quota(user_id: int, *, limit: int | None = None) -> ClusterValidationStats:
+    async def _quota(user_id: int, *, limit: int | None = None) -> ClusterPartitionStats:
         raise LLMQuotaError(402, "sin saldo")
 
-    monkeypatch.setattr(jobs_mod, "run_cluster_validation", _quota)
+    monkeypatch.setattr(jobs_mod, "run_cluster_partition", _quota)
     cycle = await jobs_mod.run_graph_cycle(1)
     assert cycle.detected == 1  # lo determinista corrió igual
     assert "validate:no_quota" in cycle.steps_failed

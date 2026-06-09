@@ -189,30 +189,32 @@ def resolve_edge(
     edge_id: int,
     *,
     status: str,
-    producer: str,
     confidence: Decimal | None = None,
+    evidence: str | None = None,
 ) -> bool:
     """Transiciona una PISTA → `confirmed`/`rejected` (monótono); devuelve si cambió algo.
 
-    Una arista terminal NO se re-evalúa (WHERE status='pista'); el LLM o el humano deciden una sola
-    vez. `producer` = quién resuelve (`llm`/`humano`). `confidence=None` deja el valor existente.
-    (Las aristas ya `confirmed` por dato determinista no son pistas; no pasan por acá.)"""
+    Una arista terminal NO se re-evalúa (WHERE status='pista'); el LLM/humano deciden una sola vez.
+    NO toca `producer`: la pista la FORMÓ su productor (p.ej. `inbox`) y resolverla es un cambio de
+    NIVEL, no una re-producción. Reescribir `producer` además CHOCARÍA con la UNIQUE lógica (que lo
+    incluye) si ya existe una arista vouchada del mismo par por otro productor — p.ej. la
+    co-ocurrencia que el LLM de identidades confirma directo (`producer='llm'`). Quién resolvió
+    queda en `decided_at` + el cúmulo (la arista `miembro_de`). `confidence`/`evidence=None`
+    dejan el valor existente. (las `confirmed` deterministas no son pistas; no pasan acá.)"""
     if status not in {STATUS_CONFIRMED, STATUS_REJECTED}:
         raise ValueError(f"resolve_edge solo a confirmed/rejected, no {status!r}")
-    if not producer:
-        raise ValueError("producer es obligatorio (quién resuelve la arista)")
     rows = conn.execute(
         text(
             """
             UPDATE relation_edges
             SET status = :st,
-                producer = :pr,
                 decided_at = NOW(),
-                confidence = COALESCE(:conf, confidence)
+                confidence = COALESCE(:conf, confidence),
+                evidence = COALESCE(:ev, evidence)
             WHERE id = :id AND status = 'pista'
             """
         ),
-        {"id": edge_id, "st": status, "pr": producer, "conf": confidence},
+        {"id": edge_id, "st": status, "conf": confidence, "ev": evidence},
     ).rowcount
     if rows == 0:
         _log.info("relation.edge.resolve_noop", edge_id=edge_id, status=status)
