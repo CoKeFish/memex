@@ -275,6 +275,7 @@ class SenderRelevance(BaseModel):
     # tier forzado activo ("muted") o null.
     email: str | None = None
     override_tier: str | None = None
+    kind: str = "other"  # email | chat | social | other — para filtrar la vista por fuente
     relevance_pct: float | None = None
     last_at: datetime | None = None
     tier_mix: dict[str, int] = Field(default_factory=dict)

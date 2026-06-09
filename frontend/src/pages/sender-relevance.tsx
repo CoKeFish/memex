@@ -25,6 +25,7 @@ import {
 } from "@/data"
 import type { RelevanceCandidate, SenderRelevance } from "@/data"
 import { ApiError } from "@/lib/api"
+import { cn } from "@/lib/utils"
 import { useAsync } from "@/lib/use-async"
 
 /** Fecha corta `YYYY-MM-DD` desde un ISO. */
@@ -56,6 +57,14 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
 }
 
+type KindFilter = "all" | "email" | "chat" | "social"
+const KIND_FILTERS: { value: KindFilter; label: string }[] = [
+  { value: "all", label: "Todos" },
+  { value: "email", label: "Correo" },
+  { value: "chat", label: "Chat" },
+  { value: "social", label: "Redes" },
+]
+
 type PendingAction = { email: string; kind: "no_procesar" | "descartar"; candidateKey?: string }
 
 export function SenderRelevancePage() {
@@ -71,6 +80,8 @@ export function SenderRelevancePage() {
   const candidates = candidatesData ?? []
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [busy, setBusy] = useState(false)
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all")
+  const visible = kindFilter === "all" ? rows : rows.filter((r) => r.kind === kindFilter)
 
   async function runAction(fn: () => Promise<unknown>, msg: string) {
     setBusy(true)
@@ -112,6 +123,25 @@ export function SenderRelevancePage() {
         eyebrow="categoría · calidad"
         title="Relevancia por remitente"
         description="Qué tan seguido cada remitente produjo un hecho de dominio (relevante) frente a solo leerse o quedar inerte (ruido). Determinista, sin LLM, con el ruido primero. Desde acá podés mandar un remitente a 'no procesar' (se guarda, sin gasto LLM) o descartarlo (drop puro). El % cuenta solo los mensajes con un hecho extraído; 'solo lectura' e 'inertes' van aparte."
+        actions={
+          <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5">
+            {KIND_FILTERS.map((k) => (
+              <button
+                key={k.value}
+                type="button"
+                onClick={() => setKindFilter(k.value)}
+                className={cn(
+                  "rounded px-2.5 py-1 text-xs transition-colors",
+                  kindFilter === k.value
+                    ? "bg-accent text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {k.label}
+              </button>
+            ))}
+          </div>
+        }
       />
       {candidates.length > 0 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
@@ -234,7 +264,14 @@ export function SenderRelevancePage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
+              {visible.length === 0 && (
+                <tr>
+                  <td colSpan={11} className="px-3 py-6 text-center text-sm text-muted-foreground">
+                    Sin remitentes de este tipo.
+                  </td>
+                </tr>
+              )}
+              {visible.map((r) => {
                 const email = r.email
                 return (
                   <tr key={r.senderKey} className="border-t align-top">

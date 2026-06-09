@@ -159,6 +159,7 @@ def test_chat_without_from_email_groups_by_sender(seed_source: dict[str, Any]) -
     assert len(rows) == 1
     assert rows[0]["sender_key"] == "tg:user:42"
     assert rows[0]["sender_label"] == "Ana"
+    assert rows[0]["kind"] == "chat"
 
 
 # --- (2) atribución del item_count por el orquestador ---------------------------- #
@@ -241,6 +242,7 @@ def test_quality_senders_endpoint(client: Any, seed_source: dict[str, Any]) -> N
     row = next(it for it in items if it["sender_key"] == "c@x.com")
     assert row["messages"] == 1
     assert row["relevant"] == 1
+    assert row["kind"] == "email"
     assert float(row["relevance_pct"]) == 100.0
 
 

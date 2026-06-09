@@ -58,7 +58,14 @@ WITH msg AS (
         ) AS summarized,
         (rm.is_relevant IS NOT NULL) AS marked,
         lower(i.payload->'from'->>'email') AS email,
-        sto.tier AS override_tier
+        sto.tier AS override_tier,
+        CASE
+            WHEN i.payload->'from'->>'email' IS NOT NULL THEN 'email'
+            WHEN i.payload->'sender'->>'user_id' IS NOT NULL
+                 OR NULLIF(i.payload->>'chat_id', '') IS NOT NULL THEN 'chat'
+            WHEN NULLIF(i.payload->>'account', '') IS NOT NULL THEN 'social'
+            ELSE 'other'
+        END AS kind
     FROM inbox i
     LEFT JOIN classifications c ON c.inbox_id = i.id
     LEFT JOIN relevance_marks rm ON rm.inbox_id = i.id
@@ -78,6 +85,7 @@ agg AS (
         count(*) FILTER (WHERE marked) AS marked,
         max(email) AS email,
         max(override_tier) AS override_tier,
+        max(kind) AS kind,
         max(occurred_at) AS last_at,
         count(*) FILTER (WHERE tier = 'blacklist') AS tier_blacklist,
         count(*) FILTER (WHERE tier = 'batch') AS tier_batch,
@@ -96,6 +104,7 @@ SELECT
     marked,
     email,
     override_tier,
+    kind,
     round(100.0 * relevant / NULLIF(messages, 0), 1) AS relevance_pct,
     last_at,
     jsonb_build_object(

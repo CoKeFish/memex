@@ -21,6 +21,8 @@ export interface SenderRelevance {
   email: string | null
   /** Tier forzado activo ("no procesar"/"muted") o null. */
   overrideTier: string | null
+  /** Fuente del remitente: email | chat | social | other (para filtrar la vista). */
+  kind: string
   relevancePct: number | null
   lastAt: string | null
   tierMix: Record<string, number>
@@ -37,6 +39,7 @@ interface SenderRelevanceApi {
   marked: number
   email: string | null
   override_tier: string | null
+  kind: string
   relevance_pct: number | null
   last_at: string | null
   tier_mix: Record<string, number>
@@ -58,6 +61,7 @@ function toSender(it: SenderRelevanceApi): SenderRelevance {
     marked: it.marked,
     email: it.email,
     overrideTier: it.override_tier,
+    kind: it.kind,
     relevancePct: it.relevance_pct,
     lastAt: it.last_at,
     tierMix: it.tier_mix ?? {},
