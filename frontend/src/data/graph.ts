@@ -50,10 +50,13 @@ export interface GraphClusterResult {
 }
 
 export interface GraphClusterValidateResult {
-  clusters: number
-  confirmed: number
+  blobs: number
+  groups: number
+  created: number
+  synced: number
+  dissolved: number
   rejected: number
-  prunedMembers: number
+  promoted: number
   skipped: number
   errors: number
   llmCalls: number
@@ -157,27 +160,120 @@ export async function clusterGraph(): Promise<GraphClusterResult> {
   }
 }
 
-/** Valida con el LLM los cúmulos pendientes (POST /graph/cluster/validate): confirma/nombra/poda y
- *  materializa las aristas `miembro_de`. Usa el LLM → TIENE COSTO. Solo toca los pendientes. */
+/** Parte con el LLM los blobs pendientes (POST /graph/cluster/validate): cada blob → N contextos
+ *  (hijos confirmed), promueve sus pistas internas y materializa las aristas `miembro_de`. Usa el
+ *  LLM → TIENE COSTO. Solo toca los pendientes. */
 export async function validateClusters(): Promise<GraphClusterValidateResult> {
   const r = await apiPost<{
-    clusters: number
-    confirmed: number
+    blobs: number
+    groups: number
+    created: number
+    synced: number
+    dissolved: number
     rejected: number
-    pruned_members: number
+    promoted: number
     skipped: number
     errors: number
     llm_calls: number
     cost_usd: number
   }>("/graph/cluster/validate")
   return {
-    clusters: r.clusters,
-    confirmed: r.confirmed,
+    blobs: r.blobs,
+    groups: r.groups,
+    created: r.created,
+    synced: r.synced,
+    dissolved: r.dissolved,
     rejected: r.rejected,
-    prunedMembers: r.pruned_members,
+    promoted: r.promoted,
     skipped: r.skipped,
     errors: r.errors,
     llmCalls: r.llm_calls,
     costUsd: r.cost_usd,
+  }
+}
+
+// --- Cronología / story de un cúmulo (GET /graph/clusters/:id/timeline) --------------------------- //
+
+/** Un suceso fechado del cúmulo. `at` es ISO en hora local; `precision` ∈ datetime|date|inferred. */
+export interface TimelineEvent {
+  slug: string
+  id: number
+  kind: string
+  label: string
+  at: string
+  precision: string
+  sourceInboxIds: number[]
+}
+
+/** Un miembro sin fecha de evento (elenco/contexto: identidad, hábito). */
+export interface TimelineActor {
+  slug: string
+  id: number
+  kind: string
+  label: string
+  sourceInboxIds: number[]
+}
+
+export interface ClusterTimelineData {
+  cluster: {
+    id: number
+    name: string
+    description: string
+    confidence: number | null
+    memberCount: number
+  }
+  events: TimelineEvent[]
+  actors: TimelineActor[]
+}
+
+interface TimelineEventApi {
+  slug: string
+  id: number
+  kind: string
+  label: string
+  at: string
+  precision: string
+  source_inbox_ids: number[]
+}
+
+interface ClusterTimelineApi {
+  cluster: {
+    id: number
+    name: string
+    description: string
+    confidence: number | null
+    member_count: number
+  }
+  events: TimelineEventApi[]
+  actors: Omit<TimelineEventApi, "at" | "precision">[]
+}
+
+/** Cronología de un cúmulo CONFIRMADO: sus sucesos fechados (ordenados) + el elenco (sin fecha). */
+export async function fetchClusterTimeline(id: number): Promise<ClusterTimelineData> {
+  const r = await apiGet<ClusterTimelineApi>(`/graph/clusters/${id}/timeline`)
+  return {
+    cluster: {
+      id: r.cluster.id,
+      name: r.cluster.name,
+      description: r.cluster.description,
+      confidence: r.cluster.confidence,
+      memberCount: r.cluster.member_count,
+    },
+    events: r.events.map((e) => ({
+      slug: e.slug,
+      id: e.id,
+      kind: e.kind,
+      label: e.label,
+      at: e.at,
+      precision: e.precision,
+      sourceInboxIds: e.source_inbox_ids ?? [],
+    })),
+    actors: r.actors.map((a) => ({
+      slug: a.slug,
+      id: a.id,
+      kind: a.kind,
+      label: a.label,
+      sourceInboxIds: a.source_inbox_ids ?? [],
+    })),
   }
 }

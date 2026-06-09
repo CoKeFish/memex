@@ -17,6 +17,7 @@ import { HackathonesPage } from "@/pages/hackathones"
 import { CalendarPage } from "@/pages/calendar"
 import { IdentidadesPage } from "@/pages/identidades"
 import { GraphPage } from "@/pages/graph"
+import { ClusterStoryPage } from "@/pages/cluster-story"
 import { IngestPage } from "@/pages/ingest"
 import { ProcessingPage } from "@/pages/processing"
 import { FiltersPage } from "@/pages/filters"
@@ -58,6 +59,7 @@ export default function App() {
         <Route path="calendario" element={<CalendarPage />} />
         <Route path="directorio" element={<IdentidadesPage />} />
         <Route path="grafo" element={<GraphPage />} />
+        <Route path="grafo/cumulo/:id" element={<ClusterStoryPage />} />
         <Route path="finanzas" element={<FinancePage />} />
         <Route path="bienestar" element={<BienestarPage />} />
         <Route path="hackathones" element={<HackathonesPage />} />

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
-import { Boxes, Hammer, Loader2, Maximize2, Sparkles } from "lucide-react"
+import { Boxes, Clock, Hammer, Loader2, Maximize2, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/common/page-header"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
@@ -9,32 +9,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { buildGraph, clusterGraph, fetchGraph, validateClusters } from "@/data"
 import type { GraphData, GraphEdge, GraphNode } from "@/data/graph"
+import { CUMULO_COLOR, KIND_LABEL, kindColor } from "@/lib/graph-kind"
 import { useAsync } from "@/lib/use-async"
 
-// Color del vértice nativo «cúmulo» (un grupo validado por el LLM) + su arista de membresía.
-const CUMULO_COLOR = "#8b5cf6"
-
-const KIND_COLOR: Record<string, string> = {
-  transaccion: "#10b981",
-  evento: "#3b82f6",
-  hackaton: "#a855f7",
-  persona: "#14b8a6",
-  organizacion: "#f97316",
-  registro: "#eab308",
-  habito: "#ec4899",
-  cumulo: CUMULO_COLOR,
-}
-const KIND_LABEL: Record<string, string> = {
-  transaccion: "Cobro/pago",
-  evento: "Evento",
-  hackaton: "Hackatón",
-  persona: "Persona",
-  organizacion: "Organización",
-  registro: "Registro",
-  habito: "Hábito",
-  cumulo: "Cúmulo",
-}
-const kindColor = (k: string): string => KIND_COLOR[k] ?? "#64748b"
 const nodeKey = (slug: string, id: number): string => `${slug}#${id}`
 
 const STATUS_OPTIONS: { value: string; label: string }[] = [
@@ -363,6 +340,14 @@ function DetailPanel({ node, edges, nodesByKey }: { node: GraphNode; edges: Grap
           {node.slug}#{node.id}
         </div>
       </div>
+      {isCumulo && (
+        <Link
+          to={`/grafo/cumulo/${node.id}`}
+          className="flex items-center justify-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1.5 text-xs font-medium hover:bg-muted/60"
+        >
+          <Clock className="size-3.5" /> Abrir cronología
+        </Link>
+      )}
       <div>
         <div className="mb-1 text-xs font-medium text-muted-foreground">
           {isCumulo ? `Miembros (${mine.length})` : `Relaciones (${mine.length})`}
@@ -524,8 +509,8 @@ export function GraphPage() {
     try {
       const r = await validateClusters()
       toast.success(
-        `Validados: ${r.confirmed} confirmados · ${r.rejected} rechazados · ` +
-          `${r.prunedMembers} podados ($${r.costUsd.toFixed(4)})`,
+        `Particionado: ${r.blobs} blobs → ${r.groups} contextos · ` +
+          `${r.promoted} pistas promovidas ($${r.costUsd.toFixed(4)})`,
       )
       reload()
     } catch (e) {

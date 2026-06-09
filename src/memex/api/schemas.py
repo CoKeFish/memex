@@ -1855,3 +1855,43 @@ class GraphCluster(BaseModel):
 
 class GraphClustersResponse(BaseModel):
     clusters: list[GraphCluster]
+
+
+class GraphTimelineEvent(BaseModel):
+    """Un suceso fechado de la cronología de un cúmulo."""
+
+    slug: str
+    id: int
+    kind: str
+    label: str
+    at: str  # ISO en hora local (fecha sola si precision != 'datetime')
+    precision: str  # 'datetime' | 'date' | 'inferred'
+    source_inbox_ids: list[int]
+
+
+class GraphTimelineActor(BaseModel):
+    """Un miembro sin fecha de evento (elenco/contexto: identidad, hábito)."""
+
+    slug: str
+    id: int
+    kind: str
+    label: str
+    source_inbox_ids: list[int]
+
+
+class GraphClusterTimelineMeta(BaseModel):
+    """Cabecera del cúmulo (título + sinopsis de la story)."""
+
+    id: int
+    name: str
+    description: str
+    confidence: float | None
+    member_count: int
+
+
+class GraphClusterTimeline(BaseModel):
+    """GET /graph/clusters/{id}/timeline: cabecera + sucesos ordenados + elenco."""
+
+    cluster: GraphClusterTimelineMeta
+    events: list[GraphTimelineEvent]
+    actors: list[GraphTimelineActor]
