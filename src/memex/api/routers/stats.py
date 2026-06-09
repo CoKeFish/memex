@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 
 from memex.api.auth import current_user_id
-from memex.api.schemas import StatsOverview, StatsPipeline
+from memex.api.schemas import StatsAlert, StatsOverview, StatsPipeline
 from memex.db import connection
 from memex.logging import get_logger
 
@@ -343,3 +343,138 @@ async def overview(user_id: UserID) -> dict[str, Any]:
         "inbox_errors": int(inbox_counts["errors"]),
         "stale_workers": stale_workers,
     }
+
+
+#: Marcadores en el mensaje de error que delatan un problema de saldo/cuota del LLM (402).
+_QUOTA_MARKERS = ("402", "saldo", "quota", "insufficient")
+#: Orden de severidad para que las más graves salgan primero (la UI muestra el top-5).
+_SEV_RANK = {"critica": 0, "alta": 1, "info": 2}
+
+
+@router.get("/alerts", response_model=list[StatsAlert])
+async def alerts(user_id: UserID) -> list[dict[str, Any]]:
+    """Alertas REALES derivadas de la observabilidad (reemplaza el seed mock): fuentes cuya ÚLTIMA
+    ingesta falló, workers colgados o con error (saldo si el error lo delata) y backlog de revisión.
+    Lista vacía = todo en orden."""
+    out: list[dict[str, Any]] = []
+    with connection() as conn:
+        # 1. Fuentes cuya ÚLTIMA corrida de ingesta falló/abortó.
+        failed = (
+            conn.execute(
+                text("""
+                SELECT lr.source_id, s.name, lr.started_at, lr.error_class, lr.error_message
+                FROM (
+                    SELECT DISTINCT ON (source_id) source_id, status, started_at,
+                           error_class, error_message
+                    FROM ingestion_runs WHERE user_id = :uid
+                    ORDER BY source_id, started_at DESC
+                ) lr
+                JOIN sources s ON s.id = lr.source_id
+                WHERE lr.status IN ('failed', 'aborted')
+                ORDER BY lr.source_id
+            """),
+                {"uid": user_id},
+            )
+            .mappings()
+            .all()
+        )
+        for r in failed:
+            out.append(
+                {
+                    "id": f"run-{r['source_id']}",
+                    "severity": "alta",
+                    "kind": "run-failed",
+                    "title": f"Ingesta fallida: {r['name']}",
+                    "detail": str(
+                        r["error_message"] or r["error_class"] or "la última corrida falló"
+                    ),
+                    "at": r["started_at"],
+                    "read": False,
+                    "deep_link": "/pipeline",
+                }
+            )
+
+        # 2. Workers: colgados (running > umbral) o con la última corrida en error.
+        workers = (
+            conn.execute(
+                text(f"""
+                SELECT DISTINCT ON (job) job, status, started_at, error,
+                       (status = 'running' AND NOW() - started_at > {_STALE}) AS is_stale
+                FROM worker_runs
+                WHERE user_id = :uid AND run_type = 'job'
+                ORDER BY job, started_at DESC
+            """),
+                {"uid": user_id},
+            )
+            .mappings()
+            .all()
+        )
+        for w in workers:
+            if w["is_stale"]:
+                out.append(
+                    {
+                        "id": f"stale-{w['job']}",
+                        "severity": "alta",
+                        "kind": "worker-stale",
+                        "title": f"Worker {w['job']} colgado",
+                        "detail": "lleva más de 30 min en 'running' — posible daemon caído",
+                        "at": w["started_at"],
+                        "read": False,
+                        "deep_link": "/pipeline",
+                    }
+                )
+            elif w["status"] == "error":
+                err = str(w["error"] or "")
+                quota = any(m in err.lower() for m in _QUOTA_MARKERS)
+                out.append(
+                    {
+                        "id": f"worker-{w['job']}",
+                        "severity": "critica" if quota else "alta",
+                        "kind": "saldo" if quota else "run-failed",
+                        "title": "Saldo/cuota LLM agotado" if quota else f"Worker {w['job']} falló",
+                        "detail": err or "la última corrida terminó en error",
+                        "at": w["started_at"],
+                        "read": False,
+                        "deep_link": "/pipeline",
+                    }
+                )
+
+        # 3. Backlog de revisión (dead-letter + conflictos de calendario pendientes).
+        review = (
+            conn.execute(
+                text("""
+                SELECT
+                  (SELECT COUNT(*) FROM work_item_failures
+                   WHERE user_id = :uid AND status = 'review') AS dl,
+                  (SELECT COUNT(*) FROM mod_calendar_conflicts
+                   WHERE user_id = :uid AND status = 'pending') AS cf,
+                  GREATEST(
+                    (SELECT MAX(updated_at) FROM work_item_failures
+                     WHERE user_id = :uid AND status = 'review'),
+                    (SELECT MAX(created_at) FROM mod_calendar_conflicts
+                     WHERE user_id = :uid AND status = 'pending')
+                  ) AS at
+            """),
+                {"uid": user_id},
+            )
+            .mappings()
+            .one()
+        )
+        total = int(review["dl"]) + int(review["cf"])
+        if total > 0:
+            out.append(
+                {
+                    "id": "review",
+                    "severity": "info",
+                    "kind": "review",
+                    "title": f"{total} ítems pendientes de revisión",
+                    "detail": "Dead-letter + conflictos de calendario esperan tu decisión.",
+                    "at": review["at"],
+                    "read": False,
+                    "deep_link": "/revision",
+                }
+            )
+
+    out.sort(key=lambda a: _SEV_RANK[str(a["severity"])])
+    _log.info("stats.alerts", user_id=user_id, count=len(out))
+    return out

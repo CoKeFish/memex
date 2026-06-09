@@ -374,6 +374,8 @@ export interface WorkItemFailure {
   status: "failing" | "review"
   createdAt: string
   updatedAt: string
+  /** Preview legible del mensaje original (asunto/cuerpo) para la cola de revisión. */
+  preview?: string
 }
 
 export interface ConsolidatedEventLite {

@@ -10,6 +10,8 @@ export interface CredentialStatus {
   secretName: string
   configured: boolean
   last4: string
+  /** "vault" (cifrada en DB) · "env" (variable de entorno del contenedor) · "" si falta. */
+  source: "vault" | "env" | ""
 }
 
 export interface ManagedAccount {
@@ -29,6 +31,7 @@ interface CredentialApi {
   secret_name: string
   configured: boolean
   last4: string
+  source?: string
 }
 
 interface AccountApi {
@@ -46,7 +49,12 @@ interface AccountApi {
 }
 
 function toCredential(c: CredentialApi): CredentialStatus {
-  return { secretName: c.secret_name, configured: c.configured, last4: c.last4 }
+  return {
+    secretName: c.secret_name,
+    configured: c.configured,
+    last4: c.last4,
+    source: (c.source ?? "") as CredentialStatus["source"],
+  }
 }
 
 function toAccount(a: AccountApi): ManagedAccount {

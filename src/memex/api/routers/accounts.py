@@ -28,7 +28,7 @@ from memex.core.source import HealthResult, SourceConfigError
 from memex.db import connection
 from memex.logging import get_logger
 from memex.security import crypto, vault
-from memex.sources.resolver import build_resolved_env
+from memex.sources.resolver import build_resolved_env, env_satisfied_secrets
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
@@ -50,6 +50,44 @@ def _assert_owns_account(conn: Any, user_id: int, account_id: int) -> None:
         raise HTTPException(status_code=404, detail="account not found")
 
 
+def _linked_source(conn: Any, account_id: int) -> tuple[str, dict[str, Any]] | None:
+    """Tipo + config de la primera source vinculada a la cuenta (para resolver env / salud)."""
+    src = (
+        conn.execute(
+            text("SELECT type, config FROM sources WHERE account_id = :aid ORDER BY id LIMIT 1"),
+            {"aid": account_id},
+        )
+        .mappings()
+        .first()
+    )
+    if src is None:
+        return None
+    return str(src["type"]), dict(src["config"] or {})
+
+
+def _effective_health(conn: Any, account_id: int, stored: str) -> str:
+    """Salud que REFLEJA la realidad: deriva del último `ingestion_run` de las sources de la cuenta
+    (ok→healthy, failed/aborted→unhealthy). Sin runs (o 'running'), conserva el estado guardado por
+    el health-check manual. Así una fuente que ACABA de ingestar no aparece 'unhealthy' (H-11)."""
+    status = conn.execute(
+        text(
+            """
+            SELECT ir.status FROM ingestion_runs ir
+            JOIN sources s ON s.id = ir.source_id
+            WHERE s.account_id = :aid
+            ORDER BY ir.started_at DESC
+            LIMIT 1
+            """
+        ),
+        {"aid": account_id},
+    ).scalar()
+    if status == "ok":
+        return "healthy"
+    if status in ("failed", "aborted"):
+        return "unhealthy"
+    return stored
+
+
 def _account_row(conn: Any, account_id: int) -> dict[str, Any]:
     row = (
         conn.execute(
@@ -61,7 +99,23 @@ def _account_row(conn: Any, account_id: int) -> dict[str, Any]:
     )
     assert row is not None
     data = dict(row)
-    data["secrets"] = vault.list_secret_status(conn, account_id)
+
+    # Vault primero; luego suma los secretos que resuelven por entorno (no en el vault) como
+    # configurados "vía env" — así el panel no marca "FALTA" lo que funciona por env (H-11).
+    secrets: list[dict[str, Any]] = [
+        {**s, "source": "vault"} for s in vault.list_secret_status(conn, account_id)
+    ]
+    linked = _linked_source(conn, account_id)
+    if linked is not None:
+        source_type, cfg = linked
+        have = {str(s["secret_name"]) for s in secrets}
+        for name in sorted(env_satisfied_secrets(source_type, cfg)):
+            if name not in have:
+                secrets.append(
+                    {"secret_name": name, "configured": True, "last4": "", "source": "env"}
+                )
+        data["health_status"] = _effective_health(conn, account_id, str(data["health_status"]))
+    data["secrets"] = secrets
     return data
 
 
@@ -168,7 +222,7 @@ async def set_credential(account_id: int, body: CredentialSet, user_id: UserID) 
             raise HTTPException(
                 status_code=409, detail="tu vault no está provisionado (registrate/logueate)"
             ) from e
-    return {"secret_name": body.secret_name, "configured": True, "last4": last4}
+    return {"secret_name": body.secret_name, "configured": True, "last4": last4, "source": "vault"}
 
 
 @router.delete("/{account_id}/credentials/{secret_name}", status_code=status.HTTP_204_NO_CONTENT)

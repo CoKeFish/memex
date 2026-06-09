@@ -246,7 +246,11 @@ function AccountCard({ account, onChange }: { account: ManagedAccount; onChange:
                 <KeyRound className="size-3 text-muted-foreground" />
                 {name}
               </span>
-              {has ? (
+              {!has ? (
+                <span className="eyebrow text-status-pending">falta</span>
+              ) : cred?.source === "env" ? (
+                <span className="eyebrow text-muted-foreground">vía env</span>
+              ) : (
                 <span className="flex items-center gap-2">
                   <span className="num text-muted-foreground">••••{cred?.last4}</span>
                   <button
@@ -260,8 +264,6 @@ function AccountCard({ account, onChange }: { account: ManagedAccount; onChange:
                     <Trash2 className="size-3" />
                   </button>
                 </span>
-              ) : (
-                <span className="eyebrow text-status-pending">falta</span>
               )}
             </div>
           )

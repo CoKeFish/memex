@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -83,10 +85,17 @@ def test_set_credential_masks_value(authed: TestClient) -> None:
     aid = _new_account(authed, "gmail")
     r = _set_cred(authed, aid, "password", "hunter2-secreto")
     assert r.status_code == 200
-    assert r.json() == {"secret_name": "password", "configured": True, "last4": "reto"}
-    # La lista refleja configured + last4, nunca el valor.
+    assert r.json() == {
+        "secret_name": "password",
+        "configured": True,
+        "last4": "reto",
+        "source": "vault",
+    }
+    # La lista refleja configured + last4 + origen, nunca el valor.
     acc = next(a for a in authed.get("/accounts").json() if a["id"] == aid)
-    assert acc["secrets"] == [{"secret_name": "password", "configured": True, "last4": "reto"}]
+    assert acc["secrets"] == [
+        {"secret_name": "password", "configured": True, "last4": "reto", "source": "vault"}
+    ]
 
 
 def test_delete_credential(authed: TestClient) -> None:
@@ -168,3 +177,71 @@ def test_cross_tenant_account_is_404(authed: TestClient) -> None:
     assert aid is not None
     assert authed.patch(f"/accounts/{aid}", json={"alias": "x"}).status_code == 404
     assert _set_cred(authed, int(aid), "password", "x").status_code == 404
+
+
+# --- H-11: el estado refleja env + actividad real, no solo el vault ---------------- #
+
+
+def _link_source(client: TestClient, account_id: int, name: str, cfg: dict[str, Any]) -> int:
+    """Crea una source 'imap' vinculada a la cuenta, con `config` (env-var-by-name)."""
+    from memex.db import connection
+
+    with connection() as conn:
+        sid = conn.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type, account_id, config) "
+                "VALUES (:u, :n, 'imap', :aid, CAST(:cfg AS JSONB)) RETURNING id"
+            ),
+            {"u": _uid(client), "n": name, "aid": account_id, "cfg": json.dumps(cfg)},
+        ).scalar()
+    assert sid is not None
+    return int(sid)
+
+
+def _seed_run(source_id: int, user_id: int, *, status: str, started_at: datetime) -> None:
+    from memex.db import connection
+
+    with connection() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO ingestion_runs (id, user_id, source_id, trigger, status, started_at) "
+                "VALUES (:id, :u, :s, 'cli', :st, :t)"
+            ),
+            {"id": uuid.uuid4(), "u": user_id, "s": source_id, "st": status, "t": started_at},
+        )
+
+
+def test_credential_configured_via_env_not_falta(
+    authed: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Un secreto que resuelve por env var (no en el vault) se reporta configurado 'vía env'."""
+    monkeypatch.setenv("TEST_IMAP_USER", "someone@x.io")
+    aid = _new_account(authed, "env-acc")
+    _link_source(authed, aid, "env-src", {"username_env": "TEST_IMAP_USER"})
+
+    acc = next(a for a in authed.get("/accounts").json() if a["id"] == aid)
+    by_name = {s["secret_name"]: s for s in acc["secrets"]}
+    assert by_name["username"] == {
+        "secret_name": "username",
+        "configured": True,
+        "last4": "",
+        "source": "env",
+    }
+    assert "password" not in by_name  # password_env sin setear → no satisfecho por env
+
+
+def test_health_reflects_last_ingestion_run(authed: TestClient) -> None:
+    """La salud deriva del último ingestion_run (ok→healthy, failed→unhealthy); sin runs conserva
+    el estado guardado ('unknown')."""
+    aid = _new_account(authed, "health-acc")
+    sid = _link_source(authed, aid, "health-src", {})
+
+    def health() -> str:
+        rows = authed.get("/accounts").json()
+        return str(next(a for a in rows if a["id"] == aid)["health_status"])
+
+    assert health() == "unknown"  # sin runs
+    _seed_run(sid, _uid(authed), status="ok", started_at=datetime(2026, 6, 1, tzinfo=UTC))
+    assert health() == "healthy"
+    _seed_run(sid, _uid(authed), status="failed", started_at=datetime(2026, 6, 2, tzinfo=UTC))
+    assert health() == "unhealthy"

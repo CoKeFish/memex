@@ -5,7 +5,7 @@
 
 import { apiGet } from "@/lib/api"
 import type { MetricsWindow } from "./metrics"
-import type { IngestionRunStatus, SourceType, WorkerRunStatus } from "@/types/domain"
+import type { AlertEvent, IngestionRunStatus, SourceType, WorkerRunStatus } from "@/types/domain"
 
 // ---- Tipos de dominio (camelCase) ---------------------------------------------------------------
 
@@ -244,4 +244,32 @@ export async function fetchOverview(): Promise<OverviewStats> {
     inboxErrors: r.inbox_errors,
     staleWorkers: r.stale_workers,
   }
+}
+
+// ---- Alertas (derivadas de la observabilidad real: GET /stats/alerts) ---------------------------
+
+interface AlertApi {
+  id: string
+  severity: AlertEvent["severity"]
+  kind: AlertEvent["kind"]
+  title: string
+  detail: string
+  at: string
+  read: boolean
+  deep_link: string
+}
+
+/** Alertas REALES (ingesta fallida, worker colgado/en error, backlog de revisión). [] = todo ok. */
+export async function fetchAlerts(): Promise<AlertEvent[]> {
+  const rows = await apiGet<AlertApi[]>("/stats/alerts")
+  return rows.map((a) => ({
+    id: a.id,
+    severity: a.severity,
+    kind: a.kind,
+    title: a.title,
+    detail: a.detail,
+    at: a.at,
+    read: a.read,
+    deepLink: a.deep_link,
+  }))
 }

@@ -94,3 +94,16 @@ def build_resolved_env(
             count=injected,
         )
     return env
+
+
+def env_satisfied_secrets(source_type: str, cfg: dict[str, Any]) -> set[str]:
+    """Nombres de secreto (de `_SECRET_ENV`) que YA resuelven por variable de entorno para esta
+    source: la credencial existe en `os.environ` aunque no esté en el vault. Espeja qué env var mira
+    cada secreto (igual que `build_resolved_env`) sin descifrar nada — para reportar estado."""
+    mapping = _SECRET_ENV.get(source_type, {})
+    satisfied: set[str] = set()
+    for secret_name, (env_field, default_env) in mapping.items():
+        env_var = str(cfg.get(env_field) or default_env or "")
+        if env_var and os.environ.get(env_var, "").strip():
+            satisfied.add(secret_name)
+    return satisfied

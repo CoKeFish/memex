@@ -77,22 +77,28 @@ export function OverviewPage() {
         <Panel className="overflow-hidden">
           <PanelHeader eyebrow={`alertas · ${unread} sin leer`} title="Lo último que requiere atención" />
           <PanelBody className="p-0">
-            <ul className="divide-y divide-border">
-              {alerts.slice(0, 5).map((a) => (
-                <li key={a.id}>
-                  <Link to={a.deepLink} className="flex items-start gap-3 px-4 py-3 hover:bg-accent/30">
-                    <Led tone={sevTone[a.severity]} className="mt-1.5" />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className={cn("truncate text-sm", a.read ? "text-muted-foreground" : "font-medium")}>{a.title}</span>
-                        <span className="shrink-0 text-[11px] text-muted-foreground"><RelativeTime date={a.at} /></span>
+            {alerts.length === 0 ? (
+              <p className="px-4 py-6 text-center text-sm text-muted-foreground">
+                Todo en orden — sin alertas.
+              </p>
+            ) : (
+              <ul className="divide-y divide-border">
+                {alerts.slice(0, 5).map((a) => (
+                  <li key={a.id}>
+                    <Link to={a.deepLink} className="flex items-start gap-3 px-4 py-3 hover:bg-accent/30">
+                      <Led tone={sevTone[a.severity]} className="mt-1.5" />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className={cn("truncate text-sm", a.read ? "text-muted-foreground" : "font-medium")}>{a.title}</span>
+                          <span className="shrink-0 text-[11px] text-muted-foreground"><RelativeTime date={a.at} /></span>
+                        </div>
+                        <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{a.detail}</p>
                       </div>
-                      <p className="mt-0.5 line-clamp-1 text-xs text-muted-foreground">{a.detail}</p>
-                    </div>
-                  </Link>
-                </li>
-              ))}
-            </ul>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
           </PanelBody>
         </Panel>
         <FreshnessGrid sources={pipe?.sources ?? []} workers={pipe?.workers ?? []} />

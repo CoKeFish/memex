@@ -1,5 +1,5 @@
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react"
-import { getReviewItems, getSeedAlerts } from "@/data"
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
+import { fetchAlerts, fetchOverview } from "@/data"
 import type { AlertEvent } from "@/types/domain"
 
 interface AlertsCtx {
@@ -14,19 +14,38 @@ interface AlertsCtx {
 const Ctx = createContext<AlertsCtx | null>(null)
 
 export function AlertsProvider({ children }: { children: ReactNode }) {
-  const [alerts, setAlerts] = useState<AlertEvent[]>(() => getSeedAlerts().map((a) => ({ ...a })))
+  const [raw, setRaw] = useState<AlertEvent[]>([])
+  const [reviewCount, setReviewCount] = useState(0)
+  // El estado "leído" vive en el cliente: las alertas reales se re-derivan en cada carga.
+  const [readIds, setReadIds] = useState<Set<string>>(() => new Set())
 
-  const value = useMemo<AlertsCtx>(
-    () => ({
+  useEffect(() => {
+    let alive = true
+    Promise.all([fetchAlerts(), fetchOverview()])
+      .then(([a, ov]) => {
+        if (!alive) return
+        setRaw(a)
+        setReviewCount(ov.review.total)
+      })
+      .catch(() => {
+        /* sin datos → bandeja vacía (honesto), nunca mock */
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  const value = useMemo<AlertsCtx>(() => {
+    const alerts = raw.map((a) => ({ ...a, read: a.read || readIds.has(a.id) }))
+    return {
       alerts,
       unread: alerts.filter((a) => !a.read).length,
-      reviewCount: getReviewItems().length,
-      markRead: (id) => setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, read: true } : a))),
-      markAllRead: () => setAlerts((prev) => prev.map((a) => ({ ...a, read: true }))),
-      addAlert: (a) => setAlerts((prev) => [a, ...prev]),
-    }),
-    [alerts],
-  )
+      reviewCount,
+      markRead: (id) => setReadIds((prev) => new Set(prev).add(id)),
+      markAllRead: () => setReadIds(new Set(raw.map((a) => a.id))),
+      addAlert: (a) => setRaw((prev) => [a, ...prev]),
+    }
+  }, [raw, reviewCount, readIds])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

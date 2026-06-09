@@ -1353,6 +1353,39 @@ class StatsOverview(BaseModel):
     stale_workers: int
 
 
+class StatsAlert(BaseModel):
+    """Alerta derivada de la observabilidad REAL (no mock): ingesta con última corrida fallida,
+    worker colgado/en error o backlog de revisión. Lista vacía = todo en orden."""
+
+    id: str
+    severity: Literal["critica", "alta", "info"]
+    kind: Literal["saldo", "worker-stale", "run-failed", "source-stale", "review"]
+    title: str
+    detail: str
+    at: datetime
+    read: bool = False
+    deep_link: str
+
+
+class ReviewDeadLetterItem(BaseModel):
+    """Mensaje en 'pendiente de revisión' (dead-letter) con contexto del inbox para la cola."""
+
+    id: int
+    stage: str
+    inbox_id: int
+    attempts: int
+    last_error: str | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    #: Preview legible del mensaje original (asunto/cuerpo), para no tener que abrir el inbox.
+    preview: str
+
+
+class ReviewActionResult(BaseModel):
+    ok: bool
+
+
 class SourceCreate(BaseModel):
     name: str
     type: str
@@ -1454,6 +1487,9 @@ class CredentialStatus(BaseModel):
     secret_name: str
     configured: bool
     last4: str
+    #: Origen de la credencial cuando está configurada: "vault" (cifrada en DB) o "env" (variable
+    #: de entorno del contenedor). "" si falta. Evita marcar "FALTA" lo que funciona vía env (H-11).
+    source: str = ""
 
 
 class AccountCreate(BaseModel):
