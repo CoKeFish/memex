@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react"
 import { ArrowLeft, Braces, CalendarDays, DollarSign, Eye, Loader2, Network, Paperclip, RotateCw, ScrollText, Sparkles, Trophy, Users, Zap } from "lucide-react"
-import { Link, useParams } from "react-router-dom"
+import { Link, useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -79,12 +79,20 @@ function statusOf(row: InboxRow): { tone: Tone; label: string } {
 }
 
 function BackLink() {
-  // Volver con los MISMOS filtros con los que se salió del feed (el ancla de scroll la
-  // restaura el propio feed desde sessionStorage; acá solo se reconstruye la URL).
-  const saved = loadFeedReturn()
+  // Volver con los MISMOS filtros con los que se salió del feed (el ancla de scroll la restaura
+  // el propio feed desde sessionStorage). El destino se resuelve EN EL CLIC: leerlo en render
+  // no sirve — el React Compiler memoiza el componente y cachearía la primera lectura (vacía).
+  const navigate = useNavigate()
   return (
     <Button variant="ghost" size="sm" className="h-8" asChild>
-      <Link to={saved?.search ? `/datos?${saved.search}` : "/datos"}>
+      <Link
+        to="/datos"
+        onClick={(e) => {
+          e.preventDefault()
+          const saved = loadFeedReturn()
+          navigate(saved?.search ? `/datos?${saved.search}` : "/datos")
+        }}
+      >
         <ArrowLeft className="size-4" /> Datos
       </Link>
     </Button>
