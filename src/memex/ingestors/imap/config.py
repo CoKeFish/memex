@@ -72,6 +72,9 @@ class ImapConfig(BaseModel):
     fetch_body: bool = True
     max_body_bytes: int = 524288
     use_ssl: bool = True
+    # Timeout del socket IMAP (segundos): un servidor que no responde no puede colgar el fetch
+    # para siempre (colgaba todas las fuentes del daemon y bloqueaba el apagado graceful).
+    timeout_s: float = 30.0
 
     # Ventana de fetch — override transitorio por corrida (lo inyecta el endpoint de fetch a
     # demanda; NO se persiste en sources.config). Default = incremental por checkpoint.
@@ -163,6 +166,7 @@ class ImapConfig(BaseModel):
             "fetch_body": bool(cfg.get("fetch_body", True)),
             "max_body_bytes": int(cfg.get("max_body_bytes", 524288)),
             "use_ssl": bool(cfg.get("use_ssl", True)),
+            "timeout_s": float(cfg.get("timeout_s", 30.0)),
             "extract_media": bool(cfg.get("extract_media", False)),
             "max_attachment_bytes": int(cfg.get("max_attachment_bytes", 10 * 1024 * 1024)),
             "username_env": str(username_env),

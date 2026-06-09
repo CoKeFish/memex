@@ -70,6 +70,14 @@ def test_content_dedup_by_msgid_across_external_ids(conn: Any, seed_source: dict
     assert conn.execute(text("SELECT COUNT(*) FROM inbox")).scalar() == 1
 
 
+def test_insert_record_rejects_non_json_payload(conn: Any, seed_source: dict[str, Any]) -> None:
+    """Un payload no serializable a JSON se trata como record fallido (ValueError), no como un
+    TypeError no capturado que abortaría el batch y atascaría el cursor (poison-wedge)."""
+    rec = _rec("nonjson", payload={"when": datetime(2026, 1, 1)})  # datetime crudo: no es JSON
+    with pytest.raises(ValueError, match="not JSON-serializable"):
+        insert_record(conn, user_id=1, source_id=seed_source["id"], record=rec)
+
+
 def test_dedupe_keys_persisted(conn: Any, seed_source: dict[str, Any]) -> None:
     rec = _rec("k1", dedupe_keys=["msgid:<a@x>", "imap:1:5"])
     r = insert_record(conn, user_id=1, source_id=seed_source["id"], record=rec)

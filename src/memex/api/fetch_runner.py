@@ -15,9 +15,11 @@ range/last insertan pero no avanzan el cursor incremental (`persist_checkpoint` 
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Any
 
 from fastapi import HTTPException
+from sqlalchemy import Connection, text
 from starlette.concurrency import run_in_threadpool
 
 from memex import sources as source_registry
@@ -25,12 +27,40 @@ from memex.api.inprocess_sink import DryRunSink, InProcessSink
 from memex.core.observability import ingestion_run
 from memex.core.sink import MemexSink
 from memex.core.source import SourceConfigError
-from memex.db import connection
+from memex.db import connection, get_engine
 from memex.ingestors.runner import RunStats, run_ingestor
 from memex.logging import get_logger
 from memex.sources.resolver import build_resolved_env
 
 _log = get_logger("memex.api.fetch_runner")
+
+# Clave del advisory lock por-fuente. Incluye current_database() para que NO colisione entre las
+# DB efímeras del mismo cluster (xdist en tests); en prod (una sola DB) es estable por source.
+_FETCH_LOCK_KEY = "hashtext('ingest_fetch:' || current_database() || ':' || (:sid)::text)"
+
+
+def _acquire_fetch_lock(source_id: int) -> Connection | None:
+    """Lock de SESIÓN por-fuente para serializar el fetch incremental.
+
+    Devuelve la conexión que retiene el lock (el caller la libera + cierra en su `finally`) o
+    ``None`` si ya está tomado por otra corrida. Es de sesión (no por-tx) porque una corrida
+    abarca muchas transacciones cortas del runner; se commitea de inmediato para no dejar la
+    conexión idle-in-transaction mientras lo retiene.
+    """
+    conn = get_engine().connect()
+    try:
+        got = conn.execute(
+            text(f"SELECT pg_try_advisory_lock({_FETCH_LOCK_KEY})"),
+            {"sid": source_id},
+        ).scalar()
+        conn.commit()
+    except Exception:
+        conn.close()
+        raise
+    if not got:
+        conn.close()
+        return None
+    return conn
 
 
 async def run_fetch_window(
@@ -64,52 +94,79 @@ async def run_fetch_window(
         if limit is not None:
             cfg["fetch_limit"] = limit
 
-    # Inyecta los secretos del vault de la cuenta (si hay) bajo el nombre de su env var. Usa la
-    # master key del servidor → funciona sin sesión. Fallback a os.environ si no hay.
-    with connection() as conn:
-        resolved_env = build_resolved_env(
-            conn,
+    # Serializa el fetch INCREMENTAL del mismo source (daemon vs fetch manual vs CLI): dos a la vez
+    # leerían el mismo cursor y harían doble fetch (y doble corrida de actor pago en redes). El lock
+    # se retiene toda la corrida; range/last (backfill) y dry-run no tocan el cursor → sin lock.
+    lock_conn: Connection | None = None
+    if mode == "incremental" and not dry_run:
+        lock_conn = _acquire_fetch_lock(source_id)
+        if lock_conn is None:
+            _log.warning("fetch.skipped_concurrent", source_id=source_id, trigger=trigger)
+            raise HTTPException(
+                status_code=409,
+                detail="ya hay una corrida incremental en curso para esta fuente",
+            )
+    try:
+        # Inyecta los secretos del vault de la cuenta (si hay) bajo el nombre de su env var. Usa la
+        # master key del servidor → funciona sin sesión. Fallback a os.environ si no hay.
+        with connection() as conn:
+            resolved_env = build_resolved_env(
+                conn,
+                user_id=user_id,
+                source_type=source_type,
+                cfg=cfg,
+                account_id=account_id,
+            )
+
+        try:
+            factory = source_registry.resolve(source_type)
+        except KeyError as e:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"source type {source_type!r} no se puede traer desde el server (sin ingestor)"
+                ),
+            ) from e
+        try:
+            source = factory(cfg, env=resolved_env)
+        except SourceConfigError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+        _log.info(
+            "fetch.requested",
             user_id=user_id,
-            source_type=source_type,
-            cfg=cfg,
-            account_id=account_id,
+            source_id=source_id,
+            dry_run=dry_run,
+            mode=mode,
+            since=since,
+            until=until,
+            limit=limit,
+            trigger=trigger,
         )
 
-    try:
-        factory = source_registry.resolve(source_type)
-    except KeyError as e:
-        raise HTTPException(
-            status_code=422,
-            detail=f"source type {source_type!r} no se puede traer desde el server (sin ingestor)",
-        ) from e
-    try:
-        source = factory(cfg, env=resolved_env)
-    except SourceConfigError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
+        if dry_run:
+            dry_sink: MemexSink = DryRunSink(user_id)
+            return await run_in_threadpool(
+                run_ingestor, source, source_id, dry_sink, chunk_sleep_ms=0
+            )
 
-    _log.info(
-        "fetch.requested",
-        user_id=user_id,
-        source_id=source_id,
-        dry_run=dry_run,
-        mode=mode,
-        since=since,
-        until=until,
-        limit=limit,
-        trigger=trigger,
-    )
-
-    if dry_run:
-        dry_sink: MemexSink = DryRunSink(user_id)
-        return await run_in_threadpool(run_ingestor, source, source_id, dry_sink, chunk_sleep_ms=0)
-
-    # range/last son backfills: insertan pero no avanzan el cursor incremental.
-    sink: MemexSink = InProcessSink(user_id, persist_checkpoint=(mode == "incremental"))
-    with ingestion_run(user_id=user_id, source_id=source_id, trigger=trigger) as run:
-        try:
-            stats = await run_in_threadpool(run_ingestor, source, source_id, sink, chunk_sleep_ms=0)
-            run.finalize(stats)
-        except Exception as e:
-            run.fail(e)
-            raise HTTPException(status_code=502, detail=f"fetch falló: {e}") from e
-    return stats
+        # range/last son backfills: insertan pero no avanzan el cursor incremental.
+        sink: MemexSink = InProcessSink(user_id, persist_checkpoint=(mode == "incremental"))
+        with ingestion_run(user_id=user_id, source_id=source_id, trigger=trigger) as run:
+            try:
+                stats = await run_in_threadpool(
+                    run_ingestor, source, source_id, sink, chunk_sleep_ms=0
+                )
+                run.finalize(stats)
+            except Exception as e:
+                run.fail(e)
+                raise HTTPException(status_code=502, detail=f"fetch falló: {e}") from e
+        return stats
+    finally:
+        if lock_conn is not None:
+            with suppress(Exception):
+                lock_conn.execute(
+                    text(f"SELECT pg_advisory_unlock({_FETCH_LOCK_KEY})"),
+                    {"sid": source_id},
+                )
+            lock_conn.close()

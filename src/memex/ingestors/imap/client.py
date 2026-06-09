@@ -33,9 +33,11 @@ class ImapClient(AbstractContextManager["ImapClient"]):
 
     def __enter__(self) -> ImapClient:
         if self.cfg.use_ssl:
-            mb: MailBox | MailBoxUnencrypted = MailBox(self.cfg.server, port=self.cfg.port)
+            mb: MailBox | MailBoxUnencrypted = MailBox(
+                self.cfg.server, port=self.cfg.port, timeout=self.cfg.timeout_s
+            )
         else:
-            mb = MailBoxUnencrypted(self.cfg.server, port=self.cfg.port)
+            mb = MailBoxUnencrypted(self.cfg.server, port=self.cfg.port, timeout=self.cfg.timeout_s)
 
         if self.cfg.auth_method == "basic":
             self._mailbox = mb.login(self.cfg.username, self.cfg.password)
