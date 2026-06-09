@@ -36,7 +36,12 @@ from memex.modules.contract import (
 )
 from memex.modules.dedup import fetch_internal_calls, forget_inbox_rows
 from memex.modules.identidades.domain import IdentidadesDomainReader
-from memex.modules.identidades.fuzzy import HIGH_THRESHOLD, LOW_THRESHOLD, find_fuzzy_candidates
+from memex.modules.identidades.fuzzy import (
+    HIGH_THRESHOLD,
+    LOW_THRESHOLD,
+    find_containment_candidates,
+    find_fuzzy_candidates,
+)
 from memex.modules.identidades.normalize import is_role_email, norm_identifier
 from memex.modules.identidades.prompt import IDENTIDADES_SYSTEM_PROMPT
 from memex.modules.identidades.resolve import (
@@ -323,13 +328,17 @@ def _resolve_fuzzy_or_create(
             best.identity_id, best.score, auto_merge=True
         )
     new_id = _create_entity(conn, user_id, m, kind, index, source=source)
+    hint: _MergeHint | None = None
     if best is not None and best.score >= LOW_THRESHOLD:
-        # zona gris: candidato para el desempate LLM (par canónico a<b).
+        # zona gris (trigram): candidato para el desempate LLM (par canónico a<b).
         _propose_merge_candidate(conn, user_id, new_id, best.identity_id, "trgm_name", best.score)
-        return Resolution(kind, new_id, "fuzzy"), _MergeHint(
-            best.identity_id, best.score, auto_merge=False
-        )
-    return Resolution(kind, new_id, "created"), None
+        hint = _MergeHint(best.identity_id, best.score, auto_merge=False)
+    # H-7: 2ª fuente de candidatos por CONTENCIÓN DE TOKENS (subcadena/abreviación del mismo nombre)
+    # que el trigram no alcanza. Solo CANDIDATOS para el juez LLM — NUNCA auto-merge. Se propone
+    # después del trigram para que, en un par solapado, gane su reason (ON CONFLICT).
+    for c in find_containment_candidates(conn, user_id, kind=kind, probe=m.name, exclude_id=new_id):
+        _propose_merge_candidate(conn, user_id, new_id, c.identity_id, "token_containment", c.score)
+    return Resolution(kind, new_id, "fuzzy" if hint is not None else "created"), hint
 
 
 def _create_entity(
