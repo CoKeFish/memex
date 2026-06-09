@@ -498,6 +498,55 @@ def _existing_summary(user_id: int, inbox_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def inbox_window(user_id: int, inbox_id: int) -> dict[str, Any]:
+    """Lote de procesamiento de un mensaje (solo lectura): `{mode, summary_id, member_ids}`.
+
+    - Con summary → co-linkeados al MISMO summary (`mode="summary"`): el lote que YA se procesó
+      junto (los miembros pueden estar resumidos, por eso NO se usa el work-set acá).
+    - Sin summary y tier batch/individual → ventana PROSPECTIVA (`mode="prospective"`): lo que
+      `plan_windows` armaría hoy sobre el work-set no-resumido de la fuente — exactamente lo que
+      haría «Resumir su lote». Cambia entre corridas: los vecinos ya resumidos salen del work-set.
+      Mismo costo y limitación que `summarize_inbox(scope="window")` (scan acotado a la fuente,
+      LIMIT `_WINDOW_SCAN_LIMIT`); si el mensaje quedó fuera (gateado por OCR/review o más allá
+      del LIMIT) cae a ventana de 1 — paridad con el fallback de `summarize_inbox`.
+    - blacklist / sin clasificar → sin lote (`mode="none"`, sin miembros).
+
+    Lanza `LookupError` si el inbox no existe o es de otro user (→ 404 en el router).
+    """
+    try:
+        row = _load_one_workrow(user_id, inbox_id)
+    except InboxNotClassifiedError:
+        return {"mode": "none", "summary_id": None, "member_ids": []}
+
+    existing = _existing_summary(user_id, inbox_id)
+    if existing is not None:
+        with connection() as conn:
+            ids = (
+                conn.execute(
+                    text(
+                        "SELECT inbox_id FROM summary_inbox_links "
+                        "WHERE summary_id = :sid ORDER BY inbox_id"
+                    ),
+                    {"sid": int(existing["id"])},
+                )
+                .scalars()
+                .all()
+            )
+        return {
+            "mode": "summary",
+            "summary_id": int(existing["id"]),
+            "member_ids": [int(x) for x in ids],
+        }
+
+    if row.tier not in ("batch", "individual"):
+        return {"mode": "none", "summary_id": None, "member_ids": []}
+
+    windows = plan_windows(_load_workset(user_id, row.source_id, None, _WINDOW_SCAN_LIMIT))
+    window = next((w for w in windows if any(r.inbox_id == inbox_id for r in w.rows)), None)
+    member_ids = [r.inbox_id for r in window.rows] if window is not None else [inbox_id]
+    return {"mode": "prospective", "summary_id": None, "member_ids": member_ids}
+
+
 async def summarize_inbox(
     user_id: int,
     inbox_id: int,

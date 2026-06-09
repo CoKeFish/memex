@@ -2,7 +2,6 @@ import { useState } from "react"
 import { Gauge, Loader2 } from "lucide-react"
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
-import { Textarea } from "@/components/ui/textarea"
 import {
   Dialog,
   DialogContent,
@@ -36,7 +35,6 @@ export function RelevanceButton({
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [reason, setReason] = useState(current?.reason ?? "")
 
   const triggerLabel = !current ? "Relevancia" : current.isRelevant ? "Relevante" : "No relevante"
   const triggerTone = !current
@@ -61,7 +59,7 @@ export function RelevanceButton({
 
   const mark = (isRelevant: boolean) =>
     act(
-      () => setRelevanceMark(inboxId, isRelevant, reason.trim() || null),
+      () => setRelevanceMark(inboxId, isRelevant),
       `Marcado ${isRelevant ? "relevante" : "no relevante"} · #${inboxId}`,
     )
   const clear = () => act(() => clearRelevanceMark(inboxId), `Marca quitada · #${inboxId}`)
@@ -82,13 +80,6 @@ export function RelevanceButton({
             No bloquea al remitente ni toca filtros; marcar uno no condena a todos sus mensajes.
           </DialogDescription>
         </DialogHeader>
-        <Textarea
-          placeholder="Motivo (opcional)…"
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          disabled={busy}
-          className="h-20"
-        />
         <DialogFooter className="sm:justify-between">
           <div>
             {current && (

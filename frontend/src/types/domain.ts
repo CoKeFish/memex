@@ -37,6 +37,8 @@ export interface TelegramPayload {
   sender?: { user_id: number; username?: string | null; display_name?: string | null } | null
   date: string
   text: string
+  reply_to_message_id?: number | null
+  forwarded_from?: string | null
   media_kind?: "none" | "photo" | "video" | "document" | "audio" | "voice" | "sticker" | "other"
   media_caption?: string | null
 }
@@ -64,6 +66,8 @@ export interface InboxSummary {
   tier: string
   content: string
   createdAt?: string | null
+  /** `summaries.metadata` del backend; `n` = tamaño real del lote al persistir. */
+  metadata?: Record<string, unknown> | null
 }
 
 export interface InboxExtraction {
@@ -288,6 +292,15 @@ export interface InboxRow {
 }
 
 export type Tier = "blacklist" | "batch" | "individual"
+
+/** Lote de procesamiento de un mensaje (GET /inbox/{id}/window): "summary" = co-miembros del
+ * resumen ya hecho; "prospective" = la ventana que se armaría hoy («Resumir su lote»); "none" =
+ * sin lote (blacklist / sin clasificar). Miembros en orden conversacional, incluye al mensaje. */
+export interface InboxWindow {
+  mode: "summary" | "prospective" | "none"
+  summaryId: number | null
+  members: InboxRow[]
+}
 
 // ---- Observabilidad -----------------------------------------------------------
 
