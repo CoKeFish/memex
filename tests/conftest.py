@@ -53,8 +53,15 @@ def _setup_test_database() -> Iterator[None]:
     with admin.connect() as conn:
         # `_DB_NAME` es interno/derivado (no input de usuario) → f-string en DDL es seguro,
         # y los identificadores de base de datos no se pueden parametrizar en SQL igualmente.
-        conn.execute(text(f"DROP DATABASE IF EXISTS {_DB_NAME}"))
+        # FORCE: si una corrida anterior murió colgada, sus conexiones zombis bloquearían
+        # el DROP normal.
+        conn.execute(text(f"DROP DATABASE IF EXISTS {_DB_NAME} WITH (FORCE)"))
         conn.execute(text(f"CREATE DATABASE {_DB_NAME}"))
+        # Cinturón anti-cuelgue: en tests, esperar un lock = bug de aislamiento (p.ej. sembrar
+        # vía una transacción abierta y llamar al API, que abre OTRA conexión y se bloquea
+        # contra ese lock). Con lock_timeout el statement falla a los 15s con error claro en
+        # vez de colgar la suite (y el pre-push) indefinidamente.
+        conn.execute(text(f"ALTER DATABASE {_DB_NAME} SET lock_timeout = '15s'"))
     admin.dispose()
 
     cfg = Config("alembic.ini")
@@ -71,30 +78,55 @@ def _setup_test_database() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _reset_tables() -> None:
     """Per-test cleanup: truncate data tables + re-seed user id=1."""
+    import time
+
+    import psycopg.errors
     from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError
 
     from memex.db import connection
 
-    with connection() as conn:
-        conn.execute(
-            text(
-                """
-                TRUNCATE TABLE
-                    media_assets, inbox_dedupe_keys, inbox, source_checkpoints,
-                    backfill_jobs, filter_rules, geo_place_cache, sources, users
-                RESTART IDENTITY CASCADE
-                """
-            )
-        )
-        conn.execute(
-            text("INSERT INTO users (id, email, display_name) VALUES (1, 'me@local', 'default')")
-        )
-        conn.execute(text("SELECT setval(pg_get_serial_sequence('users','id'), 1)"))
+    # Reintento acotado SOLO ante deadlock detectado: un test previo puede dejar un escritor
+    # de fondo (runner/streaming) terminando un INSERT cuya verificación de FK toma RowShare
+    # sobre los padres mientras este TRUNCATE pide AccessExclusive → Postgres mata a uno (~1s).
+    # Un lock_timeout (cuelgue real) NO se reintenta: debe reventar y señalar el bug.
+    for attempt in (1, 2, 3):
+        try:
+            with connection() as conn:
+                conn.execute(
+                    text(
+                        """
+                        TRUNCATE TABLE
+                            media_assets, inbox_dedupe_keys, inbox, source_checkpoints,
+                            backfill_jobs, filter_rules, geo_place_cache, sources, users
+                        RESTART IDENTITY CASCADE
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        "INSERT INTO users (id, email, display_name) "
+                        "VALUES (1, 'me@local', 'default')"
+                    )
+                )
+                conn.execute(text("SELECT setval(pg_get_serial_sequence('users','id'), 1)"))
+            break
+        except OperationalError as e:
+            if attempt == 3 or not isinstance(e.orig, psycopg.errors.DeadlockDetected):
+                raise
+            time.sleep(0.2 * attempt)
 
 
 @pytest.fixture
 def conn() -> Iterator[Any]:
-    """A managed Connection in a fresh transaction (autocommits on success)."""
+    """A managed Connection in a fresh transaction (commits when the test ends).
+
+    OJO: la transacción queda ABIERTA durante todo el test — lo que se escribe por acá es
+    INVISIBLE para las conexiones que abre el API (TestClient) y sostiene locks FK sobre las
+    filas tocadas. Para sembrar datos que un endpoint debe ver, usar un bloque
+    `with connection():` propio (commitea al salir); `conn` sirve para leer de vuelta lo que
+    el API ya commiteó.
+    """
     from memex.db import connection
 
     with connection() as c:
