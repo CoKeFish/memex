@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { useVirtualizer } from "@tanstack/react-virtual"
 import { Inbox, Loader2, Search } from "lucide-react"
@@ -127,7 +127,10 @@ export function InboxFeed() {
       })
     }
   })
-  useEffect(() => () => saveRef.current?.(), [])
+  // useLayoutEffect a propósito: su cleanup corre en la fase de mutación, con parentRef AÚN
+  // conectado; el de useEffect corre después de que React desconecta los refs (current=null)
+  // y el guardado nunca ocurriría.
+  useLayoutEffect(() => () => saveRef.current?.(), [])
 
   // Restauración: espera la primera data, consume el estado guardado (one-shot) y solo aplica si
   // el filtro coincide. Loop de rAF porque con alturas dinámicas un scrollToIndex único queda
