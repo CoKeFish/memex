@@ -1518,6 +1518,10 @@ class SourceRow(BaseModel):
     # cuenta vinculada (pisa al env), "env" = variable del contenedor (Doppler), "missing" = no
     # resuelve (el fetch fallará). None = tipo sin token reportable (correo/telegram/etc.).
     token_source: Literal["vault", "env", "missing"] | None = None
+    # Modos del fetch a demanda que el ingestor de este tipo HONRA (la UI habilita opciones por
+    # esto, no por type hardcodeado) + avisos por modo (server-driven, p. ej. rango de Instagram).
+    fetch_modes: list[str] = Field(default_factory=list)
+    mode_caveats: dict[str, str] = Field(default_factory=dict)
 
 
 class CheckpointBody(BaseModel):

@@ -30,6 +30,10 @@ export interface Source {
   config: Record<string, unknown>
   /** Solo redes; null/ausente = tipo sin token reportable. */
   tokenSource?: TokenSource | null
+  /** Modos del fetch a demanda que el ingestor HONRA (server-driven; la UI no hardcodea tipos). */
+  fetchModes: string[]
+  /** Avisos por modo (p. ej. el costo del rango en Instagram), texto listo para mostrar. */
+  modeCaveats?: Record<string, string> | null
 }
 
 // Payloads fieles (subconjunto usado por la UI). snake_case = claves del JSONB.

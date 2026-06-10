@@ -113,12 +113,46 @@ def kind_types() -> list[str]:
     return list(_KIND_BY_TYPE.keys())
 
 
-# Tipos cuyo ingestor honra ventanas de fecha (since/until) en `mode=range`. Hoy solo IMAP: telegram
-# y social solo hacen incremental (su `fetch` ignora la ventana). El backfill segmentado, que avanza
-# por rangos de fecha, solo se ofrece para estos tipos. Agregar uno acá lo habilita en API y UI.
+# Tipos cuyo BACKFILL SEGMENTADO (avance por rangos con estado propio) se ofrece. Hoy solo IMAP
+# por diseño: las redes ya honran `mode=range` a demanda (ver `_FETCH_MODES_BY_TYPE`), pero el
+# backfill segmentado sigue siendo de correo.
 _DATE_WINDOW_TYPES: frozenset[str] = frozenset({"imap"})
 
 
 def supports_date_window(source_type: str) -> bool:
-    """True si el ingestor del tipo honra ventanas de fecha (`mode=range` con since/until)."""
+    """True si el tipo es elegible para el backfill segmentado (rangos con estado propio)."""
     return source_type in _DATE_WINDOW_TYPES
+
+
+#: Modos del fetch a demanda (`POST /sources/{id}/fetch`) que cada tipo honra DE VERDAD. La UI
+#: habilita opciones leyendo esto vía `SourceRow.fetch_modes` — nunca hardcodear en el front.
+#: telegram solo incremental (su fetch ignora la ventana); push-only (outlook) no se trae.
+_FETCH_MODES_BY_TYPE: dict[str, tuple[str, ...]] = {
+    "imap": ("incremental", "range", "last"),
+    "instagram": ("incremental", "range", "last"),
+    "facebook": ("incremental", "range", "last"),
+    "x": ("incremental", "range", "last"),
+    "telegram": ("incremental",),
+}
+
+#: Avisos por modo (server-driven: la UI los muestra tal cual, sin conocer plataformas). Hoy solo
+#: el rango de Instagram, que no tiene techo de fecha nativo en el actor.
+_FETCH_MODE_CAVEATS: dict[str, dict[str, str]] = {
+    "instagram": {
+        "range": (
+            "Instagram no tiene techo de fecha nativo: el actor escanea desde hoy hacia atrás "
+            "hasta «desde» (y se paga ese camino); el «hasta» se filtra en memex. El tope de "
+            "cantidad es el freno de costo."
+        )
+    }
+}
+
+
+def fetch_modes_for_type(source_type: str) -> list[str]:
+    """Modos de fetch a demanda que el ingestor honra. [] = no traíble (push-only/desconocido)."""
+    return list(_FETCH_MODES_BY_TYPE.get(source_type, ()))
+
+
+def fetch_mode_caveats_for_type(source_type: str) -> dict[str, str]:
+    """Avisos por modo para la UI (p. ej. el costo del rango en Instagram)."""
+    return dict(_FETCH_MODE_CAVEATS.get(source_type, {}))

@@ -176,6 +176,7 @@ function toSource(r: SourceApiRow): Source {
     enabled: r.enabled,
     createdAt: r.created_at,
     config: r.config,
+    fetchModes: ["incremental"], // esta vista no dispara fetches con ventana; default seguro
   }
 }
 

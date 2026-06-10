@@ -346,3 +346,32 @@ def test_fetch_failure_still_persists_cost(
     assert run is not None
     assert run["status"] == "failed"
     assert run["api_cost_usd"] is not None and float(run["api_cost_usd"]) == 0.0021
+
+
+# --- Capacidades: el endpoint rechaza modos que el ingestor no honra -------------------------
+
+
+def test_fetch_mode_not_honored_by_type_is_422(client: Any) -> None:
+    """telegram solo honra incremental: un range explícito es 422 (antes corría un incremental
+    disfrazado, silencioso)."""
+    with connection() as c:
+        sid = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (1, 'tg', 'telegram') RETURNING id"
+            )
+        ).scalar()
+    r = client.post(f"/sources/{sid}/fetch", params={"mode": "range", "since": "2026-01-01"})
+    assert r.status_code == 422
+    assert "no soporta" in r.json()["detail"]
+
+
+def test_fetch_social_range_is_allowed(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    sid = _make_social_source(client, ["nasa"])
+    monkeypatch.setattr(
+        "memex.sources.resolve", lambda _t: lambda _cfg, env=None: _StubSource([_record("s1")])
+    )
+    r = client.post(
+        f"/sources/{sid}/fetch", params={"mode": "range", "since": "2026-01-01", "dry_run": True}
+    )
+    assert r.status_code == 200

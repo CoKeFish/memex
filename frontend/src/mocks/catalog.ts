@@ -2,12 +2,12 @@ import type { LlmPurpose, ModelPricing, Source, WorkerJob } from "@/types/domain
 
 // Sources de ingesta reales del dueño (las categorías del contrato Source).
 export const SOURCES: Source[] = [
-  { id: 1, name: "Correo universitario", type: "imap", enabled: true, createdAt: "2026-05-23T00:00:00Z", config: { folder: "INBOX", host: "outlook.office365.com" } },
-  { id: 2, name: "Gmail personal", type: "imap", enabled: true, createdAt: "2026-05-23T00:00:00Z", config: { folder: "INBOX", host: "imap.gmail.com" } },
-  { id: 3, name: "Telegram · personal", type: "telegram", enabled: true, createdAt: "2026-05-24T00:00:00Z", config: { mode: "polling" } },
-  { id: 4, name: "Telegram · canales", type: "telegram", enabled: true, createdAt: "2026-05-24T00:00:00Z", config: { mode: "streaming" } },
-  { id: 5, name: "Instagram", type: "social", enabled: true, createdAt: "2026-05-26T00:00:00Z", config: { platform: "instagram" } },
-  { id: 6, name: "Facebook", type: "social", enabled: false, createdAt: "2026-05-26T00:00:00Z", config: { platform: "facebook" } },
+  { id: 1, name: "Correo universitario", type: "imap", enabled: true, createdAt: "2026-05-23T00:00:00Z", config: { folder: "INBOX", host: "outlook.office365.com" }, fetchModes: ["incremental", "range", "last"] },
+  { id: 2, name: "Gmail personal", type: "imap", enabled: true, createdAt: "2026-05-23T00:00:00Z", config: { folder: "INBOX", host: "imap.gmail.com" }, fetchModes: ["incremental", "range", "last"] },
+  { id: 3, name: "Telegram · personal", type: "telegram", enabled: true, createdAt: "2026-05-24T00:00:00Z", config: { mode: "polling" }, fetchModes: ["incremental"] },
+  { id: 4, name: "Telegram · canales", type: "telegram", enabled: true, createdAt: "2026-05-24T00:00:00Z", config: { mode: "streaming" }, fetchModes: ["incremental"] },
+  { id: 5, name: "Instagram", type: "social", enabled: true, createdAt: "2026-05-26T00:00:00Z", config: { platform: "instagram" }, fetchModes: ["incremental"] },
+  { id: 6, name: "Facebook", type: "social", enabled: false, createdAt: "2026-05-26T00:00:00Z", config: { platform: "facebook" }, fetchModes: ["incremental"] },
 ]
 
 export const SOURCE_BY_ID: Record<number, Source> = Object.fromEntries(

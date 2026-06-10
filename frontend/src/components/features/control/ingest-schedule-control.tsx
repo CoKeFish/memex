@@ -46,6 +46,7 @@ function asSource(s: IngestScheduleSource): Source {
     enabled: s.enabled,
     createdAt: "",
     config: s.config,
+    fetchModes: ["incremental"], // sourceMeta solo lee type/name/config; default seguro
   }
 }
 

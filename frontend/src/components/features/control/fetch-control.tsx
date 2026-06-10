@@ -50,11 +50,15 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
 }
 
-// Qué modos admite cada tipo de fuente. Solo el correo (imap) honra la ventana de fechas/cantidad
-// (rango / últimos N); telegram y redes solo traen lo nuevo (incremental) — su ingestor ignora esos
-// parámetros, así que no los ofrecemos para no confundir.
-function supportsMode(type: string, mode: Mode): boolean {
-  return mode === "incremental" ? true : type === "imap"
+// Qué modos admite cada fuente: lo dice el BACKEND (SourceRow.fetch_modes, derivado de lo que el
+// ingestor honra de verdad) — acá no se hardcodean tipos. Incremental siempre está.
+function supportsMode(s: Source, mode: Mode): boolean {
+  return mode === "incremental" ? true : s.fetchModes.includes(mode)
+}
+
+/** Aviso server-driven del modo activo para esta fuente (p. ej. el costo del rango en IG). */
+function modeCaveat(s: Source, mode: Mode): string | null {
+  return s.modeCaveats?.[mode] ?? null
 }
 
 function rec(v: unknown): Record<string, unknown> | null {
@@ -258,9 +262,9 @@ export function FetchControl() {
 
   const modeMeta = MODES.find((m) => m.v === mode)!
   const allIds = useMemo(() => (sources ?? []).map((s) => s.id), [sources])
-  // Fuentes que el modo actual puede traer (incremental = todas; rango/últimos N = solo correo).
+  // Fuentes que el modo actual puede traer (incremental = todas; rango/últimos N según fetch_modes).
   const enabledIds = useMemo(
-    () => (sources ?? []).filter((s) => supportsMode(s.type, mode)).map((s) => s.id),
+    () => (sources ?? []).filter((s) => supportsMode(s, mode)).map((s) => s.id),
     [sources, mode],
   )
 
@@ -327,7 +331,7 @@ export function FetchControl() {
     // Al pasar a rango/últimos N, destildá las fuentes que ese modo no admite.
     setSelected((prev) => new Set([...prev].filter((id) => {
       const s = (sources ?? []).find((x) => x.id === id)
-      return s ? supportsMode(s.type, nm) : false
+      return s ? supportsMode(s, nm) : false
     })))
     setRanReal(false)
   }
@@ -589,7 +593,7 @@ export function FetchControl() {
 
               {groups.map((g) => {
                 const ids = g.sources.map((s) => s.id)
-                const groupEnabled = g.sources.filter((s) => supportsMode(s.type, mode)).map((s) => s.id)
+                const groupEnabled = g.sources.filter((s) => supportsMode(s, mode)).map((s) => s.id)
                 const selCount = ids.filter((id) => selected.has(id)).length
                 const allSel = groupEnabled.length > 0 && groupEnabled.every((id) => selected.has(id))
                 const isOpen = expanded.has(g.key)
@@ -645,7 +649,8 @@ export function FetchControl() {
 
                     {isOpen &&
                       g.sources.map((s) => {
-                        const enabled = supportsMode(s.type, mode)
+                        const enabled = supportsMode(s, mode)
+                        const caveat = enabled ? modeCaveat(s, mode) : null
                         const social = PAID_API_TYPES.has(s.type)
                         const cursor = checkpoints?.[s.id]
                         const progress = social ? socialAccountsProgress(cursor) : {}
@@ -677,6 +682,9 @@ export function FetchControl() {
                                       ? checkpointLabel(cursor)
                                       : "Solo modo incremental (no admite rango/cantidad)"}
                                   </div>
+                                  {caveat && (
+                                    <div className="text-[11px] text-status-review">{caveat}</div>
+                                  )}
                                 </div>
                               </button>
                               <div className="shrink-0 pl-2">
