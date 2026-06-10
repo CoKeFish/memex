@@ -1,9 +1,10 @@
 // Cobertura temporal (timeline de rangos de días cubiertos) contra la API real.
 //
-// El shape lanes/ranges es GENÉRICO (espejo de `CoverageOut` en el backend): hoy lo produce solo
-// GET /inbox/coverage — rangos INGERIDOS por fecha del mensaje original (`occurred_at`) — pero una
-// futura vista de procesamiento puede exponer su propio endpoint con el mismo shape y reusar
-// `toCoverage` + el componente <CoverageTimeline> tal cual.
+// El shape lanes/ranges es GENÉRICO (espejo de `CoverageOut` en el backend) y hoy lo producen DOS
+// endpoints que comparten `toCoverage` + el componente <CoverageTimeline>:
+// - GET /inbox/coverage — rangos INGERIDOS por fecha del mensaje original (`occurred_at`).
+// - GET /processing/coverage — de lo ingerido, qué días ya están MANEJADOS (timeline de
+//   /procesamiento; `swept` ahí significa "día parcial" y `cursor` la frontera del lote).
 
 import { apiGet } from "@/lib/api"
 import type { DayRange } from "@/lib/coverage"
@@ -124,4 +125,35 @@ export async function fetchInboxCoverage(
   if (opts.until) qs.set("until", opts.until)
   const q = qs.toString()
   return toCoverage(await apiGet<CoverageApi>(`/inbox/coverage${q ? `?${q}` : ""}`))
+}
+
+/** Etapa del pipeline contra la que se mide el avance: `any` = cualquier decisión tomada
+ *  (resumido ∨ extraído ∨ blacklist); `summarize`/`extract` = avance de ESA etapa (blacklist
+ *  cuenta siempre: un blacklisteado jamás pasa por la etapa y no es backlog). */
+export type ProcessingCriterion = "any" | "summarize" | "extract"
+
+/** Cobertura de PROCESAMIENTO (GET /processing/coverage): de lo ingerido, qué días ya están
+ *  manejados, por fuente. Banda sólida = día completo; `swept` = día parcial; `cursor` =
+ *  frontera del lote por ventanas. `total` por lane = mensajes manejados en la ventana. */
+export async function fetchProcessingCoverage(
+  opts: {
+    tz?: string
+    gapDays?: number
+    kind?: string
+    sourceId?: number
+    since?: string
+    until?: string
+    criterion?: ProcessingCriterion
+  } = {},
+): Promise<Coverage> {
+  const qs = new URLSearchParams()
+  if (opts.tz) qs.set("tz", opts.tz)
+  if (opts.gapDays !== undefined) qs.set("gap_days", String(opts.gapDays))
+  if (opts.kind) qs.set("kind", opts.kind)
+  if (opts.sourceId !== undefined) qs.set("source_id", String(opts.sourceId))
+  if (opts.since) qs.set("since", opts.since)
+  if (opts.until) qs.set("until", opts.until)
+  if (opts.criterion) qs.set("criterion", opts.criterion)
+  const q = qs.toString()
+  return toCoverage(await apiGet<CoverageApi>(`/processing/coverage${q ? `?${q}` : ""}`))
 }

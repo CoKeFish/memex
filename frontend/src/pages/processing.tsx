@@ -1,5 +1,6 @@
 import { PageHeader } from "@/components/common/page-header"
 import { ManualRunPanel } from "@/components/features/control/manual-run"
+import { ProcessingCoveragePanel } from "@/components/features/control/processing-coverage"
 import {
   ModulesTogglePanel,
   SchedulerPanel,
@@ -17,6 +18,7 @@ export function ProcessingPage() {
         <SchedulerPanel />
         <ManualRunPanel />
       </div>
+      <ProcessingCoveragePanel />
       <ModulesTogglePanel />
     </div>
   )

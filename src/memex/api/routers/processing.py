@@ -20,6 +20,11 @@ Dos superficies:
    (`scheduler_settings`) con el último run real de cada job (`worker_runs`, `run_type='job'`).
    PATCH prende/apaga el daemon y setea qué jobs corren; el daemon relee la DB cada tick. Off por
    default.
+
+4. **Cobertura del procesamiento** (`GET /processing/coverage`, SOLO lectura). Espejo de
+   `GET /inbox/coverage` pero respondiendo "de lo ingerido, qué ya se digirió": mismo shape
+   `CoverageOut`, lanes por fuente, con un `criterion` por etapa (any/summarize/extract).
+   Acá no se dispara ningún procesamiento.
 """
 
 from __future__ import annotations
@@ -27,15 +32,18 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
-from typing import Annotated, Any
+from datetime import UTC, date, datetime, timedelta
+from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 
 from memex.api.auth import current_user_id
+from memex.api.coverage_helpers import merge_date_spans, merge_day_buckets
 from memex.api.schemas import (
+    CoverageOut,
     ProcessingDryRun,
     ProcessingLotAdvance,
     ProcessingLotAdvanceStatus,
@@ -57,6 +65,7 @@ from memex.processing import lots
 from memex.reprocess import STAGE_ORDER, reprocess, select_targets
 from memex.scheduler import runs
 from memex.scheduler.jobs import all_jobs
+from memex.sources import kind_for_type
 
 router = APIRouter(prefix="/processing", tags=["processing"])
 
@@ -506,3 +515,217 @@ async def patch_scheduler(body: SchedulerSettingsPatch, user_id: UserID) -> dict
             )
         _log.info("processing.scheduler.patched", user_id=user_id, fields=list(fields.keys()))
     return await get_scheduler(user_id)
+
+
+# --- cobertura del procesamiento (solo lectura) ---
+# NOTA: este router no tiene un `GET /{param}` en la raíz, así que `/coverage` no compite con
+# nada; si algún día se agrega una ruta paramétrica, esta debe quedar declarada ANTES (la trampa
+# de FastAPI documentada en inbox.py: "coverage" se intentaría parsear como el parámetro).
+
+#: TZ por defecto del bucket de cobertura (cuando el cliente no manda `tz`), patrón de inbox.py.
+_BUCKET_TZ = "America/Bogota"
+
+
+def _resolve_tz(tz: str | None) -> str:
+    """Valida/resuelve la TZ del bucket. None → `_BUCKET_TZ`; nombre IANA inválido → 422.
+
+    Helper copiado inline a propósito, como en inbox.py/logs.py/metrics.py (convención del repo).
+    """
+    if tz is None:
+        return _BUCKET_TZ
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"timezone inválida: {tz}") from exc
+    return tz
+
+
+#: Fragmentos SQL de "manejado" (constantes propias, nunca input del usuario). Un mensaje está
+#: manejado cuando hay DECISIÓN tomada: resumido, extraído, o clasificado blacklist (decisión
+#: deliberada de NO procesarlo — por eso blacklist cuenta bajo TODOS los criterios: un
+#: blacklisteado jamás va a pasar por la etapa y no debe quedar como "pendiente" eterno).
+_SUMMARIZED = "EXISTS (SELECT 1 FROM summary_inbox_links sl WHERE sl.inbox_id = i.id)"
+_EXTRACTED = "EXISTS (SELECT 1 FROM module_extractions me WHERE me.inbox_id = i.id)"
+_BLACKLISTED = "c.tier = 'blacklist'"
+_HANDLED_SQL: dict[str, str] = {
+    "any": f"{_SUMMARIZED} OR {_EXTRACTED} OR {_BLACKLISTED}",
+    "summarize": f"{_SUMMARIZED} OR {_BLACKLISTED}",
+    "extract": f"{_EXTRACTED} OR {_BLACKLISTED}",
+}
+
+
+@router.get("/coverage", response_model=CoverageOut)
+async def processing_coverage(
+    user_id: UserID,
+    tz: str | None = None,
+    gap_days: Annotated[int, Query(ge=0, le=365)] = 2,
+    source_id: int | None = None,
+    kind: Literal["email", "chat", "social", "other"] | None = None,
+    since: date | None = None,
+    until: date | None = None,
+    criterion: Literal["any", "summarize", "extract"] = "any",
+) -> dict[str, Any]:
+    """Cobertura del PROCESAMIENTO sobre lo ya ingerido, por fuente (espejo de /inbox/coverage).
+
+    El denominador es lo INGERIDO: cada día (en la tz pedida) se pinta según cuántos de sus
+    mensajes están MANEJADOS bajo `criterion` (`any` = resumido/extraído/blacklist;
+    `summarize`/`extract` = avance de esa etapa, blacklist incluido):
+
+    - `ranges` (banda sólida): días donde TODOS los mensajes del día están manejados. La fusión
+      por `gap_days` solo puentea días SIN mensajes — un día con pendientes corta el tramo,
+      la banda sólida nunca tapa un pendiente.
+    - `swept` (banda tenue): días PARCIALES (algunos manejados, otros no); adyacentes se funden.
+    - `cursor` (marcador): frontera del lote de `processing_lots` — el `occurred_at` del último
+      mensaje ya procesado por el lote ("el lote va por acá"). Si el lote se creó filtrado a una
+      fuente va solo en esa lane; si no, en todas (el snapshot ordena cronológicamente ENTRE
+      fuentes: la frontera es una posición temporal global). Omitido fuera de la ventana.
+
+    `total` por lane = mensajes manejados en la ventana (días completos + parciales). Un día sin
+    nada manejado no se pinta: el hueco es backlog (lo ingerido se ve en /inbox/coverage).
+    """
+    resolved_tz = _resolve_tz(tz)
+    if since is not None and until is not None and until < since:
+        raise HTTPException(status_code=422, detail="until no puede ser anterior a since")
+
+    src_where = ["user_id = :uid"]
+    bucket_where = ["i.user_id = :uid"]
+    params: dict[str, Any] = {"uid": user_id}
+    if source_id is not None:
+        src_where.append("id = :sid")
+        bucket_where.append("i.source_id = :sid")
+        params["sid"] = source_id
+    bucket_params: dict[str, Any] = {**params, "tz": resolved_tz}
+    if since is not None:
+        bucket_where.append("(i.occurred_at AT TIME ZONE :tz)::date >= :since")
+        bucket_params["since"] = since
+    if until is not None:
+        bucket_where.append("(i.occurred_at AT TIME ZONE :tz)::date <= :until")
+        bucket_params["until"] = until
+
+    with connection() as conn:
+        src_rows = (
+            conn.execute(
+                text(
+                    "SELECT id, name, type, enabled FROM sources "
+                    f"WHERE {' AND '.join(src_where)} ORDER BY id"
+                ),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+        # Buckets diarios por fuente: total ingerido vs manejados bajo el criterio. El LEFT JOIN
+        # a classifications no duplica filas (UNIQUE(inbox_id)).
+        bucket_rows = conn.execute(
+            text(
+                f"""
+                SELECT i.source_id,
+                       (i.occurred_at AT TIME ZONE :tz)::date AS day,
+                       COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE {_HANDLED_SQL[criterion]}) AS handled
+                FROM inbox i
+                LEFT JOIN classifications c ON c.inbox_id = i.id
+                WHERE {" AND ".join(bucket_where)}
+                GROUP BY i.source_id, day
+                ORDER BY i.source_id, day
+                """
+            ),
+            bucket_params,
+        ).all()
+        # Frontera del lote (a lo sumo uno por user): los arrays de PG son 1-based, así que
+        # `target_ids[frontier]` ES el último ya procesado; frontier=0 (o inbox borrado) deja
+        # `frontier_at` NULL → sin marcador.
+        lot_row = (
+            conn.execute(
+                text(
+                    """
+                    SELECT pl.frontier, cardinality(pl.target_ids) AS total_targets,
+                           pl.config, pl.updated_at, i.occurred_at AS frontier_at
+                    FROM processing_lots pl
+                    LEFT JOIN inbox i ON i.id = pl.target_ids[pl.frontier]
+                    WHERE pl.user_id = :uid
+                    """
+                ),
+                {"uid": user_id},
+            )
+            .mappings()
+            .first()
+        )
+
+    # Por fuente: segmentos de días COMPLETOS separados por días con pendientes (parciales o sin
+    # nada manejado) — la fusión por gap_days corre POR SEGMENTO, así nunca puentea un pendiente;
+    # los días sin mensajes no cortan nada (no hay bucket) y sí se pueden fundir.
+    full_by_source: dict[int, list[list[tuple[date, int]]]] = {}
+    partial_by_source: dict[int, list[tuple[date, date]]] = {}
+    handled_by_source: dict[int, int] = {}
+    for sid, day, total, handled in bucket_rows:
+        handled_by_source[sid] = handled_by_source.get(sid, 0) + int(handled)
+        segments = full_by_source.setdefault(sid, [[]])
+        if handled == total:
+            segments[-1].append((day, int(handled)))
+        else:
+            if segments[-1]:
+                segments.append([])
+            if handled > 0:
+                partial_by_source.setdefault(sid, []).append((day, day + timedelta(days=1)))
+
+    lot_cursor: dict[str, Any] | None = None
+    lot_source_id: int | None = None
+    if lot_row is not None and lot_row["frontier_at"] is not None:
+        cur_day = lot_row["frontier_at"].astimezone(ZoneInfo(resolved_tz)).date()
+        if (since is None or cur_day >= since) and (until is None or cur_day <= until):
+            filters = dict(lot_row["config"] or {}).get("filters") or {}
+            lot_source_id = filters.get("source_id")
+            lot_cursor = {
+                "at": lot_row["updated_at"],
+                "day": cur_day,
+                "summary": f"lote: {lot_row['frontier']}/{lot_row['total_targets']} mensajes",
+            }
+
+    lanes: list[dict[str, Any]] = []
+    domain_lo: list[date] = []
+    domain_hi: list[date] = []
+    for src in src_rows:
+        try:
+            src_kind = kind_for_type(src["type"]).value
+        except KeyError:
+            src_kind = "other"  # tipos sin SourceKind registrada (p.ej. seeds viejos)
+        if kind is not None and src_kind != kind:
+            continue
+        ranges = [
+            r for seg in full_by_source.get(src["id"], []) for r in merge_day_buckets(seg, gap_days)
+        ]
+        swept = merge_date_spans(partial_by_source.get(src["id"], []))
+        cursor_info = (
+            lot_cursor if lot_cursor is not None and lot_source_id in (None, src["id"]) else None
+        )
+        lanes.append(
+            {
+                "id": src["id"],
+                "label": src["name"],
+                "kind": src_kind,
+                "enabled": src["enabled"],
+                "total": handled_by_source.get(src["id"], 0),
+                "first_day": ranges[0]["start"] if ranges else None,
+                "last_day": ranges[-1]["end"] if ranges else None,
+                "ranges": ranges,
+                "swept": swept,
+                "cursor": cursor_info,
+            }
+        )
+        # El dominio del eje abarca completos, parciales y marcador (todo es estado del pipeline).
+        domain_lo += [r["start"] for r in (ranges[:1] + swept[:1])]
+        domain_hi += [r["end"] for r in (ranges[-1:] + swept[-1:])]
+        if cursor_info is not None:
+            domain_lo.append(cursor_info["day"])
+            domain_hi.append(cursor_info["day"])
+
+    return {
+        "lanes": lanes,
+        # Con ventana pedida el eje ES la ventana (aunque esté vacía); sin ella, los extremos
+        # de los datos. Lado pedido a medias: el faltante sale de los datos (o queda None).
+        "domain_min": since if since is not None else (min(domain_lo) if domain_lo else None),
+        "domain_max": until if until is not None else (max(domain_hi) if domain_hi else None),
+        "tz": resolved_tz,
+        "gap_days": gap_days,
+    }

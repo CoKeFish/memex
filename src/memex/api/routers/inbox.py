@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from memex.api.auth import current_user_id
+from memex.api.coverage_helpers import clip_date_spans, merge_date_spans, merge_day_buckets
 from memex.api.schemas import (
     ClassificationInfo,
     ClassifyRequest,
@@ -89,56 +90,6 @@ def _resolve_tz(tz: str | None) -> str:
     except (ZoneInfoNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=f"timezone inválida: {tz}") from exc
     return tz
-
-
-def _merge_day_buckets(buckets: list[tuple[date, int]], gap_days: int) -> list[dict[str, Any]]:
-    """Funde días-bucket ORDENADOS en rangos; huecos de <= `gap_days` días se absorben.
-
-    Días consecutivos difieren en 1; un hueco de `g` días faltantes da diferencia `g + 1`,
-    de ahí el `<= gap_days + 1`.
-    """
-    ranges: list[dict[str, Any]] = []
-    for day, n in buckets:
-        if ranges and (day - ranges[-1]["end"]).days <= gap_days + 1:
-            ranges[-1]["end"] = day
-            ranges[-1]["count"] += n
-        else:
-            ranges.append({"start": day, "end": day, "count": n})
-    for r in ranges:
-        r["days"] = (r["end"] - r["start"]).days + 1
-    return ranges
-
-
-def _merge_date_spans(spans: list[tuple[date, date]]) -> list[dict[str, Any]]:
-    """Funde intervalos `[start, end)` que se solapen o sean adyacentes; salen INCLUSIVOS.
-
-    Para los tramos barridos: son reclamos explícitos (sin tolerancia de huecos). La entrada se
-    ordena acá; `end` exclusivo en la entrada (convención de backfill_jobs), inclusivo en la
-    salida (lo que pinta el front, como CoverageRange).
-    """
-    merged: list[list[date]] = []
-    for s, e in sorted(spans):
-        if merged and s <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], e)
-        else:
-            merged.append([s, e])
-    return [{"start": s, "end": e - timedelta(days=1), "days": (e - s).days} for s, e in merged]
-
-
-def _clip_date_spans(
-    spans: list[tuple[date, date]], since: date | None, until: date | None
-) -> list[tuple[date, date]]:
-    """Recorta intervalos `[start, end)` a la ventana [since, until] (inclusiva) pedida."""
-    if since is None and until is None:
-        return spans
-    hi_excl = until + timedelta(days=1) if until is not None else None
-    out: list[tuple[date, date]] = []
-    for s, e in spans:
-        s2 = s if since is None else max(s, since)
-        e2 = e if hi_excl is None else min(e, hi_excl)
-        if e2 > s2:
-            out.append((s2, e2))
-    return out
 
 
 @router.get("", response_model=InboxList)
@@ -341,10 +292,8 @@ async def inbox_coverage(
             src_kind = "other"  # tipos sin SourceKind registrada (p.ej. seeds viejos)
         if kind is not None and src_kind != kind:
             continue
-        ranges = _merge_day_buckets(buckets_by_source.get(src["id"], []), gap_days)
-        swept = _merge_date_spans(
-            _clip_date_spans(spans_by_source.get(src["id"], []), since, until)
-        )
+        ranges = merge_day_buckets(buckets_by_source.get(src["id"], []), gap_days)
+        swept = merge_date_spans(clip_date_spans(spans_by_source.get(src["id"], []), since, until))
         cursor_info = cursors_by_source.get(src["id"])
         lanes.append(
             {
