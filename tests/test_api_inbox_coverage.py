@@ -159,3 +159,132 @@ def test_coverage_invalid_tz_422(client: Any) -> None:
 def test_coverage_negative_gap_422(client: Any) -> None:
     r = client.get("/inbox/coverage?gap_days=-1")
     assert r.status_code == 422
+
+
+# ---- Tramos barridos (`swept`): bitácora ingest_swept_ranges + frontera del backfill_job --------
+
+
+def _seed_swept(source_id: int, user_id: int, spans: list[tuple[str, str]]) -> None:
+    """Inserta reclamos [start, end-exclusivo) en la bitácora ingest_swept_ranges."""
+    with connection() as c:
+        for start, end in spans:
+            c.execute(
+                text(
+                    "INSERT INTO ingest_swept_ranges (user_id, source_id, range_start, range_end)"
+                    " VALUES (:u, :s, :rs, :re)"
+                ),
+                {"u": user_id, "s": source_id, "rs": start, "re": end},
+            )
+
+
+def _seed_backfill_job(
+    source_id: int, user_id: int, range_start: str, range_end: str, frontier: str
+) -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO backfill_jobs (user_id, source_id, range_start, range_end, frontier)"
+                " VALUES (:u, :s, :rs, :re, :f)"
+            ),
+            {"u": user_id, "s": source_id, "rs": range_start, "re": range_end, "f": frontier},
+        )
+
+
+def test_coverage_swept_rows_merge_adjacent(client: Any, seed_source: dict[str, Any]) -> None:
+    # [01..05) + [05..10) son adyacentes → un solo tramo 01..09; julio queda aparte.
+    _seed_swept(
+        seed_source["id"],
+        1,
+        [("2026-06-01", "2026-06-05"), ("2026-06-05", "2026-06-10"), ("2026-07-01", "2026-07-03")],
+    )
+    body = client.get("/inbox/coverage").json()
+    lane = _lane(body, seed_source["id"])
+    assert lane["swept"] == [
+        {"start": "2026-06-01", "end": "2026-06-09", "days": 9},
+        {"start": "2026-07-01", "end": "2026-07-02", "days": 2},
+    ]
+    assert lane["ranges"] == []
+    assert lane["total"] == 0
+    # El barrido también define el dominio del eje (barrido vacío = cobertura).
+    assert body["domain_min"] == "2026-06-01"
+    assert body["domain_max"] == "2026-07-02"
+
+
+def test_coverage_swept_from_backfill_job_frontier(
+    client: Any, seed_source: dict[str, Any]
+) -> None:
+    # Job vigente con frontera avanzada: lo ya recorrido [range_start, frontier) cuenta barrido.
+    _seed_backfill_job(seed_source["id"], 1, "2026-01-01", "2026-04-01", "2026-02-01")
+    other = _mk_source(1, "sin-avance", "imap")
+    _seed_backfill_job(other, 1, "2026-01-01", "2026-04-01", "2026-01-01")  # frontera sin mover
+
+    body = client.get("/inbox/coverage").json()
+    assert _lane(body, seed_source["id"])["swept"] == [
+        {"start": "2026-01-01", "end": "2026-01-31", "days": 31}
+    ]
+    assert _lane(body, other)["swept"] == []
+
+
+def test_coverage_swept_merges_job_and_rows(client: Any, seed_source: dict[str, Any]) -> None:
+    # La bitácora y la frontera del job se solapan → un solo tramo fundido.
+    _seed_backfill_job(seed_source["id"], 1, "2026-01-01", "2026-06-01", "2026-02-01")
+    _seed_swept(seed_source["id"], 1, [("2026-01-15", "2026-03-01")])
+    lane = _lane(client.get("/inbox/coverage").json(), seed_source["id"])
+    assert lane["swept"] == [{"start": "2026-01-01", "end": "2026-02-28", "days": 59}]
+
+
+def test_coverage_swept_cross_tenant(
+    client: Any, seed_source: dict[str, Any], seed_user2: int
+) -> None:
+    src2 = _mk_source(seed_user2, "ajena", "imap")
+    _seed_swept(src2, seed_user2, [("2026-06-01", "2026-06-10")])
+    body = client.get("/inbox/coverage").json()
+    assert [ln["id"] for ln in body["lanes"]] == [seed_source["id"]]
+    assert body["domain_min"] is None
+
+
+# ---- record_swept_range (write-path compartido de run_fetch_window) -----------------------------
+
+
+def _swept_rows(source_id: int) -> list[tuple[str, str]]:
+    with connection() as c:
+        rows = c.execute(
+            text(
+                "SELECT range_start, range_end FROM ingest_swept_ranges "
+                "WHERE source_id = :s ORDER BY range_start"
+            ),
+            {"s": source_id},
+        ).all()
+    return [(str(r[0]), str(r[1])) for r in rows]
+
+
+def test_record_swept_range_inserts(seed_source: dict[str, Any]) -> None:
+    from memex.api.fetch_runner import record_swept_range
+
+    record_swept_range(
+        user_id=1,
+        source_id=seed_source["id"],
+        since="2026-01-01",
+        until="2026-02-01",
+        posted=0,
+        limit=2000,
+    )
+    assert _swept_rows(seed_source["id"]) == [("2026-01-01", "2026-02-01")]
+
+
+def test_record_swept_range_skips_incomplete_windows(seed_source: dict[str, Any]) -> None:
+    from memex.api.fetch_runner import record_swept_range
+
+    sid = seed_source["id"]
+    base: dict[str, Any] = {"user_id": 1, "source_id": sid, "posted": 0, "limit": 100}
+    # Rango abierto (sin until) → no se reclama.
+    record_swept_range(**{**base, "since": "2026-01-01", "until": None})
+    # Posible truncamiento por cap (posted >= limit) → no se reclama.
+    record_swept_range(
+        user_id=1, source_id=sid, since="2026-01-01", until="2026-02-01", posted=100, limit=100
+    )
+    # Timestamps (no fechas puras) → no se reclama.
+    record_swept_range(**{**base, "since": "2026-01-01T10:00:00", "until": "2026-01-02T10:00:00"})
+    # Ventana vacía o invertida → no se reclama.
+    record_swept_range(**{**base, "since": "2026-02-01", "until": "2026-02-01"})
+    assert _swept_rows(sid) == []

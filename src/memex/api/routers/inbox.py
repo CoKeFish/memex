@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -108,6 +108,22 @@ def _merge_day_buckets(buckets: list[tuple[date, int]], gap_days: int) -> list[d
     return ranges
 
 
+def _merge_date_spans(spans: list[tuple[date, date]]) -> list[dict[str, Any]]:
+    """Funde intervalos `[start, end)` que se solapen o sean adyacentes; salen INCLUSIVOS.
+
+    Para los tramos barridos: son reclamos explícitos (sin tolerancia de huecos). La entrada se
+    ordena acá; `end` exclusivo en la entrada (convención de backfill_jobs), inclusivo en la
+    salida (lo que pinta el front, como CoverageRange).
+    """
+    merged: list[list[date]] = []
+    for s, e in sorted(spans):
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [{"start": s, "end": e - timedelta(days=1), "days": (e - s).days} for s, e in merged]
+
+
 @router.get("", response_model=InboxList)
 async def list_inbox(
     user_id: UserID,
@@ -194,6 +210,11 @@ async def inbox_coverage(
     Para el timeline de cobertura del historial: un día (en la tz pedida) está cubierto si tiene
     >= 1 item; días separados por <= `gap_days` se funden en un rango. Las fuentes sin items
     salen como lane vacía (eso también es información: "de acá no hay nada ingerido").
+
+    Además cada lane trae sus tramos BARRIDOS (`swept`): rangos de fechas que un fetch de rango
+    ya recorrió aunque no haya dejado mensajes — distingue "barrí y estaba vacío" de "nunca lo
+    intenté". Fuentes: `ingest_swept_ranges` (bitácora durable) + el avance del backfill_job
+    vigente (`[range_start, frontier)`, que cubre lo barrido antes de existir la bitácora).
     """
     resolved_tz = _resolve_tz(tz)
 
@@ -232,12 +253,33 @@ async def inbox_coverage(
             ),
             {**params, "tz": resolved_tz},
         ).all()
+        # Tramos barridos: la bitácora durable + el avance del job vigente (frontera ya recorrida).
+        sweep_where = ["user_id = :uid"] + (["source_id = :sid"] if source_id is not None else [])
+        swept_rows = conn.execute(
+            text(
+                "SELECT source_id, range_start, range_end FROM ingest_swept_ranges "
+                f"WHERE {' AND '.join(sweep_where)}"
+            ),
+            params,
+        ).all()
+        job_rows = conn.execute(
+            text(
+                "SELECT source_id, range_start, frontier FROM backfill_jobs "
+                f"WHERE {' AND '.join(sweep_where)} AND frontier > range_start"
+            ),
+            params,
+        ).all()
 
     buckets_by_source: dict[int, list[tuple[date, int]]] = {}
     for sid, day, n in bucket_rows:
         buckets_by_source.setdefault(sid, []).append((day, n))
+    spans_by_source: dict[int, list[tuple[date, date]]] = {}
+    for sid, start, end in [*swept_rows, *job_rows]:
+        spans_by_source.setdefault(sid, []).append((start, end))
 
     lanes: list[dict[str, Any]] = []
+    domain_lo: list[date] = []
+    domain_hi: list[date] = []
     for src in src_rows:
         try:
             src_kind = kind_for_type(src["type"]).value
@@ -246,6 +288,7 @@ async def inbox_coverage(
         if kind is not None and src_kind != kind:
             continue
         ranges = _merge_day_buckets(buckets_by_source.get(src["id"], []), gap_days)
+        swept = _merge_date_spans(spans_by_source.get(src["id"], []))
         lanes.append(
             {
                 "id": src["id"],
@@ -256,15 +299,17 @@ async def inbox_coverage(
                 "first_day": ranges[0]["start"] if ranges else None,
                 "last_day": ranges[-1]["end"] if ranges else None,
                 "ranges": ranges,
+                "swept": swept,
             }
         )
+        # El dominio del eje abarca items Y barridos (un barrido vacío también es cobertura).
+        domain_lo += [r["start"] for r in (ranges[:1] + swept[:1])]
+        domain_hi += [r["end"] for r in (ranges[-1:] + swept[-1:])]
 
-    firsts = [lane["first_day"] for lane in lanes if lane["first_day"] is not None]
-    lasts = [lane["last_day"] for lane in lanes if lane["last_day"] is not None]
     return {
         "lanes": lanes,
-        "domain_min": min(firsts) if firsts else None,
-        "domain_max": max(lasts) if lasts else None,
+        "domain_min": min(domain_lo) if domain_lo else None,
+        "domain_max": max(domain_hi) if domain_hi else None,
         "tz": resolved_tz,
         "gap_days": gap_days,
     }

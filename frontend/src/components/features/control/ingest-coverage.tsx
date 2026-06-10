@@ -60,6 +60,8 @@ export function IngestCoveragePanel() {
       color: KIND_COLOR[ln.kind] ?? KIND_COLOR.other,
       total: ln.total,
       ranges: ln.ranges,
+      // El componente funde por ancho con la misma geometría que los rangos; count no aplica.
+      swept: ln.swept.map((s) => ({ start: s.start, end: s.end, count: 0 })),
     }
   })
 
@@ -68,7 +70,7 @@ export function IngestCoveragePanel() {
       <PanelHeader
         eyebrow="cobertura · fecha original"
         title="Timeline de ingesta"
-        sub="Qué rangos del historial ya están guardados, por fuente — según la fecha del mensaje original, no la de inserción"
+        sub="Qué rangos del historial ya se ingirieron, por fuente — fecha del mensaje original; la banda tenue es tiempo barrido donde no había mensajes"
         right={
           <Select value={gapDays} onValueChange={setGapDays}>
             <SelectTrigger className="h-8 w-44 text-xs">
@@ -90,13 +92,34 @@ export function IngestCoveragePanel() {
         ) : st.error ? (
           <ErrorState detail={st.error} onRetry={st.reload} />
         ) : (
-          <CoverageTimeline
-            lanes={lanes}
-            domainMin={coverage?.domainMin ?? null}
-            domainMax={coverage?.domainMax ?? null}
-            emptyTitle="Aún no hay mensajes ingeridos"
-            emptyHint="Cuando se ingiera historial, acá se ve qué rangos de tiempo quedaron cubiertos y qué huecos faltan."
-          />
+          <>
+            <CoverageTimeline
+              lanes={lanes}
+              domainMin={coverage?.domainMin ?? null}
+              domainMax={coverage?.domainMax ?? null}
+              emptyTitle="Aún no se ingirió nada"
+              emptyHint="Cuando se ingiera historial, acá se ve qué rangos de tiempo quedaron cubiertos y qué huecos faltan."
+            />
+            {(coverage?.domainMin ?? null) !== null && (
+              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground">
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className="h-2 w-3 rounded-[2px]"
+                    style={{ background: "var(--chart-2)" }}
+                  />
+                  con mensajes guardados
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span
+                    className="h-2 w-3 rounded-[2px]"
+                    style={{ background: "var(--chart-2)", opacity: 0.22 }}
+                  />
+                  barrido sin mensajes (se buscó y no había)
+                </span>
+                <span>hueco sin nada = falta por traer</span>
+              </div>
+            )}
+          </>
         )}
       </PanelBody>
     </Panel>

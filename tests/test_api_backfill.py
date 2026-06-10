@@ -225,6 +225,42 @@ def test_cap_hit_flag(client: Any, seed_source: dict[str, Any], patch_source: An
     assert body["window"]["cap_hit"] is True
 
 
+def _swept_rows(source_id: int) -> list[tuple[str, str]]:
+    with connection() as c:
+        rows = c.execute(
+            text(
+                "SELECT range_start, range_end FROM ingest_swept_ranges "
+                "WHERE source_id = :s ORDER BY range_start"
+            ),
+            {"s": source_id},
+        ).all()
+    return [(str(r[0]), str(r[1])) for r in rows]
+
+
+def test_advance_records_swept_range(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    """La ventana avanzada queda reclamada en ingest_swept_ranges (overlay del timeline),
+    incluso si no insertó nada; el dry-run y las ventanas cap_hit NO reclaman."""
+    sid = seed_source["id"]
+    client.post(f"/sources/{sid}/backfill", json=_CFG)
+    patch_source([])  # ventana VACÍA: barrer sin encontrar también es cobertura
+    client.post(f"/sources/{sid}/backfill/advance", params={"dry_run": True})
+    assert _swept_rows(sid) == []  # dry-run no reclama
+    client.post(f"/sources/{sid}/backfill/advance")
+    assert _swept_rows(sid) == [("2026-01-01", "2026-02-01")]
+
+
+def test_cap_hit_window_does_not_record_swept(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    client.post(f"/sources/{sid}/backfill", json={**_CFG, "per_window_limit": 2})
+    patch_source(["a", "b"])  # posted >= limit → la ventana pudo quedar truncada
+    client.post(f"/sources/{sid}/backfill/advance")
+    assert _swept_rows(sid) == []
+
+
 def test_non_imap_source_is_422(client: Any) -> None:
     with connection() as c:
         sid = c.execute(

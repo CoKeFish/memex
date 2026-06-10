@@ -14,6 +14,14 @@ export interface CoverageRange extends DayRange {
   days: number // días de calendario del tramo (end - start + 1)
 }
 
+/** Tramo BARRIDO por la ingesta (reclamado por un fetch de rango), haya o no mensajes.
+ *  Distingue "barrí y estaba vacío" de "nunca lo intenté". */
+export interface CoverageSpan {
+  start: string // inclusive
+  end: string // inclusive
+  days: number
+}
+
 export interface CoverageLane {
   id: number
   label: string // sources.name (el caller puede preferir una etiqueta amigable propia)
@@ -23,6 +31,7 @@ export interface CoverageLane {
   firstDay: string | null
   lastDay: string | null
   ranges: CoverageRange[]
+  swept: CoverageSpan[]
 }
 
 export interface Coverage {
@@ -44,6 +53,7 @@ interface LaneApi {
   first_day: string | null
   last_day: string | null
   ranges: CoverageRange[]
+  swept: CoverageSpan[]
 }
 
 interface CoverageApi {
@@ -67,6 +77,7 @@ export function toCoverage(r: CoverageApi): Coverage {
       firstDay: ln.first_day,
       lastDay: ln.last_day,
       ranges: ln.ranges,
+      swept: ln.swept,
     })),
     domainMin: r.domain_min,
     domainMax: r.domain_max,

@@ -29,15 +29,24 @@ export interface CoverageTimelineLane {
   color?: string
   total: number
   ranges: DayRange[]
+  /** Tramos BARRIDOS (reclamados por la ingesta aunque no hayan dejado items): se pintan como
+   *  banda tenue bajo los segmentos sólidos. `count` se ignora (pasar 0). */
+  swept?: DayRange[]
+}
+
+function fmtSpan(seg: VisualSegment): string {
+  return seg.start === seg.end
+    ? formatDateOnly(seg.start)
+    : `${formatDateOnly(seg.start)} – ${formatDateOnly(seg.end)}`
 }
 
 function defaultTooltip(seg: VisualSegment, lane: CoverageTimelineLane): string {
-  const span =
-    seg.start === seg.end
-      ? formatDateOnly(seg.start)
-      : `${formatDateOnly(seg.start)} – ${formatDateOnly(seg.end)}`
-  const base = `${lane.label}\n${span} · ${formatInt(seg.count)} items · ${formatInt(seg.days)} días`
+  const base = `${lane.label}\n${fmtSpan(seg)} · ${formatInt(seg.count)} items · ${formatInt(seg.days)} días`
   return seg.merged > 1 ? `${base} · ${seg.merged} tramos` : base
+}
+
+function defaultSweptTooltip(seg: VisualSegment, lane: CoverageTimelineLane): string {
+  return `${lane.label}\nbarrido: ${fmtSpan(seg)} · ${formatInt(seg.days)} días — ya se buscó acá; donde no hay banda sólida, no había mensajes`
 }
 
 export function CoverageTimeline({
@@ -47,6 +56,7 @@ export function CoverageTimeline({
   emptyTitle = "Sin rangos cubiertos",
   emptyHint,
   formatTooltip = defaultTooltip,
+  formatSweptTooltip = defaultSweptTooltip,
 }: {
   lanes: CoverageTimelineLane[]
   domainMin: string | null
@@ -54,6 +64,7 @@ export function CoverageTimeline({
   emptyTitle?: string
   emptyHint?: string
   formatTooltip?: (seg: VisualSegment, lane: CoverageTimelineLane) => string
+  formatSweptTooltip?: (seg: VisualSegment, lane: CoverageTimelineLane) => string
 }) {
   const domain: DayDomain | null = useMemo(
     () => (domainMin && domainMax ? { min: domainMin, max: domainMax } : null),
@@ -83,6 +94,24 @@ export function CoverageTimeline({
             {({ w }) => (
               <>
                 <div className="absolute inset-x-0 inset-y-1.5 rounded-sm bg-muted/40" />
+                {(lane.swept ?? []).length > 0 &&
+                  mergeForWidth(lane.swept ?? [], domain, w).map((seg) => {
+                    const pos = segmentPosition(seg, domain)
+                    return (
+                      <div
+                        key={`b-${seg.start}`}
+                        className="absolute inset-y-1.5 rounded-[2px]"
+                        style={{
+                          left: `${pos.leftPct}%`,
+                          width: `${pos.widthPct}%`,
+                          minWidth: 2,
+                          background: lane.color ?? "var(--chart-2)",
+                          opacity: lane.muted ? 0.1 : 0.22,
+                        }}
+                        title={formatSweptTooltip(seg, lane)}
+                      />
+                    )
+                  })}
                 {mergeForWidth(lane.ranges, domain, w).map((seg) => {
                   const pos = segmentPosition(seg, domain)
                   return (
