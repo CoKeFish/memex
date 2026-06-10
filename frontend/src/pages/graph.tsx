@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
 import { Boxes, Clock, Hammer, Loader2, Maximize2, Sparkles } from "lucide-react"
 import { toast } from "sonner"
@@ -164,8 +164,14 @@ function GraphCanvas({
   const [hover, setHover] = useState<string | null>(null)
   const lay = useMemo(() => layout(data.nodes, data.edges), [data.nodes, data.edges])
   const [view, setView] = useState<View>(() => fitView(lay.bounds))
-  // Re-encuadra al cambiar el conjunto (filtro/armado), no en cada render.
-  useEffect(() => setView(fitView(lay.bounds)), [lay])
+  // Re-encuadra al cambiar el conjunto (filtro/armado), no en cada render. Ajuste de estado
+  // DURANTE el render (patrón "derivar al cambiar la prop") en vez de un effect: evita el
+  // frame intermedio con el encuadre viejo y el setState-in-effect.
+  const [prevLay, setPrevLay] = useState(lay)
+  if (prevLay !== lay) {
+    setPrevLay(lay)
+    setView(fitView(lay.bounds))
+  }
 
   const focus = selected ?? hover
   const incident = useMemo(() => {

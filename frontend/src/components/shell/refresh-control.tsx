@@ -2,7 +2,16 @@ import { RotateCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { LiveSince } from "@/components/common/time"
-import { REFRESH_OPTIONS, useAutoRefresh, type IntervalSec } from "@/state/auto-refresh"
+import { useAutoRefresh, type IntervalSec } from "@/state/auto-refresh"
+
+// Opciones del selector (vivían en auto-refresh.tsx; acá por ser su único consumidor — y el
+// provider exportaba un no-componente, rompiendo react-refresh/only-export-components).
+const REFRESH_OPTIONS: { value: IntervalSec; label: string }[] = [
+  { value: 0, label: "Manual" },
+  { value: 30, label: "30 s" },
+  { value: 60, label: "1 min" },
+  { value: 300, label: "5 min" },
+]
 
 export function RefreshControl() {
   const { intervalSec, setIntervalSec, refreshNow } = useAutoRefresh()

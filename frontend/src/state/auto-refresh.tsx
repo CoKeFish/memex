@@ -2,13 +2,6 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 
 export type IntervalSec = 0 | 30 | 60 | 300
 
-export const REFRESH_OPTIONS: { value: IntervalSec; label: string }[] = [
-  { value: 0, label: "Manual" },
-  { value: 30, label: "30 s" },
-  { value: 60, label: "1 min" },
-  { value: 300, label: "5 min" },
-]
-
 interface RefreshCtx {
   intervalSec: IntervalSec
   setIntervalSec: (s: IntervalSec) => void
