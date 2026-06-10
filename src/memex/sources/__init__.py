@@ -124,6 +124,20 @@ def supports_date_window(source_type: str) -> bool:
     return source_type in _DATE_WINDOW_TYPES
 
 
+# Tipos cuyo fetch INCREMENTAL puede RECLAMAR como barrido el tiempo [última puesta al día,
+# ahora] en el timeline de cobertura. Hoy solo IMAP: con cursor previo el criteria es `UID n:*`
+# SIN filtro temporal, así que una corrida no truncada deja la fuente al día (el corte por
+# `batch_size` por corrida lo detecta el caller con `posted >= batch_size` y NO reclama).
+# Telegram corta por `batch_size` TOTAL (Telethon) y las redes por `results_limit`, avanzando
+# el cursor igual sin señal de corte → reclamar mentiría.
+_INCREMENTAL_EXHAUSTIVE_TYPES: frozenset[str] = frozenset({"imap"})
+
+
+def incremental_claims_supported(source_type: str) -> bool:
+    """True si una corrida incremental exitosa del tipo puede reclamar barrido (cobertura)."""
+    return source_type in _INCREMENTAL_EXHAUSTIVE_TYPES
+
+
 #: Modos del fetch a demanda (`POST /sources/{id}/fetch`) que cada tipo honra DE VERDAD. La UI
 #: habilita opciones leyendo esto vía `SourceRow.fetch_modes` — nunca hardcodear en el front.
 #: telegram solo incremental (su fetch ignora la ventana); push-only (outlook) no se trae.

@@ -35,6 +35,17 @@ export function domainDays(domain: DayDomain): number {
   return spanDays(domain.min, domain.max)
 }
 
+/** Suma `n` días (negativo resta) a un día "YYYY-MM-DD", en UTC puro. */
+export function addDays(day: string, n: number): string {
+  return new Date(dayMs(day) + n * MS_PER_DAY).toISOString().slice(0, 10)
+}
+
+/** Posición (0..100) del FINAL del día dado sobre el dominio — para marcadores tipo cursor
+ *  ("al día hasta acá"): el último día del dominio cae en 100. */
+export function markerPosition(day: string, domain: DayDomain): number {
+  return Math.min(((dayIndex(day, domain) + 1) / domainDays(domain)) * 100, 100)
+}
+
 /** Posición de un rango como % del dominio: cada día es una celda de igual ancho
  *  (left = idx(start)/N; width = días del rango/N). */
 export function segmentPosition(

@@ -272,6 +272,93 @@ def test_record_swept_range_inserts(seed_source: dict[str, Any]) -> None:
     assert _swept_rows(seed_source["id"]) == [("2026-01-01", "2026-02-01")]
 
 
+# ---- Ventana temporal (since/until) y cursor por lane -------------------------------------------
+
+
+def _seed_checkpoint(source_id: int, cursor: str, updated_at: str) -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO source_checkpoints (source_id, cursor, updated_at)"
+                " VALUES (:s, CAST(:cur AS JSONB), :ts)"
+            ),
+            {"s": source_id, "cur": cursor, "ts": updated_at},
+        )
+
+
+def test_coverage_window_filters_and_fixes_domain(client: Any, seed_source: dict[str, Any]) -> None:
+    _seed_at(
+        seed_source["id"],
+        1,
+        [datetime(2026, m, d, 12, 0, tzinfo=UTC) for m, d in ((6, 1), (6, 15), (7, 10))],
+    )
+    body = client.get("/inbox/coverage?tz=UTC&since=2026-06-01&until=2026-06-30").json()
+    lane = _lane(body, seed_source["id"])
+    assert [r["start"] for r in lane["ranges"]] == ["2026-06-01", "2026-06-15"]
+    assert lane["total"] == 2  # julio queda fuera
+    # El eje ES la ventana pedida, no los extremos de los datos.
+    assert body["domain_min"] == "2026-06-01"
+    assert body["domain_max"] == "2026-06-30"
+
+
+def test_coverage_window_clips_swept(client: Any, seed_source: dict[str, Any]) -> None:
+    _seed_swept(seed_source["id"], 1, [("2026-05-20", "2026-06-10")])
+    lane = _lane(
+        client.get("/inbox/coverage?since=2026-06-01&until=2026-06-30").json(),
+        seed_source["id"],
+    )
+    assert lane["swept"] == [{"start": "2026-06-01", "end": "2026-06-09", "days": 9}]
+
+
+def test_coverage_window_inverted_422(client: Any) -> None:
+    r = client.get("/inbox/coverage?since=2026-06-30&until=2026-06-01")
+    assert r.status_code == 422
+
+
+def test_coverage_window_since_only(client: Any, seed_source: dict[str, Any]) -> None:
+    _seed_at(
+        seed_source["id"],
+        1,
+        [datetime(2026, m, 10, 12, 0, tzinfo=UTC) for m in (3, 6)],
+    )
+    body = client.get("/inbox/coverage?tz=UTC&since=2026-05-01").json()
+    lane = _lane(body, seed_source["id"])
+    assert [r["start"] for r in lane["ranges"]] == ["2026-06-10"]
+    assert body["domain_min"] == "2026-05-01"  # el piso pedido
+    assert body["domain_max"] == "2026-06-10"  # el techo sale de los datos
+
+
+def test_coverage_lane_cursor(client: Any, seed_source: dict[str, Any]) -> None:
+    _seed_checkpoint(
+        seed_source["id"],
+        '{"folders": {"INBOX": {"uidvalidity": 17, "last_uid": 4321}}}',
+        "2026-06-08T15:00:00Z",
+    )
+    body = client.get("/inbox/coverage?tz=UTC").json()
+    lane = _lane(body, seed_source["id"])
+    assert lane["cursor"] is not None
+    assert lane["cursor"]["day"] == "2026-06-08"
+    assert lane["cursor"]["summary"] == "1 carpeta(s) · uid hasta 4321"
+    # El cursor también define dominio (única señal de esta lane).
+    assert body["domain_min"] == "2026-06-08"
+
+    # Ventana que excluye el día del cursor → marcador omitido.
+    windowed = client.get("/inbox/coverage?tz=UTC&since=2026-01-01&until=2026-02-01").json()
+    assert _lane(windowed, seed_source["id"])["cursor"] is None
+
+
+def test_coverage_cursor_tz_day(client: Any, seed_source: dict[str, Any]) -> None:
+    # 02:00Z del 9 de junio == 21:00 del 8 de junio en Bogotá: el día del marcador sigue la tz.
+    _seed_checkpoint(seed_source["id"], '{"folders": {}}', "2026-06-09T02:00:00Z")
+    bog = _lane(client.get("/inbox/coverage?tz=America/Bogota").json(), seed_source["id"])
+    assert bog["cursor"]["day"] == "2026-06-08"
+    utc = _lane(client.get("/inbox/coverage?tz=UTC").json(), seed_source["id"])
+    assert utc["cursor"]["day"] == "2026-06-09"
+
+
+# ---- record_swept_range: guards ------------------------------------------------------------------
+
+
 def test_record_swept_range_skips_incomplete_windows(seed_source: dict[str, Any]) -> None:
     from memex.api.fetch_runner import record_swept_range
 

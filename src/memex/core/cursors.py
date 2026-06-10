@@ -8,8 +8,9 @@ boundary instead of letting them propagate as KeyErrors mid-fetch.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class FolderState(BaseModel):
@@ -90,3 +91,37 @@ class SocialCursor(BaseModel):
     accounts: dict[str, AccountCursor] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid")
+
+
+def summarize_cursor(source_type: str, raw: dict[str, Any]) -> str:
+    """Resumen humano de un cursor crudo (tooltip del marcador en el timeline de cobertura).
+
+    Conoce los shapes tipados de este módulo; un tipo sin cursor conocido o un cursor
+    malformado devuelven "" (el caller muestra el marcador sin detalle, no revienta).
+    """
+    try:
+        if source_type == "imap":
+            imap = ImapCursor.model_validate(raw)
+            if not imap.folders:
+                return ""
+            top_uid = max(f.last_uid for f in imap.folders.values())
+            return f"{len(imap.folders)} carpeta(s) · uid hasta {top_uid}"
+        if source_type == "telegram":
+            tg = TelegramCursor.model_validate(raw)
+            if not tg.chats:
+                return ""
+            top_msg = max(c.last_message_id for c in tg.chats.values())
+            return f"{len(tg.chats)} chat(s) · msg hasta {top_msg}"
+        if source_type in ("instagram", "facebook", "x"):
+            social = SocialCursor.model_validate(raw)
+            if not social.accounts:
+                return ""
+            dates = [
+                a.last_posted_at for a in social.accounts.values() if a.last_posted_at is not None
+            ]
+            if not dates:
+                return f"{len(social.accounts)} cuenta(s)"
+            return f"{len(social.accounts)} cuenta(s) · último post {max(dates).date().isoformat()}"
+    except ValidationError:
+        return ""
+    return ""

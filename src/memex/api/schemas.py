@@ -545,6 +545,19 @@ class CoverageSpan(BaseModel):
     days: int
 
 
+class CoverageCursor(BaseModel):
+    """Posición del cursor incremental de la fuente: hasta cuándo está al día.
+
+    `at` es `source_checkpoints.updated_at` (última vez que el cursor avanzó o se confirmó al
+    día); `day` su día en la tz pedida (posición en el eje); `summary` un resumen humano del
+    cursor crudo ("" si no se pudo resumir).
+    """
+
+    at: datetime
+    day: date
+    summary: str
+
+
 class CoverageLane(BaseModel):
     """Una pista del timeline (hoy: una fuente)."""
 
@@ -557,6 +570,7 @@ class CoverageLane(BaseModel):
     last_day: date | None
     ranges: list[CoverageRange]
     swept: list[CoverageSpan]
+    cursor: CoverageCursor | None = None
 
 
 class CoverageOut(BaseModel):

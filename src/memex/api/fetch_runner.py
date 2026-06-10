@@ -16,8 +16,9 @@ range/last insertan pero no avanzan el cursor incremental (`persist_checkpoint` 
 from __future__ import annotations
 
 from contextlib import suppress
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import Connection, text
@@ -25,6 +26,7 @@ from starlette.concurrency import run_in_threadpool
 
 from memex import sources as source_registry
 from memex.api.inprocess_sink import DryRunSink, InProcessSink
+from memex.core.checkpoint import save_cursor
 from memex.core.observability import ingestion_run, record_apify_runs
 from memex.core.sink import MemexSink
 from memex.core.source import ActorRunReporting, Source, SourceConfigError
@@ -77,6 +79,11 @@ def _persist_actor_reports(
     return float(total) if total is not None else None
 
 
+#: TZ canónica para convertir instantes → días de reclamo incremental (duplicación deliberada de
+#: la `_BUCKET_TZ` del router de inbox; un borde de ±horas es aceptable a granularidad de día).
+_SWEEP_TZ = "America/Bogota"
+
+
 def record_swept_range(
     *,
     user_id: int,
@@ -85,14 +92,17 @@ def record_swept_range(
     until: str | None,
     posted: int,
     limit: int | None,
+    skip_if_covered: bool = False,
 ) -> None:
-    """Registra el rango de fechas BARRIDO por una corrida `range` exitosa (overlay del timeline).
+    """Registra el rango de fechas BARRIDO por una corrida exitosa (overlay del timeline).
 
     Solo ventanas CERRADAS de fechas puras (`since` inclusivo + `until` exclusivo) y COMPLETAS:
     si `posted >= limit` la ventana pudo quedar truncada por el cap → no se reclama (under-claim
     deliberado; los rangos abiertos o con timestamps tampoco se reclaman). Append-only: el
-    solape/dedup lo funde el lector (GET /inbox/coverage). Nunca lanza — perder la marca no debe
-    tumbar una corrida que ya funcionó.
+    solape/dedup lo funde el lector (GET /inbox/coverage). `skip_if_covered` evita filas
+    redundantes cuando el reclamo ya está contenido en uno previo (corridas incrementales
+    repetidas del daemon). Nunca lanza — perder la marca no debe tumbar una corrida que ya
+    funcionó.
     """
     if not since or not until:
         return
@@ -106,6 +116,17 @@ def record_swept_range(
         return
     try:
         with connection() as conn:
+            if skip_if_covered:
+                covered = conn.execute(
+                    text(
+                        "SELECT 1 FROM ingest_swept_ranges "
+                        "WHERE source_id = :sid AND range_start <= :rs AND range_end >= :re "
+                        "LIMIT 1"
+                    ),
+                    {"sid": source_id, "rs": start, "re": end},
+                ).first()
+                if covered:
+                    return
             conn.execute(
                 text(
                     "INSERT INTO ingest_swept_ranges (user_id, source_id, range_start, range_end)"
@@ -120,6 +141,16 @@ def record_swept_range(
             exc_type=type(e).__name__,
             exc_msg=str(e),
         )
+
+
+def _read_checkpoint_state(source_id: int) -> tuple[dict[str, Any], datetime] | None:
+    """Cursor + `updated_at` del checkpoint de la fuente (None si nunca corrió incremental)."""
+    with connection() as conn:
+        row = conn.execute(
+            text("SELECT cursor, updated_at FROM source_checkpoints WHERE source_id = :sid"),
+            {"sid": source_id},
+        ).first()
+    return (dict(row[0]), row[1]) if row else None
 
 
 def _acquire_fetch_lock(source_id: int) -> Connection | None:
@@ -189,7 +220,19 @@ async def run_fetch_window(
                 status_code=409,
                 detail="ya hay una corrida incremental en curso para esta fuente",
             )
+    # Reclamo de barrido incremental (timeline de cobertura): el ancla es la última vez que el
+    # cursor avanzó — las corridas range no lo tocan. Se lee ANTES de correr (el runner lo
+    # reescribe adentro del threadpool). Sin checkpoint previo no se reclama: la primera corrida
+    # siembra solo `since_days`, no el pasado completo.
+    claims_enabled = (
+        mode == "incremental"
+        and not dry_run
+        and source_registry.incremental_claims_supported(source_type)
+    )
+    claim_prev: tuple[dict[str, Any], datetime] | None = None
     try:
+        if claims_enabled:
+            claim_prev = _read_checkpoint_state(source_id)
         # Inyecta los secretos del vault de la cuenta (si hay) bajo el nombre de su env var. Usa la
         # master key del servidor → funciona sin sesión. Fallback a os.environ si no hay.
         with connection() as conn:
@@ -268,8 +311,10 @@ async def run_fetch_window(
                     ingestion_run_id=run.id,
                 )
             stats.api_cost_usd = api_cost
-        # La corrida terminó sin excepción: si fue una ventana de rango cerrada, queda
-        # reclamada como BARRIDA (timeline de cobertura) aunque no haya traído nada.
+        # La corrida terminó sin excepción: queda reclamado el tiempo BARRIDO (timeline de
+        # cobertura) aunque no haya traído nada. range = la ventana pedida; incremental (tipos
+        # exhaustivos con cursor previo) = [última puesta al día, hoy] — así una semana sin
+        # correos también cuenta como ingerida.
         if mode == "range":
             record_swept_range(
                 user_id=user_id,
@@ -279,6 +324,28 @@ async def run_fetch_window(
                 posted=stats.posted,
                 limit=limit,
             )
+        elif claims_enabled and claim_prev is not None:
+            prev_cursor, prev_at = claim_prev
+            sweep_tz = ZoneInfo(_SWEEP_TZ)
+            today = datetime.now(sweep_tz).date()
+            record_swept_range(
+                user_id=user_id,
+                source_id=source_id,
+                since=prev_at.astimezone(sweep_tz).date().isoformat(),
+                until=(today + timedelta(days=1)).isoformat(),
+                posted=stats.posted,
+                # batch_size por corrida (espeja el default de ImapConfig): posted >= eso =
+                # posible truncamiento → el guard de record_swept_range descarta el reclamo.
+                limit=int(cfg.get("batch_size", 50)),
+                skip_if_covered=True,
+            )
+            if stats.posted == 0:
+                # Sin chunks el runner no reescribió el checkpoint: "touch" (mismo cursor,
+                # updated_at=NOW) para que la próxima corrida ancle desde hoy y no re-reclame
+                # un rango creciente. Edge aceptado: una carpeta IMAP nueva en una fuente con
+                # checkpoint arranca en since_days pero el reclamo cubre toda la fuente.
+                with connection() as conn:
+                    save_cursor(conn, source_id, prev_cursor)
         return stats
     finally:
         if lock_conn is not None:

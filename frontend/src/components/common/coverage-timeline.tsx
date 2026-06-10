@@ -4,6 +4,7 @@ import { EmptyState } from "@/components/common/data-state"
 import { MeasuredBox } from "@/components/common/measured-box"
 import {
   axisTicks,
+  markerPosition,
   mergeForWidth,
   segmentPosition,
   type DayDomain,
@@ -32,6 +33,9 @@ export interface CoverageTimelineLane {
   /** Tramos BARRIDOS (reclamados por la ingesta aunque no hayan dejado items): se pintan como
    *  banda tenue bajo los segmentos sólidos. `count` se ignora (pasar 0). */
   swept?: DayRange[]
+  /** Marcador puntual (p. ej. el cursor incremental: "al día hasta acá"): barrita vertical al
+   *  FINAL del día indicado, con su tooltip. */
+  marker?: { day: string; label: string }
 }
 
 function fmtSpan(seg: VisualSegment): string {
@@ -128,6 +132,17 @@ export function CoverageTimeline({
                     />
                   )
                 })}
+                {lane.marker && (
+                  <div
+                    className="absolute inset-y-0.5 w-0.5 rounded bg-foreground/80"
+                    // Al final del día; el clamp evita que la barrita sobresalga del track
+                    // (no hay overflow-hidden en el contenedor).
+                    style={{
+                      left: `min(${markerPosition(lane.marker.day, domain)}%, calc(100% - 2px))`,
+                    }}
+                    title={lane.marker.label}
+                  />
+                )}
               </>
             )}
           </MeasuredBox>

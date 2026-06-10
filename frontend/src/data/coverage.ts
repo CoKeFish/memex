@@ -14,12 +14,19 @@ export interface CoverageRange extends DayRange {
   days: number // días de calendario del tramo (end - start + 1)
 }
 
-/** Tramo BARRIDO por la ingesta (reclamado por un fetch de rango), haya o no mensajes.
- *  Distingue "barrí y estaba vacío" de "nunca lo intenté". */
+/** Tramo BARRIDO por la ingesta (reclamado por un fetch de rango o incremental), haya o no
+ *  mensajes. Distingue "barrí y estaba vacío" de "nunca lo intenté". */
 export interface CoverageSpan {
   start: string // inclusive
   end: string // inclusive
   days: number
+}
+
+/** Posición del cursor incremental de la fuente: hasta cuándo está al día. */
+export interface CoverageCursor {
+  at: string // instante (ISO) de la última puesta al día
+  day: string // su día en la tz pedida (posición en el eje)
+  summary: string // resumen humano del cursor crudo ("" si no se pudo resumir)
 }
 
 export interface CoverageLane {
@@ -32,6 +39,7 @@ export interface CoverageLane {
   lastDay: string | null
   ranges: CoverageRange[]
   swept: CoverageSpan[]
+  cursor: CoverageCursor | null
 }
 
 export interface Coverage {
@@ -44,6 +52,12 @@ export interface Coverage {
 
 // ---- Shape crudo de la API (snake_case) ---------------------------------------------------------
 
+interface CursorApi {
+  at: string
+  day: string
+  summary: string
+}
+
 interface LaneApi {
   id: number
   label: string
@@ -54,6 +68,7 @@ interface LaneApi {
   last_day: string | null
   ranges: CoverageRange[]
   swept: CoverageSpan[]
+  cursor: CursorApi | null
 }
 
 interface CoverageApi {
@@ -78,6 +93,7 @@ export function toCoverage(r: CoverageApi): Coverage {
       lastDay: ln.last_day,
       ranges: ln.ranges,
       swept: ln.swept,
+      cursor: ln.cursor,
     })),
     domainMin: r.domain_min,
     domainMax: r.domain_max,
@@ -87,15 +103,25 @@ export function toCoverage(r: CoverageApi): Coverage {
 }
 
 /** Cobertura de INGESTA (GET /inbox/coverage): qué rangos de fechas de origen ya están guardados,
- *  por fuente. `gapDays` = tolerancia de fusión (días sin items que no rompen un tramo). */
+ *  por fuente. `gapDays` = tolerancia de fusión (días sin items que no rompen un tramo);
+ *  `since`/`until` ("YYYY-MM-DD", inclusivos) acotan la ventana del eje. */
 export async function fetchInboxCoverage(
-  opts: { tz?: string; gapDays?: number; kind?: string; sourceId?: number } = {},
+  opts: {
+    tz?: string
+    gapDays?: number
+    kind?: string
+    sourceId?: number
+    since?: string
+    until?: string
+  } = {},
 ): Promise<Coverage> {
   const qs = new URLSearchParams()
   if (opts.tz) qs.set("tz", opts.tz)
   if (opts.gapDays !== undefined) qs.set("gap_days", String(opts.gapDays))
   if (opts.kind) qs.set("kind", opts.kind)
   if (opts.sourceId !== undefined) qs.set("source_id", String(opts.sourceId))
+  if (opts.since) qs.set("since", opts.since)
+  if (opts.until) qs.set("until", opts.until)
   const q = qs.toString()
   return toCoverage(await apiGet<CoverageApi>(`/inbox/coverage${q ? `?${q}` : ""}`))
 }

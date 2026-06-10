@@ -27,6 +27,7 @@ from memex.api.schemas import (
     SummarizeResponse,
 )
 from memex.classifier.rules import classify
+from memex.core.cursors import summarize_cursor
 from memex.core.feedback import InvalidFeedbackError, get_feedback, record_feedback
 from memex.core.relevance_marks import clear_mark, get_mark, set_mark
 from memex.db import connection
@@ -124,6 +125,22 @@ def _merge_date_spans(spans: list[tuple[date, date]]) -> list[dict[str, Any]]:
     return [{"start": s, "end": e - timedelta(days=1), "days": (e - s).days} for s, e in merged]
 
 
+def _clip_date_spans(
+    spans: list[tuple[date, date]], since: date | None, until: date | None
+) -> list[tuple[date, date]]:
+    """Recorta intervalos `[start, end)` a la ventana [since, until] (inclusiva) pedida."""
+    if since is None and until is None:
+        return spans
+    hi_excl = until + timedelta(days=1) if until is not None else None
+    out: list[tuple[date, date]] = []
+    for s, e in spans:
+        s2 = s if since is None else max(s, since)
+        e2 = e if hi_excl is None else min(e, hi_excl)
+        if e2 > s2:
+            out.append((s2, e2))
+    return out
+
+
 @router.get("", response_model=InboxList)
 async def list_inbox(
     user_id: UserID,
@@ -204,6 +221,8 @@ async def inbox_coverage(
     gap_days: Annotated[int, Query(ge=0, le=365)] = 2,
     source_id: int | None = None,
     kind: Literal["email", "chat", "social", "other"] | None = None,
+    since: date | None = None,
+    until: date | None = None,
 ) -> dict[str, Any]:
     """Rangos de FECHAS DE ORIGEN (`occurred_at`) ya ingeridos, por fuente.
 
@@ -212,11 +231,17 @@ async def inbox_coverage(
     salen como lane vacía (eso también es información: "de acá no hay nada ingerido").
 
     Además cada lane trae sus tramos BARRIDOS (`swept`): rangos de fechas que un fetch de rango
-    ya recorrió aunque no haya dejado mensajes — distingue "barrí y estaba vacío" de "nunca lo
-    intenté". Fuentes: `ingest_swept_ranges` (bitácora durable) + el avance del backfill_job
-    vigente (`[range_start, frontier)`, que cubre lo barrido antes de existir la bitácora).
+    o incremental ya recorrió aunque no haya dejado mensajes — distingue "barrí y estaba vacío"
+    de "nunca lo intenté". Fuentes: `ingest_swept_ranges` (bitácora durable) + el avance del
+    backfill_job vigente (`[range_start, frontier)`, que cubre lo barrido antes de la bitácora).
+
+    `since`/`until` (inclusivos) acotan la ventana del eje: filtran buckets, recortan barridos
+    y fijan el dominio EXACTO a la ventana pedida. `cursor` por lane = posición del checkpoint
+    incremental ("al día hasta acá"), omitido si cae fuera de la ventana.
     """
     resolved_tz = _resolve_tz(tz)
+    if since is not None and until is not None and until < since:
+        raise HTTPException(status_code=422, detail="until no puede ser anterior a since")
 
     src_where = ["user_id = :uid"]
     bucket_where = ["i.user_id = :uid"]
@@ -225,6 +250,13 @@ async def inbox_coverage(
         src_where.append("id = :sid")
         bucket_where.append("i.source_id = :sid")
         params["sid"] = source_id
+    bucket_params: dict[str, Any] = {**params, "tz": resolved_tz}
+    if since is not None:
+        bucket_where.append("(i.occurred_at AT TIME ZONE :tz)::date >= :since")
+        bucket_params["since"] = since
+    if until is not None:
+        bucket_where.append("(i.occurred_at AT TIME ZONE :tz)::date <= :until")
+        bucket_params["until"] = until
 
     with connection() as conn:
         src_rows = (
@@ -251,7 +283,7 @@ async def inbox_coverage(
                 ORDER BY i.source_id, day
                 """
             ),
-            {**params, "tz": resolved_tz},
+            bucket_params,
         ).all()
         # Tramos barridos: la bitácora durable + el avance del job vigente (frontera ya recorrida).
         sweep_where = ["user_id = :uid"] + (["source_id = :sid"] if source_id is not None else [])
@@ -269,6 +301,18 @@ async def inbox_coverage(
             ),
             params,
         ).all()
+        # Cursores incrementales (checkpoints): no tienen user_id propio → JOIN a sources.
+        cursor_where = ["s.user_id = :uid"] + (
+            ["sc.source_id = :sid"] if source_id is not None else []
+        )
+        cursor_rows = conn.execute(
+            text(
+                "SELECT sc.source_id, sc.cursor, sc.updated_at, s.type "
+                "FROM source_checkpoints sc JOIN sources s ON s.id = sc.source_id "
+                f"WHERE {' AND '.join(cursor_where)}"
+            ),
+            params,
+        ).all()
 
     buckets_by_source: dict[int, list[tuple[date, int]]] = {}
     for sid, day, n in bucket_rows:
@@ -276,6 +320,16 @@ async def inbox_coverage(
     spans_by_source: dict[int, list[tuple[date, date]]] = {}
     for sid, start, end in [*swept_rows, *job_rows]:
         spans_by_source.setdefault(sid, []).append((start, end))
+    cursors_by_source: dict[int, dict[str, Any]] = {}
+    for sid, cur, updated_at, src_type in cursor_rows:
+        cur_day = updated_at.astimezone(ZoneInfo(resolved_tz)).date()
+        if (since is not None and cur_day < since) or (until is not None and cur_day > until):
+            continue  # marcador fuera de la ventana pedida: se omite
+        cursors_by_source[sid] = {
+            "at": updated_at,
+            "day": cur_day,
+            "summary": summarize_cursor(str(src_type), dict(cur)),
+        }
 
     lanes: list[dict[str, Any]] = []
     domain_lo: list[date] = []
@@ -288,7 +342,10 @@ async def inbox_coverage(
         if kind is not None and src_kind != kind:
             continue
         ranges = _merge_day_buckets(buckets_by_source.get(src["id"], []), gap_days)
-        swept = _merge_date_spans(spans_by_source.get(src["id"], []))
+        swept = _merge_date_spans(
+            _clip_date_spans(spans_by_source.get(src["id"], []), since, until)
+        )
+        cursor_info = cursors_by_source.get(src["id"])
         lanes.append(
             {
                 "id": src["id"],
@@ -300,16 +357,22 @@ async def inbox_coverage(
                 "last_day": ranges[-1]["end"] if ranges else None,
                 "ranges": ranges,
                 "swept": swept,
+                "cursor": cursor_info,
             }
         )
-        # El dominio del eje abarca items Y barridos (un barrido vacío también es cobertura).
+        # El dominio del eje abarca items, barridos y cursor (todo es cobertura/estado).
         domain_lo += [r["start"] for r in (ranges[:1] + swept[:1])]
         domain_hi += [r["end"] for r in (ranges[-1:] + swept[-1:])]
+        if cursor_info is not None:
+            domain_lo.append(cursor_info["day"])
+            domain_hi.append(cursor_info["day"])
 
     return {
         "lanes": lanes,
-        "domain_min": min(domain_lo) if domain_lo else None,
-        "domain_max": max(domain_hi) if domain_hi else None,
+        # Con ventana pedida el eje ES la ventana (aunque esté vacía); sin ella, los extremos
+        # de los datos. Lado pedido a medias: el faltante sale de los datos (o queda None).
+        "domain_min": since if since is not None else (min(domain_lo) if domain_lo else None),
+        "domain_max": until if until is not None else (max(domain_hi) if domain_hi else None),
         "tz": resolved_tz,
         "gap_days": gap_days,
     }

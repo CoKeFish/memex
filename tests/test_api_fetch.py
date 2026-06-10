@@ -8,7 +8,7 @@ el checkpoint y la corrida real SÍ, dedup contra el inbox real, y los 422/404 d
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -375,3 +375,140 @@ def test_fetch_social_range_is_allowed(client: Any, monkeypatch: pytest.MonkeyPa
         f"/sources/{sid}/fetch", params={"mode": "range", "since": "2026-01-01", "dry_run": True}
     )
     assert r.status_code == 200
+
+
+# --- Reclamo de barrido incremental (timeline de cobertura) --------------------------------
+# Una corrida incremental exitosa y no truncada de un tipo exhaustivo (imap) reclama
+# [última puesta al día, hoy] en ingest_swept_ranges; el ancla es source_checkpoints.updated_at.
+
+
+def _seed_checkpoint(source_id: int, updated_at: str) -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO source_checkpoints (source_id, cursor, updated_at)"
+                " VALUES (:s, CAST(:cur AS JSONB), :ts)"
+            ),
+            {"s": source_id, "cur": '{"seen": []}', "ts": updated_at},
+        )
+
+
+def _checkpoint_updated_at(source_id: int) -> Any:
+    with connection() as c:
+        return c.execute(
+            text("SELECT updated_at FROM source_checkpoints WHERE source_id = :sid"),
+            {"sid": source_id},
+        ).scalar()
+
+
+def _swept_rows(source_id: int) -> list[tuple[str, str]]:
+    with connection() as c:
+        rows = c.execute(
+            text(
+                "SELECT range_start, range_end FROM ingest_swept_ranges "
+                "WHERE source_id = :s ORDER BY range_start, id"
+            ),
+            {"s": source_id},
+        ).all()
+    return [(str(r[0]), str(r[1])) for r in rows]
+
+
+def _today_sweep_excl() -> str:
+    """`hoy + 1` en la TZ de reclamo del runner (espeja _SWEEP_TZ = America/Bogota)."""
+    from zoneinfo import ZoneInfo
+
+    from memex.api.fetch_runner import _SWEEP_TZ
+
+    return (datetime.now(ZoneInfo(_SWEEP_TZ)).date() + timedelta(days=1)).isoformat()
+
+
+def test_incremental_with_checkpoint_claims_swept(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    # 12:00Z del 1 de junio = 07:00 en Bogotá → ancla 2026-06-01.
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a"])
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    assert _swept_rows(sid) == [("2026-06-01", _today_sweep_excl())]
+
+
+def test_incremental_without_checkpoint_claims_nothing(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    # Primera corrida (siembra solo since_days): no reclama el pasado.
+    sid = seed_source["id"]
+    patch_source(["a"])
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    assert _swept_rows(sid) == []
+
+
+def test_incremental_dry_run_claims_nothing(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a"])
+    assert client.post(f"/sources/{sid}/fetch", params={"dry_run": True}).status_code == 200
+    assert _swept_rows(sid) == []
+
+
+def test_incremental_non_exhaustive_type_claims_nothing(client: Any, patch_source: Any) -> None:
+    # Telegram trunca por batch_size total avanzando el cursor → no puede reclamar.
+    with connection() as c:
+        sid = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (1, 'tg-claims', 'telegram') RETURNING id"
+            )
+        ).scalar()
+    assert isinstance(sid, int)
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a"])
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    assert _swept_rows(sid) == []
+
+
+def test_incremental_truncated_run_claims_nothing(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    # posted >= batch_size → la corrida pudo quedar truncada: no se reclama.
+    sid = seed_source["id"]
+    with connection() as c:
+        c.execute(
+            text("UPDATE sources SET config = '{\"batch_size\": 2}'::jsonb WHERE id = :sid"),
+            {"sid": sid},
+        )
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a", "b"])
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    assert _swept_rows(sid) == []
+
+
+def test_incremental_repeat_run_does_not_duplicate_claim(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a"])
+    client.post(f"/sources/{sid}/fetch")
+    # Segunda corrida del día: su reclamo [hoy, hoy+1) ya está contenido → skip_if_covered.
+    patch_source(["b"])
+    client.post(f"/sources/{sid}/fetch")
+    assert len(_swept_rows(sid)) == 1
+
+
+def test_incremental_empty_run_claims_and_touches_checkpoint(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    before = _checkpoint_updated_at(sid)
+    patch_source([])  # corrida vacía: nada nuevo en el buzón
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    # Reclama igual (vacío también es cobertura)...
+    assert _swept_rows(sid) == [("2026-06-01", _today_sweep_excl())]
+    # ...y "toca" el checkpoint para que la próxima corrida ancle desde hoy.
+    after = _checkpoint_updated_at(sid)
+    assert after > before
+    assert _checkpoint(sid) == {"seen": []}  # el cursor en sí no cambió

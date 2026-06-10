@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest"
-import { axisTicks, domainDays, mergeForWidth, segmentPosition } from "./coverage"
+import {
+  addDays,
+  axisTicks,
+  domainDays,
+  markerPosition,
+  mergeForWidth,
+  segmentPosition,
+} from "./coverage"
 
 const D = (min: string, max: string) => ({ min, max })
 
@@ -9,6 +16,31 @@ describe("domainDays", () => {
   })
   it("min == max → 1", () => {
     expect(domainDays(D("2026-06-01", "2026-06-01"))).toBe(1)
+  })
+})
+
+describe("addDays", () => {
+  it("suma y resta cruzando mes/año", () => {
+    expect(addDays("2026-06-10", -90)).toBe("2026-03-12")
+    expect(addDays("2026-01-01", -1)).toBe("2025-12-31")
+    expect(addDays("2026-02-27", 2)).toBe("2026-03-01")
+    expect(addDays("2026-06-10", 0)).toBe("2026-06-10")
+  })
+})
+
+describe("markerPosition", () => {
+  const dom = D("2026-06-01", "2026-06-10") // 10 días
+
+  it("marca el FINAL del día (día 5 de 10 → 50%)", () => {
+    expect(markerPosition("2026-06-05", dom)).toBe(50)
+  })
+
+  it("último día del dominio → 100", () => {
+    expect(markerPosition("2026-06-10", dom)).toBe(100)
+  })
+
+  it("nunca pasa de 100", () => {
+    expect(markerPosition("2026-06-25", dom)).toBe(100)
   })
 })
 
