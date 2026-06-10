@@ -344,6 +344,32 @@ export interface LotAdvanceStatus {
   window: { startIdx: number; endIdx: number } | null
 }
 
+/** ¿El request del form coincide con la config CONGELADA del lote? La UI avisa cuando divergen:
+ * editar el form no toca el lote (sigue con su snapshot); solo «Reconfigurar lote» lo pisa.
+ * Etapas se comparan como conjunto (el backend las reordena a STAGE_ORDER al crear). */
+export function runRequestMatchesLot(
+  req: ProcessingRunRequest,
+  lot: Pick<LotState, "stages" | "filters" | "force">,
+): boolean {
+  const f = lot.filters as {
+    source_id?: number | null
+    since?: string | null
+    until?: string | null
+    limit?: number | null
+    only?: string | null
+  }
+  const sameStages = [...req.stages].sort().join(",") === [...lot.stages].sort().join(",")
+  return (
+    sameStages &&
+    (req.sourceId ?? null) === (f.source_id ?? null) &&
+    (req.since ?? null) === (f.since ?? null) &&
+    (req.until ?? null) === (f.until ?? null) &&
+    (req.limit ?? null) === (f.limit ?? null) &&
+    (req.only ?? null) === (f.only ?? null) &&
+    (req.force ?? false) === lot.force
+  )
+}
+
 interface LotWindowApi {
   start_idx: number
   end_idx: number

@@ -5,7 +5,7 @@
 // recientes» (compartida entre modos) cierra el panel.
 
 import { useEffect, useState } from "react"
-import { Check, FlaskConical, Layers, Loader2, Play } from "lucide-react"
+import { Check, FlaskConical, Layers, Loader2, Play, TriangleAlert } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api"
@@ -40,6 +40,7 @@ import {
   type ProcessingRun,
   type ProcessingStage,
   runProcessing,
+  runRequestMatchesLot,
 } from "@/data"
 import type { Source } from "@/types/domain"
 import { DefaultsEditor, LotSection } from "./lot-control"
@@ -282,6 +283,17 @@ export function ManualRunPanel() {
       )}
     </div>
   )
+  // El form cambió respecto a la config congelada del lote: avisar que el lote NO lo sigue.
+  const lotDiverges = lot != null && !runRequestMatchesLot(buildReq(), lot)
+  const divergenceNotice = lotDiverges && (
+    <p className="flex items-start gap-1.5 rounded-md border border-status-review/30 bg-status-review/5 px-3 py-2 text-xs text-status-review">
+      <TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
+      <span>
+        El form de arriba no coincide con la config congelada del lote — las ventanas siguen
+        corriendo con la del lote. «Reconfigurar lote» la reemplaza (resetea frontera e historial).
+      </span>
+    </p>
+  )
 
   return (
     <Panel>
@@ -294,7 +306,10 @@ export function ManualRunPanel() {
         }
       />
       <PanelBody className="space-y-3">
-        <Field label="Etapas">
+        {/* NO usar <Field> acá: un <label> que envuelve botones le regala todo el texto del grupo
+            al nombre accesible del primer botón. Grupo plano con su eyebrow como texto. */}
+        <div role="group" aria-label="Etapas">
+          <span className="eyebrow mb-1 block">Etapas</span>
           <div className="flex flex-wrap gap-2">
             {PROCESSING_STAGES.map((s) => (
               <button
@@ -322,7 +337,7 @@ export function ManualRunPanel() {
               </button>
             ))}
           </div>
-        </Field>
+        </div>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Fuente">
@@ -488,6 +503,7 @@ export function ManualRunPanel() {
               {hints}
             </div>
             {dryBox}
+            {divergenceNotice}
             {lot ? (
               <LotSection
                 lot={lot}
