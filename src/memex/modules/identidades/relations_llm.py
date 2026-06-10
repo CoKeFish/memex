@@ -41,6 +41,7 @@ from memex.logging import get_logger
 from memex.modules.identidades.prompt import IDENTIDADES_COOCCURRENCE_SYSTEM_PROMPT
 from memex.relations.deterministic import DEFAULT_COOCCURRENCE_CAP
 from memex.relations.edges import PRODUCER_LLM, STATUS_CONFIRMED, Ref, propose_edge
+from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 _log = get_logger("memex.modules.identidades.relations_llm")
 
@@ -64,7 +65,7 @@ class MentionedIdentity:
     """Una identidad mencionada en un correo, con el contexto que el LLM ve."""
 
     id: int
-    kind: str  # 'persona' | 'organizacion'
+    kind: str  # 'persona' | 'organizacion' | 'producto'
     display_name: str
     evidence: str
 
@@ -83,8 +84,8 @@ class CooccurrenceStats:
 
 
 def _slug(kind: str) -> str:
-    """Slug de grafo del vértice de identidad (igual que en `deterministic.vertex_inbox_ids`)."""
-    return "identidades:person" if kind == "persona" else "identidades:org"
+    """Slug de grafo del vértice de identidad (mapa único en `relations.vertices`)."""
+    return IDENTITY_SLUG_BY_KIND[kind]
 
 
 # --- carga (sin LLM) --------------------------------------------------------------- #

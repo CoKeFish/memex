@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from memex.modules.contract import ExtractionItem
-from memex.modules.identidades.schema import IdentityItem
+from memex.modules.identidades.schema import IDENTITY_KINDS, IdentityItem
 
 
 def test_minimal_valid() -> None:
@@ -29,6 +29,16 @@ def test_extra_forbidden() -> None:
 def test_kind_out_of_list_becomes_unknown() -> None:
     it = IdentityItem.model_validate({"source_inbox_ids": [1], "name": "X", "kind": "empresa"})
     assert it.kind == "unknown"
+
+
+def test_kinds_sin_agente() -> None:
+    assert IDENTITY_KINDS == ("persona", "organizacion", "producto", "unknown")
+
+
+def test_kind_agente_legado_se_vuelve_producto() -> None:
+    # 'agente' salió de la taxonomía (0057); una salida LLM rancia pliega a producto, no a unknown.
+    it = IdentityItem.model_validate({"source_inbox_ids": [1], "name": "Claude", "kind": "agente"})
+    assert it.kind == "producto"
 
 
 def test_kind_valid_lowercased() -> None:

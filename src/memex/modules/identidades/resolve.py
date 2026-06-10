@@ -1,4 +1,5 @@
-"""Resolución DETERMINISTA de una mención a una identidad canónica (persona u organización).
+"""Resolución DETERMINISTA de una mención a una identidad canónica (persona, organización o
+producto).
 
 Señales FUERTES de la MENCIÓN MISMA, en orden de prioridad (sin LLM; el difuso y el desempate LLM
 viven en `fuzzy.py` / `dedup_llm.py`). El remitente del mensaje NO se usa como señal: que el correo
@@ -28,6 +29,7 @@ from memex.modules.identidades.schema import IdentityItem
 #: Discriminador de identidad (espejo del CHECK `kind` en mod_identidades).
 KIND_PERSONA = "persona"
 KIND_ORG = "organizacion"
+KIND_PRODUCTO = "producto"
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,7 @@ class KnownIdentity:
     """Una identidad conocida, reducida a las llaves de match (nombre, alias, identificadores)."""
 
     id: int
-    kind: str  # 'persona' | 'organizacion'
+    kind: str  # 'persona' | 'organizacion' | 'producto'
     display_name: str
     aliases: Sequence[str] = ()
     identifiers: Sequence[KnownIdentifier] = field(default_factory=tuple)
@@ -54,7 +56,7 @@ class KnownIdentity:
 class Resolution:
     """Resultado de atar una mención a una identidad canónica (o no)."""
 
-    kind: str | None  # 'persona' | 'organizacion' | None
+    kind: str | None  # 'persona' | 'organizacion' | 'producto' | None
     identity_id: int | None
     #: email/domain/handle/exact_name/alias/sender_email/fuzzy/llm/created/unresolved
     method: str

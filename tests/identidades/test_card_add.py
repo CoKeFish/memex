@@ -139,6 +139,26 @@ def test_add_org_requires_persona(capsys: pytest.CaptureFixture[str]) -> None:
     assert "persona" in capsys.readouterr().err
 
 
+def test_add_producto(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = _add("--name", "Steam", "--kind", "producto", "--json")
+    assert rc == 0
+    row = _last_json(capsys.readouterr().out)
+    assert row["kind"] == "producto"
+    assert row["method"] == "created"
+    with connection() as c:
+        n = c.execute(
+            text("SELECT count(*) FROM mod_identidades WHERE user_id = 1 AND kind = 'producto'")
+        ).scalar_one()
+    assert n == 1
+
+
+def test_add_producto_con_org_rechazado(capsys: pytest.CaptureFixture[str]) -> None:
+    # la afiliación sigue siendo persona↔organización; un producto con --org se rechaza igual
+    rc = _add("--name", "Steam", "--kind", "producto", "--org", "Valve")
+    assert rc == 1
+    assert "persona" in capsys.readouterr().err
+
+
 def test_help_lists_add(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["help"]) == 0
     out = capsys.readouterr().out

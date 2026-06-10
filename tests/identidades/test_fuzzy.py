@@ -15,7 +15,7 @@ def _seed(conn: Any) -> None:
         text(
             "INSERT INTO mod_identidades (user_id, kind, display_name) VALUES "
             "(1,'persona','Ada Lovelace'),(1,'organizacion','Acme S.A.S.'),"
-            "(1,'organizacion','Globex')"
+            "(1,'organizacion','Globex'),(1,'producto','Hearthstone')"
         )
     )
 
@@ -43,6 +43,19 @@ def test_kind_scoped(conn: Any) -> None:
     _seed(conn)
     # 'Globex' es una org; buscarlo como persona no debe traerlo
     assert find_fuzzy_candidates(conn, 1, kind="persona", probe="Globex") == []
+
+
+def test_producto_matches_by_org_core(conn: Any) -> None:
+    _seed(conn)
+    # los productos matchean por org_core (todo kind != persona usa esa columna)
+    cands = find_fuzzy_candidates(conn, 1, kind="producto", probe="Hearthstonee")
+    assert cands and cands[0].display_name == "Hearthstone"
+
+
+def test_producto_scoped_no_cruza_a_org(conn: Any) -> None:
+    _seed(conn)
+    # 'Globex' es org: el difuso de producto NO la trae (producto solo matchea producto)
+    assert find_fuzzy_candidates(conn, 1, kind="producto", probe="Globex") == []
 
 
 def test_empty_probe(conn: Any) -> None:

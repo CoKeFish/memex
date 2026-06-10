@@ -1,8 +1,8 @@
 """Prompt de extracción de identidades. El orquestador arma el bloque de mensajes (JSON con `id`
 por mensaje) y usa esto como system; la respuesta se parsea con `parse_items`.
 
-Una identidad = una PERSONA (un contacto) o una ORGANIZACIÓN / PRODUCTO / AGENTE (empresa, marca,
-herramienta, IA — p. ej. Unity, Claude). `kind` se elige de una lista cerrada.
+Una identidad = una PERSONA (un contacto), una ORGANIZACIÓN (empresa, institución) o un PRODUCTO
+(marca, app, herramienta, IA — p. ej. Unity, Claude). `kind` se elige de una lista cerrada.
 """
 
 from __future__ import annotations
@@ -14,13 +14,13 @@ _KINDS = ", ".join(IDENTITY_KINDS)
 IDENTIDADES_SYSTEM_PROMPT = (
     "Sos un extractor de IDENTIDADES mencionadas en mensajes personales (chats, correos, posts)\n"
     "en español. Una identidad es una PERSONA (un contacto, alguien con quien la persona\n"
-    "interactúa) o una ORGANIZACIÓN / PRODUCTO / AGENTE: empresa, marca, herramienta o IA\n"
-    "(p. ej. Unity, Claude, Anthropic, una universidad).\n"
+    "interactúa), una ORGANIZACIÓN (empresa, institución, universidad — p. ej. Anthropic, Valve)\n"
+    "o un PRODUCTO: marca, app, plataforma, herramienta o IA (p. ej. Unity, Claude, Steam).\n"
     "Te paso una lista de mensajes; cada uno tiene un campo `id` numérico.\n\n"
     "Reglas estrictas:\n"
     "- Para CADA identidad indicá `source_inbox_ids`: los `id` EXACTOS de los mensajes\n"
     "  donde aparece (normalmente uno).\n"
-    "- `name`: el nombre tal como aparece (persona u organización/producto).\n"
+    "- `name`: el nombre tal como aparece (persona, organización o producto).\n"
     f"- `kind`: UNO de esta lista cerrada: {_KINDS}. Usá 'unknown' si no podés decidir.\n"
     "- `email`: el email de la identidad si aparece; si no, null.\n"
     "- `handle`: usuario/handle social (@...) si aparece; si no, null.\n"
@@ -45,15 +45,15 @@ IDENTIDADES_SYSTEM_PROMPT = (
 #: SESGO A COEXISTIR: ante la duda NO son la misma (un falso "no" deja dos copias —recuperable—;
 #: un falso "sí" pierde una identidad). Se le pasan nombre, alias e identificadores de cada lado.
 IDENTIDADES_DEDUP_SYSTEM_PROMPT = (
-    "Sos un desambiguador de IDENTIDADES (persona u organización). Te paso dos entradas (A y B)\n"
-    "de un directorio, cada una con tipo, nombre, alias e identificadores (emails, handles,\n"
-    "dominios). Decidí si A y B son la MISMA identidad del mundo real.\n\n"
+    "Sos un desambiguador de IDENTIDADES (persona, organización o producto). Te paso dos\n"
+    "entradas (A y B) de un directorio, cada una con tipo, nombre, alias e identificadores\n"
+    "(emails, handles, dominios). Decidí si A y B son la MISMA identidad del mundo real.\n\n"
     "Reglas:\n"
     "- SESGO A COEXISTIR: ante la duda, NO son la misma. Solo decí que SÍ si hay evidencia clara\n"
     "  (mismo email/handle/dominio, o el mismo nombre con variantes obvias de la MISMA entidad).\n"
     "- Nombres parecidos pero de entidades distintas (homónimos, dos personas con igual nombre,\n"
     "  dos empresas distintas) → NO son la misma.\n"
-    "- Persona y organización NUNCA son la misma identidad.\n\n"
+    "- Identidades de TIPO distinto (persona/organización/producto) NUNCA son la misma.\n\n"
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
     '{"same": <true|false>, "confidence": <0..1>, "rationale": "<motivo breve>"}'
 )
@@ -97,9 +97,10 @@ IDENTIDADES_HIERARCHY_SYSTEM_PROMPT = (
 #: (firmas, pies, listas). Solo aplica al overflow (correos que el paso determinista descarta por
 #: el tope de fan-out): ahí el todos-contra-todos sería ruido, el LLM filtra. SESGO A PRECISIÓN.
 IDENTIDADES_COOCCURRENCE_SYSTEM_PROMPT = (
-    "Sos un analista de RELACIONES entre identidades (personas y organizaciones) dentro de UN\n"
-    "mismo mensaje (correo/chat/post). Te paso las identidades mencionadas en ESE mensaje, cada\n"
-    "una con un `id` numérico, su tipo, su nombre y un fragmento de evidencia de dónde aparece.\n"
+    "Sos un analista de RELACIONES entre identidades (personas, organizaciones y productos)\n"
+    "dentro de UN mismo mensaje (correo/chat/post). Te paso las identidades mencionadas en ESE\n"
+    "mensaje, cada una con un `id` numérico, su tipo, su nombre y un fragmento de evidencia de\n"
+    "dónde aparece.\n"
     "El mensaje menciona MUCHAS identidades; tu tarea es decidir qué PARES están genuinamente\n"
     "relacionados en el CONTEXTO de este mensaje (trabajan juntos, una pertenece a la otra, se\n"
     "co-organizan, participan del mismo asunto) e IGNORAR las identidades de RUIDO (firmas, pies\n"

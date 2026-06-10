@@ -70,7 +70,7 @@ bienestar (salud y bienestar):
 finance (gastos/ingresos):
   memex finance register       registra una transacción
 
-identidad (directorio de personas/organizaciones):
+identidad (directorio de personas/organizaciones/productos):
   memex identidad add          registra/resuelve una tarjeta de contacto (no duplica)
 
 evento multi-hecho (una factura = varios hechos del MISMO evento):

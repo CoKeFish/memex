@@ -58,7 +58,8 @@ def _emit_json(obj: Any) -> None:
     print(_safe(json.dumps(obj, default=str, ensure_ascii=False)))
 
 
-_HELP = """memex-identidades — directorio de personas y organizaciones (resolución determinista).
+_HELP = """memex-identidades — directorio de personas, organizaciones y productos (resolución
+determinista).
 
 Comandos del agente:
   add          registra/resuelve una tarjeta de contacto (resolve-or-create, no duplica)
@@ -68,7 +69,7 @@ Mantenimiento (no del agente; usar 'memex-identidades' directo, no 'memex identi
   sync · add-account · accounts · interest · merge · candidates
 
 add — desde una tarjeta de contacto / vCard (la lee el agente, no memex):
-  memex-identidades add --name "<nombre>" --kind <persona|organizacion> [--email <e>]
+  memex-identidades add --name "<nombre>" --kind <persona|organizacion|producto> [--email <e>]
       [--phone <t>] [--handle <@>] [--org "<empresa>"] [--role "<rol>"] [--json]
   - resuelve contra el directorio (señales fuertes + difuso) y crea si no existe; idempotente.
   - --org (solo personas) teje la afiliación persona↔organización.
@@ -83,9 +84,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     add_id = sub.add_parser("add", help="Registra/resuelve una identidad desde una tarjeta.")
     add_id.add_argument("--user", type=int, default=1, help="User id (default 1).")
-    add_id.add_argument("--name", required=True, help="Nombre de la persona u organización.")
     add_id.add_argument(
-        "--kind", required=True, choices=["persona", "organizacion"], help="Tipo de identidad."
+        "--name", required=True, help="Nombre de la persona, organización o producto."
+    )
+    add_id.add_argument(
+        "--kind",
+        required=True,
+        choices=["persona", "organizacion", "producto"],
+        help="Tipo de identidad.",
     )
     add_id.add_argument("--email", help="Email de contacto.")
     add_id.add_argument("--phone", help="Teléfono de contacto.")
@@ -277,10 +283,13 @@ def _cmd_interest_add(args: argparse.Namespace) -> int:
     """Upsert por nombre normalizado (no hay UNIQUE de negocio en mod_identidades): busca la org del
     user por `name_norm`; actualiza o inserta; los dominios van a identificadores."""
     with connection() as conn:
+        # El lookup admite productos (una entidad ya reclasificada actualiza su interés en vez de
+        # duplicarse como org); el INSERT de abajo sigue creando organizaciones.
         row = conn.execute(
             text(
                 "SELECT id FROM mod_identidades "
-                "WHERE user_id = :u AND kind = 'organizacion' AND name_norm = memex_norm(:n)"
+                "WHERE user_id = :u AND kind IN ('organizacion','producto') "
+                "AND name_norm = memex_norm(:n)"
             ),
             {"u": args.user, "n": args.name},
         ).first()
@@ -326,7 +335,7 @@ def _cmd_interest_add(args: argparse.Namespace) -> int:
                 ),
                 {"u": args.user, "id": org_id, "v": d, "vn": norm_identifier("domain", d)},
             )
-    _say(f"\nEn la lista de interés: id={org_id} {args.name!r} (organizacion).\n")
+    _say(f"\nEn la lista de interés: id={org_id} {args.name!r}.\n")
     return 0
 
 
@@ -340,7 +349,8 @@ def _cmd_interest_list(args: argparse.Namespace) -> int:
                            (SELECT array_agg(value) FROM mod_identidades_identifiers
                             WHERE identity_id = mi.id AND kind = 'domain') AS domains
                     FROM mod_identidades mi
-                    WHERE mi.user_id = :uid AND mi.kind = 'organizacion' AND mi.interest
+                    WHERE mi.user_id = :uid AND mi.kind IN ('organizacion','producto')
+                      AND mi.interest
                     ORDER BY mi.display_name
                     """
                 ),

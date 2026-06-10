@@ -20,7 +20,8 @@ identidad, esta primitiva las colapsa en la superviviente y borra la absorbida, 
      `parent_identity_id`, sin crear self-parent);
   7. deja auditoría en `metadata.merged_from` y borra la absorbida.
 
-Solo funde identidades del MISMO `user_id` y MISMO `kind` (persona con persona, org con org).
+Solo funde identidades del MISMO `user_id` y MISMO `kind` (persona con persona, org con org,
+producto con producto).
 Atómica sobre `conn` (no abre tx propia). Devuelve True si fundió (False si algún id no existe).
 """
 
@@ -30,11 +31,9 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
+from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 _log = get_logger("memex.modules.identidades.merge")
-
-#: slug del grafo por kind (espejo de relations/vertices.NODE_SOURCES).
-_SLUG_BY_KIND = {"persona": "identidades:person", "organizacion": "identidades:org"}
 
 
 def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_id: int) -> bool:
@@ -59,7 +58,7 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
     if by_id[survivor_id]["kind"] != by_id[absorbed_id]["kind"]:
         _log.warning("identidades.merge.kind_mismatch", survivor=survivor_id, absorbed=absorbed_id)
         return False
-    slug = _SLUG_BY_KIND[str(by_id[survivor_id]["kind"])]
+    slug = IDENTITY_SLUG_BY_KIND[str(by_id[survivor_id]["kind"])]
     p = {"u": user_id, "surv": survivor_id, "absb": absorbed_id, "slug": slug}
 
     # 1. identificadores (mover sin duplicar) + sedes.
