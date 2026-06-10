@@ -428,6 +428,7 @@ def _stats_response(stats: RunStats, *, dry_run: bool) -> dict[str, Any]:
         "filtered": stats.filtered,
         "dry_run": dry_run,
         "ms_elapsed": stats.ms_elapsed,
+        "api_cost_usd": stats.api_cost_usd,
     }
 
 

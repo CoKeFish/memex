@@ -15,7 +15,7 @@ import pytest
 from pydantic import BaseModel
 from sqlalchemy import text
 
-from memex.core.source import SourceRecord
+from memex.core.source import ActorRunReport, SourceRecord
 from memex.db import connection
 
 
@@ -223,3 +223,126 @@ def test_fetch_accounts_param_rejects_unknown_handle(client: Any) -> None:
 def test_fetch_accounts_param_rejects_non_social(client: Any, seed_source: dict[str, Any]) -> None:
     r = client.post(f"/sources/{seed_source['id']}/fetch", params={"accounts": ["nasa"]})
     assert r.status_code == 422
+
+
+# --- Trazabilidad de costos (apify_runs / api_cost_usd) -------------------------------------
+
+
+class _ReportingStub(_StubSource):
+    """Stub social-like: además del fetch, expone reports de runs de actor (ActorRunReporting)."""
+
+    def __init__(
+        self,
+        records: list[SourceRecord],
+        reports: list[ActorRunReport],
+        *,
+        explode: bool = False,
+    ) -> None:
+        super().__init__(records)
+        self._reports = reports
+        self._explode = explode
+
+    def fetch(self, checkpoint: StubCursor) -> Iterable[SourceRecord]:
+        yield from self._records
+        if self._explode:
+            raise RuntimeError("boom post-scrape")
+
+    def pop_run_reports(self) -> list[ActorRunReport]:
+        out, self._reports = self._reports, []
+        return out
+
+
+def _cost_report(cost: float | None, *, account: str = "nasa") -> ActorRunReport:
+    return ActorRunReport(
+        platform="x",
+        account=account,
+        actor_id="apidojo/tweet-scraper",
+        apify_run_id="RA",
+        status="ok",
+        items_scraped=1,
+        items_kept=1,
+        cost_usd=cost,
+        charged_events=None,
+        started_at=None,
+        finished_at=None,
+    )
+
+
+def _apify_rows(source_id: int) -> list[dict[str, Any]]:
+    with connection() as c:
+        rows = c.execute(
+            text(
+                "SELECT account, cost_usd, ingestion_run_id FROM apify_runs "
+                "WHERE source_id = :sid ORDER BY id"
+            ),
+            {"sid": source_id},
+        ).mappings()
+        return [dict(r) for r in rows]
+
+
+def _install_reporting(monkeypatch: pytest.MonkeyPatch, stub: _ReportingStub) -> None:
+    monkeypatch.setattr("memex.sources.resolve", lambda _t: lambda _cfg, env=None: stub)
+
+
+def test_fetch_returns_api_cost_and_persists_runs(
+    client: Any, seed_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = seed_source["id"]
+    stub = _ReportingStub(
+        [_record("c1")], [_cost_report(0.0021), _cost_report(0.0009, account="spacex")]
+    )
+    _install_reporting(monkeypatch, stub)
+    r = client.post(f"/sources/{sid}/fetch")
+    assert r.status_code == 200
+    assert r.json()["api_cost_usd"] == 0.003
+    rows = _apify_rows(sid)
+    assert [x["account"] for x in rows] == ["nasa", "spacex"]
+    assert all(x["ingestion_run_id"] is not None for x in rows)
+    # El agregado quedó en la corrida.
+    with connection() as c:
+        agg = c.execute(
+            text("SELECT api_cost_usd FROM ingestion_runs WHERE source_id = :sid"), {"sid": sid}
+        ).scalar()
+    assert agg is not None and float(agg) == 0.003
+
+
+def test_fetch_dry_run_still_persists_cost_rows(
+    client: Any, seed_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El dry-run no escribe inbox pero el actor corre y COBRA: el gasto queda trazado."""
+    sid = seed_source["id"]
+    _install_reporting(monkeypatch, _ReportingStub([_record("d1")], [_cost_report(0.0021)]))
+    r = client.post(f"/sources/{sid}/fetch", params={"dry_run": True})
+    assert r.status_code == 200
+    assert r.json()["api_cost_usd"] == 0.0021
+    [row] = _apify_rows(sid)
+    assert row["ingestion_run_id"] is None  # sin corrida de ingesta en dry-run
+
+
+def test_fetch_failure_still_persists_cost(
+    client: Any, seed_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Si la corrida falla DESPUÉS del scrape, la plata ya se gastó: el report se persiste igual."""
+    sid = seed_source["id"]
+    _install_reporting(
+        monkeypatch, _ReportingStub([_record("f1")], [_cost_report(0.0021)], explode=True)
+    )
+    r = client.post(f"/sources/{sid}/fetch")
+    assert r.status_code == 502
+    [row] = _apify_rows(sid)
+    assert float(row["cost_usd"]) == 0.0021
+    with connection() as c:
+        run = (
+            c.execute(
+                text(
+                    "SELECT status, api_cost_usd FROM ingestion_runs WHERE source_id = :sid "
+                    "ORDER BY started_at DESC LIMIT 1"
+                ),
+                {"sid": sid},
+            )
+            .mappings()
+            .first()
+        )
+    assert run is not None
+    assert run["status"] == "failed"
+    assert run["api_cost_usd"] is not None and float(run["api_cost_usd"]) == 0.0021

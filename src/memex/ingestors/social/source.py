@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from memex.core.cursors import SocialCursor
 from memex.core.payloads import BasePayload, SocialPostPayload
-from memex.core.source import HealthResult, Source, SourceKind, SourceRecord
+from memex.core.source import ActorRunReport, HealthResult, Source, SourceKind, SourceRecord
 from memex.ingestors.social._common import (
     advance_social_checkpoint,
     social_fetch,
@@ -73,6 +73,7 @@ class InstagramSource:
 
     def __init__(self, cfg: SocialConfig) -> None:
         self.cfg = cfg
+        self._run_reports: list[ActorRunReport] = []
         self._log = get_logger("memex.ingestors.social.source").bind(platform="instagram")
 
     async def health_check(self) -> HealthResult:
@@ -85,7 +86,13 @@ class InstagramSource:
             parse_item=parse_instagram_item,
             build_run_input=_instagram_run_input,
             log=self._log,
+            reports=self._run_reports,
         )
+
+    def pop_run_reports(self) -> list[ActorRunReport]:
+        """Drena los reports de runs de actor acumulados por fetch() (`ActorRunReporting`)."""
+        out, self._run_reports = self._run_reports, []
+        return out
 
     def advance_checkpoint(self, checkpoint: SocialCursor, last: SourceRecord) -> SocialCursor:
         return advance_social_checkpoint(checkpoint, last)
@@ -102,6 +109,7 @@ class FacebookSource:
 
     def __init__(self, cfg: SocialConfig) -> None:
         self.cfg = cfg
+        self._run_reports: list[ActorRunReport] = []
         self._log = get_logger("memex.ingestors.social.source").bind(platform="facebook")
 
     async def health_check(self) -> HealthResult:
@@ -114,7 +122,13 @@ class FacebookSource:
             parse_item=parse_facebook_item,
             build_run_input=_facebook_run_input,
             log=self._log,
+            reports=self._run_reports,
         )
+
+    def pop_run_reports(self) -> list[ActorRunReport]:
+        """Drena los reports de runs de actor acumulados por fetch() (`ActorRunReporting`)."""
+        out, self._run_reports = self._run_reports, []
+        return out
 
     def advance_checkpoint(self, checkpoint: SocialCursor, last: SourceRecord) -> SocialCursor:
         return advance_social_checkpoint(checkpoint, last)
@@ -131,6 +145,7 @@ class XSource:
 
     def __init__(self, cfg: SocialConfig) -> None:
         self.cfg = cfg
+        self._run_reports: list[ActorRunReport] = []
         self._log = get_logger("memex.ingestors.social.source").bind(platform="x")
 
     async def health_check(self) -> HealthResult:
@@ -143,7 +158,13 @@ class XSource:
             parse_item=parse_x_item,
             build_run_input=_x_run_input,
             log=self._log,
+            reports=self._run_reports,
         )
+
+    def pop_run_reports(self) -> list[ActorRunReport]:
+        """Drena los reports de runs de actor acumulados por fetch() (`ActorRunReporting`)."""
+        out, self._run_reports = self._run_reports, []
+        return out
 
     def advance_checkpoint(self, checkpoint: SocialCursor, last: SourceRecord) -> SocialCursor:
         return advance_social_checkpoint(checkpoint, last)

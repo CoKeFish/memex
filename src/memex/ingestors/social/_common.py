@@ -40,8 +40,8 @@ from memex.core.media_types import (
     make_media_blob,
     normalize_content_type,
 )
-from memex.core.source import HealthResult, MediaBlob, SourceRecord
-from memex.ingestors.social.apify_client import ApifyClient, ApifyError
+from memex.core.source import ActorRunReport, HealthResult, MediaBlob, SourceRecord
+from memex.ingestors.social.apify_client import ApifyClient, ApifyError, ApifyTimeoutError
 from memex.ingestors.social.config import SocialConfig
 
 # parse_item(item, account) -> SourceRecord | None ; build_run_input(account, limit) -> dict
@@ -207,6 +207,7 @@ def social_fetch(
     parse_item: ParseItem,
     build_run_input: BuildRunInput,
     log: Any,
+    reports: list[ActorRunReport] | None = None,
 ) -> Iterator[SourceRecord]:
     """Corre el actor por cada cuenta de la allowlist y yieldea records nuevos.
 
@@ -215,6 +216,10 @@ def social_fetch(
     records salen ya aplanados en orden de cuenta, oldest-first dentro de cada una
     (para que el runner avance el cursor a `chunk[-1]` = el más nuevo). Un error de
     cuenta se loggea y se saltea — no tumba el run completo.
+
+    `reports` (opcional) acumula un `ActorRunReport` por run de actor — TAMBIÉN en
+    error/timeout (un run fallido pudo cobrar). Es seguro sin lock: las corutinas
+    appendean desde el MISMO event loop. La Source lo expone vía `pop_run_reports`.
     """
     yield from run_sync(
         _social_fetch_async(
@@ -223,6 +228,7 @@ def social_fetch(
             parse_item=parse_item,
             build_run_input=build_run_input,
             log=log,
+            reports=reports,
         )
     )
 
@@ -234,6 +240,7 @@ async def _social_fetch_async(
     parse_item: ParseItem,
     build_run_input: BuildRunInput,
     log: Any,
+    reports: list[ActorRunReport] | None = None,
 ) -> list[SourceRecord]:
     """Trabajo async de `social_fetch`: scrapeo concurrente de la allowlist.
 
@@ -247,6 +254,37 @@ async def _social_fetch_async(
 
     log.info("social.fetch.start", accounts_count=len(cfg.accounts))
     sem = asyncio.Semaphore(_MAX_CONCURRENCY)
+
+    def _report(
+        account: str,
+        status: Literal["ok", "error", "timeout"],
+        *,
+        run_id: str | None = None,
+        items_scraped: int = 0,
+        items_kept: int = 0,
+        cost_usd: float | None = None,
+        charged_events: dict[str, int] | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+    ) -> None:
+        """Acumula el reporte del run de esta cuenta (si el caller pidió trazabilidad)."""
+        if reports is None:
+            return
+        reports.append(
+            ActorRunReport(
+                platform=cfg.platform,
+                account=account,
+                actor_id=cfg.actor_id,
+                apify_run_id=run_id,
+                status=status,
+                items_scraped=items_scraped,
+                items_kept=items_kept,
+                cost_usd=cost_usd,
+                charged_events=charged_events,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+        )
 
     async with ApifyClient(
         cfg.apify_token.get_secret_value(),
@@ -269,12 +307,28 @@ async def _social_fetch_async(
                     result = await apify.run_actor(
                         cfg.actor_id, build_run_input(account, cfg.results_limit)
                     )
+                except ApifyTimeoutError as e:
+                    # El run se abortó pero cobró lo consumido: reportarlo con su costo parcial.
+                    acct_log.warning(
+                        "social.fetch.account_timeout",
+                        apify_run_id=e.run_id,
+                        exc_msg=str(e),
+                    )
+                    _report(
+                        account,
+                        "timeout",
+                        run_id=e.run_id,
+                        cost_usd=e.usage_usd,
+                        charged_events=e.charged_events,
+                    )
+                    return [], e.usage_usd
                 except ApifyError as e:
                     acct_log.warning(
                         "social.fetch.account_error",
                         status_code=e.status_code,
                         exc_msg=str(e),
                     )
+                    _report(account, "error")
                     return [], None
 
             kept: list[SourceRecord] = []
@@ -331,6 +385,17 @@ async def _social_fetch_async(
                 media_assets=sum(len(r.media) for r in kept),
                 apify_run_id=result.run_id,
                 apify_cost_usd=result.usage_usd,
+            )
+            _report(
+                account,
+                "ok",
+                run_id=result.run_id,
+                items_scraped=len(result.items),
+                items_kept=len(kept),
+                cost_usd=result.usage_usd,
+                charged_events=result.charged_events,
+                started_at=result.started_at,
+                finished_at=result.finished_at,
             )
             return kept, result.usage_usd
 

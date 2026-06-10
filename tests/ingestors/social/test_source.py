@@ -23,7 +23,7 @@ from memex.ingestors.social._common import (
     social_fetch,
     split_social_external_id,
 )
-from memex.ingestors.social.apify_client import ApifyRunResult
+from memex.ingestors.social.apify_client import ApifyError, ApifyRunResult, ApifyTimeoutError
 from memex.ingestors.social.config import AllowedAccount, SocialConfig
 from memex.ingestors.social.source import (
     FacebookSource,
@@ -73,7 +73,12 @@ def _ig_media(
     return item
 
 
-def _fake_apify_returning(items: list[dict[str, Any]], *, usage: float | None = 0.01) -> type:
+def _fake_apify_returning(
+    items: list[dict[str, Any]],
+    *,
+    usage: float | None = 0.01,
+    charged_events: dict[str, int] | None = None,
+) -> type:
     class _FakeApify:
         def __init__(self, token: str, **kwargs: Any) -> None:
             self.token = token
@@ -85,9 +90,28 @@ def _fake_apify_returning(items: list[dict[str, Any]], *, usage: float | None = 
             return None
 
         async def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
-            return ApifyRunResult(items=items, usage_usd=usage, run_id="R1")
+            return ApifyRunResult(
+                items=items, usage_usd=usage, run_id="R1", charged_events=charged_events
+            )
 
     return _FakeApify
+
+
+def _fake_apify_raising(exc: Exception) -> type:
+    class _Fail:
+        def __init__(self, token: str, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> _Fail:
+            return self
+
+        async def __aexit__(self, *a: object) -> None:
+            return None
+
+        async def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
+            raise exc
+
+    return _Fail
 
 
 def _fake_apify_concurrency(tracker: dict[str, int]) -> type:
@@ -236,6 +260,71 @@ def test_fetch_scrapes_accounts_concurrently(monkeypatch: pytest.MonkeyPatch) ->
     accounts = [AllowedAccount(account=a) for a in ("a", "b", "c")]
     list(InstagramSource(_cfg(accounts=accounts)).fetch(SocialCursor()))
     assert tracker["max"] >= 2
+
+
+# ---- ActorRunReporting: reports de costo por run de actor ---- #
+
+
+def test_fetch_collects_ok_report_and_pop_drains(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [_ig("2026-05-28T10:00:00Z", "p1"), _ig("2026-05-28T09:00:00Z", "p0")]
+    monkeypatch.setattr(
+        "memex.ingestors.social._common.ApifyClient",
+        _fake_apify_returning(items, charged_events={"result": 2}),
+    )
+    src = InstagramSource(_cfg())
+    recs = list(src.fetch(SocialCursor()))
+    reports = src.pop_run_reports()
+    assert len(reports) == 1
+    rep = reports[0]
+    assert (rep.platform, rep.account, rep.status) == ("instagram", "utn.frba", "ok")
+    assert rep.actor_id == "apify/instagram-scraper"
+    assert rep.apify_run_id == "R1"
+    assert rep.items_scraped == 2
+    assert rep.items_kept == len(recs) == 2
+    assert rep.cost_usd == 0.01
+    assert rep.charged_events == {"result": 2}
+    # pop DRENA: un segundo drenaje no duplica filas.
+    assert src.pop_run_reports() == []
+
+
+def test_fetch_reports_one_per_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    items = [_ig("2026-05-28T10:00:00Z", "p1")]
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_returning(items))
+    src = InstagramSource(_cfg(accounts=[AllowedAccount(account="a"), AllowedAccount(account="b")]))
+    list(src.fetch(SocialCursor()))
+    reports = src.pop_run_reports()
+    assert [r.account for r in reports] == ["a", "b"]  # gather preserva el orden
+    assert all(r.status == "ok" for r in reports)
+
+
+def test_fetch_reports_error_run_without_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Un run que falla TAMBIÉN se reporta (pudo cobrar) — sin run_id ni costo conocidos."""
+    monkeypatch.setattr(
+        "memex.ingestors.social._common.ApifyClient",
+        _fake_apify_raising(ApifyError(500, "server error")),
+    )
+    src = InstagramSource(_cfg())
+    assert list(src.fetch(SocialCursor())) == []
+    [rep] = src.pop_run_reports()
+    assert rep.status == "error"
+    assert rep.apify_run_id is None
+    assert rep.cost_usd is None
+    assert rep.items_scraped == 0
+
+
+def test_fetch_reports_timeout_run_with_partial_cost(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Timeout = run abortado que cobró lo consumido: el report lleva ese costo parcial."""
+    exc = ApifyTimeoutError(
+        "run 'RT' timed out", run_id="RT", usage_usd=0.02, charged_events={"result": 5}
+    )
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_raising(exc))
+    src = InstagramSource(_cfg())
+    assert list(src.fetch(SocialCursor())) == []
+    [rep] = src.pop_run_reports()
+    assert rep.status == "timeout"
+    assert rep.apify_run_id == "RT"
+    assert rep.cost_usd == 0.02
+    assert rep.charged_events == {"result": 5}
 
 
 # ---- advance_checkpoint ---- #

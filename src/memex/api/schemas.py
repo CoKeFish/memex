@@ -1438,7 +1438,9 @@ class FetchResponse(BaseModel):
 
     En dry-run los contadores son lo que PASARÍA (sin escribir): `inserted` = nuevos,
     `duplicates` = ya existentes ignorados, `filtered` = descartados por filter_rules.
-    `posted` = total escaneado que cruzó el wire.
+    `posted` = total escaneado que cruzó el wire. `api_cost_usd` = costo real de API
+    externa paga (Apify) de ESTA corrida — también viene en dry-run, que gasta igual;
+    None para fuentes sin costo por corrida (correo/telegram) o si Apify aún no lo asentó.
     """
 
     posted: int
@@ -1448,6 +1450,7 @@ class FetchResponse(BaseModel):
     filtered: int
     dry_run: bool
     ms_elapsed: int
+    api_cost_usd: float | None = None
 
 
 class SourcePatch(BaseModel):

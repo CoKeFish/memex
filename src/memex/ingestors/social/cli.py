@@ -29,8 +29,8 @@ from typing import Any
 from dotenv import load_dotenv
 
 from memex.core.cursors import SocialCursor
-from memex.core.observability import ingestion_run
-from memex.core.source import Source, SourceConfigError
+from memex.core.observability import ingestion_run, record_apify_runs
+from memex.core.source import ActorRunReporting, Source, SourceConfigError
 from memex.ingestors.memex_server_client import MemexAPIError, MemexServerClient
 from memex.ingestors.runner import run_ingestor
 from memex.logging import get_logger, setup_logging
@@ -118,6 +118,31 @@ def _build_source(src: dict[str, Any], cfg_override: dict[str, Any] | None = Non
     return factory(cfg_dict)
 
 
+def _drain_reports(
+    source: Source[Any], *, uid: int, sid: int, run_id: str | None, log: Any
+) -> None:
+    """Persiste el costo de los runs de actor (apify_runs) aunque la corrida haya fallado.
+
+    La plata ya se gastó cuando el fetch corrió — esto va en un `finally`. Nunca tumba
+    el CLI: si la DB no está accesible (p. ej. `discover` sin entorno de DB), se loggea
+    y se sigue.
+    """
+    if not isinstance(source, ActorRunReporting):
+        return
+    reports = source.pop_run_reports()
+    if not reports:
+        return
+    try:
+        record_apify_runs(user_id=uid, source_id=sid, ingestion_run_id=run_id, reports=reports)
+    except Exception as e:
+        log.error(
+            "social.cli.apify_runs.persist_failed",
+            source_id=sid,
+            exc_type=type(e).__name__,
+            exc_msg=str(e),
+        )
+
+
 def _cmd_run(args: argparse.Namespace, client: MemexServerClient, log: Any) -> int:
     sources = _select_sources(client, args.source_id, args.type)
     if not sources:
@@ -154,6 +179,8 @@ def _cmd_run(args: argparse.Namespace, client: MemexServerClient, log: Any) -> i
             except Exception as e:
                 run.fail(e)
                 had_fatal = True
+            finally:
+                _drain_reports(source, uid=uid, sid=sid, run_id=run.id, log=log)
 
     return 1 if had_fatal else 0
 
@@ -204,6 +231,16 @@ def _cmd_discover(args: argparse.Namespace, client: MemexServerClient, log: Any)
             exc_msg=str(e),
         )
         return 1
+    finally:
+        # discover gasta Apify real aunque no persista posts: dejar rastro del costo
+        # (ingestion_run_id=None — no hay corrida de ingesta).
+        _drain_reports(
+            source,
+            uid=int(sources[0]["user_id"]),
+            sid=args.source_id,
+            run_id=None,
+            log=log,
+        )
 
 
 def _print_accounts(row: dict[str, Any]) -> None:
