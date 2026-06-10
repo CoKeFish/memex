@@ -34,6 +34,9 @@ export interface Source {
   fetchModes: string[]
   /** Avisos por modo (p. ej. el costo del rango en Instagram), texto listo para mostrar. */
   modeCaveats?: Record<string, string> | null
+  /** Categoría conceptual del tipo (server-driven, espeja SourceRow.kind). null/ausente = tipo
+   * sin kind registrado (calendar/gateway/dummy). */
+  kind?: "email" | "chat" | "social" | null
 }
 
 // Payloads fieles (subconjunto usado por la UI). snake_case = claves del JSONB.

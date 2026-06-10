@@ -66,6 +66,7 @@ interface SourceApiRow {
   token_source?: string | null
   fetch_modes?: string[] | null
   mode_caveats?: Record<string, string> | null
+  kind?: string | null
 }
 
 function toSource(r: SourceApiRow): Source {
@@ -80,6 +81,7 @@ function toSource(r: SourceApiRow): Source {
     // Backend viejo sin el campo → asumir solo incremental (el default seguro).
     fetchModes: r.fetch_modes ?? ["incremental"],
     modeCaveats: r.mode_caveats ?? null,
+    kind: (r.kind ?? null) as Source["kind"],
   }
 }
 

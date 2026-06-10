@@ -1,6 +1,6 @@
 import { PageHeader } from "@/components/common/page-header"
+import { ManualRunPanel } from "@/components/features/control/manual-run"
 import {
-  ManualRunPanel,
   ModulesTogglePanel,
   SchedulerPanel,
 } from "@/components/features/control/processing-controls"

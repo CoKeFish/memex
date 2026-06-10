@@ -18,9 +18,14 @@ export const PROCESSING_STAGES: { key: ProcessingStage; label: string; llm: bool
   { key: "extract", label: "Extraer", llm: true },
 ]
 
-export const PROCESSING_ONLY: { key: ProcessingOnly; label: string }[] = [
-  { key: "unstored-attachments", label: "Adjuntos sin guardar" },
-  { key: "errored", label: "Con error" },
+/** Casos especiales del filtro «qué procesar» (param `only`): label + hint autoexplicativos. */
+export const PROCESSING_ONLY: { key: ProcessingOnly; label: string; hint: string }[] = [
+  {
+    key: "unstored-attachments",
+    label: "Solo adjuntos sin guardar",
+    hint: "declarados y nunca bajados",
+  },
+  { key: "errored", label: "Solo con error", hint: "falló el pipeline o el OCR" },
 ]
 
 export type ProcessingStage = "media" | "ocr" | "classify" | "summarize" | "extract"

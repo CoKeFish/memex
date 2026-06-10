@@ -83,6 +83,38 @@ export function sourceFullLabel(source?: Source): string {
   return account ? `${label} · ${account}` : label
 }
 
+//: Etiquetas en español de los medios (los kinds del backend son email/chat/social).
+export const KIND_LABELS: Record<string, string> = {
+  email: "correo",
+  chat: "chat",
+  social: "social",
+}
+
+const KIND_ORDER = ["email", "chat", "social", "other"]
+
+export interface SourceKindGroup {
+  kind: string
+  label: string
+  sources: Source[]
+}
+
+/** Agrupa fuentes por su kind (server-driven) para selectores: correo/chat/social + «otras» para
+ * tipos sin kind. Grupos vacíos se omiten; el orden interno respeta el de la API. */
+export function groupSourcesByKind(sources: Source[]): SourceKindGroup[] {
+  const by = new Map<string, Source[]>()
+  for (const s of sources) {
+    const k = s.kind ?? "other"
+    const arr = by.get(k) ?? []
+    arr.push(s)
+    by.set(k, arr)
+  }
+  return KIND_ORDER.filter((k) => by.has(k)).map((k) => ({
+    kind: k,
+    label: KIND_LABELS[k] ?? "otras",
+    sources: by.get(k) ?? [],
+  }))
+}
+
 /** Limpia un cuerpo crudo de correo para un snippet amigable: sin URLs, sin separadores ASCII,
  * whitespace colapsado. */
 export function cleanText(s: string): string {

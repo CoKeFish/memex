@@ -282,3 +282,22 @@ def test_source_row_exposes_fetch_modes_and_caveats(client: Any) -> None:
     # un tipo sin ingestor traíble no ofrece modos
     weird = client.post("/sources", json={"name": "w", "type": "dummy", "config": {}}).json()
     assert weird["fetch_modes"] == []
+
+
+def test_source_row_exposes_kind(client: Any) -> None:
+    """La UI agrupa fuentes por SourceRow.kind (server-driven, no hardcodea tipos)."""
+    imap = client.post("/sources", json={"name": "k-mail", "type": "imap", "config": {}}).json()
+    assert imap["kind"] == "email"
+    tg = client.post("/sources", json={"name": "k-tg", "type": "telegram", "config": {}}).json()
+    assert tg["kind"] == "chat"
+    for stype in ("x", "instagram"):
+        row = client.post(
+            "/sources", json={"name": f"k-{stype}", "type": stype, "config": {}}
+        ).json()
+        assert row["kind"] == "social"
+    # tipo sin kind registrado → None (no 500)
+    weird = client.post("/sources", json={"name": "k-dummy", "type": "dummy", "config": {}}).json()
+    assert weird["kind"] is None
+    # en la lista viene calculado igual
+    listed = {s["id"]: s for s in client.get("/sources").json()}
+    assert listed[imap["id"]]["kind"] == "email"

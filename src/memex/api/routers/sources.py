@@ -79,12 +79,17 @@ def _token_source(conn: Any, row: dict[str, Any]) -> str | None:
 
 
 def _capabilities(conn: Any, row: dict[str, Any]) -> dict[str, Any]:
-    """Campos derivados de SourceRow que la UI consume (token + modos honrados + avisos)."""
+    """Campos derivados de SourceRow que la UI consume (token + modos honrados + avisos + kind)."""
     stype = str(row.get("type") or "")
+    try:
+        kind: str | None = kind_for_type(stype).value
+    except KeyError:
+        kind = None
     return {
         "token_source": _token_source(conn, row),
         "fetch_modes": fetch_modes_for_type(stype),
         "mode_caveats": fetch_mode_caveats_for_type(stype),
+        "kind": kind,
     }
 
 

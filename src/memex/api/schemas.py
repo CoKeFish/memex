@@ -1526,6 +1526,9 @@ class SourceRow(BaseModel):
     # esto, no por type hardcodeado) + avisos por modo (server-driven, p. ej. rango de Instagram).
     fetch_modes: list[str] = Field(default_factory=list)
     mode_caveats: dict[str, str] = Field(default_factory=dict)
+    # Categoría conceptual del tipo (server-driven: la UI agrupa fuentes por medio leyendo esto,
+    # nunca hardcodeando types). None = tipo sin kind registrado (calendar/gateway/dummy).
+    kind: Literal["email", "chat", "social"] | None = None
 
 
 class CheckpointBody(BaseModel):

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
-import { summarizeRow } from "./inbox-format"
-import type { InboxPayload, InboxRow } from "../types/domain"
+import { groupSourcesByKind, summarizeRow } from "./inbox-format"
+import type { InboxPayload, InboxRow, Source } from "../types/domain"
 
 function rowWith(payload: Record<string, unknown>): InboxRow {
   return {
@@ -57,5 +57,50 @@ describe("summarizeRow · context (grupo de origen del chat)", () => {
     expect(social.kind).toBe("social")
     expect(social.context).toBe("")
     expect(social.sender).toBe("nasa")
+  })
+})
+
+function srcWith(id: number, kind: Source["kind"]): Source {
+  return {
+    id,
+    name: `s${id}`,
+    type: "imap",
+    enabled: true,
+    createdAt: "2026-06-01T12:00:00Z",
+    config: {},
+    fetchModes: ["incremental"],
+    kind,
+  }
+}
+
+describe("groupSourcesByKind · agrupado del selector de fuente", () => {
+  it("agrupa por medio en orden correo → chat → social", () => {
+    const groups = groupSourcesByKind([
+      srcWith(1, "social"),
+      srcWith(2, "email"),
+      srcWith(3, "chat"),
+      srcWith(4, "email"),
+    ])
+    expect(groups.map((g) => g.label)).toEqual(["correo", "chat", "social"])
+    expect(groups[0].sources.map((s) => s.id)).toEqual([2, 4])
+  })
+
+  it("kind null/ausente cae al grupo «otras», al final", () => {
+    const groups = groupSourcesByKind([srcWith(1, null), srcWith(2, "email")])
+    expect(groups.map((g) => g.kind)).toEqual(["email", "other"])
+    expect(groups[1].label).toBe("otras")
+    expect(groups[1].sources.map((s) => s.id)).toEqual([1])
+  })
+
+  it("omite grupos vacíos y devuelve [] sin fuentes", () => {
+    expect(groupSourcesByKind([])).toEqual([])
+    const groups = groupSourcesByKind([srcWith(1, "chat")])
+    expect(groups).toHaveLength(1)
+    expect(groups[0].kind).toBe("chat")
+  })
+
+  it("conserva el orden de la API dentro de cada grupo", () => {
+    const groups = groupSourcesByKind([srcWith(9, "email"), srcWith(3, "email"), srcWith(5, "email")])
+    expect(groups[0].sources.map((s) => s.id)).toEqual([9, 3, 5])
   })
 })

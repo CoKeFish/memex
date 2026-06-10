@@ -11,10 +11,8 @@ import { ApiError } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { formatDurationMs, formatInt, formatUsd, formatUsdFine } from "@/lib/format"
+import { KIND_LABELS } from "@/lib/inbox-format"
 import { advanceLot, deleteLot, type LotState, type LotWindow, patchWindowDefaults } from "@/data"
-
-//: Etiquetas en español de los medios (los kinds del backend son email/chat/social).
-const KIND_LABELS: Record<string, string> = { email: "correo", chat: "chat", social: "social" }
 
 function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
@@ -56,8 +54,9 @@ function WindowRow({ w, index }: { w: LotWindow; index: number }) {
   )
 }
 
-/** Editor inline de los defaults de tamaño de ventana por medio (PATCH al salir del campo). */
-function DefaultsEditor({
+/** Editor inline de los defaults de tamaño de ventana por medio (PATCH al salir del campo).
+ * Lot-agnóstico: el caller le pasa los defaults (del lote o de GET /processing/window-defaults). */
+export function DefaultsEditor({
   defaults,
   disabled,
   onChanged,
@@ -171,7 +170,7 @@ export function LotSection({
     <div className="space-y-3 rounded-md border border-border p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <div className="eyebrow">Lote por ventanas</div>
+          <div className="eyebrow">Lote activo</div>
           <div className="mt-0.5 text-[11px] text-muted-foreground">
             {lot.stages.join(" → ")} · {lotFilterSummary(lot)}
           </div>
