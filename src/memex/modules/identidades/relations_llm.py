@@ -13,6 +13,11 @@ A diferencia de la co-ocurrencia barata (que nace `pista`, sin vouchar), estas a
 implica `total_vertices > cap`, así que el determinista ya saltó ese correo. NO toca ningún otro
 tipo de vértice.
 
+GROUNDER: cada par debe venir con una cita textual (`quote`) de la evidencia que el LLM vio; la
+verificación de contención es DETERMINISTA (normalizar + substring) y un par sin cita verificable
+se DESCARTA (`stats.ungrounded`), no se propone. Esto cambia el recall a propósito (sesgo a
+precisión): una mención con `evidence=''` no puede anclar ningún par.
+
 Molde: `hierarchy.py` (estructura/observabilidad, UNA llamada por unidad) + `dedup_llm.py` (loop
 best-effort por ítem). Cada llamada se registra en `llm_calls` (`purpose=identidades_cooccurrence`).
 Cliente LLM inyectable (tests con fake). `LLMQuotaError` se propaga (el scheduler la captura).
@@ -47,6 +52,11 @@ _EVIDENCE_MAX = 200
 _MAX_IDENTITIES = 80
 #: La salida es una lista de pares; cota holgada para un correo denso.
 _MAX_TOKENS = 4096
+#: Largo mínimo del `quote` NORMALIZADO para aceptar un par: mata citas trivialmente contenidas
+#: ("y", "de", un nombre suelto) sin exigir frases largas (p50 del largo de evidencia real ≈ 36).
+#: Es la perilla de calibración del grounder: si `ungrounded` sale alto en corridas reales, se
+#: revisa ANTES de relajar la normalización.
+_MIN_QUOTE_NORM_LEN = 10
 
 
 @dataclass(frozen=True)
@@ -67,6 +77,7 @@ class CooccurrenceStats:
     edges: int = 0  # pares confirmed propuestos (idempotente; re-correr re-propone)
     skipped: int = 0  # correos saltados por demasiadas identidades (_MAX_IDENTITIES)
     errors: int = 0
+    ungrounded: int = 0  # pares del LLM descartados por el grounder (cita ausente/corta/no hallada)
     #: Costo LLM acumulado (identidades es source-less → se atribuye por `purpose` + `inbox_id`).
     cost: CostAccum = field(default_factory=CostAccum)
 
@@ -138,9 +149,27 @@ def _load_email_identities(conn: Connection, user_id: int, mid: int) -> list[Men
 # --- parseo de la respuesta del LLM ------------------------------------------------ #
 
 
-def _parse_pairs(content: str, valid_ids: set[int]) -> list[tuple[int, int]]:
-    """Parsea `{"pairs":[{"a_id","b_id"}]}`. ULTRA-DEFENSIVO (molde `hierarchy._parse_links`):
-    basura → `[]`; descarta ids ∉ `valid_ids`, bool-como-int y self-pares; canoniza `a<b`, dedup."""
+def _norm_grounding(s: str) -> str:
+    """Normalización del check de contención: lower + colapso de TODO whitespace. Deliberadamente
+    SIN unaccent ni strip de puntuación — la estrictez es el sesgo a precisión; calibrar con
+    `ungrounded` antes de relajar."""
+    return " ".join(s.lower().split())
+
+
+def _grounded(quote: str, ev_a: str, ev_b: str) -> bool:
+    """¿La cita está realmente en la evidencia que el LLM vio (la de a o la de b)? Determinista:
+    largo mínimo normalizado + substring sobre las MISMAS strings truncadas del prompt."""
+    q = _norm_grounding(quote)
+    if len(q) < _MIN_QUOTE_NORM_LEN:
+        return False
+    return q in _norm_grounding(ev_a) or q in _norm_grounding(ev_b)
+
+
+def _parse_pairs(content: str, valid_ids: set[int]) -> list[tuple[int, int, str]]:
+    """Parsea `{"pairs":[{"a_id","b_id","quote"}]}`. ULTRA-DEFENSIVO (molde
+    `hierarchy._parse_links`): basura → `[]`; descarta ids ∉ `valid_ids`, bool-como-int y
+    self-pares; canoniza `a<b`, dedup (la primera cita gana). `quote` ausente/no-string → `""`
+    (el grounder lo descartará después)."""
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError):
@@ -150,7 +179,7 @@ def _parse_pairs(content: str, valid_ids: set[int]) -> list[tuple[int, int]]:
     raw = data.get("pairs")
     if not isinstance(raw, list):
         return []
-    out: list[tuple[int, int]] = []
+    out: list[tuple[int, int, str]] = []
     seen: set[tuple[int, int]] = set()
     for item in raw:
         if not isinstance(item, dict):
@@ -167,7 +196,8 @@ def _parse_pairs(content: str, valid_ids: set[int]) -> list[tuple[int, int]]:
         if pair in seen:
             continue
         seen.add(pair)
-        out.append(pair)
+        q = item.get("quote")
+        out.append((pair[0], pair[1], q.strip() if isinstance(q, str) else ""))
     return out
 
 
@@ -181,9 +211,9 @@ def _serialize(identities: list[MentionedIdentity]) -> str:
 
 async def propose_relations(
     llm: LLMClient, identities: list[MentionedIdentity]
-) -> tuple[list[tuple[int, int]], LLMResult]:
+) -> tuple[list[tuple[int, int, str]], LLMResult]:
     """Le pide al LLM los pares relacionados de las identidades de UN correo. Devuelve los pares
-    válidos (parseados/filtrados contra los ids reales) + el LLMResult (para el costo)."""
+    válidos con su cita (parseados/filtrados contra los ids reales) + el LLMResult (el costo)."""
     valid_ids = {i.id for i in identities}
     result = await llm.complete(
         [
@@ -250,8 +280,24 @@ async def run_cooccurrence_llm(
                 )
                 continue
             kind_by_id = {i.id: i.kind for i in identities}
+            # Las MISMAS strings truncadas que vio el LLM (`_load_email_identities` trunca al
+            # cargar): el grounding se verifica contra el prompt, no contra la DB completa.
+            ev_by_id = {i.id: i.evidence for i in identities}
+            ungrounded_email = 0
             with connection() as conn:
-                for a, b in pairs:
+                for a, b, quote in pairs:
+                    if not _grounded(quote, ev_by_id[a], ev_by_id[b]):
+                        ungrounded_email += 1
+                        stats.ungrounded += 1
+                        # Largo y no el texto: la cita es payload personal.
+                        _log.info(
+                            "identidades.cooccurrence.ungrounded",
+                            inbox_id=mid,
+                            a_id=a,
+                            b_id=b,
+                            quote_len=len(quote),
+                        )
+                        continue
                     propose_edge(
                         conn,
                         user_id,
@@ -260,7 +306,7 @@ async def run_cooccurrence_llm(
                         producer=PRODUCER_LLM,
                         relation_type="co-ocurrencia",
                         status=STATUS_CONFIRMED,
-                        evidence=f"inbox:{mid}",
+                        evidence=f"inbox:{mid} | {quote}",
                     )
                     stats.edges += 1
             call_id = record_llm_call(
@@ -277,7 +323,12 @@ async def run_cooccurrence_llm(
                 # inbox puede purgarse y la mención sobrevive), así que el FK fallaría. El correo va
                 # en metadata para la traza; el costo se atribuye por `purpose`.
                 source_id=None,
-                metadata={"inbox_id": mid, "identities": len(identities), "pairs": len(pairs)},
+                metadata={
+                    "inbox_id": mid,
+                    "identities": len(identities),
+                    "pairs": len(pairs),
+                    "ungrounded": ungrounded_email,
+                },
             )
             # Traza: la co-ocurrencia es per-mensaje pero no produce fila de dominio con `entity`
             # (materializa `relation_edges`) → cuelga su costo bajo el ROOT del mensaje. No-op si
@@ -289,7 +340,11 @@ async def run_cooccurrence_llm(
                         call_id,
                         label="co-ocurrencia",
                         status="ok",
-                        detail={"identities": len(identities), "pairs": len(pairs)},
+                        detail={
+                            "identities": len(identities),
+                            "pairs": len(pairs),
+                            "ungrounded": ungrounded_email,
+                        },
                     )
             stats.cost.calls += 1
             stats.cost.prompt_tokens += result.usage.prompt_tokens
@@ -304,6 +359,7 @@ async def run_cooccurrence_llm(
         user_id=user_id,
         emails=stats.emails,
         edges=stats.edges,
+        ungrounded=stats.ungrounded,
         skipped=stats.skipped,
         errors=stats.errors,
         llm_calls=stats.cost.calls,

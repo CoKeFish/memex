@@ -175,6 +175,18 @@ def test_parse_partition_filtra_ids_y_clampa_confianza() -> None:
     assert r.groups[0].members == (1, 2) and r.groups[0].confidence == 1.0
 
 
+def test_parse_partition_rejected_edges_canoniza_dedup_e_ignora_basura() -> None:
+    r = parse_partition(
+        '{"groups":[{"members":[1,2],"name":"A","description":"","confidence":0.9}],'
+        '"rejected_edges":["2-1","1-2","3-3","9-1","a-b",5]}',
+        3,
+    )
+    assert r.valid is True
+    assert r.rejected_pairs == ((1, 2),)  # canónico, dedup; fuera-de-rango/self/no-string ignorados
+    # Campo ausente → tupla vacía (comportamiento previo intacto).
+    assert parse_partition('{"groups":[]}', 3).rejected_pairs == ()
+
+
 # --- worker: run_cluster_partition (LLM falso) ------------------------------------- #
 
 _G3 = '{"groups":[{"members":[1,2,3],"name":"Ctx","description":"d","confidence":0.9}]}'
@@ -294,6 +306,77 @@ async def test_no_toca_aristas_confirmed_deterministas() -> None:
     assert stats.promoted == 0  # no hay pistas; la confirmed determinista no cuenta
     det_edge = _edges_by_id()[det]
     assert det_edge.status == "confirmed" and det_edge.producer == PRODUCER_IDENTIDADES
+
+
+# --- rejected_edges (poda a nivel ARISTA, veredicto explícito del LLM) -------------- #
+
+
+@pytest.mark.asyncio
+async def test_rejected_edges_rechaza_la_pista_y_promueve_el_resto() -> None:
+    with connection() as c:
+        p = [_person(c, f"P{i}") for i in range(3)]
+        _seed_candidate(c, p)
+        e01 = _pista(c, p[0], p[1])  # vetada explícitamente por el LLM
+        e12 = _pista(c, p[1], p[2])  # intra-grupo → promueve como siempre
+    fake = FakeLLM(
+        '{"groups":[{"members":[1,2,3],"name":"Ctx","description":"d","confidence":0.9}],'
+        '"rejected_edges":["1-2"]}'
+    )
+    stats = await run_cluster_partition(1, client=fake)
+    assert (stats.blobs, stats.created, stats.promoted, stats.rejected_edges) == (1, 1, 1, 1)
+    edges = _edges_by_id()
+    assert edges[e01].status == "rejected"
+    assert edges[e12].status == "confirmed"
+    with connection() as c:
+        decided = c.execute(
+            text("SELECT decided_at FROM relation_edges WHERE id = :e"), {"e": e01}
+        ).scalar_one()
+    assert decided is not None  # veredicto terminal estampado en la arista misma
+
+
+@pytest.mark.asyncio
+async def test_rejected_edges_indices_basura_no_rompen() -> None:
+    with connection() as c:
+        p = [_person(c, f"P{i}") for i in range(3)]
+        _seed_candidate(c, p)
+        e01 = _pista(c, p[0], p[1])
+        e12 = _pista(c, p[1], p[2])
+    fake = FakeLLM(
+        '{"groups":[{"members":[1,2,3],"name":"Ctx","description":"d","confidence":0.9}],'
+        '"rejected_edges":["9-9","x-y","3-3"]}'
+    )
+    stats = await run_cluster_partition(1, client=fake)
+    assert (stats.promoted, stats.rejected_edges) == (2, 0)  # basura ignorada = cascada de siempre
+    edges = _edges_by_id()
+    assert edges[e01].status == "confirmed" and edges[e12].status == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_rejected_edges_no_toca_confirmed_determinista() -> None:
+    # El LLM "veta" el par 1-2, pero entre P0 y P1 solo hay una afiliación determinista confirmed:
+    # el filtro estricto de la cascada (pista+inbox+co-ocurrencia) la protege.
+    with connection() as c:
+        p = [_person(c, f"P{i}") for i in range(3)]
+        _seed_candidate(c, p)
+        det = propose_edge(
+            c,
+            1,
+            p[0],
+            p[1],
+            producer=PRODUCER_IDENTIDADES,
+            relation_type="afiliado",
+            status="confirmed",
+        )
+        e12 = _pista(c, p[1], p[2])
+    fake = FakeLLM(
+        '{"groups":[{"members":[1,2,3],"name":"Ctx","description":"d","confidence":0.9}],'
+        '"rejected_edges":["1-2"]}'
+    )
+    stats = await run_cluster_partition(1, client=fake)
+    assert (stats.promoted, stats.rejected_edges) == (1, 0)
+    edges = _edges_by_id()
+    assert edges[det].status == "confirmed" and edges[det].producer == PRODUCER_IDENTIDADES
+    assert edges[e12].status == "confirmed"
 
 
 @pytest.mark.asyncio

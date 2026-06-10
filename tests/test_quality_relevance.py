@@ -101,6 +101,49 @@ def _item_count(inbox_id: int, slug: str) -> int | None:
         ).scalar()
 
 
+def _enable_finance() -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO module_settings (user_id, module_slug, enabled) "
+                "VALUES (1, 'finance', TRUE) ON CONFLICT (user_id, module_slug) DO NOTHING"
+            )
+        )
+
+
+def _seed_empty_msg(source_id: int, ext: str, *, minute: int = 0) -> int:
+    """Mensaje clasificado batch SIN contenido renderizable (payload {}) → camino empty_input."""
+    with connection() as c:
+        iid = c.execute(
+            text(
+                "INSERT INTO inbox (user_id, source_id, external_id, occurred_at, payload) "
+                "VALUES (1, :sid, :eid, :occ, CAST('{}' AS JSONB)) RETURNING id"
+            ),
+            {"sid": source_id, "eid": ext, "occ": datetime(2026, 5, 28, 12, minute, tzinfo=UTC)},
+        ).scalar()
+        c.execute(
+            text("INSERT INTO classifications (user_id, inbox_id, tier) VALUES (1, :i, 'batch')"),
+            {"i": iid},
+        )
+    assert iid is not None
+    return int(iid)
+
+
+def _seed_tx(inbox_id: int) -> None:
+    """Transacción de dominio pre-existente atribuida al mensaje (lo que deja una corrida previa
+    cuyo hecho quedó compartido/unido por el dedup)."""
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_finance_transactions "
+                "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, "
+                " occurred_at_precision, counterparty) "
+                "VALUES (1, CAST(:ids AS BIGINT[]), 'egreso', 10, 'USD', :at, 'datetime', 'Tigo')"
+            ),
+            {"ids": [inbox_id], "at": datetime(2026, 5, 28, 11, 0, tzinfo=UTC)},
+        )
+
+
 # --- (1) agregación SQL ---------------------------------------------------------- #
 
 
@@ -167,11 +210,12 @@ def test_chat_without_from_email_groups_by_sender(seed_source: dict[str, Any]) -
 
 class _OneFactLLM:
     """LLM falso: produce UN gasto de finanzas atribuido SOLO al primer mensaje del lote (los demás
-    quedan en 0 hechos). Verifica que el cursor guarda el conteo POR MENSAJE, no el total de la
-    ventana."""
+    quedan en 0 hechos) — o a TODOS con `attribute_all=True` (un hecho compartido). Verifica que el
+    cursor guarda el conteo POR MENSAJE atribuido, no el total de la ventana ni lo insertado."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, attribute_all: bool = False) -> None:
         self.calls = 0
+        self._attribute_all = attribute_all
 
     async def complete(
         self,
@@ -186,7 +230,7 @@ class _OneFactLLM:
         msgs: list[dict[str, Any]] = json.loads(messages[-1].content.split(_MESSAGES_MARKER, 1)[1])
         first = msgs[0]
         item = {
-            "source_inbox_ids": [first["id"]],
+            "source_inbox_ids": ([m["id"] for m in msgs] if self._attribute_all else [first["id"]]),
             "amount": "10.00",
             "currency": "ARS",
             "counterparty": "Test",
@@ -206,13 +250,7 @@ class _OneFactLLM:
 
 def test_orchestrator_attributes_item_count_per_message(seed_source: dict[str, Any]) -> None:
     sid = seed_source["id"]  # imap → email; finance consume email
-    with connection() as c:
-        c.execute(
-            text(
-                "INSERT INTO module_settings (user_id, module_slug, enabled) "
-                "VALUES (1, 'finance', TRUE) ON CONFLICT (user_id, module_slug) DO NOTHING"
-            )
-        )
+    _enable_finance()
     # Lote batch de 2 mensajes; el fake solo atribuye un gasto al PRIMERO.
     m1 = _seed_msg(sid, "m1", email="a@x.com", tier="batch", minute=0, body="pagué $10")
     m2 = _seed_msg(
@@ -226,6 +264,73 @@ def test_orchestrator_attributes_item_count_per_message(seed_source: dict[str, A
     # El conteo es POR MENSAJE: m1 produjo el hecho (1), m2 no (0) — NO se sobre-atribuye el total.
     assert _item_count(m1, "finance") == 1
     assert _item_count(m2, "finance") == 0
+
+
+def test_item_count_atribuido_cuenta_hecho_compartido(seed_source: dict[str, Any]) -> None:
+    """Un hecho respaldado por VARIOS mensajes (el dedup/extracción los une en una sola fila)
+    cuenta para cada uno: item_count = hechos atribuidos, no "ítems nuevos insertados"."""
+    sid = seed_source["id"]
+    _enable_finance()
+    m1 = _seed_msg(sid, "m1", email="a@x.com", tier="batch", minute=0, body="pagué $10")
+    m2 = _seed_msg(sid, "m2", email="a@x.com", tier="batch", minute=1, body="comprobante del pago")
+
+    stats = asyncio.run(run_extraction(1, client=_OneFactLLM(attribute_all=True)))
+
+    assert stats.items == 1  # una sola fila de dominio…
+    assert _item_count(m1, "finance") == 1  # …atribuida a ambos mensajes
+    assert _item_count(m2, "finance") == 1
+
+
+def test_force_reprocess_no_degrada_item_count_ni_relevancia(seed_source: dict[str, Any]) -> None:
+    """Reprocesar con `force` (borra cursor + desatribuye + re-extrae el mismo hecho) deja el
+    item_count y la señal de relevancia como estaban."""
+    sid = seed_source["id"]
+    _enable_finance()
+    m1 = _seed_msg(sid, "m1", email="a@x.com", tier="batch", minute=0, body="pagué $10")
+    asyncio.run(run_extraction(1, client=_OneFactLLM()))
+    assert _item_count(m1, "finance") == 1
+
+    asyncio.run(run_extraction(1, inbox_ids=[m1], force=True, client=_OneFactLLM()))
+
+    assert _item_count(m1, "finance") == 1
+    with connection() as c:
+        rows = senders_by_relevance(c, user_id=1)
+    a = next(r for r in rows if r["sender_key"] == "a@x.com")
+    assert a["relevant"] == 1
+
+
+def test_empty_input_cursor_cuenta_atribucion_previa(seed_source: dict[str, Any]) -> None:
+    """Camino empty_input: el cursor cuenta lo que el dominio YA atribuye al mensaje (antes
+    quedaba en 0 y la relevancia lo leía como irrelevante)."""
+    sid = seed_source["id"]
+    _enable_finance()
+    m1 = _seed_empty_msg(sid, "vacio")
+    _seed_tx(m1)
+
+    fake = _OneFactLLM()
+    asyncio.run(run_extraction(1, client=fake))
+
+    assert fake.calls == 0  # 1 módulo → ruteo short-circuit; lote sin texto → sin LLM
+    assert _item_count(m1, "finance") == 1
+
+
+def test_write_path_coincide_con_backfill(seed_source: dict[str, Any]) -> None:
+    """Invariante: el write-path deja exactamente lo que `backfill-counts` recalcularía (misma
+    función `attributed_counts`) — el backfill no encuentra nada que reparar."""
+    from memex.quality.backfill import backfill_item_counts
+
+    sid = seed_source["id"]
+    _enable_finance()
+    m1 = _seed_empty_msg(sid, "vacio")
+    _seed_tx(m1)
+    asyncio.run(run_extraction(1, client=_OneFactLLM()))
+    m2 = _seed_msg(sid, "m2", email="a@x.com", tier="batch", minute=1, body="pagué $10")
+    asyncio.run(run_extraction(1, client=_OneFactLLM()))
+
+    assert _item_count(m1, "finance") == 1
+    assert _item_count(m2, "finance") == 1
+    stats = backfill_item_counts(1)
+    assert stats.updated == 0
 
 
 # --- (3) endpoint ---------------------------------------------------------------- #
@@ -395,13 +500,7 @@ def test_backfill_item_counts(seed_source: dict[str, Any]) -> None:
     from memex.quality.backfill import backfill_item_counts
 
     sid = seed_source["id"]
-    with connection() as c:
-        c.execute(
-            text(
-                "INSERT INTO module_settings (user_id, module_slug, enabled) "
-                "VALUES (1, 'finance', TRUE) ON CONFLICT (user_id, module_slug) DO NOTHING"
-            )
-        )
+    _enable_finance()
     m1 = _seed_msg(sid, "m1", email="a@x.com", tier="batch", minute=0, body="pagué $10")
     asyncio.run(run_extraction(1, client=_OneFactLLM()))
     # Simular histórico: el cursor se escribió con el conteo correcto → lo reseteamos a 0.

@@ -1,5 +1,6 @@
 """Paso de relaciones deterministas (Fase 2): pistas de co-ocurrencia (mismo correo, directo y
-transitivo) + afiliación real persona↔org; idempotencia; tope de fan-out.
+transitivo) + afiliación real persona↔org; idempotencia; tope de fan-out; supresión/poda de
+pistas redundantes con una confirmada del mismo par.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from sqlalchemy import text
 
 from memex.db import connection
 from memex.relations.deterministic import build_relations
-from memex.relations.edges import list_edges
+from memex.relations.edges import list_edges, resolve_edge
 from memex.relations.vertices import list_vertices
 
 
@@ -327,6 +328,92 @@ def test_contraparte_persona() -> None:
     assert len(edges) == 1
     assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:person", p)
     assert (edges[0].src.slug, edges[0].src.id) == ("finance", fin)
+
+
+def test_cooccurrence_suprimida_por_confirmada_del_par() -> None:
+    # la pista tx↔org duplicaría la contraparte confirmada del MISMO par → se suprime (la
+    # conectividad ya la da la real, que pesa 1.0); los demás pares del mensaje SÍ emiten.
+    org = _org("Uber")
+    fin = _finance("Uber", [15], identity_id=org)
+    _mention(org, [15], kind="organizacion")
+    hack = _hack("HackPago", [15])
+    with connection() as c:
+        stats = build_relations(c, 1)
+        pistas = list_edges(c, 1, producer="inbox")
+    assert stats.contraparte_reales == 1
+    assert stats.cooccurrence_pistas == 2
+    assert stats.redundant_pruned == 0
+    pares = [_pair(e) for e in pistas]
+    assert {("finance", fin), ("identidades:org", org)} not in pares
+    assert {("finance", fin), ("hackathones", hack)} in pares
+    assert {("identidades:org", org), ("hackathones", hack)} in pares
+
+
+def test_poda_pista_redundante_preexistente() -> None:
+    # primer build: tx sin identidad → pista tx↔org normal; luego la contraparte se resuelve →
+    # el segundo build confirma la real Y poda la pista redundante del par; el tercero es no-op.
+    org = _org("Uber")
+    fin = _finance("Uber", [16])
+    _mention(org, [16], kind="organizacion")
+    with connection() as c:
+        stats1 = build_relations(c, 1)
+    assert stats1.cooccurrence_pistas == 1
+    _exec(
+        "UPDATE mod_finance_consolidated SET counterparty_identity_id = :o WHERE id = :f",
+        o=org,
+        f=fin,
+    )
+    with connection() as c:
+        stats2 = build_relations(c, 1)
+        edges = list_edges(c, 1)
+    assert stats2.contraparte_reales == 1
+    assert stats2.redundant_pruned == 1
+    assert len(edges) == 1  # queda SOLO la contraparte confirmada
+    assert edges[0].relation_type == "contraparte"
+    assert edges[0].status == "confirmed"
+    with connection() as c:
+        stats3 = build_relations(c, 1)
+        n = len(list_edges(c, 1))
+    assert stats3.redundant_pruned == 0
+    assert stats3.cooccurrence_pistas == 0
+    assert n == 1
+
+
+def test_orientacion_inversa_tambien_suprime() -> None:
+    # la confirmada es afiliado person→org; el par canónico de la pista sería org→person
+    # (orden (slug, id): "identidades:org" < "identidades:person") → el par se compara sin
+    # orientación y la pista igual se suprime.
+    p = _person("Ana")
+    o = _org("Acme")
+    _link_person_org(p, o)
+    _mention(p, [17])
+    _mention(o, [17], kind="organizacion")
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1)
+    assert stats.cooccurrence_pistas == 0
+    assert stats.redundant_pruned == 0
+    assert len(edges) == 1
+    assert edges[0].relation_type == "afiliado"
+
+
+def test_cooc_promovida_a_confirmed_no_se_poda() -> None:
+    # una pista promovida a confirmed (cascada del partidor) NO se poda (el filtro status=pista
+    # la excluye) y su par tampoco se re-emite (ya está vouchado).
+    _finance("Rappi", [18])
+    _hack("HackX", [18])
+    with connection() as c:
+        build_relations(c, 1)
+        eid = list_edges(c, 1)[0].id
+        resolve_edge(c, eid, status="confirmed")
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1)
+    assert stats.redundant_pruned == 0
+    assert stats.cooccurrence_pistas == 0
+    assert len(edges) == 1
+    assert edges[0].status == "confirmed"
+    assert edges[0].relation_type == "co-ocurrencia"
 
 
 def test_build_poda_huerfana_por_tombstone() -> None:

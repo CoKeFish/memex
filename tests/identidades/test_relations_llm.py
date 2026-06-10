@@ -3,7 +3,8 @@
 Cubre: parseo ultra-defensivo (`_parse_pairs`); detección de correos over-cap
 (`_find_overcap_emails`, cuenta SOLO identidades); el worker `run_cooccurrence_llm` end-to-end
 (emite aristas `confirmed`/`producer='llm'`, idempotente, descarta ruido, best-effort por correo,
-no llama sin overcap, `LLMQuotaError` propaga).
+no llama sin overcap, `LLMQuotaError` propaga); y el GROUNDER (un par solo se confirma si su
+`quote` es cita verificable de la evidencia que el LLM vio — ausente/corta/inventada descarta).
 """
 
 from __future__ import annotations
@@ -115,14 +116,24 @@ def _identity(conn: Any, kind: str, name: str) -> int:
     )
 
 
-def _mention(conn: Any, identity_id: int, inbox_ids: list[int], kind: str = "persona") -> None:
+#: Evidencia por default ≥ `_MIN_QUOTE_NORM_LEN`: los tests felices la citan textual.
+_EV = "Juan trabaja con Acme"
+
+
+def _mention(
+    conn: Any,
+    identity_id: int,
+    inbox_ids: list[int],
+    kind: str = "persona",
+    evidence: str = _EV,
+) -> None:
     conn.execute(
         text(
             "INSERT INTO mod_identidades_mentions "
             "(user_id, source_inbox_ids, mentioned_name, resolved_kind, resolved_identity_id, "
-            "evidence) VALUES (1, :ids, 'X', :k, :p, 'ev')"
+            "evidence) VALUES (1, :ids, 'X', :k, :p, :ev)"
         ),
-        {"ids": inbox_ids, "k": kind, "p": identity_id},
+        {"ids": inbox_ids, "k": kind, "p": identity_id, "ev": evidence},
     )
 
 
@@ -149,13 +160,17 @@ def _seed_inbox(conn: Any, ext: str) -> int:
 
 
 def test_parse_pairs_valid() -> None:
-    assert _parse_pairs('{"pairs": [{"a_id": 1, "b_id": 2}]}', {1, 2}) == [(1, 2)]
+    raw = '{"pairs": [{"a_id": 1, "b_id": 2, "quote": "trabajan juntos"}]}'
+    assert _parse_pairs(raw, {1, 2}) == [(1, 2, "trabajan juntos")]
 
 
 def test_parse_pairs_canonicalizes_and_dedups() -> None:
-    # b<a se canoniza a (a<b); el par repetido se descarta.
-    raw = '{"pairs": [{"a_id": 3, "b_id": 1}, {"a_id": 1, "b_id": 3}]}'
-    assert _parse_pairs(raw, {1, 3}) == [(1, 3)]
+    # b<a se canoniza a (a<b); el par repetido se descarta (la primera cita gana).
+    raw = (
+        '{"pairs": [{"a_id": 3, "b_id": 1, "quote": "uno"},'
+        ' {"a_id": 1, "b_id": 3, "quote": "dos"}]}'
+    )
+    assert _parse_pairs(raw, {1, 3}) == [(1, 3, "uno")]
 
 
 def test_parse_pairs_drops_unknown_self_and_bool() -> None:
@@ -164,6 +179,12 @@ def test_parse_pairs_drops_unknown_self_and_bool() -> None:
     assert _parse_pairs('{"pairs": [{"a_id": 9, "b_id": 1}]}', {1, 2}) == []  # id fuera del set
     assert _parse_pairs('{"pairs": [{"a_id": 1, "b_id": 1}]}', {1, 2}) == []  # self-par
     assert _parse_pairs('{"pairs": [{"a_id": true, "b_id": 1}]}', {1, 2}) == []  # bool-como-int
+
+
+def test_parse_pairs_quote_ausente_o_no_string_es_vacio() -> None:
+    # Sin `quote` (o con basura) el par se parsea con cita vacía: el grounder lo descarta después.
+    assert _parse_pairs('{"pairs": [{"a_id": 1, "b_id": 2}]}', {1, 2}) == [(1, 2, "")]
+    assert _parse_pairs('{"pairs": [{"a_id": 1, "b_id": 2, "quote": 5}]}', {1, 2}) == [(1, 2, "")]
 
 
 # --- _find_overcap_emails (DB) ----------------------------------------------------- #
@@ -188,9 +209,9 @@ async def test_run_cooccurrence_llm_emits_confirmed_llm_edges() -> None:
         o = _identity(c, "organizacion", "Acme")
         _mention(c, p, [7])
         _mention(c, o, [7], kind="organizacion")
-    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}}}]}}')
+    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}, "quote": "trabaja con Acme"}}]}}')
     stats = await run_cooccurrence_llm(1, cap=1, client=fake)
-    assert (stats.emails, stats.edges, stats.errors) == (1, 1, 0)
+    assert (stats.emails, stats.edges, stats.errors, stats.ungrounded) == (1, 1, 0, 0)
     assert stats.cost.calls == 1
     with connection() as c:
         edges = list_edges(c, 1)
@@ -200,7 +221,7 @@ async def test_run_cooccurrence_llm_emits_confirmed_llm_edges() -> None:
     assert e.producer == "llm"
     assert e.status == "confirmed"
     assert e.relation_type == "co-ocurrencia"
-    assert e.evidence == "inbox:7"
+    assert e.evidence == "inbox:7 | trabaja con Acme"
     assert _pair(e) == {("identidades:person", p), ("identidades:org", o)}
     assert purpose == "identidades_cooccurrence"
 
@@ -212,7 +233,7 @@ async def test_run_cooccurrence_llm_idempotent() -> None:
         o = _identity(c, "organizacion", "Acme")
         _mention(c, p, [7])
         _mention(c, o, [7], kind="organizacion")
-    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}}}]}}')
+    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}, "quote": "trabaja con Acme"}}]}}')
     await run_cooccurrence_llm(1, cap=1, client=fake)
     await run_cooccurrence_llm(1, cap=1, client=fake)
     with connection() as c:
@@ -261,7 +282,12 @@ async def test_run_cooccurrence_llm_best_effort_one_bad_email() -> None:
         e2 = _identity(c, "persona", "E")
         _mention(c, d, [8])
         _mention(c, e2, [8])
-    seq = SeqLLM([f'{{"pairs": [{{"a_id": {a}, "b_id": {b}}}]}}', RuntimeError("boom")])
+    seq = SeqLLM(
+        [
+            f'{{"pairs": [{{"a_id": {a}, "b_id": {b}, "quote": "trabaja con Acme"}}]}}',
+            RuntimeError("boom"),
+        ]
+    )
     stats = await run_cooccurrence_llm(1, cap=1, client=seq)
     assert (stats.emails, stats.edges, stats.errors) == (2, 1, 1)
     with connection() as c:
@@ -281,7 +307,7 @@ async def test_run_cooccurrence_llm_attaches_cost_to_root() -> None:
         _mention(c, p, [iid])
         _mention(c, o, [iid], kind="organizacion")
         root = create_root(c, user_id=1, inbox_id=iid, label="msg")
-    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}}}]}}')
+    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}, "quote": "trabaja con Acme"}}]}}')
     await run_cooccurrence_llm(1, cap=1, client=fake)
 
     with connection() as c:
@@ -300,6 +326,68 @@ async def test_run_cooccurrence_llm_attaches_cost_to_root() -> None:
     assert rows[0]["parent_id"] == root  # cuelga del root del mensaje
     assert rows[0]["label"] == "co-ocurrencia"
     assert rows[0]["llm_call_id"] is not None
+
+
+# --- grounder (la cita debe ser verificable) ---------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_grounder_quote_inventado_descarta_el_par() -> None:
+    with connection() as c:
+        p = _identity(c, "persona", "Juan")
+        o = _identity(c, "organizacion", "Acme")
+        _mention(c, p, [7])
+        _mention(c, o, [7], kind="organizacion")
+    fake = FakeLLM(
+        f'{{"pairs": [{{"a_id": {p}, "b_id": {o}, "quote": "colaboran en el proyecto X"}}]}}'
+    )
+    stats = await run_cooccurrence_llm(1, cap=1, client=fake)
+    assert (stats.edges, stats.ungrounded) == (0, 1)
+    with connection() as c:
+        assert list_edges(c, 1) == []
+
+
+@pytest.mark.asyncio
+async def test_grounder_quote_ausente_descarta_el_par() -> None:
+    with connection() as c:
+        p = _identity(c, "persona", "Juan")
+        o = _identity(c, "organizacion", "Acme")
+        _mention(c, p, [7])
+        _mention(c, o, [7], kind="organizacion")
+    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}}}]}}')  # sin quote
+    stats = await run_cooccurrence_llm(1, cap=1, client=fake)
+    assert (stats.edges, stats.ungrounded) == (0, 1)
+    with connection() as c:
+        assert list_edges(c, 1) == []
+
+
+@pytest.mark.asyncio
+async def test_grounder_quote_corto_descarta_aunque_este_contenido() -> None:
+    # "Juan" SÍ está en la evidencia pero su largo normalizado (4) < _MIN_QUOTE_NORM_LEN.
+    with connection() as c:
+        p = _identity(c, "persona", "Juan")
+        o = _identity(c, "organizacion", "Acme")
+        _mention(c, p, [7])
+        _mention(c, o, [7], kind="organizacion")
+    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}, "quote": "Juan"}}]}}')
+    stats = await run_cooccurrence_llm(1, cap=1, client=fake)
+    assert (stats.edges, stats.ungrounded) == (0, 1)
+
+
+@pytest.mark.asyncio
+async def test_grounder_normaliza_case_y_whitespace() -> None:
+    # La cita matchea aunque difiera en mayúsculas y colapso de whitespace (incl. saltos).
+    with connection() as c:
+        p = _identity(c, "persona", "Juan")
+        o = _identity(c, "organizacion", "Acme")
+        _mention(c, p, [7], evidence="Juan   trabaja\ncon ACME")
+        _mention(c, o, [7], kind="organizacion", evidence="otra cosa irrelevante")
+    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {o}, "quote": "juan trabaja con acme"}}]}}')
+    stats = await run_cooccurrence_llm(1, cap=1, client=fake)
+    assert (stats.edges, stats.ungrounded) == (1, 0)
+    with connection() as c:
+        edges = list_edges(c, 1)
+    assert edges[0].evidence == "inbox:7 | juan trabaja con acme"
 
 
 @pytest.mark.asyncio

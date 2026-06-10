@@ -47,6 +47,7 @@ from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError, LLMResult
 from memex.logging import get_logger
 from memex.modules import known_modules, resolve
+from memex.modules.attribution import attributed_counts
 from memex.modules.contract import (
     CAP_DEBUG_INBOX,
     CAP_PROVIDE_DOMAIN,
@@ -155,24 +156,27 @@ def _done_by_id(conn: Connection, inbox_ids: list[int]) -> dict[int, set[str]]:
 def _insert_cursor(
     conn: Connection,
     user_id: int,
-    slug: str,
+    module: InterestModule,
     inbox_ids: list[int],
-    *,
-    counts: dict[int, int] | None = None,
 ) -> None:
-    """Marca el cursor (module_slug, inbox_id). `counts` = hechos públicos por inbox que el módulo
-    produjo (señal de relevancia del sistema de calidad); ausente → 0 (considerado pero sin
-    extraer: empty_input, ruteado-fuera, o solo identidad). ON CONFLICT DO NOTHING preserva el
-    count previo — re-extraer sin `force` no lo pisa (con `force` se borró antes y se reescribe)."""
+    """Marca el cursor (module_slug, inbox_id). `item_count` = hechos públicos que el dominio
+    ATRIBUYE a cada mensaje (`attributed_counts`, la MISMA función que `memex-quality
+    backfill-counts`), sea cual sea el camino (persist / empty_input / ruteado-fuera) y aunque el
+    dedup haya unido los hechos a filas pre-existentes — un reproceso o un ruteo distinto no
+    degrada la señal de relevancia. ON CONFLICT DO NOTHING preserva el count previo — re-extraer
+    sin `force` no lo pisa (con `force` se borró antes y se reescribe)."""
     if not inbox_ids:
         return
-    by_id = counts or {}
+    by_id = attributed_counts(module, conn, user_id, inbox_ids)
     conn.execute(
         text(
             "INSERT INTO module_extractions (user_id, module_slug, inbox_id, item_count) "
             "VALUES (:uid, :slug, :iid, :cnt) ON CONFLICT (module_slug, inbox_id) DO NOTHING"
         ),
-        [{"uid": user_id, "slug": slug, "iid": i, "cnt": by_id.get(i, 0)} for i in inbox_ids],
+        [
+            {"uid": user_id, "slug": module.slug, "iid": i, "cnt": by_id.get(i, 0)}
+            for i in inbox_ids
+        ],
     )
 
 
@@ -528,7 +532,7 @@ async def _persist_unit(
         # Lote sin texto útil → nada que extraer; se marca el cursor de cada módulo (no recargarlo).
         with connection() as conn:
             for module in unit.modules:
-                _insert_cursor(conn, user_id, module.slug, inbox_ids)
+                _insert_cursor(conn, user_id, module, inbox_ids)
         _log.info("extract.unit.empty_input", slugs=slugs, n=n)
         return
 
@@ -596,16 +600,11 @@ async def _persist_unit(
                 trace=tracer,
             )
             persisted = await module.persist(ctx, outcome.valid_by_slug[module.slug])
-            # Conteo de hechos públicos POR-MENSAJE (señal de relevancia del sistema de calidad).
-            # read_for_inbox por inbox da la atribución exacta; NO usar `persisted`, que es el total
-            # de la VENTANA y sobre-atribuiría a cada mensaje del lote batch. Solo si el módulo
-            # produjo algo (evita N queries en vano). Misma tx → ve las filas recién persistidas.
-            counts = (
-                {iid: len(module.read_for_inbox(conn, user_id, [iid])) for iid in inbox_ids}
-                if persisted > 0
-                else None
-            )
-            _insert_cursor(conn, user_id, module.slug, inbox_ids, counts=counts)
+            # Cursor en la MISMA tx, tras persist → `attributed_counts` ve las filas frescas.
+            # NO usar `persisted` como conteo: es el total de la VENTANA (sobre-atribuiría en
+            # batch) y cuenta solo lo insertado (un hecho unido por dedup a una fila existente
+            # dejaría el mensaje en 0 → relevancia degradada al reprocesar).
+            _insert_cursor(conn, user_id, module, inbox_ids)
         items_by_slug[module.slug] = persisted
         stats.items += persisted
         stats.discarded += outcome.discarded_by_slug[module.slug]
@@ -736,7 +735,7 @@ async def _process_window(
         ]
         if pending_ids:
             with connection() as conn:
-                _insert_cursor(conn, user_id, module.slug, pending_ids)
+                _insert_cursor(conn, user_id, module, pending_ids)
             _log.info(
                 "route.skipped_module",
                 slug=module.slug,

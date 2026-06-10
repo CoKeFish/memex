@@ -111,8 +111,11 @@ IDENTIDADES_COOCCURRENCE_SYSTEM_PROMPT = (
     "- La sola CO-APARICIÓN en el mensaje NO basta para relacionar (por eso filtrás vos): dos\n"
     "  identidades nombradas de pasada, sin vínculo entre ellas, NO van.\n"
     "- NO inventes pares para llenar; muchas identidades no se relacionan y eso está bien. Una\n"
-    "  identidad de ruido no aparece en ningún par.\n\n"
+    "  identidad de ruido no aparece en ningún par.\n"
+    "- `quote`: la prueba del par. Copiá TEXTUAL (carácter a carácter, sin parafrasear ni\n"
+    "  corregir tildes/puntuación) un fragmento de la evidencia de a o de b que muestre el\n"
+    "  vínculo. Si no podés citar un fragmento que lo pruebe, NO incluyas el par.\n\n"
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
-    '{"pairs": [{"a_id": <id>, "b_id": <id>}]}\n'
+    '{"pairs": [{"a_id": <id>, "b_id": <id>, "quote": "<cita textual de la evidencia>"}]}\n'
     'Si ningún par se relaciona claramente, devolvé {"pairs": []}.'
 )
