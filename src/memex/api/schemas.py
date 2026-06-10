@@ -1187,6 +1187,95 @@ class LlmCallList(BaseModel):
     total: int
 
 
+# ---- Métricas de costo Apify (tabla apify_runs) -------------------------------------------------
+# Espejo acotado del rollup LLM: acá la unidad es el RUN DE ACTOR (una corrida de scraping de UNA
+# cuenta seguida) y el costo viene de Apify (usageTotalUsd), no de una tabla de precios local.
+
+
+class ApifyKpis(BaseModel):
+    """KPIs del rango: gasto Apify, corridas de actor y volumen scrapeado."""
+
+    cost_usd: float
+    runs: int
+    items_scraped: int
+    items_kept: int
+    errors: int  # runs con status != 'ok' (error + timeout) — pudieron cobrar igual
+    accounts: int  # cuentas seguidas distintas con actividad en el rango
+    prev_cost_usd: float | None = None
+    prev_runs: int | None = None
+
+
+class ApifyBySource(BaseModel):
+    """Gasto por fuente. `source_id` None = fuente borrada (el gasto histórico se conserva)."""
+
+    source_id: int | None
+    source_name: str
+    runs: int
+    items_scraped: int
+    cost_usd: float
+
+
+class ApifyByAccount(BaseModel):
+    """Gasto por cuenta seguida — la unidad real de scraping (un run de actor por cuenta)."""
+
+    platform: str
+    account: str
+    runs: int
+    items_scraped: int
+    cost_usd: float
+
+
+class ApifyByPlatform(BaseModel):
+    platform: str
+    runs: int
+    items_scraped: int
+    cost_usd: float
+
+
+class ApifyDailyPoint(BaseModel):
+    """Gasto de un día, desglosado por plataforma (sparse: el front rellena ceros)."""
+
+    day: str  # 'YYYY-MM-DD' en la TZ del bucket
+    total: float
+    by_platform: dict[str, float]
+
+
+class ApifyRollup(BaseModel):
+    kpis: ApifyKpis
+    by_source: list[ApifyBySource]
+    by_account: list[ApifyByAccount]
+    by_platform: list[ApifyByPlatform]
+    daily: list[ApifyDailyPoint]
+    # Plataformas presentes en el rango → series estables del área apilada en el front.
+    platforms: list[str]
+
+
+class ApifyRunRow(BaseModel):
+    """Un run de actor crudo para la auditoría. `cost_usd` NULL = Apify aún no lo asentó."""
+
+    id: int
+    created_at: datetime
+    platform: str
+    account: str
+    actor_id: str
+    apify_run_id: str | None = None
+    status: str
+    items_scraped: int
+    items_kept: int
+    cost_usd: float | None = None
+    charged_events: dict[str, int] | None = None
+    source_id: int | None = None
+    source_name: str | None = None
+    ingestion_run_id: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ApifyRunList(BaseModel):
+    items: list[ApifyRunRow]
+    total: int
+
+
 # ---- Log events (vista /logs) -------------------------------------------------------------------
 # Filas crudas de `log_events` (el sink de structlog, migración 0020) + agregaciones para el panel
 # de métricas. `fields` es el resto de kwargs estructurados del evento; `exception` el traceback
@@ -1331,6 +1420,7 @@ class StatsIngestionRun(BaseModel):
     filtered: int
     error_class: str | None = None
     error_message: str | None = None
+    api_cost_usd: float | None = None  # gasto Apify de la corrida (None = sin API paga)
     expected: int  # inserted + duplicates + errors + filtered
     balanced: bool  # posted == expected
 
@@ -1343,6 +1433,7 @@ class StatsIngestionTotals(BaseModel):
     filtered: int
     runs: int
     unbalanced: int  # nº de corridas con posted != expected
+    api_cost_usd: float = 0.0  # gasto Apify sumado de las corridas listadas
 
 
 class StatsIngestion(BaseModel):
@@ -1427,6 +1518,10 @@ class SourceRow(BaseModel):
     # cuenta vinculada (pisa al env), "env" = variable del contenedor (Doppler), "missing" = no
     # resuelve (el fetch fallará). None = tipo sin token reportable (correo/telegram/etc.).
     token_source: Literal["vault", "env", "missing"] | None = None
+    # Modos del fetch a demanda que el ingestor de este tipo HONRA (la UI habilita opciones por
+    # esto, no por type hardcodeado) + avisos por modo (server-driven, p. ej. rango de Instagram).
+    fetch_modes: list[str] = Field(default_factory=list)
+    mode_caveats: dict[str, str] = Field(default_factory=dict)
 
 
 class CheckpointBody(BaseModel):
@@ -1438,7 +1533,9 @@ class FetchResponse(BaseModel):
 
     En dry-run los contadores son lo que PASARÍA (sin escribir): `inserted` = nuevos,
     `duplicates` = ya existentes ignorados, `filtered` = descartados por filter_rules.
-    `posted` = total escaneado que cruzó el wire.
+    `posted` = total escaneado que cruzó el wire. `api_cost_usd` = costo real de API
+    externa paga (Apify) de ESTA corrida — también viene en dry-run, que gasta igual;
+    None para fuentes sin costo por corrida (correo/telegram) o si Apify aún no lo asentó.
     """
 
     posted: int
@@ -1448,6 +1545,7 @@ class FetchResponse(BaseModel):
     filtered: int
     dry_run: bool
     ms_elapsed: int
+    api_cost_usd: float | None = None
 
 
 class SourcePatch(BaseModel):
@@ -1688,6 +1786,8 @@ class IngestionRunRow(BaseModel):
     filtered: int
     error_class: str | None = None
     error_message: str | None = None
+    # Gasto de API externa paga (Apify) de la corrida — agregado de sus apify_runs (0055).
+    api_cost_usd: float | None = None
     is_stale: bool
 
 

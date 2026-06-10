@@ -358,3 +358,103 @@ def test_llm_call_detail_includes_response_text(client: Any) -> None:
 
 def test_llm_call_detail_missing_returns_404(client: Any) -> None:
     assert client.get("/metrics/llm/calls/999999").status_code == 404
+
+
+# ---- Apify: rollup + auditoría de runs ----------------------------------------------------------
+
+
+def _seed_apify_run(
+    user_id: int = 1,
+    *,
+    source_id: int | None = None,
+    platform: str = "x",
+    account: str = "nasa",
+    status: str = "ok",
+    items_scraped: int = 2,
+    items_kept: int = 1,
+    cost_usd: str | None = "0.0008",
+    charged_events: str | None = None,
+) -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                """
+                INSERT INTO apify_runs
+                  (user_id, source_id, platform, account, actor_id, apify_run_id, status,
+                   items_scraped, items_kept, cost_usd, charged_events)
+                VALUES
+                  (:uid, :src, :p, :a, 'apidojo/tweet-scraper', 'RX', :st, :isc, :ik, :cost,
+                   CAST(:ce AS JSONB))
+                """
+            ),
+            {
+                "uid": user_id,
+                "src": source_id,
+                "p": platform,
+                "a": account,
+                "st": status,
+                "isc": items_scraped,
+                "ik": items_kept,
+                "cost": cost_usd,
+                "ce": charged_events,
+            },
+        )
+
+
+def test_apify_rollup_aggregates(client: Any) -> None:
+    sid = _seed_source("apify-mx", "x")
+    _seed_apify_run(source_id=sid, cost_usd="0.0008", platform="x", account="nasa")
+    _seed_apify_run(source_id=sid, cost_usd="0.0004", platform="x", account="spacex")
+    _seed_apify_run(source_id=sid, cost_usd=None, status="error", platform="instagram")
+    body = client.get("/metrics/apify/rollup").json()
+    k = body["kpis"]
+    assert k["runs"] == 3
+    assert round(k["cost_usd"], 6) == 0.0012
+    assert k["errors"] == 1
+    assert k["accounts"] == 3  # (x,nasa) (x,spacex) (instagram,nasa)
+    assert {b["platform"] for b in body["by_platform"]} == {"x", "instagram"}
+    assert ("x", "nasa") in {(b["platform"], b["account"]) for b in body["by_account"]}
+    assert body["by_source"][0]["source_name"] == "apify-mx"
+    assert len(body["daily"]) >= 1
+    assert body["daily"][0]["total"] > 0
+
+
+def test_apify_rollup_scopes_by_user(client: Any, seed_user2: int) -> None:
+    _seed_apify_run(user_id=seed_user2, cost_usd="9.0")
+    assert client.get("/metrics/apify/rollup").json()["kpis"]["runs"] == 0
+
+
+def test_apify_runs_audit_filters_and_paginates(client: Any) -> None:
+    sid = _seed_source("apify-audit", "x")
+    for i in range(3):
+        _seed_apify_run(source_id=sid, account=f"acc{i}")
+    _seed_apify_run(
+        source_id=sid,
+        account="other",
+        status="timeout",
+        cost_usd=None,
+        charged_events='{"result": 7}',
+    )
+    body = client.get("/metrics/apify/runs", params={"status": ["timeout"]}).json()
+    assert body["total"] == 1
+    row = body["items"][0]
+    assert row["status"] == "timeout"
+    assert row["cost_usd"] is None
+    assert row["charged_events"] == {"result": 7}
+    assert row["source_name"] == "apify-audit"
+    page = client.get("/metrics/apify/runs", params={"limit": 2}).json()
+    assert page["total"] == 4
+    assert len(page["items"]) == 2
+    assert client.get("/metrics/apify/runs", params={"q": "acc1"}).json()["total"] == 1
+
+
+def test_apify_cost_survives_source_deletion(client: Any) -> None:
+    sid = _seed_source("apify-bye", "x")
+    _seed_apify_run(source_id=sid, cost_usd="0.001")
+    r = client.delete(f"/sources/{sid}")
+    assert r.status_code in (200, 204)
+    body = client.get("/metrics/apify/rollup").json()
+    rows = [b for b in body["by_source"] if b["source_name"] == "(fuente borrada)"]
+    assert rows
+    assert rows[0]["source_id"] is None
+    assert rows[0]["cost_usd"] == 0.001

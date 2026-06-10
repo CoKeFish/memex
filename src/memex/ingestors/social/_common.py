@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
-from dataclasses import replace
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 import httpx
@@ -40,13 +40,33 @@ from memex.core.media_types import (
     make_media_blob,
     normalize_content_type,
 )
-from memex.core.source import HealthResult, MediaBlob, SourceRecord
-from memex.ingestors.social.apify_client import ApifyClient, ApifyError
-from memex.ingestors.social.config import SocialConfig
+from memex.core.source import ActorRunReport, HealthResult, MediaBlob, SourceRecord
+from memex.ingestors.social.apify_client import ApifyClient, ApifyError, ApifyTimeoutError
+from memex.ingestors.social.config import SocialConfig, SocialFetchMode
 
-# parse_item(item, account) -> SourceRecord | None ; build_run_input(account, limit) -> dict
+
+@dataclass(frozen=True)
+class RunWindow:
+    """Ventana efectiva del run de actor de UNA cuenta: modo + cotas de fecha + tope de items.
+
+    La computa `_account_window` a partir del config (modo/since/until/limit) y, en
+    incremental con `native_since`, del cursor por-cuenta. Los builders por plataforma la
+    traducen al shape del actor (onlyPostsNewerThan / olderThan / start / end / limits).
+    """
+
+    mode: SocialFetchMode
+    since: date | None
+    until: date | None
+    limit: int
+
+
+# parse_item(item, account) -> SourceRecord | None ; build_run_input(account, window) -> dict
 ParseItem = Callable[[dict[str, Any], str], SourceRecord | None]
-BuildRunInput = Callable[[str, int], dict[str, Any]]
+BuildRunInput = Callable[[str, RunWindow], dict[str, Any]]
+
+#: Tope de items por cuenta cuando un range no trae fetch_limit (espejo del default de
+#: imap.fetch_range). En Instagram es el ÚNICO freno de costo del rango (escanea desde hoy).
+_RANGE_DEFAULT_LIMIT = 200
 
 _PLATFORMS = ("instagram", "facebook", "x")
 # Cuentas scrapeadas en paralelo por run. Tope para no martillar Apify ni gatillar
@@ -89,6 +109,59 @@ def advance_social_checkpoint(checkpoint: SocialCursor, last: SourceRecord) -> S
     new_accounts = dict(checkpoint.accounts)
     new_accounts[account] = AccountCursor(last_post_id=post_id, last_posted_at=last.occurred_at)
     return SocialCursor(accounts=new_accounts)
+
+
+def _account_window(cfg: SocialConfig, acct_cursor: AccountCursor | None) -> RunWindow:
+    """Ventana del run de actor para UNA cuenta según el modo (+ cursor en incremental).
+
+    Incremental con `native_since`: el cursor por-cuenta viaja como cota inferior nativa con
+    1 día de margen — los actores filtran a precisión de día y los pinned de IG se cuelan;
+    el solape lo absorben `is_new_record` + el UNIQUE(source_id, external_id).
+    """
+    if cfg.fetch_mode == "range":
+        return RunWindow(
+            "range", cfg.fetch_since, cfg.fetch_until, cfg.fetch_limit or _RANGE_DEFAULT_LIMIT
+        )
+    if cfg.fetch_mode == "last":
+        return RunWindow("last", None, None, cfg.fetch_limit or cfg.results_limit)
+    since: date | None = None
+    if cfg.native_since and acct_cursor is not None and acct_cursor.last_posted_at is not None:
+        since = acct_cursor.last_posted_at.date() - timedelta(days=1)
+    return RunWindow("incremental", since, None, cfg.results_limit)
+
+
+def _window_bounds(window: RunWindow) -> tuple[datetime | None, datetime | None]:
+    """[since, until) como datetimes UTC (medianoche) para el backstop client-side del rango."""
+    since_dt = (
+        datetime(window.since.year, window.since.month, window.since.day, tzinfo=UTC)
+        if window.since is not None
+        else None
+    )
+    until_dt = (
+        datetime(window.until.year, window.until.month, window.until.day, tzinfo=UTC)
+        if window.until is not None
+        else None
+    )
+    return since_dt, until_dt
+
+
+def _should_warn_saturation(
+    window: RunWindow, acct_cursor: AccountCursor | None, *, scraped: int, saw_old: bool
+) -> bool:
+    """¿La ventana newest-N pudo dejar posts nuevos sin traer? Solo aplica al incremental.
+
+    Sin cota nativa: traer el tope SIN ver ninguno viejo = no se alcanzó el cursor → gap
+    posible. Con cota nativa (`window.since`): el actor ya filtró lo viejo, así que traer el
+    tope (todo nuevo) sigue indicando gap posible. range/last son backfills acotados a
+    propósito — el corte ahí es esperado, no una pérdida silenciosa.
+    """
+    if window.mode != "incremental":
+        return False
+    if acct_cursor is None or acct_cursor.last_posted_at is None:
+        return False
+    if scraped < window.limit:
+        return False
+    return window.since is not None or not saw_old
 
 
 def is_new_record(record: SourceRecord, cursor: AccountCursor | None) -> bool:
@@ -207,6 +280,7 @@ def social_fetch(
     parse_item: ParseItem,
     build_run_input: BuildRunInput,
     log: Any,
+    reports: list[ActorRunReport] | None = None,
 ) -> Iterator[SourceRecord]:
     """Corre el actor por cada cuenta de la allowlist y yieldea records nuevos.
 
@@ -215,6 +289,10 @@ def social_fetch(
     records salen ya aplanados en orden de cuenta, oldest-first dentro de cada una
     (para que el runner avance el cursor a `chunk[-1]` = el más nuevo). Un error de
     cuenta se loggea y se saltea — no tumba el run completo.
+
+    `reports` (opcional) acumula un `ActorRunReport` por run de actor — TAMBIÉN en
+    error/timeout (un run fallido pudo cobrar). Es seguro sin lock: las corutinas
+    appendean desde el MISMO event loop. La Source lo expone vía `pop_run_reports`.
     """
     yield from run_sync(
         _social_fetch_async(
@@ -223,6 +301,7 @@ def social_fetch(
             parse_item=parse_item,
             build_run_input=build_run_input,
             log=log,
+            reports=reports,
         )
     )
 
@@ -234,6 +313,7 @@ async def _social_fetch_async(
     parse_item: ParseItem,
     build_run_input: BuildRunInput,
     log: Any,
+    reports: list[ActorRunReport] | None = None,
 ) -> list[SourceRecord]:
     """Trabajo async de `social_fetch`: scrapeo concurrente de la allowlist.
 
@@ -247,6 +327,37 @@ async def _social_fetch_async(
 
     log.info("social.fetch.start", accounts_count=len(cfg.accounts))
     sem = asyncio.Semaphore(_MAX_CONCURRENCY)
+
+    def _report(
+        account: str,
+        status: Literal["ok", "error", "timeout"],
+        *,
+        run_id: str | None = None,
+        items_scraped: int = 0,
+        items_kept: int = 0,
+        cost_usd: float | None = None,
+        charged_events: dict[str, int] | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
+    ) -> None:
+        """Acumula el reporte del run de esta cuenta (si el caller pidió trazabilidad)."""
+        if reports is None:
+            return
+        reports.append(
+            ActorRunReport(
+                platform=cfg.platform,
+                account=account,
+                actor_id=cfg.actor_id,
+                apify_run_id=run_id,
+                status=status,
+                items_scraped=items_scraped,
+                items_kept=items_kept,
+                cost_usd=cost_usd,
+                charged_events=charged_events,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+        )
 
     async with ApifyClient(
         cfg.apify_token.get_secret_value(),
@@ -263,20 +374,41 @@ async def _social_fetch_async(
 
         async def _one(account: str) -> tuple[list[SourceRecord], float | None]:
             acct_cursor = checkpoint.accounts.get(account)
+            window = _account_window(cfg, acct_cursor)
             acct_log = log.bind(account=account)
             async with sem:
                 try:
                     result = await apify.run_actor(
-                        cfg.actor_id, build_run_input(account, cfg.results_limit)
+                        cfg.actor_id,
+                        build_run_input(account, window),
+                        max_items=window.limit,
+                        max_total_charge_usd=cfg.max_run_charge_usd,
                     )
+                except ApifyTimeoutError as e:
+                    # El run se abortó pero cobró lo consumido: reportarlo con su costo parcial.
+                    acct_log.warning(
+                        "social.fetch.account_timeout",
+                        apify_run_id=e.run_id,
+                        exc_msg=str(e),
+                    )
+                    _report(
+                        account,
+                        "timeout",
+                        run_id=e.run_id,
+                        cost_usd=e.usage_usd,
+                        charged_events=e.charged_events,
+                    )
+                    return [], e.usage_usd
                 except ApifyError as e:
                     acct_log.warning(
                         "social.fetch.account_error",
                         status_code=e.status_code,
                         exc_msg=str(e),
                     )
+                    _report(account, "error")
                     return [], None
 
+            since_dt, until_dt = _window_bounds(window)
             kept: list[SourceRecord] = []
             saw_old = False
             for raw in result.items:
@@ -293,24 +425,29 @@ async def _social_fetch_async(
                     continue
                 if record is None:
                     continue
-                if not is_new_record(record, acct_cursor):
-                    saw_old = True
-                    continue
+                if window.mode == "incremental":
+                    # El filtro de cursor es DEL incremental: un backfill (range/last) debe
+                    # poder traer posts más viejos que el cursor sin que se descarten.
+                    if not is_new_record(record, acct_cursor):
+                        saw_old = True
+                        continue
+                elif window.mode == "range":
+                    # Backstop client-side del rango (since inclusivo / until exclusivo, UTC):
+                    # IG no tiene techo nativo y los actores son imprecisos en el borde.
+                    if since_dt is not None and record.occurred_at < since_dt:
+                        continue
+                    if until_dt is not None and record.occurred_at >= until_dt:
+                        continue
                 kept.append(record)
 
-            # Saturación: los scrapers devuelven los newest-N sin cursor nativo. Si trajo el tope
-            # (results_limit) y NINGUNO era viejo, no se alcanzó el cursor → posibles posts nuevos
-            # más viejos que la ventana se pierden; avisar para subir results_limit o el intervalo.
-            if (
-                not saw_old
-                and acct_cursor is not None
-                and acct_cursor.last_posted_at is not None
-                and len(result.items) >= cfg.results_limit
+            # Saturación de la ventana newest-N del incremental (ver _should_warn_saturation).
+            if _should_warn_saturation(
+                window, acct_cursor, scraped=len(result.items), saw_old=saw_old
             ):
                 acct_log.warning(
                     "social.fetch.window_saturated",
                     scraped=len(result.items),
-                    results_limit=cfg.results_limit,
+                    results_limit=window.limit,
                 )
 
             # oldest-first: el runner avanza el cursor a chunk[-1], así el último
@@ -331,6 +468,17 @@ async def _social_fetch_async(
                 media_assets=sum(len(r.media) for r in kept),
                 apify_run_id=result.run_id,
                 apify_cost_usd=result.usage_usd,
+            )
+            _report(
+                account,
+                "ok",
+                run_id=result.run_id,
+                items_scraped=len(result.items),
+                items_kept=len(kept),
+                cost_usd=result.usage_usd,
+                charged_events=result.charged_events,
+                started_at=result.started_at,
+                finished_at=result.finished_at,
             )
             return kept, result.usage_usd
 

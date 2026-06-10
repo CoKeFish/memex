@@ -238,3 +238,46 @@ class SourceFactory(Protocol):
     def __call__(
         self, cfg: dict[str, Any], env: Mapping[str, str] | None = None
     ) -> Source[Any]: ...
+
+
+@dataclass(frozen=True)
+class ActorRunReport:
+    """Reporte de UNA corrida de actor externo pago (Apify) acumulado durante `fetch()`.
+
+    Es el canal por el que el costo real (lo que cobró el proveedor) sale del ingestor
+    sin que el ingestor toque la DB (ADR-001): la Source lo acumula en memoria, el borde
+    (fetch_runner / CLI) lo drena vía `ActorRunReporting.pop_run_reports()` y lo persiste
+    el single-writer `memex.core.observability.record_apify_runs`.
+
+    Hay un report por (cuenta seguida, run de actor) — TAMBIÉN en error/timeout: un run
+    fallido o abortado pudo haber cobrado lo consumido.
+    """
+
+    platform: str
+    account: str
+    actor_id: str
+    apify_run_id: str | None
+    status: Literal["ok", "error", "timeout"]
+    items_scraped: int
+    items_kept: int
+    cost_usd: float | None
+    charged_events: dict[str, int] | None
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+@runtime_checkable
+class ActorRunReporting(Protocol):
+    """Capacidad OPCIONAL de una Source: reportar corridas de actor externo con costo.
+
+    Protocolo separado de `Source` a propósito — sumarlo al contrato base se lo exigiría
+    a todas las sources (imap/telegram no corren actores pagos). El borde detecta la
+    capacidad con `isinstance(source, ActorRunReporting)` DESPUÉS de consumir el fetch
+    (en un `finally`: si el sink falló a mitad de corrida, los actores ya corrieron y
+    cobraron igual — ese gasto se persiste siempre).
+
+    `pop_run_reports` DRENA: devuelve lo acumulado y deja la lista vacía, para que dos
+    drenajes consecutivos no dupliquen filas.
+    """
+
+    def pop_run_reports(self) -> list[ActorRunReport]: ...

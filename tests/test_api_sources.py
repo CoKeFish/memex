@@ -268,3 +268,17 @@ def test_token_source_env_and_missing(client: Any, monkeypatch: pytest.MonkeyPat
 
 def test_token_source_none_for_non_social(client: Any, seed_source: dict[str, Any]) -> None:
     assert client.get(f"/sources/{seed_source['id']}").json()["token_source"] is None
+
+
+def test_source_row_exposes_fetch_modes_and_caveats(client: Any) -> None:
+    """La UI habilita modos por SourceRow.fetch_modes (server-driven, no hardcodea tipos)."""
+    row = client.post(
+        "/sources", json={"name": "ig-caps", "type": "instagram", "config": {}}
+    ).json()
+    assert row["fetch_modes"] == ["incremental", "range", "last"]
+    assert "range" in row["mode_caveats"]  # aviso del rango de IG (sin techo nativo)
+    listed = {s["id"]: s for s in client.get("/sources").json()}
+    assert listed[row["id"]]["fetch_modes"] == ["incremental", "range", "last"]
+    # un tipo sin ingestor traíble no ofrece modos
+    weird = client.post("/sources", json={"name": "w", "type": "dummy", "config": {}}).json()
+    assert weird["fetch_modes"] == []

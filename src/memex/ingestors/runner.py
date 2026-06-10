@@ -19,6 +19,11 @@ class RunStats:
     errors: int = 0
     filtered: int = 0
     ms_elapsed: int = 0
+    # Costo de APIs externas pagas de la corrida (hoy: runs de actor de Apify). Lo setea
+    # el BORDE (fetch_runner / CLI) tras drenar `ActorRunReporting` — nunca `run_ingestor`:
+    # si el sink falla a mitad de corrida estas stats no se devuelven, pero el gasto ya
+    # ocurrió y se persiste aparte en un `finally`.
+    api_cost_usd: float | None = None
 
 
 def _record_to_request(record: SourceRecord, source_id: int) -> dict[str, Any]:

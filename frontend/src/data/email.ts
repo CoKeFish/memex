@@ -64,6 +64,8 @@ interface SourceApiRow {
   config: Record<string, unknown>
   created_at: string
   token_source?: string | null
+  fetch_modes?: string[] | null
+  mode_caveats?: Record<string, string> | null
 }
 
 function toSource(r: SourceApiRow): Source {
@@ -75,6 +77,9 @@ function toSource(r: SourceApiRow): Source {
     createdAt: r.created_at,
     config: r.config,
     tokenSource: (r.token_source ?? null) as Source["tokenSource"],
+    // Backend viejo sin el campo → asumir solo incremental (el default seguro).
+    fetchModes: r.fetch_modes ?? ["incremental"],
+    modeCaveats: r.mode_caveats ?? null,
   }
 }
 
@@ -118,6 +123,8 @@ export interface FetchResult {
   filtered: number
   dry_run: boolean
   ms_elapsed: number
+  /** Costo Apify real de ESTA corrida (también en dry-run, que gasta igual); null si no aplica. */
+  api_cost_usd?: number | null
 }
 
 export type FetchMode = "incremental" | "range" | "last"

@@ -24,9 +24,9 @@ from starlette.concurrency import run_in_threadpool
 
 from memex import sources as source_registry
 from memex.api.inprocess_sink import DryRunSink, InProcessSink
-from memex.core.observability import ingestion_run
+from memex.core.observability import ingestion_run, record_apify_runs
 from memex.core.sink import MemexSink
-from memex.core.source import SourceConfigError
+from memex.core.source import ActorRunReporting, Source, SourceConfigError
 from memex.db import connection, get_engine
 from memex.ingestors.runner import RunStats, run_ingestor
 from memex.logging import get_logger
@@ -37,6 +37,43 @@ _log = get_logger("memex.api.fetch_runner")
 # Clave del advisory lock por-fuente. Incluye current_database() para que NO colisione entre las
 # DB efímeras del mismo cluster (xdist en tests); en prod (una sola DB) es estable por source.
 _FETCH_LOCK_KEY = "hashtext('ingest_fetch:' || current_database() || ':' || (:sid)::text)"
+
+
+def _persist_actor_reports(
+    source: Source[Any],
+    *,
+    user_id: int,
+    source_id: int,
+    ingestion_run_id: str | None,
+) -> float | None:
+    """Drena y persiste los reports de runs de actor (costo Apify) si la source los expone.
+
+    Se llama en un `finally` (sync, dentro del threadpool): los actores ya corrieron y
+    COBRARON aunque el sink o la corrida hayan fallado después — el gasto se persiste
+    siempre. Devuelve el costo agregado (float) para la respuesta del fetch, o None.
+    Nunca lanza: perder la trazabilidad no debe tumbar una corrida que ya funcionó.
+    """
+    if not isinstance(source, ActorRunReporting):
+        return None
+    reports = source.pop_run_reports()
+    if not reports:
+        return None
+    try:
+        total = record_apify_runs(
+            user_id=user_id,
+            source_id=source_id,
+            ingestion_run_id=ingestion_run_id,
+            reports=reports,
+        )
+    except Exception as e:
+        _log.error(
+            "fetch.apify_runs.persist_failed",
+            source_id=source_id,
+            exc_type=type(e).__name__,
+            exc_msg=str(e),
+        )
+        return None
+    return float(total) if total is not None else None
 
 
 def _acquire_fetch_lock(source_id: int) -> Connection | None:
@@ -146,9 +183,22 @@ async def run_fetch_window(
 
         if dry_run:
             dry_sink: MemexSink = DryRunSink(user_id)
-            return await run_in_threadpool(
-                run_ingestor, source, source_id, dry_sink, chunk_sleep_ms=0
-            )
+            try:
+                stats = await run_in_threadpool(
+                    run_ingestor, source, source_id, dry_sink, chunk_sleep_ms=0
+                )
+            finally:
+                # El dry-run NO escribe inbox, pero los actores de Apify corren y COBRAN
+                # igual: la trazabilidad del gasto se persiste siempre (sin ingestion_run).
+                api_cost = await run_in_threadpool(
+                    _persist_actor_reports,
+                    source,
+                    user_id=user_id,
+                    source_id=source_id,
+                    ingestion_run_id=None,
+                )
+            stats.api_cost_usd = api_cost
+            return stats
 
         # range/last son backfills: insertan pero no avanzan el cursor incremental.
         sink: MemexSink = InProcessSink(user_id, persist_checkpoint=(mode == "incremental"))
@@ -161,6 +211,17 @@ async def run_fetch_window(
             except Exception as e:
                 run.fail(e)
                 raise HTTPException(status_code=502, detail=f"fetch falló: {e}") from e
+            finally:
+                # SIEMPRE (éxito o fallo del sink): los runs de actor ya gastaron. El writer
+                # también deja el agregado en ingestion_runs.api_cost_usd de esta corrida.
+                api_cost = await run_in_threadpool(
+                    _persist_actor_reports,
+                    source,
+                    user_id=user_id,
+                    source_id=source_id,
+                    ingestion_run_id=run.id,
+                )
+            stats.api_cost_usd = api_cost
         return stats
     finally:
         if lock_conn is not None:

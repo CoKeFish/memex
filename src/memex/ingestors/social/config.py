@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from typing import Any, Literal
+from datetime import date
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
@@ -28,6 +29,9 @@ from memex.core.media_types import DEFAULT_MAX_ATTACHMENT_BYTES
 from memex.core.source import SourceConfigError
 
 Platform = Literal["instagram", "facebook", "x"]
+
+#: Modo de la corrida (espejo de `imap.FetchMode`, definido local para no acoplar ingestors).
+SocialFetchMode = Literal["incremental", "range", "last"]
 
 _DEFAULT_ACTORS: dict[Platform, str] = {
     "instagram": "apify/instagram-scraper",
@@ -82,6 +86,27 @@ class SocialConfig(BaseModel):
 
     results_limit: int = 30
     run_timeout_s: int = 120
+
+    # Ventana de fetch — override transitorio por corrida (lo inyecta el fetch a demanda /
+    # el CLI; NO se persiste en sources.config). Default = incremental por cursor por-cuenta.
+    #   - "incremental": newest `results_limit` por cuenta + filtro client-side por cursor
+    #     (con cota nativa de fecha si `native_since`). Avanza el cursor.
+    #   - "range": fetch_since (inclusivo) .. fetch_until (exclusivo). Backfill; NO avanza el
+    #     cursor. En Instagram el techo no es nativo: lo filtra el backstop client-side.
+    #   - "last": los `fetch_limit` posts más recientes por cuenta. Backfill; NO avanza.
+    fetch_mode: SocialFetchMode = "incremental"
+    fetch_since: date | None = None
+    fetch_until: date | None = None
+    fetch_limit: int | None = None
+
+    # Cota nativa de fecha en el incremental: pasa el cursor por-cuenta al actor (con 1 día de
+    # margen) → un poll sin novedades cuesta ~$0 en IG/X. Facebook cobra un add-on por post con
+    # filtro de fecha ($0.002): aun así gana con polls frecuentes; opt-out por fuente acá.
+    native_since: bool = True
+
+    # Tope de gasto por run de actor (`maxTotalChargeUsd`, solo pay-per-event). Red de seguridad
+    # para backfills profundos: al alcanzarlo Apify TERMINA el run. None = sin tope.
+    max_run_charge_usd: float | None = None
 
     # Extracción de media (fotos + video crudo) para MinIO + OCR. Off por default → sin cambio de
     # comportamiento. Se habilita por-source en sources.config (`extract_media: true`). Espejo de
@@ -159,6 +184,16 @@ class SocialConfig(BaseModel):
         if results_limit <= 0:
             raise SocialConfigError("'results_limit' must be positive")
 
+        fetch_mode_raw = cfg.get("fetch_mode", "incremental")
+        if fetch_mode_raw not in ("incremental", "range", "last"):
+            raise SocialConfigError(
+                f"'fetch_mode' must be 'incremental', 'range' or 'last', got {fetch_mode_raw!r}"
+            )
+        fetch_limit_raw = cfg.get("fetch_limit")
+        fetch_limit = int(fetch_limit_raw) if fetch_limit_raw is not None else None
+        if fetch_limit is not None and fetch_limit <= 0:
+            raise SocialConfigError("'fetch_limit' must be positive")
+
         run_timeout_s = int(cfg.get("run_timeout_s", 120))
         if run_timeout_s <= 0:
             raise SocialConfigError("'run_timeout_s' must be positive")
@@ -170,6 +205,11 @@ class SocialConfig(BaseModel):
         if max_video_bytes <= 0:
             raise SocialConfigError("'max_video_bytes' must be positive")
 
+        max_charge_raw = cfg.get("max_run_charge_usd")
+        max_run_charge_usd = float(max_charge_raw) if max_charge_raw is not None else None
+        if max_run_charge_usd is not None and max_run_charge_usd <= 0:
+            raise SocialConfigError("'max_run_charge_usd' must be positive")
+
         return cls(
             platform=platform,
             apify_token=SecretStr(token_value),
@@ -177,6 +217,12 @@ class SocialConfig(BaseModel):
             accounts=accounts,
             results_limit=results_limit,
             run_timeout_s=run_timeout_s,
+            fetch_mode=cast("SocialFetchMode", fetch_mode_raw),
+            fetch_since=_parse_date(cfg.get("fetch_since")),
+            fetch_until=_parse_date(cfg.get("fetch_until")),
+            fetch_limit=fetch_limit,
+            native_since=bool(cfg.get("native_since", True)),
+            max_run_charge_usd=max_run_charge_usd,
             extract_media=bool(cfg.get("extract_media", False)),
             max_attachment_bytes=max_attachment_bytes,
             max_video_bytes=max_video_bytes,
@@ -204,6 +250,18 @@ def normalize_account(raw: str) -> str:
 
 # Alias privado retro-compatible (el constructor de config lo usa internamente).
 _normalize_account = normalize_account
+
+
+def _parse_date(value: Any) -> date | None:
+    """Acepta None/'' → None, un `date`, o ISO 'YYYY-MM-DD' (espejo de imap._parse_date)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError as e:
+        raise SocialConfigError(f"invalid date {value!r} (expected YYYY-MM-DD): {e}") from e
 
 
 def _require_env(env_map: Mapping[str, str], var: str) -> str:

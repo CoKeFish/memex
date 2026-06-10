@@ -44,6 +44,7 @@ _STALE = "interval '30 minutes'"
 _RUN_COLUMNS = f"""
     id, source_id, trigger, status, started_at, ended_at, duration_ms,
     posted, inserted, duplicates, errors, filtered, error_class, error_message,
+    api_cost_usd,
     (status = 'running' AND NOW() - started_at > {_STALE}) AS is_stale
 """
 
@@ -65,6 +66,7 @@ def _run_row(r: RowMapping) -> IngestionRunRow:
         filtered=int(r["filtered"]),
         error_class=r["error_class"],
         error_message=r["error_message"],
+        api_cost_usd=float(r["api_cost_usd"]) if r["api_cost_usd"] is not None else None,
         is_stale=bool(r["is_stale"]),
     )
 

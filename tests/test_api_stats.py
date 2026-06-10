@@ -206,6 +206,7 @@ def test_pipeline_empty(client: Any) -> None:
         "filtered": 0,
         "runs": 0,
         "unbalanced": 0,
+        "api_cost_usd": 0.0,
     }
 
 

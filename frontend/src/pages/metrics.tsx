@@ -11,6 +11,7 @@ import { SourceModuleMatrix } from "@/components/features/metrics/source-module-
 import { Outliers } from "@/components/features/metrics/outliers"
 import { RecentErrors } from "@/components/features/metrics/recent-errors"
 import { LlmAudit } from "@/components/features/metrics/llm-audit"
+import { ApifyCosts } from "@/components/features/metrics/apify-costs"
 import { fetchLlmRollup, presetWindow, type MetricsWindow } from "@/data"
 import { activeDisplayTz } from "@/lib/timezone"
 import { useAsync } from "@/lib/use-async"
@@ -61,6 +62,8 @@ export function MetricsPage() {
           <LlmAudit window={win} modules={data.modules} byModel={data.byModel} bySource={data.bySource} />
         </>
       )}
+      {/* Gasto Apify: fuera del gate de llamadas LLM — puede haber scraping sin LLM en el rango. */}
+      <ApifyCosts window={win} />
     </div>
     </MetricsTzProvider>
   )

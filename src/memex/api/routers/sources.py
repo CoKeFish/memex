@@ -23,7 +23,7 @@ from memex.ingestors.runner import RunStats
 from memex.ingestors.social.config import normalize_account
 from memex.logging import get_logger
 from memex.security import vault
-from memex.sources import kind_for_type
+from memex.sources import fetch_mode_caveats_for_type, fetch_modes_for_type, kind_for_type
 from memex.sources.resolver import env_satisfied_secrets
 
 router = APIRouter(prefix="/sources", tags=["sources"])
@@ -78,11 +78,21 @@ def _token_source(conn: Any, row: dict[str, Any]) -> str | None:
     return "missing"
 
 
+def _capabilities(conn: Any, row: dict[str, Any]) -> dict[str, Any]:
+    """Campos derivados de SourceRow que la UI consume (token + modos honrados + avisos)."""
+    stype = str(row.get("type") or "")
+    return {
+        "token_source": _token_source(conn, row),
+        "fetch_modes": fetch_modes_for_type(stype),
+        "mode_caveats": fetch_mode_caveats_for_type(stype),
+    }
+
+
 def _source_row(conn: Any, source_id: int) -> dict[str, Any]:
     row = conn.execute(text(_SOURCE_SELECT), {"sid": source_id}).mappings().first()
     assert row is not None
     out = dict(row)
-    out["token_source"] = _token_source(conn, out)
+    out.update(_capabilities(conn, out))
     return out
 
 
@@ -123,7 +133,7 @@ async def list_sources(user_id: UserID) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for r in rows:
             d = dict(r)
-            d["token_source"] = _token_source(conn, d)
+            d.update(_capabilities(conn, d))
             out.append(d)
     return out
 
@@ -151,19 +161,21 @@ async def create_source(body: SourceCreate, user_id: UserID) -> dict[str, Any]:
                 .mappings()
                 .first()
             )
+            assert row is not None
+            out = dict(row)
+            out.update(_capabilities(conn, out))
     except IntegrityError as e:
         raise HTTPException(
             status_code=409, detail="source with that name already exists for this user"
         ) from e
-    assert row is not None
     _log.info(
         "sources.created",
         user_id=user_id,
-        source_id=row["id"],
-        name=row["name"],
-        source_type=row["type"],
+        source_id=out["id"],
+        name=out["name"],
+        source_type=out["type"],
     )
-    return dict(row)
+    return out
 
 
 @router.post("/ensure", response_model=SourceRow)
@@ -196,7 +208,9 @@ async def ensure_source(body: SourceCreate, user_id: UserID) -> dict[str, Any]:
                 source_type=existing["type"],
                 action="existed",
             )
-            return dict(existing)
+            out = dict(existing)
+            out.update(_capabilities(conn, out))
+            return out
         row = (
             conn.execute(
                 text(
@@ -216,16 +230,18 @@ async def ensure_source(body: SourceCreate, user_id: UserID) -> dict[str, Any]:
             .mappings()
             .first()
         )
-    assert row is not None
+        assert row is not None
+        out = dict(row)
+        out.update(_capabilities(conn, out))
     _log.info(
         "sources.ensured",
         user_id=user_id,
-        source_id=row["id"],
-        name=row["name"],
-        source_type=row["type"],
+        source_id=out["id"],
+        name=out["name"],
+        source_type=out["type"],
         action="created",
     )
-    return dict(row)
+    return out
 
 
 @router.patch("/{source_id}", response_model=SourceRow)
@@ -428,6 +444,7 @@ def _stats_response(stats: RunStats, *, dry_run: bool) -> dict[str, Any]:
         "filtered": stats.filtered,
         "dry_run": dry_run,
         "ms_elapsed": stats.ms_elapsed,
+        "api_cost_usd": stats.api_cost_usd,
     }
 
 
@@ -478,6 +495,14 @@ async def fetch_source(
         source_type = str(row["type"])
         cfg = dict(row["config"] or {})
         account_id = row["account_id"]
+
+    # Un modo que el ingestor no honra fallaría SILENCIOSO (correría incremental disfrazado):
+    # mejor 422 explícito. `incremental` pasa siempre (cualquier tipo resolvible lo corre).
+    if mode != "incremental" and mode not in fetch_modes_for_type(source_type):
+        raise HTTPException(
+            status_code=422,
+            detail=f"la fuente tipo {source_type!r} no soporta mode={mode!r}",
+        )
 
     if accounts:
         _assert_social(source_type)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from memex.core.source import SourceConfigError
@@ -106,3 +108,59 @@ def test_token_never_leaks_via_repr_str_or_dump() -> None:
     assert "apify_api_secret" not in cfg.model_dump_json()
     # El valor real solo se obtiene explícitamente.
     assert cfg.apify_token.get_secret_value() == "apify_api_secret"
+
+
+# ---- Ventana de fetch (modos) + native_since + tope de gasto ------------------------------------
+
+
+def test_fetch_window_defaults() -> None:
+    cfg = SocialConfig.from_source_config({}, env=VALID_ENV, platform="instagram")
+    assert cfg.fetch_mode == "incremental"
+    assert cfg.fetch_since is None
+    assert cfg.fetch_until is None
+    assert cfg.fetch_limit is None
+    assert cfg.native_since is True
+    assert cfg.max_run_charge_usd is None
+
+
+def test_fetch_window_parses_transient_keys() -> None:
+    cfg = SocialConfig.from_source_config(
+        {
+            "fetch_mode": "range",
+            "fetch_since": "2026-01-05",
+            "fetch_until": "2026-02-01",
+            "fetch_limit": 50,
+            "native_since": False,
+            "max_run_charge_usd": 1.5,
+        },
+        env=VALID_ENV,
+        platform="x",
+    )
+    assert cfg.fetch_mode == "range"
+    assert cfg.fetch_since == date(2026, 1, 5)
+    assert cfg.fetch_until == date(2026, 2, 1)
+    assert cfg.fetch_limit == 50
+    assert cfg.native_since is False
+    assert cfg.max_run_charge_usd == 1.5
+
+
+def test_fetch_mode_invalid_raises() -> None:
+    with pytest.raises(SocialConfigError):
+        SocialConfig.from_source_config({"fetch_mode": "bogus"}, env=VALID_ENV, platform="x")
+
+
+def test_fetch_since_invalid_date_raises() -> None:
+    with pytest.raises(SocialConfigError):
+        SocialConfig.from_source_config(
+            {"fetch_mode": "range", "fetch_since": "05/01/2026"}, env=VALID_ENV, platform="x"
+        )
+
+
+def test_fetch_limit_must_be_positive() -> None:
+    with pytest.raises(SocialConfigError):
+        SocialConfig.from_source_config({"fetch_limit": 0}, env=VALID_ENV, platform="x")
+
+
+def test_max_run_charge_must_be_positive() -> None:
+    with pytest.raises(SocialConfigError):
+        SocialConfig.from_source_config({"max_run_charge_usd": -1}, env=VALID_ENV, platform="x")

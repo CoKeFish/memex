@@ -24,8 +24,9 @@ from pydantic import BaseModel
 
 from memex.core.cursors import SocialCursor
 from memex.core.payloads import BasePayload, SocialPostPayload
-from memex.core.source import HealthResult, Source, SourceKind, SourceRecord
+from memex.core.source import ActorRunReport, HealthResult, Source, SourceKind, SourceRecord
 from memex.ingestors.social._common import (
+    RunWindow,
     advance_social_checkpoint,
     social_fetch,
     social_health_probe,
@@ -39,27 +40,44 @@ from memex.ingestors.social.parser import (
 from memex.logging import get_logger
 
 
-def _instagram_run_input(account: str, results_limit: int) -> dict[str, Any]:
-    return {
+def _instagram_run_input(account: str, window: RunWindow) -> dict[str, Any]:
+    run_input: dict[str, Any] = {
         "directUrls": [f"https://www.instagram.com/{account}/"],
         "resultsType": "posts",
-        "resultsLimit": results_limit,
+        "resultsLimit": window.limit,
     }
+    # Cota inferior nativa (UTC, precisión de día). El actor NO tiene techo de fecha: el
+    # `until` del rango lo aplica el backstop client-side de _common (escanea desde hoy
+    # hacia atrás igual — el freno de costo es `resultsLimit`).
+    if window.since is not None:
+        run_input["onlyPostsNewerThan"] = window.since.isoformat()
+    return run_input
 
 
-def _facebook_run_input(account: str, results_limit: int) -> dict[str, Any]:
-    return {
+def _facebook_run_input(account: str, window: RunWindow) -> dict[str, Any]:
+    run_input: dict[str, Any] = {
         "startUrls": [{"url": f"https://www.facebook.com/{account}"}],
-        "resultsLimit": results_limit,
+        "resultsLimit": window.limit,
     }
+    # Ojo costo: usar filtro de fecha activa el add-on por post del actor de FB.
+    if window.since is not None:
+        run_input["onlyPostsNewerThan"] = window.since.isoformat()
+    if window.until is not None:
+        run_input["onlyPostsOlderThan"] = window.until.isoformat()
+    return run_input
 
 
-def _x_run_input(account: str, results_limit: int) -> dict[str, Any]:
-    return {
+def _x_run_input(account: str, window: RunWindow) -> dict[str, Any]:
+    run_input: dict[str, Any] = {
         "twitterHandles": [account],
-        "maxItems": results_limit,
+        "maxItems": window.limit,
         "sort": "Latest",
     }
+    if window.since is not None:
+        run_input["start"] = window.since.isoformat()
+    if window.until is not None:
+        run_input["end"] = window.until.isoformat()
+    return run_input
 
 
 class InstagramSource:
@@ -73,6 +91,7 @@ class InstagramSource:
 
     def __init__(self, cfg: SocialConfig) -> None:
         self.cfg = cfg
+        self._run_reports: list[ActorRunReport] = []
         self._log = get_logger("memex.ingestors.social.source").bind(platform="instagram")
 
     async def health_check(self) -> HealthResult:
@@ -85,7 +104,13 @@ class InstagramSource:
             parse_item=parse_instagram_item,
             build_run_input=_instagram_run_input,
             log=self._log,
+            reports=self._run_reports,
         )
+
+    def pop_run_reports(self) -> list[ActorRunReport]:
+        """Drena los reports de runs de actor acumulados por fetch() (`ActorRunReporting`)."""
+        out, self._run_reports = self._run_reports, []
+        return out
 
     def advance_checkpoint(self, checkpoint: SocialCursor, last: SourceRecord) -> SocialCursor:
         return advance_social_checkpoint(checkpoint, last)
@@ -102,6 +127,7 @@ class FacebookSource:
 
     def __init__(self, cfg: SocialConfig) -> None:
         self.cfg = cfg
+        self._run_reports: list[ActorRunReport] = []
         self._log = get_logger("memex.ingestors.social.source").bind(platform="facebook")
 
     async def health_check(self) -> HealthResult:
@@ -114,7 +140,13 @@ class FacebookSource:
             parse_item=parse_facebook_item,
             build_run_input=_facebook_run_input,
             log=self._log,
+            reports=self._run_reports,
         )
+
+    def pop_run_reports(self) -> list[ActorRunReport]:
+        """Drena los reports de runs de actor acumulados por fetch() (`ActorRunReporting`)."""
+        out, self._run_reports = self._run_reports, []
+        return out
 
     def advance_checkpoint(self, checkpoint: SocialCursor, last: SourceRecord) -> SocialCursor:
         return advance_social_checkpoint(checkpoint, last)
@@ -131,6 +163,7 @@ class XSource:
 
     def __init__(self, cfg: SocialConfig) -> None:
         self.cfg = cfg
+        self._run_reports: list[ActorRunReport] = []
         self._log = get_logger("memex.ingestors.social.source").bind(platform="x")
 
     async def health_check(self) -> HealthResult:
@@ -143,7 +176,13 @@ class XSource:
             parse_item=parse_x_item,
             build_run_input=_x_run_input,
             log=self._log,
+            reports=self._run_reports,
         )
+
+    def pop_run_reports(self) -> list[ActorRunReport]:
+        """Drena los reports de runs de actor acumulados por fetch() (`ActorRunReporting`)."""
+        out, self._run_reports = self._run_reports, []
+        return out
 
     def advance_checkpoint(self, checkpoint: SocialCursor, last: SourceRecord) -> SocialCursor:
         return advance_social_checkpoint(checkpoint, last)

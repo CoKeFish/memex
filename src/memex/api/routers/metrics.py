@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from memex.api.auth import current_user_id
-from memex.api.schemas import LlmCallDetail, LlmCallList, LlmRollup
+from memex.api.schemas import ApifyRollup, ApifyRunList, LlmCallDetail, LlmCallList, LlmRollup
 from memex.db import connection
 from memex.logging import get_logger
 
@@ -424,6 +424,299 @@ async def llm_calls(
             "source_id": r["source_id"],
             "source_name": r["source_name"],
             "metadata": r["metadata"],
+        }
+        for r in rows
+    ]
+    return {"items": items, "total": total}
+
+
+# ---- Apify (tabla apify_runs): gasto real de scraping social ------------------------------------
+
+#: La fuente puede haberse borrado (FK ON DELETE SET NULL): el gasto se conserva y se etiqueta.
+_APIFY_SOURCE_LABEL = "COALESCE(s.name, '(fuente borrada)')"
+
+_APIFY_SORT_COLS = {
+    "created_at": "created_at",
+    "cost_usd": "cost_usd",
+    "items_scraped": "items_scraped",
+}
+
+
+def _apify_window(since: datetime | None, until: datetime | None, params: dict[str, Any]) -> str:
+    """WHERE de ventana sobre `apify_runs ar`. Agrega :since/:until a `params`."""
+    clauses = ["ar.user_id = :uid"]
+    if since is not None:
+        clauses.append("ar.created_at >= :since")
+        params["since"] = since
+    if until is not None:
+        clauses.append("ar.created_at < :until")
+        params["until"] = until
+    return " AND ".join(clauses)
+
+
+@router.get("/apify/rollup", response_model=ApifyRollup)
+async def apify_rollup(
+    user_id: UserID,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    tz: str | None = None,
+) -> dict[str, Any]:
+    """Agregaciones del gasto Apify del rango [`since`, `until`) para la vista /metricas.
+
+    Espejo del rollup LLM: KPIs + por fuente + por cuenta seguida + por plataforma + serie
+    diaria (bucket en la TZ del cliente). El costo es el que reporta Apify por run
+    (`usageTotalUsd`); los runs con costo aún no asentado suman 0 acá pero se ven en la
+    auditoría con cost NULL.
+    """
+    params: dict[str, Any] = {"uid": user_id, "tz": _resolve_tz(tz)}
+    where = _apify_window(since, until, params)
+
+    with connection() as conn:
+        krow = (
+            conn.execute(
+                text(f"""
+                SELECT
+                    COUNT(*) AS runs,
+                    COALESCE(SUM(ar.cost_usd), 0) AS cost_usd,
+                    COALESCE(SUM(ar.items_scraped), 0) AS items_scraped,
+                    COALESCE(SUM(ar.items_kept), 0) AS items_kept,
+                    COUNT(*) FILTER (WHERE ar.status <> 'ok') AS errors,
+                    COUNT(DISTINCT (ar.platform, ar.account)) AS accounts
+                FROM apify_runs ar
+                WHERE {where}
+            """),
+                params,
+            )
+            .mappings()
+            .one()
+        )
+
+        prev_cost: float | None = None
+        prev_runs: int | None = None
+        if since is not None:
+            until_eff = until if until is not None else datetime.now(UTC)
+            span = until_eff - since
+            prow = (
+                conn.execute(
+                    text(
+                        "SELECT COALESCE(SUM(cost_usd), 0) AS cost, COUNT(*) AS runs "
+                        "FROM apify_runs "
+                        "WHERE user_id = :uid AND created_at >= :ps AND created_at < :pe"
+                    ),
+                    {"uid": user_id, "ps": since - span, "pe": since},
+                )
+                .mappings()
+                .one()
+            )
+            prev_cost = float(prow["cost"])
+            prev_runs = int(prow["runs"])
+
+        by_source = (
+            conn.execute(
+                text(f"""
+                SELECT ar.source_id,
+                       {_APIFY_SOURCE_LABEL} AS source_name,
+                       COUNT(*) AS runs,
+                       COALESCE(SUM(ar.items_scraped), 0) AS items_scraped,
+                       COALESCE(SUM(ar.cost_usd), 0) AS cost_usd
+                FROM apify_runs ar
+                LEFT JOIN sources s ON s.id = ar.source_id
+                WHERE {where}
+                GROUP BY ar.source_id, source_name
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        by_account = (
+            conn.execute(
+                text(f"""
+                SELECT ar.platform, ar.account,
+                       COUNT(*) AS runs,
+                       COALESCE(SUM(ar.items_scraped), 0) AS items_scraped,
+                       COALESCE(SUM(ar.cost_usd), 0) AS cost_usd
+                FROM apify_runs ar
+                WHERE {where}
+                GROUP BY ar.platform, ar.account
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        by_platform = (
+            conn.execute(
+                text(f"""
+                SELECT ar.platform,
+                       COUNT(*) AS runs,
+                       COALESCE(SUM(ar.items_scraped), 0) AS items_scraped,
+                       COALESCE(SUM(ar.cost_usd), 0) AS cost_usd
+                FROM apify_runs ar
+                WHERE {where}
+                GROUP BY ar.platform
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        daily_rows = (
+            conn.execute(
+                text(f"""
+                SELECT (ar.created_at AT TIME ZONE :tz)::date AS day,
+                       ar.platform,
+                       COALESCE(SUM(ar.cost_usd), 0) AS cost_usd
+                FROM apify_runs ar
+                WHERE {where}
+                GROUP BY day, ar.platform
+                ORDER BY day
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+    daily_map: dict[str, dict[str, Any]] = {}
+    for r in daily_rows:
+        day = r["day"].isoformat()
+        entry = daily_map.setdefault(day, {"day": day, "total": 0.0, "by_platform": {}})
+        cost = float(r["cost_usd"])
+        entry["by_platform"][r["platform"]] = cost
+        entry["total"] += cost
+    daily = [daily_map[d] for d in sorted(daily_map)]
+
+    runs = int(krow["runs"])
+    cost = float(krow["cost_usd"])
+    _log.info("metrics.apify.rollup", user_id=user_id, runs=runs, cost_usd=cost)
+    return {
+        "kpis": {
+            "cost_usd": cost,
+            "runs": runs,
+            "items_scraped": int(krow["items_scraped"]),
+            "items_kept": int(krow["items_kept"]),
+            "errors": int(krow["errors"]),
+            "accounts": int(krow["accounts"]),
+            "prev_cost_usd": prev_cost,
+            "prev_runs": prev_runs,
+        },
+        "by_source": [
+            {
+                "source_id": r["source_id"],
+                "source_name": r["source_name"],
+                "runs": int(r["runs"]),
+                "items_scraped": int(r["items_scraped"]),
+                "cost_usd": float(r["cost_usd"]),
+            }
+            for r in by_source
+        ],
+        "by_account": [
+            {
+                "platform": r["platform"],
+                "account": r["account"],
+                "runs": int(r["runs"]),
+                "items_scraped": int(r["items_scraped"]),
+                "cost_usd": float(r["cost_usd"]),
+            }
+            for r in by_account
+        ],
+        "by_platform": [
+            {
+                "platform": r["platform"],
+                "runs": int(r["runs"]),
+                "items_scraped": int(r["items_scraped"]),
+                "cost_usd": float(r["cost_usd"]),
+            }
+            for r in by_platform
+        ],
+        "daily": daily,
+        "platforms": [r["platform"] for r in by_platform],
+    }
+
+
+@router.get("/apify/runs", response_model=ApifyRunList)
+async def apify_runs_audit(
+    user_id: UserID,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    platform: Annotated[list[str] | None, Query()] = None,
+    platform_mode: FilterMode = "include",
+    account: Annotated[list[str] | None, Query()] = None,
+    account_mode: FilterMode = "include",
+    status: Annotated[list[str] | None, Query()] = None,
+    status_mode: FilterMode = "include",
+    q: str | None = None,
+    sort: Literal["created_at", "cost_usd", "items_scraped"] = "created_at",
+    dir: Literal["asc", "desc"] = "desc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    """Auditoría de `apify_runs`: corridas de actor crudas, filtrables/ordenables/paginadas.
+
+    `q` busca substring en cuenta / actor / id de run de Apify. Mismo contrato de filtros
+    incluir/excluir y paginación que `/metrics/llm/calls`.
+    """
+    params: dict[str, Any] = {"uid": user_id, "limit": limit, "offset": offset}
+    where = _apify_window(since, until, params)
+
+    filters: list[str] = []
+    _multi_filter("platform", "platform", platform, platform_mode, filters, params)
+    _multi_filter("account", "account", account, account_mode, filters, params)
+    _multi_filter("status", "status", status, status_mode, filters, params)
+    if q:
+        params["q"] = f"%{q}%"
+        filters.append("(account ILIKE :q OR actor_id ILIKE :q OR apify_run_id ILIKE :q)")
+    filter_sql = (" WHERE " + " AND ".join(filters)) if filters else ""
+
+    col = _APIFY_SORT_COLS[sort]
+    direction = "ASC" if dir == "asc" else "DESC"
+
+    sql = f"""
+        WITH c AS (
+            SELECT ar.id, ar.created_at, ar.platform, ar.account, ar.actor_id, ar.apify_run_id,
+                   ar.status, ar.items_scraped, ar.items_kept, ar.cost_usd, ar.charged_events,
+                   ar.source_id, ar.ingestion_run_id, ar.started_at, ar.finished_at,
+                   {_APIFY_SOURCE_LABEL} AS source_name
+            FROM apify_runs ar
+            LEFT JOIN sources s ON s.id = ar.source_id
+            WHERE {where}
+        )
+        SELECT *, COUNT(*) OVER() AS total
+        FROM c{filter_sql}
+        ORDER BY {col} {direction}, id {direction}
+        LIMIT :limit OFFSET :offset
+    """
+    with connection() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+
+    total = int(rows[0]["total"]) if rows else 0
+    items = [
+        {
+            "id": r["id"],
+            "created_at": r["created_at"],
+            "platform": r["platform"],
+            "account": r["account"],
+            "actor_id": r["actor_id"],
+            "apify_run_id": r["apify_run_id"],
+            "status": r["status"],
+            "items_scraped": int(r["items_scraped"]),
+            "items_kept": int(r["items_kept"]),
+            "cost_usd": float(r["cost_usd"]) if r["cost_usd"] is not None else None,
+            "charged_events": r["charged_events"],
+            "source_id": r["source_id"],
+            "source_name": r["source_name"],
+            "ingestion_run_id": (
+                str(r["ingestion_run_id"]) if r["ingestion_run_id"] is not None else None
+            ),
+            "started_at": r["started_at"],
+            "finished_at": r["finished_at"],
         }
         for r in rows
     ]

@@ -24,7 +24,7 @@ import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { CollapsiblePanel } from "@/components/common/collapsible-panel"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { CapBadge, type CapLevel } from "@/components/common/cap-badge"
-import { formatInt, formatRelative } from "@/lib/format"
+import { formatInt, formatRelative, formatUsd } from "@/lib/format"
 import { sourceFullLabel, sourceMeta } from "@/lib/inbox-format"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
@@ -50,11 +50,15 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
 }
 
-// Qué modos admite cada tipo de fuente. Solo el correo (imap) honra la ventana de fechas/cantidad
-// (rango / últimos N); telegram y redes solo traen lo nuevo (incremental) — su ingestor ignora esos
-// parámetros, así que no los ofrecemos para no confundir.
-function supportsMode(type: string, mode: Mode): boolean {
-  return mode === "incremental" ? true : type === "imap"
+// Qué modos admite cada fuente: lo dice el BACKEND (SourceRow.fetch_modes, derivado de lo que el
+// ingestor honra de verdad) — acá no se hardcodean tipos. Incremental siempre está.
+function supportsMode(s: Source, mode: Mode): boolean {
+  return mode === "incremental" ? true : s.fetchModes.includes(mode)
+}
+
+/** Aviso server-driven del modo activo para esta fuente (p. ej. el costo del rango en IG). */
+function modeCaveat(s: Source, mode: Mode): string | null {
+  return s.modeCaveats?.[mode] ?? null
 }
 
 function rec(v: unknown): Record<string, unknown> | null {
@@ -258,9 +262,9 @@ export function FetchControl() {
 
   const modeMeta = MODES.find((m) => m.v === mode)!
   const allIds = useMemo(() => (sources ?? []).map((s) => s.id), [sources])
-  // Fuentes que el modo actual puede traer (incremental = todas; rango/últimos N = solo correo).
+  // Fuentes que el modo actual puede traer (incremental = todas; rango/últimos N según fetch_modes).
   const enabledIds = useMemo(
-    () => (sources ?? []).filter((s) => supportsMode(s.type, mode)).map((s) => s.id),
+    () => (sources ?? []).filter((s) => supportsMode(s, mode)).map((s) => s.id),
     [sources, mode],
   )
 
@@ -327,7 +331,7 @@ export function FetchControl() {
     // Al pasar a rango/últimos N, destildá las fuentes que ese modo no admite.
     setSelected((prev) => new Set([...prev].filter((id) => {
       const s = (sources ?? []).find((x) => x.id === id)
-      return s ? supportsMode(s.type, nm) : false
+      return s ? supportsMode(s, nm) : false
     })))
     setRanReal(false)
   }
@@ -358,6 +362,7 @@ export function FetchControl() {
     })
     let ok = 0
     let err = 0
+    let apifyCost: number | null = null
     const total: FetchPreview = { scanned: 0, nuevos: 0, duplicados: 0, filtrados: 0 }
     // Secuencial: una fuente a la vez para no saturar el server y mostrar avance fila por fila.
     for (const id of ids) {
@@ -375,6 +380,7 @@ export function FetchControl() {
           duplicados: res.duplicates,
           filtrados: res.filtered,
         }
+        if (res.api_cost_usd != null) apifyCost = (apifyCost ?? 0) + res.api_cost_usd
         setResults((r) => ({ ...r, [id]: { status: "ok", p } }))
         total.nuevos += p.nuevos
         total.duplicados += p.duplicados
@@ -391,7 +397,10 @@ export function FetchControl() {
       setCkptTick((t) => t + 1)
     }
     const verb = dryRun ? "Dry-run" : "Ingesta"
-    const desc = `${total.nuevos} nuevos · ${total.duplicados} ya existentes · ${total.filtrados} filtrados`
+    // El dry-run también muestra el costo: los actores de Apify corren (y cobran) igual.
+    const desc =
+      `${total.nuevos} nuevos · ${total.duplicados} ya existentes · ${total.filtrados} filtrados` +
+      (apifyCost != null ? ` · ${formatUsd(apifyCost)} Apify` : "")
     if (err === 0) {
       toast.success(`${verb}: ${ok} ${ok === 1 ? "fuente" : "fuentes"}`, { description: desc })
     } else {
@@ -416,7 +425,9 @@ export function FetchControl() {
       setRanReal(true)
       setCkptTick((t) => t + 1)
       toast.success(`@${handle}: ${p.nuevos} ${p.nuevos === 1 ? "nuevo" : "nuevos"}`, {
-        description: `${p.duplicados} ya existentes · ${p.filtrados} filtrados`,
+        description:
+          `${p.duplicados} ya existentes · ${p.filtrados} filtrados` +
+          (res.api_cost_usd != null ? ` · costó ${formatUsd(res.api_cost_usd)}` : ""),
       })
     } catch (e) {
       setAcctResults((r) => ({ ...r, [key]: { status: "error", msg: errMsg(e) } }))
@@ -582,7 +593,7 @@ export function FetchControl() {
 
               {groups.map((g) => {
                 const ids = g.sources.map((s) => s.id)
-                const groupEnabled = g.sources.filter((s) => supportsMode(s.type, mode)).map((s) => s.id)
+                const groupEnabled = g.sources.filter((s) => supportsMode(s, mode)).map((s) => s.id)
                 const selCount = ids.filter((id) => selected.has(id)).length
                 const allSel = groupEnabled.length > 0 && groupEnabled.every((id) => selected.has(id))
                 const isOpen = expanded.has(g.key)
@@ -638,7 +649,8 @@ export function FetchControl() {
 
                     {isOpen &&
                       g.sources.map((s) => {
-                        const enabled = supportsMode(s.type, mode)
+                        const enabled = supportsMode(s, mode)
+                        const caveat = enabled ? modeCaveat(s, mode) : null
                         const social = PAID_API_TYPES.has(s.type)
                         const cursor = checkpoints?.[s.id]
                         const progress = social ? socialAccountsProgress(cursor) : {}
@@ -670,6 +682,9 @@ export function FetchControl() {
                                       ? checkpointLabel(cursor)
                                       : "Solo modo incremental (no admite rango/cantidad)"}
                                   </div>
+                                  {caveat && (
+                                    <div className="text-[11px] text-status-review">{caveat}</div>
+                                  )}
                                 </div>
                               </button>
                               <div className="shrink-0 pl-2">

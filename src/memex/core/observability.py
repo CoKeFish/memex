@@ -26,12 +26,16 @@ from memex.db import connection
 from memex.logging import get_logger
 
 if TYPE_CHECKING:
+    from memex.core.source import ActorRunReport
     from memex.ingestors.runner import RunStats
 
 
 _log = get_logger("memex.core.observability")
 
 _ERROR_MESSAGE_MAX = 1000
+
+#: Mismo cuanto que llm_calls.cost_usd (NUMERIC(10,6)): 6 decimales.
+_COST_QUANTUM = Decimal("0.000001")
 
 
 @dataclass
@@ -295,6 +299,78 @@ def record_llm_call(
         source_id=source_id,
     )
     return int(row_id)
+
+
+def record_apify_runs(
+    *,
+    user_id: int,
+    source_id: int | None,
+    ingestion_run_id: str | None,
+    reports: list[ActorRunReport],
+) -> Decimal | None:
+    """Persiste los reports de corridas de actor (Apify) y devuelve el costo agregado.
+
+    Single writer de `apify_runs` (espejo de `record_llm_call`). Una fila por run de
+    actor — también error/timeout (un run fallido pudo cobrar lo consumido). En la
+    misma transacción actualiza el agregado `ingestion_runs.api_cost_usd` cuando la
+    corrida existe (`ingestion_run_id` es None en dry-run y `discover`, que gastan
+    igual). Devuelve la suma cuantizada a 6 decimales, o None si ningún report trajo
+    costo (Apify lo asienta tarde a veces — la fila queda con cost_usd NULL, visible).
+    """
+    if not reports:
+        return None
+    total: Decimal | None = None
+    with connection() as conn:
+        for r in reports:
+            cost: Decimal | None = None
+            if r.cost_usd is not None:
+                cost = Decimal(str(r.cost_usd)).quantize(_COST_QUANTUM)
+                total = cost if total is None else total + cost
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO apify_runs
+                      (user_id, source_id, ingestion_run_id, platform, account, actor_id,
+                       apify_run_id, status, items_scraped, items_kept, cost_usd,
+                       charged_events, started_at, finished_at)
+                    VALUES
+                      (:user_id, :source_id, :ingestion_run_id, :platform, :account, :actor_id,
+                       :apify_run_id, :status, :items_scraped, :items_kept, :cost_usd,
+                       CAST(:charged_events AS JSONB), :started_at, :finished_at)
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "source_id": source_id,
+                    "ingestion_run_id": ingestion_run_id,
+                    "platform": r.platform,
+                    "account": r.account,
+                    "actor_id": r.actor_id,
+                    "apify_run_id": r.apify_run_id,
+                    "status": r.status,
+                    "items_scraped": r.items_scraped,
+                    "items_kept": r.items_kept,
+                    "cost_usd": str(cost) if cost is not None else None,
+                    "charged_events": json.dumps(r.charged_events)
+                    if r.charged_events is not None
+                    else None,
+                    "started_at": r.started_at,
+                    "finished_at": r.finished_at,
+                },
+            )
+        if ingestion_run_id is not None and total is not None:
+            conn.execute(
+                text("UPDATE ingestion_runs SET api_cost_usd = :cost WHERE id = :id"),
+                {"cost": str(total), "id": ingestion_run_id},
+            )
+    _log.info(
+        "apify.runs.recorded",
+        runs=len(reports),
+        cost_usd=str(total) if total is not None else None,
+        source_id=source_id,
+        ingestion_run_id=ingestion_run_id,
+    )
+    return total
 
 
 @dataclass
