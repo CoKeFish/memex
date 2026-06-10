@@ -517,6 +517,42 @@ class InboxStats(BaseModel):
     sources: dict[int, StatsBySource]
 
 
+# ---- Cobertura temporal (timeline de rangos cubiertos) ------------------------------------------
+# Shape GENÉRICO lanes/ranges, sin nada específico de ingesta: hoy lo produce GET /inbox/coverage
+# (rangos INGERIDOS por `occurred_at`); una futura vista de procesamiento puede producir el mismo
+# shape con rangos procesados y reusar el componente de timeline del frontend tal cual.
+
+
+class CoverageRange(BaseModel):
+    """Tramo contiguo de días cubiertos (días separados por <= gap_days se funden en uno)."""
+
+    start: date  # primer día del tramo (inclusive, en la tz pedida)
+    end: date  # último día del tramo (inclusive)
+    days: int  # días de calendario del tramo (end - start + 1)
+    count: int  # items dentro del tramo
+
+
+class CoverageLane(BaseModel):
+    """Una pista del timeline (hoy: una fuente)."""
+
+    id: int
+    label: str  # sources.name
+    kind: str  # email | chat | social | other (derivado de sources.type)
+    enabled: bool
+    total: int
+    first_day: date | None
+    last_day: date | None
+    ranges: list[CoverageRange]
+
+
+class CoverageOut(BaseModel):
+    lanes: list[CoverageLane]
+    domain_min: date | None  # min(first_day) entre lanes; None si no hay datos
+    domain_max: date | None
+    tz: str
+    gap_days: int
+
+
 class FinanceTransactionRow(BaseModel):
     """Una transacción CONSOLIDADA (fila de `mod_finance_consolidated` — la vista deduplicada que
     lee el dashboard).

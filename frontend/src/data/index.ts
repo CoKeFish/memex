@@ -48,6 +48,11 @@ export * from "./processing"
 // corridas con su origen (manual/daemon/backfill/agent) para linkear a /logs?run_id=.
 export * from "./ingest-scheduler"
 
+// ---- Cobertura temporal (datos reales: GET /inbox/coverage) --------------------
+// fetchInboxCoverage: rangos de fechas de origen ya ingeridos, por fuente (timeline de /carga).
+// `toCoverage` es el transform genérico del shape lanes/ranges, reusable por endpoints futuros.
+export * from "./coverage"
+
 // ---- Selectores de agregación (mock) ------------------------------------------
 // Nota: los selectores de costo LLM (costKpis/costDaily/costBy*/callsInRange) se RETIRARON del
 // facade: la vista /metricas ahora consume `./metrics` (API real). Siguen viviendo en lib/selectors
