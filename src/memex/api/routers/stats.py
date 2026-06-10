@@ -158,7 +158,7 @@ async def pipeline(
                 text(f"""
                 SELECT r.id, r.source_id, s.name AS source_name, r.trigger, r.status,
                        r.started_at, r.ended_at, r.posted, r.inserted, r.duplicates,
-                       r.errors, r.filtered, r.error_class, r.error_message
+                       r.errors, r.filtered, r.error_class, r.error_message, r.api_cost_usd
                 FROM ingestion_runs r
                 LEFT JOIN sources s ON s.id = r.source_id
                 WHERE {" AND ".join(run_where)}
@@ -231,6 +231,7 @@ async def pipeline(
     runs: list[dict[str, Any]] = []
     totals = {k: 0 for k in ("posted", "inserted", "duplicates", "errors", "filtered")}
     unbalanced = 0
+    api_cost_total = 0.0
     for r in run_rows:
         expected = int(r["inserted"]) + int(r["duplicates"]) + int(r["errors"]) + int(r["filtered"])
         balanced = int(r["posted"]) == expected
@@ -238,6 +239,9 @@ async def pipeline(
             unbalanced += 1
         for k in totals:
             totals[k] += int(r[k])
+        api_cost = float(r["api_cost_usd"]) if r["api_cost_usd"] is not None else None
+        if api_cost is not None:
+            api_cost_total += api_cost
         runs.append(
             {
                 "id": str(r["id"]),
@@ -254,6 +258,7 @@ async def pipeline(
                 "filtered": int(r["filtered"]),
                 "error_class": r["error_class"],
                 "error_message": r["error_message"],
+                "api_cost_usd": api_cost,
                 "expected": expected,
                 "balanced": balanced,
             }
@@ -270,7 +275,12 @@ async def pipeline(
         "workers": worker_items,
         "ingestion": {
             "runs": runs,
-            "totals": {**totals, "runs": len(runs), "unbalanced": unbalanced},
+            "totals": {
+                **totals,
+                "runs": len(runs),
+                "unbalanced": unbalanced,
+                "api_cost_usd": api_cost_total,
+            },
         },
     }
 

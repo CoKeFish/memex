@@ -62,6 +62,8 @@ export interface IngestionRunRow {
   filtered: number
   errorClass: string | null
   errorMessage: string | null
+  /** Gasto Apify de la corrida (agregado de sus runs de actor); null = sin API paga. */
+  apiCostUsd: number | null
   expected: number
   balanced: boolean
 }
@@ -74,6 +76,8 @@ export interface IngestionTotalsRow {
   filtered: number
   runs: number
   unbalanced: number
+  /** Gasto Apify sumado de las corridas listadas. */
+  api_cost_usd: number
 }
 
 export interface PipelineStats {
@@ -140,6 +144,7 @@ interface IngestionRunApi {
   filtered: number
   error_class: string | null
   error_message: string | null
+  api_cost_usd: number | null
   expected: number
   balanced: boolean
 }
@@ -213,6 +218,7 @@ function toRun(r: IngestionRunApi): IngestionRunRow {
     filtered: r.filtered,
     errorClass: r.error_class,
     errorMessage: r.error_message,
+    apiCostUsd: r.api_cost_usd,
     expected: r.expected,
     balanced: r.balanced,
   }

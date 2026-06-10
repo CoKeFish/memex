@@ -278,6 +278,194 @@ export async function fetchLlmRollup(w: MetricsWindow = {}): Promise<LlmRollup> 
   return toRollup(await apiGet<RollupApi>(`/metrics/llm/rollup?${qs.toString()}`))
 }
 
+// ---- Apify (gasto real de scraping social: tabla apify_runs) ------------------------------------
+
+export interface ApifyKpis {
+  costUsd: number
+  runs: number
+  itemsScraped: number
+  itemsKept: number
+  /** Runs con status != ok (error + timeout) — pudieron cobrar igual. */
+  errors: number
+  /** Cuentas seguidas distintas con actividad en el rango. */
+  accounts: number
+  prevCostUsd: number | null
+  prevRuns: number | null
+}
+
+export interface ApifySourceCost {
+  sourceId: number | null
+  sourceName: string
+  runs: number
+  itemsScraped: number
+  costUsd: number
+}
+
+export interface ApifyAccountCost {
+  platform: string
+  account: string
+  runs: number
+  itemsScraped: number
+  costUsd: number
+}
+
+export interface ApifyPlatformCost {
+  platform: string
+  runs: number
+  itemsScraped: number
+  costUsd: number
+}
+
+export interface ApifyDailyCost {
+  day: string
+  total: number
+  byPlatform: Record<string, number>
+}
+
+export interface ApifyRollup {
+  kpis: ApifyKpis
+  bySource: ApifySourceCost[]
+  byAccount: ApifyAccountCost[]
+  byPlatform: ApifyPlatformCost[]
+  daily: ApifyDailyCost[]
+  platforms: string[]
+}
+
+export interface ApifyRunRow {
+  id: number
+  createdAt: string
+  platform: string
+  account: string
+  actorId: string
+  apifyRunId: string | null
+  status: string
+  itemsScraped: number
+  itemsKept: number
+  /** null = Apify aún no asentó el costo del run. */
+  costUsd: number | null
+  chargedEvents: Record<string, number> | null
+  sourceId: number | null
+  sourceName: string | null
+  ingestionRunId: string | null
+}
+
+interface ApifyKpisApi {
+  cost_usd: number
+  runs: number
+  items_scraped: number
+  items_kept: number
+  errors: number
+  accounts: number
+  prev_cost_usd: number | null
+  prev_runs: number | null
+}
+interface ApifySourceApi { source_id: number | null; source_name: string; runs: number; items_scraped: number; cost_usd: number }
+interface ApifyAccountApi { platform: string; account: string; runs: number; items_scraped: number; cost_usd: number }
+interface ApifyPlatformApi { platform: string; runs: number; items_scraped: number; cost_usd: number }
+interface ApifyDailyApi { day: string; total: number; by_platform: Record<string, number> }
+interface ApifyRollupApi {
+  kpis: ApifyKpisApi
+  by_source: ApifySourceApi[]
+  by_account: ApifyAccountApi[]
+  by_platform: ApifyPlatformApi[]
+  daily: ApifyDailyApi[]
+  platforms: string[]
+}
+interface ApifyRunApi {
+  id: number
+  created_at: string
+  platform: string
+  account: string
+  actor_id: string
+  apify_run_id: string | null
+  status: string
+  items_scraped: number
+  items_kept: number
+  cost_usd: number | null
+  charged_events: Record<string, number> | null
+  source_id: number | null
+  source_name: string | null
+  ingestion_run_id: string | null
+}
+
+function toApifyRollup(r: ApifyRollupApi): ApifyRollup {
+  return {
+    kpis: {
+      costUsd: r.kpis.cost_usd,
+      runs: r.kpis.runs,
+      itemsScraped: r.kpis.items_scraped,
+      itemsKept: r.kpis.items_kept,
+      errors: r.kpis.errors,
+      accounts: r.kpis.accounts,
+      prevCostUsd: r.kpis.prev_cost_usd,
+      prevRuns: r.kpis.prev_runs,
+    },
+    bySource: r.by_source.map((s) => ({
+      sourceId: s.source_id,
+      sourceName: s.source_name,
+      runs: s.runs,
+      itemsScraped: s.items_scraped,
+      costUsd: s.cost_usd,
+    })),
+    byAccount: r.by_account.map((a) => ({
+      platform: a.platform,
+      account: a.account,
+      runs: a.runs,
+      itemsScraped: a.items_scraped,
+      costUsd: a.cost_usd,
+    })),
+    byPlatform: r.by_platform.map((p) => ({
+      platform: p.platform,
+      runs: p.runs,
+      itemsScraped: p.items_scraped,
+      costUsd: p.cost_usd,
+    })),
+    daily: r.daily.map((d) => ({ day: d.day, total: d.total, byPlatform: d.by_platform })),
+    platforms: r.platforms,
+  }
+}
+
+function toApifyRun(r: ApifyRunApi): ApifyRunRow {
+  return {
+    id: r.id,
+    createdAt: r.created_at,
+    platform: r.platform,
+    account: r.account,
+    actorId: r.actor_id,
+    apifyRunId: r.apify_run_id,
+    status: r.status,
+    itemsScraped: r.items_scraped,
+    itemsKept: r.items_kept,
+    costUsd: r.cost_usd,
+    chargedEvents: r.charged_events,
+    sourceId: r.source_id,
+    sourceName: r.source_name,
+    ingestionRunId: r.ingestion_run_id,
+  }
+}
+
+/** Rollup del gasto Apify del rango (KPIs + por fuente/cuenta/plataforma + serie diaria). */
+export async function fetchApifyRollup(w: MetricsWindow = {}): Promise<ApifyRollup> {
+  const qs = new URLSearchParams()
+  windowParams(qs, w)
+  return toApifyRollup(await apiGet<ApifyRollupApi>(`/metrics/apify/rollup?${qs.toString()}`))
+}
+
+/** Corridas de actor crudas (auditoría), más recientes primero. */
+export async function fetchApifyRuns(
+  w: MetricsWindow = {},
+  opts: { limit?: number; offset?: number } = {},
+): Promise<{ items: ApifyRunRow[]; total: number }> {
+  const qs = new URLSearchParams()
+  windowParams(qs, w)
+  qs.set("limit", String(opts.limit ?? 50))
+  qs.set("offset", String(opts.offset ?? 0))
+  const r = await apiGet<{ items: ApifyRunApi[]; total: number }>(
+    `/metrics/apify/runs?${qs.toString()}`,
+  )
+  return { items: r.items.map(toApifyRun), total: r.total }
+}
+
 export type FilterMode = "include" | "exclude"
 
 export interface LlmCallsQuery extends MetricsWindow {

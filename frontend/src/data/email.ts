@@ -118,6 +118,8 @@ export interface FetchResult {
   filtered: number
   dry_run: boolean
   ms_elapsed: number
+  /** Costo Apify real de ESTA corrida (también en dry-run, que gasta igual); null si no aplica. */
+  api_cost_usd?: number | null
 }
 
 export type FetchMode = "incremental" | "range" | "last"

@@ -24,7 +24,7 @@ import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { CollapsiblePanel } from "@/components/common/collapsible-panel"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { CapBadge, type CapLevel } from "@/components/common/cap-badge"
-import { formatInt, formatRelative } from "@/lib/format"
+import { formatInt, formatRelative, formatUsd } from "@/lib/format"
 import { sourceFullLabel, sourceMeta } from "@/lib/inbox-format"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
@@ -358,6 +358,7 @@ export function FetchControl() {
     })
     let ok = 0
     let err = 0
+    let apifyCost: number | null = null
     const total: FetchPreview = { scanned: 0, nuevos: 0, duplicados: 0, filtrados: 0 }
     // Secuencial: una fuente a la vez para no saturar el server y mostrar avance fila por fila.
     for (const id of ids) {
@@ -375,6 +376,7 @@ export function FetchControl() {
           duplicados: res.duplicates,
           filtrados: res.filtered,
         }
+        if (res.api_cost_usd != null) apifyCost = (apifyCost ?? 0) + res.api_cost_usd
         setResults((r) => ({ ...r, [id]: { status: "ok", p } }))
         total.nuevos += p.nuevos
         total.duplicados += p.duplicados
@@ -391,7 +393,10 @@ export function FetchControl() {
       setCkptTick((t) => t + 1)
     }
     const verb = dryRun ? "Dry-run" : "Ingesta"
-    const desc = `${total.nuevos} nuevos · ${total.duplicados} ya existentes · ${total.filtrados} filtrados`
+    // El dry-run también muestra el costo: los actores de Apify corren (y cobran) igual.
+    const desc =
+      `${total.nuevos} nuevos · ${total.duplicados} ya existentes · ${total.filtrados} filtrados` +
+      (apifyCost != null ? ` · ${formatUsd(apifyCost)} Apify` : "")
     if (err === 0) {
       toast.success(`${verb}: ${ok} ${ok === 1 ? "fuente" : "fuentes"}`, { description: desc })
     } else {
@@ -416,7 +421,9 @@ export function FetchControl() {
       setRanReal(true)
       setCkptTick((t) => t + 1)
       toast.success(`@${handle}: ${p.nuevos} ${p.nuevos === 1 ? "nuevo" : "nuevos"}`, {
-        description: `${p.duplicados} ya existentes · ${p.filtrados} filtrados`,
+        description:
+          `${p.duplicados} ya existentes · ${p.filtrados} filtrados` +
+          (res.api_cost_usd != null ? ` · costó ${formatUsd(res.api_cost_usd)}` : ""),
       })
     } catch (e) {
       setAcctResults((r) => ({ ...r, [key]: { status: "error", msg: errMsg(e) } }))
