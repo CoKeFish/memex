@@ -227,6 +227,24 @@ async def test_run_cooccurrence_llm_emits_confirmed_llm_edges() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_cooccurrence_llm_par_con_producto() -> None:
+    # el slug del vértice producto sale del mapa central (el ternario viejo lo mandaba a :org,
+    # vértice inexistente que la poda barrería).
+    with connection() as c:
+        p = _identity(c, "persona", "Juan")
+        prod = _identity(c, "producto", "Hearthstone")
+        _mention(c, p, [7])
+        _mention(c, prod, [7], kind="producto")
+    fake = FakeLLM(f'{{"pairs": [{{"a_id": {p}, "b_id": {prod}, "quote": "trabaja con Acme"}}]}}')
+    stats = await run_cooccurrence_llm(1, cap=1, client=fake)
+    assert (stats.edges, stats.ungrounded) == (1, 0)
+    with connection() as c:
+        edges = list_edges(c, 1)
+    assert len(edges) == 1
+    assert _pair(edges[0]) == {("identidades:person", p), ("identidades:producto", prod)}
+
+
+@pytest.mark.asyncio
 async def test_run_cooccurrence_llm_idempotent() -> None:
     with connection() as c:
         p = _identity(c, "persona", "Juan")

@@ -83,6 +83,16 @@ def _org(name: str) -> int:
     )
 
 
+def _producto(name: str) -> int:
+    return int(
+        _exec(
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'producto', :n) RETURNING id",
+            n=name,
+        )
+    )
+
+
 def _link_person_org(person_id: int, org_id: int) -> None:
     _exec(
         "INSERT INTO mod_identidades_person_orgs (user_id, person_id, org_id) VALUES (1, :p, :o)",
@@ -265,6 +275,39 @@ def test_pertenencia_real_sub_padre() -> None:
     assert (e.dst.slug, e.dst.id) == ("identidades:org", parent)
 
 
+def test_pertenencia_producto_a_empresa() -> None:
+    # producto→empresa con kinds reales: la arista usa el slug identidades:producto del hijo
+    parent = _org("Valve Corporation")
+    child = _producto("Steam")
+    _set_parent(child, parent)
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="identidades")
+    assert stats.pertenencia_reales == 1
+    assert len(edges) == 1
+    e = edges[0]
+    assert e.relation_type == "pertenece_a"
+    assert (e.src.slug, e.src.id) == ("identidades:producto", child)
+    assert (e.dst.slug, e.dst.id) == ("identidades:org", parent)
+
+
+def test_cooccurrence_producto_sobrevive_poda() -> None:
+    # pista con vértice producto: el slug nuevo PROYECTA (NODE_SOURCES) → la poda de huérfanas no
+    # la barre en el siguiente build (la trampa que motivó adelantar la plomería de slugs).
+    prod = _producto("Hearthstone")
+    p = _person("Rodion")
+    _mention(prod, [21], kind="producto")
+    _mention(p, [21])
+    with connection() as c:
+        stats = build_relations(c, 1)
+    assert stats.cooccurrence_pistas == 1
+    with connection() as c:
+        build_relations(c, 1)  # segundo build: la arista no es huérfana, sobrevive
+        edges = list_edges(c, 1)
+    assert len(edges) == 1
+    assert _pair(edges[0]) == {("identidades:producto", prod), ("identidades:person", p)}
+
+
 def test_idempotente() -> None:
     _finance("Rappi", [5])
     _hack("Hack", [5])
@@ -328,6 +371,19 @@ def test_contraparte_persona() -> None:
     assert len(edges) == 1
     assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:person", p)
     assert (edges[0].src.slug, edges[0].src.id) == ("finance", fin)
+
+
+def test_contraparte_a_producto_via_id() -> None:
+    # un counterparty_identity_id que apunta a un producto (vínculo histórico pre-veto, o futuro
+    # backfill org→producto) → la arista usa el slug identidades:producto y no queda huérfana.
+    prod = _producto("Steam")
+    fin = _finance("Steam", [22], identity_id=prod)
+    with connection() as c:
+        build_relations(c, 1)
+        edges = list_edges(c, 1, producer="finance")
+    assert len(edges) == 1
+    assert (edges[0].src.slug, edges[0].src.id) == ("finance", fin)
+    assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:producto", prod)
 
 
 def test_cooccurrence_suprimida_por_confirmada_del_par() -> None:

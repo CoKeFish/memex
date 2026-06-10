@@ -1,10 +1,12 @@
 """Organizador LLM de la PERTENENCIA («sub») de identidades.
 
-Sistema genérico de jerarquía: una organización puede colgar de otra («pertenece a») —
-programa→universidad, producto→empresa, filial→matriz, área→organización. A diferencia del dedup
-(par-por-par, `dedup_llm.py`), esto es HOLÍSTICO: una sola llamada con la lista COMPLETA de orgs del
-user; el LLM devuelve la jerarquía en JSON y se aplica DIRECTO, sin cola de confirmación manual (el
-dueño puede corregir un padre a mano por la UI). Mold: `calendar/merge_llm.py`.
+Sistema genérico de jerarquía: una organización o un producto puede colgar de otra entrada
+(«pertenece a») — programa→universidad, producto→empresa, filial→matriz, área→organización. A
+diferencia del dedup (par-por-par, `dedup_llm.py`), esto es HOLÍSTICO: una sola llamada con la
+lista COMPLETA de orgs + productos del user (los productos van marcados `[producto]`); el LLM
+devuelve la jerarquía en JSON y se aplica DIRECTO, sin cola de confirmación manual (el dueño puede
+corregir un padre a mano por la UI). Los padres creados por nombre son SIEMPRE organizaciones (el
+padre inferido de un producto es su empresa). Mold: `calendar/merge_llm.py`.
 
 Salida del LLM = `{"links": [{"child_id", "parent_id"|"parent_name", "cleaned_name"?}]}`:
 - `child_id` siempre es un id existente; el padre por `parent_id` (id existente) XOR `parent_name`
@@ -45,11 +47,13 @@ _MAX_TOKENS = 4096
 
 @dataclass(frozen=True)
 class OrgView:
-    """Vista mínima de una organización para mostrarle al LLM (id interno + nombre + alias)."""
+    """Vista mínima de una entrada colgable (org o producto) para mostrarle al LLM
+    (id interno + nombre + alias + kind; los productos se marcan en la lista)."""
 
     id: int
     display_name: str
     aliases: tuple[str, ...]
+    kind: str = "organizacion"
 
 
 @dataclass(frozen=True)
@@ -66,7 +70,7 @@ class HierarchyLink:
 class OrganizeStats:
     """Resumen de una corrida del organizador de pertenencia."""
 
-    orgs: int = 0  # organizaciones consideradas
+    orgs: int = 0  # entradas consideradas (organizaciones + productos)
     linked: int = 0  # parent_identity_id seteados
     created: int = 0  # padres nuevos creados por nombre
     cleaned: int = 0  # display_name limpiados (solo si apply_cleanup)
@@ -151,7 +155,8 @@ def _serialize_orgs(orgs: list[OrgView]) -> str:
     lines = []
     for o in orgs:
         alias = f" — {', '.join(o.aliases)}" if o.aliases else ""
-        lines.append(f"{o.id}: {o.display_name}{alias}")
+        tag = " [producto]" if o.kind == "producto" else ""
+        lines.append(f"{o.id}: {o.display_name}{alias}{tag}")
     return "\n".join(lines)
 
 
@@ -159,7 +164,7 @@ async def organize(llm: LLMClient, orgs: list[OrgView]) -> tuple[list[HierarchyL
     """Le pide al LLM la jerarquía de pertenencia de toda la lista. Devuelve los links válidos
     (parseados/filtrados contra los ids reales) + el LLMResult (para el costo)."""
     valid_ids = {o.id for o in orgs}
-    user_content = "ORGANIZACIONES (id: nombre — alias):\n" + _serialize_orgs(orgs)
+    user_content = "ORGANIZACIONES Y PRODUCTOS (id: nombre — alias):\n" + _serialize_orgs(orgs)
     result = await llm.complete(
         [
             ChatMessage("system", IDENTIDADES_HIERARCHY_SYSTEM_PROMPT),
@@ -176,13 +181,14 @@ async def organize(llm: LLMClient, orgs: list[OrgView]) -> tuple[list[HierarchyL
 
 
 def _load_orgs(conn: Connection, user_id: int, limit: int) -> list[OrgView]:
+    """Las entradas COLGABLES del directorio: organizaciones y productos (producto→empresa)."""
     rows = (
         conn.execute(
             text(
                 """
-                SELECT id, display_name, aliases
+                SELECT id, display_name, aliases, kind
                 FROM mod_identidades
-                WHERE user_id = :u AND kind = 'organizacion'
+                WHERE user_id = :u AND kind IN ('organizacion','producto')
                 ORDER BY id
                 LIMIT :lim
                 """
@@ -199,21 +205,23 @@ def _load_orgs(conn: Connection, user_id: int, limit: int) -> list[OrgView]:
             id=int(r["id"]),
             display_name=str(r["display_name"]),
             aliases=tuple(r["aliases"] or ()),
+            kind=str(r["kind"]),
         )
         for r in rows
     ]
 
 
 def _resolve_or_create_parent(conn: Connection, user_id: int, name: str) -> tuple[int, bool]:
-    """Resuelve `name` a una org existente por `org_core`; si no hay, la crea (source='extraction',
-    `metadata.created_by='hierarchy_llm'`). Devuelve `(parent_id, created)`. Idempotente: dos links
-    al mismo padre-por-nombre convergen a la misma org (la segunda la reusa)."""
+    """Resuelve `name` a una org O producto existente por `org_core` (si el padre nombrado ya vive
+    como producto, se reusa — no se duplica como org); si no hay, la crea como ORGANIZACIÓN
+    (source='extraction', `metadata.created_by='hierarchy_llm'`). Devuelve `(parent_id, created)`.
+    Idempotente: dos links al mismo padre-por-nombre convergen a la misma entrada."""
     core = org_core(name)
     if core:
         existing = conn.execute(
             text(
                 "SELECT id FROM mod_identidades "
-                "WHERE user_id = :u AND kind = 'organizacion' AND org_core = :core "
+                "WHERE user_id = :u AND kind IN ('organizacion','producto') AND org_core = :core "
                 "ORDER BY id LIMIT 1"
             ),
             {"u": user_id, "core": core},

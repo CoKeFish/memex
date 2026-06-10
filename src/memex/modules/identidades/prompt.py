@@ -59,22 +59,23 @@ IDENTIDADES_DEDUP_SYSTEM_PROMPT = (
 )
 
 
-#: Organizador de PERTENENCIA («sub»): recibe la lista COMPLETA de organizaciones del directorio
-#: (id interno + nombre + alias) y arma la jerarquía «pertenece a» (programa→universidad,
-#: producto→empresa, filial→matriz, área→org). UNA sola llamada holística, SESGO A PRECISIÓN
-#: (ante la duda queda sin padre). El resultado se aplica solo (sin confirmación manual).
+#: Organizador de PERTENENCIA («sub»): recibe la lista COMPLETA de organizaciones Y productos del
+#: directorio (id interno + nombre + alias; los productos marcados `[producto]`) y arma la
+#: jerarquía «pertenece a» (programa→universidad, producto→empresa, filial→matriz, área→org). UNA
+#: sola llamada holística, SESGO A PRECISIÓN (ante la duda queda sin padre). El resultado se
+#: aplica solo (sin confirmación manual).
 IDENTIDADES_HIERARCHY_SYSTEM_PROMPT = (
-    "Sos un organizador de la JERARQUÍA de un directorio de ORGANIZACIONES. Te paso la lista\n"
-    "completa de organizaciones, cada una con un `id` numérico, su nombre y sus alias. Tu tarea\n"
-    "es detectar relaciones de PERTENENCIA: cuando una organización es una SUB-PARTE de otra y\n"
-    "debería colgar de ella («pertenece a»).\n\n"
+    "Sos un organizador de la JERARQUÍA de un directorio de ORGANIZACIONES y PRODUCTOS. Te paso\n"
+    "la lista completa, cada entrada con un `id` numérico, su nombre y sus alias; los PRODUCTOS\n"
+    "van marcados con [producto]. Tu tarea es detectar relaciones de PERTENENCIA: cuando una\n"
+    "entrada es una SUB-PARTE de otra y debería colgar de ella («pertenece a»).\n\n"
     "Casos de pertenencia (ejemplos):\n"
     "- un PROGRAMA/carrera/facultad/escuela pertenece a su UNIVERSIDAD\n"
     "  (ej. 'Ingeniería Mecánica - Universidad del Norte' pertenece a 'Universidad del Norte');\n"
     "- un PRODUCTO/marca pertenece a su EMPRESA (ej. 'Steam' pertenece a 'Valve Corporation');\n"
     "- una FILIAL pertenece a su MATRIZ; un ÁREA/equipo pertenece a su organización.\n\n"
     "Reglas estrictas:\n"
-    "- `child_id`: el `id` EXACTO de la organización sub (de la lista). Cada `child_id` UNA vez.\n"
+    "- `child_id`: el `id` EXACTO de la entrada sub (de la lista). Cada `child_id` UNA vez.\n"
     "- El padre se indica de UNA de dos formas (exactamente una, nunca ambas):\n"
     "  • `parent_id`: el `id` de la organización padre, SI está en la lista; o\n"
     "  • `parent_name`: el nombre del padre cuando DEBERÍA existir pero NO está en la lista\n"
