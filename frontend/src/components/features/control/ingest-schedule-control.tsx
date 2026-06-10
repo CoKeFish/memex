@@ -97,6 +97,83 @@ function LoadingRow({ label }: { label: string }) {
   )
 }
 
+/** Resumen inline de la última corrida (nuevos/ya/filtr/err); oculta filtr/err en cero. */
+function RunCounts({ run }: { run: IngestionRun }) {
+  return (
+    <span className="num text-muted-foreground">
+      <span className="text-status-ok">{run.inserted} nuevos</span> · {run.duplicates} ya
+      {run.filtered > 0 && <span className="text-status-filtered"> · {run.filtered} filtr</span>}
+      {run.errors > 0 && <span className="text-status-error"> · {run.errors} err</span>}
+    </span>
+  )
+}
+
+/** Estado de la última corrida de una fuente — rellena la banda central que antes quedaba vacía:
+ *  relativa + badge de estado + conteos (o la clase del error si falló). */
+function LatestRunInfo({ run }: { run: IngestionRun | null }) {
+  if (!run) return <span className="text-muted-foreground">sin corridas</span>
+  return (
+    <span className="num flex items-center gap-2">
+      <span>
+        <span className="text-muted-foreground">última </span>
+        <RelativeTime date={run.startedAt} />
+      </span>
+      <StatusBadge
+        tone={run.isStale ? "review" : statusTone(run.status)}
+        label={run.isStale ? "colgado" : run.status}
+      />
+      {run.status === "failed" && run.errorClass ? (
+        <span className="max-w-64 truncate text-status-error" title={run.errorMessage ?? undefined}>
+          {run.errorClass}
+        </span>
+      ) : (
+        <RunCounts run={run} />
+      )}
+    </span>
+  )
+}
+
+/** Franja-resumen del panel: activas / agendadas / última actividad / con problema. */
+function SchedulerSummary({ sources }: { sources: IngestScheduleSource[] }) {
+  const total = sources.length
+  const activas = sources.filter((s) => s.enabled).length
+  const agendadas = sources.filter((s) => s.fetchSchedule).length
+  const conProblema = sources.filter(
+    (s) => s.latest && (s.latest.isStale || s.latest.status === "failed"),
+  ).length
+  const ultima = sources.reduce<string | null>((acc, s) => {
+    const t = s.latest?.startedAt ?? null
+    return t && (!acc || t > acc) ? t : acc
+  }, null)
+  return (
+    <div className="num flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[11px] text-muted-foreground">
+      <span>
+        <span className="font-medium text-foreground">{activas}</span>/{total} activas
+      </span>
+      <span aria-hidden>·</span>
+      <span>
+        <span className="font-medium text-foreground">{agendadas}</span> agendadas
+      </span>
+      {ultima && (
+        <>
+          <span aria-hidden>·</span>
+          <span>
+            última actividad <RelativeTime date={ultima} />
+          </span>
+        </>
+      )}
+      {conProblema > 0 && (
+        <>
+          <span aria-hidden>·</span>
+          <span className="text-status-error">
+            {conProblema} {conProblema === 1 ? "con problema" : "con problemas"}
+          </span>
+        </>
+      )}
+    </div>
+  )
+}
+
 // ============================================================================
 // Panel unificado: ingesta por fuente (master daemon + on/off + intervalo por fuente)
 // ============================================================================
@@ -165,53 +242,65 @@ export function IngestSchedulerPanel() {
               />
             </div>
 
-            {/* Una fila por fuente: estado on/off (LED + atenuado) + intervalo. */}
+            {/* Una fila densa por fuente: identidad (izq) · última corrida (centro) · intervalo + on/off (der). */}
             {data.sources.length === 0 ? (
               <div className="px-2 py-6 text-sm text-muted-foreground">No hay fuentes.</div>
             ) : (
-              <ul className="divide-y divide-border rounded-md border border-border">
-                {data.sources.map((s) => {
-                  const src = asSource(s)
-                  const m = sourceMeta(src)
-                  const Icon = m.icon
-                  const schedulable = PULLABLE_SOURCE_TYPES.has(s.type)
-                  const paid = PAID_API_TYPES.has(s.type)
-                  const value = s.fetchSchedule ?? OFF
-                  // ISO fuera de los presets → lo agregamos como opción para no perderlo.
-                  const hasCustom = s.fetchSchedule !== null && !PRESET_LABEL.has(s.fetchSchedule)
-                  const rowBusy = busy === s.sourceId
-                  return (
-                    <li
-                      key={s.sourceId}
-                      className={cn(
-                        "flex flex-col gap-1.5 px-3 py-2.5 transition-opacity",
-                        !s.enabled && "opacity-55",
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex min-w-0 items-center gap-2.5">
+              <>
+                <SchedulerSummary sources={data.sources} />
+                <ul className="divide-y divide-border rounded-md border border-border">
+                  {data.sources.map((s) => {
+                    const src = asSource(s)
+                    const m = sourceMeta(src)
+                    const Icon = m.icon
+                    const schedulable = PULLABLE_SOURCE_TYPES.has(s.type)
+                    const paid = PAID_API_TYPES.has(s.type)
+                    const value = s.fetchSchedule ?? OFF
+                    // ISO fuera de los presets → lo agregamos como opción para no perderlo.
+                    const hasCustom = s.fetchSchedule !== null && !PRESET_LABEL.has(s.fetchSchedule)
+                    const rowBusy = busy === s.sourceId
+                    return (
+                      <li
+                        key={s.sourceId}
+                        className={cn(
+                          "flex items-center gap-3 px-3 py-2 transition-opacity",
+                          !s.enabled && "opacity-55",
+                        )}
+                      >
+                        {/* Identidad: LED + icono + nombre (trunca) + tipo + avisos. */}
+                        <div className="flex min-w-0 flex-1 items-center gap-2.5">
                           <Led tone={s.enabled ? "ok" : "neutral"} />
                           <Icon
-                            className={cn(
-                              "size-4 shrink-0",
-                              s.enabled ? m.tone : "text-muted-foreground",
-                            )}
+                            className={cn("size-4 shrink-0", s.enabled ? m.tone : "text-muted-foreground")}
                           />
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <span className="truncate text-sm font-medium">
-                                {sourceFullLabel(src)}
-                              </span>
-                              {paid && (
-                                <TriangleAlert
-                                  className="size-3 shrink-0 text-status-review"
-                                  aria-label="API de paga (Apify)"
-                                />
-                              )}
-                            </div>
-                            <div className="eyebrow">{s.type}</div>
-                          </div>
+                          <span className="min-w-0 truncate text-sm font-medium">
+                            {sourceFullLabel(src)}
+                          </span>
+                          <span className="eyebrow shrink-0">{s.type}</span>
+                          {paid && (
+                            <span
+                              className="shrink-0"
+                              title="Red social: la ingesta usa API de paga (Apify), con costo por corrida"
+                            >
+                              <TriangleAlert className="size-3 text-status-review" aria-label="API de paga" />
+                            </span>
+                          )}
+                          {s.fetchSchedule && !s.enabled && (
+                            <span
+                              className="shrink-0 rounded bg-status-review/10 px-1.5 py-0.5 text-[10px] font-medium text-status-review"
+                              title="Agendada pero apagada: no se trae aunque tenga intervalo."
+                            >
+                              agendada · apagada
+                            </span>
+                          )}
                         </div>
+
+                        {/* Última corrida: rellena el centro (oculto en pantallas chicas). */}
+                        <div className="hidden shrink-0 items-center text-[11px] md:flex">
+                          <LatestRunInfo run={s.latest} />
+                        </div>
+
+                        {/* Controles: intervalo (si es agendable) + on/off. */}
                         <div className="flex shrink-0 items-center gap-2.5">
                           {schedulable ? (
                             <Select
@@ -257,32 +346,11 @@ export function IngestSchedulerPanel() {
                             aria-label={`Ingesta de ${sourceFullLabel(src)}`}
                           />
                         </div>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pl-[26px] text-[11px] text-muted-foreground">
-                        {s.fetchSchedule && !s.enabled && (
-                          <span className="text-status-review">
-                            apagada: no se trae aunque esté agendada
-                          </span>
-                        )}
-                        {s.fetchSchedule && s.enabled && paid && (
-                          <span className="flex items-center gap-1 text-status-review">
-                            <TriangleAlert className="size-3" /> API de paga: gasta en cada corrida
-                          </span>
-                        )}
-                        {s.latest && (
-                          <span className="num flex items-center gap-1.5">
-                            última <RelativeTime date={s.latest.startedAt} />
-                            <StatusBadge
-                              tone={s.latest.isStale ? "review" : statusTone(s.latest.status)}
-                              label={s.latest.isStale ? "colgado" : s.latest.status}
-                            />
-                          </span>
-                        )}
-                      </div>
-                    </li>
-                  )
-                })}
-              </ul>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </>
             )}
           </>
         )}
