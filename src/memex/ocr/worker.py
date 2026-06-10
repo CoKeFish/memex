@@ -16,13 +16,13 @@ Manejo de fallos (cada asset es independiente y reintentable):
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from sqlalchemy import text
 
 from memex.core.media import MAX_OCR_ATTEMPTS
-from memex.core.observability import record_llm_call
+from memex.core.observability import CostBySource, record_llm_call
 from memex.db import connection
 from memex.logging import get_logger
 from memex.ocr.client import OCRClient, OcrQuotaError
@@ -58,6 +58,9 @@ class OcrStats:
     deduped: int = 0  # subconjunto de `ok` resuelto copiando otra fila (sin llamada de visión)
     truncated: int = 0  # subconjunto de `ok` con transcripción truncada (finish_reason != stop)
     errors: int = 0
+    #: Costo de visión acumulado de la corrida (espejo de SummarizeStats/ExtractStats). Los assets
+    #: no cargan `source_id` → todo va al bucket None ("sin_source" en el log de fin).
+    cost: CostBySource = field(default_factory=CostBySource)
 
 
 @dataclass(frozen=True)
@@ -255,6 +258,12 @@ async def _process_asset(
     # Persistir estado ANTES del costo: nunca un costo 'ok' sin el texto guardado.
     _mark_ok(asset.id, ocr_text, result.model)
     stats.ok += 1
+    stats.cost.record(
+        None,
+        prompt_tokens=result.usage.prompt_tokens,
+        completion_tokens=result.usage.completion_tokens,
+        cost_usd=result.cost_usd,
+    )
     record_llm_call(
         user_id=user_id,
         purpose="ocr",
@@ -311,6 +320,7 @@ async def _ocr_blob(
     client: OCRClient,
     asset: _Asset,
     run: _VisionRun,
+    stats: OcrStats,
     *,
     image_bytes: bytes,
     content_type: str,
@@ -331,6 +341,12 @@ async def _ocr_blob(
     run.any_truncated = run.any_truncated or truncated
     if text:
         run.texts.append(text)
+    stats.cost.record(
+        None,
+        prompt_tokens=result.usage.prompt_tokens,
+        completion_tokens=result.usage.completion_tokens,
+        cost_usd=result.cost_usd,
+    )
     record_llm_call(
         user_id=user_id,
         purpose="ocr",
@@ -380,6 +396,7 @@ async def _process_pdf(
             client,
             asset,
             run,
+            stats,
             image_bytes=img.png_bytes,
             content_type=img.content_type,
             model=model,
@@ -453,6 +470,7 @@ async def _process_zip(
                 client,
                 asset,
                 run,
+                stats,
                 image_bytes=entry.data,
                 content_type=entry.content_type,
                 model=model,
@@ -460,7 +478,9 @@ async def _process_zip(
                 origin=entry.name,
             )
         elif entry.kind == "pdf" and entry.data is not None:
-            await _ocr_inner_pdf(user_id, client, asset, run, entry.data, entry.name, model, limits)
+            await _ocr_inner_pdf(
+                user_id, client, asset, run, stats, entry.data, entry.name, model, limits
+            )
 
     combined = "\n\n".join(run.texts)
     if run.any_truncated:
@@ -497,6 +517,7 @@ async def _ocr_inner_pdf(
     client: OCRClient,
     asset: _Asset,
     run: _VisionRun,
+    stats: OcrStats,
     pdf_bytes: bytes,
     name: str,
     model: str | None,
@@ -517,6 +538,7 @@ async def _ocr_inner_pdf(
             client,
             asset,
             pdf_run,
+            stats,
             image_bytes=img.png_bytes,
             content_type=img.content_type,
             model=model,
@@ -661,5 +683,6 @@ async def run_ocr(
         deduped=stats.deduped,
         truncated=stats.truncated,
         errors=stats.errors,
+        **stats.cost.log_fields(),
     )
     return stats

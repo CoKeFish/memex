@@ -33,12 +33,14 @@ class FakeOCR:
         fail: bool = False,
         quota: bool = False,
         finish_reason: str = "stop",
+        cost: Decimal = Decimal("0"),
     ) -> None:
         self.calls = 0
         self._text = text
         self._fail = fail
         self._quota = quota
         self._finish = finish_reason
+        self._cost = cost
 
     async def ocr_image(
         self, *, image_bytes: bytes, content_type: str, model: str | None = None
@@ -52,7 +54,7 @@ class FakeOCR:
             text=self._text,
             model=model or "fake-vision",
             usage=LLMUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
-            cost_usd=Decimal("0"),
+            cost_usd=self._cost,
             latency_ms=1,
             finish_reason=self._finish,
         )
@@ -181,6 +183,22 @@ def test_happy_path() -> None:
     assert row["ocr_text"] == "hola mundo"  # strip aplicado
     assert row["ocr_model"] == "fake-vision"
     assert _count_llm("ocr", "ok") == 1
+
+
+def test_cost_accumulates_in_stats() -> None:
+    """Cada llamada de visión suma a `stats.cost`; el dedup no llama → no suma."""
+    sid = _new_source()
+    _seed_media(_seed_inbox(sid, "c1"), sha256="cost-a")
+    _seed_media(_seed_inbox(sid, "c2"), sha256="cost-b")
+    _seed_media(_seed_inbox(sid, "c3"), sha256="cost-b")  # dedup: sin llamada, sin costo
+
+    fake = FakeOCR(cost=Decimal("0.0015"))
+    stats = asyncio.run(run_ocr(1, client=fake, store=FakeStore()))
+
+    assert fake.calls == 2
+    assert stats.ok == 3 and stats.deduped == 1
+    assert stats.cost.total.calls == 2
+    assert stats.cost.total.cost_usd == Decimal("0.0030")
 
 
 def test_dedup_same_sha_single_vision_call() -> None:

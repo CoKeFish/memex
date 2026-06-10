@@ -1745,6 +1745,71 @@ class ProcessingRunList(BaseModel):
     items: list[ProcessingRunRow]
 
 
+# --- Procesamiento: lote por ventanas (0056) ---
+class ProcessingLotConfig(ProcessingRunRequest):
+    """Alta/reconfiguración del lote: los mismos filtros de una corrida + tamaño de ventana.
+
+    `window_size` opcional: sin él se resuelve por medio (min de los defaults de los kinds
+    presentes en el snapshot).
+    """
+
+    window_size: int | None = Field(default=None, ge=1, le=5000)
+
+
+class ProcessingLotAdvance(BaseModel):
+    """Override del tamaño de ventana para ESTE avance; queda como nuevo default del lote."""
+
+    window_size: int | None = Field(default=None, ge=1, le=5000)
+
+
+class ProcessingLotWindow(BaseModel):
+    """Una ventana ejecutada (item del history). `end_idx` exclusivo; índices 0-based."""
+
+    start_idx: int
+    end_idx: int
+    n: int
+    results: dict[str, Any]  # resultado por etapa de reprocess() (mismos slots que una corrida)
+    errors: int  # suma de los `errors` por-mensaje de las etapas
+    cost_usd: float
+    ms_elapsed: int
+    at: datetime
+
+
+class ProcessingLotState(BaseModel):
+    """Estado del lote para la UI: progreso (frontier/total), gasto y defaults por medio."""
+
+    stages: list[str]
+    filters: dict[str, Any]  # eco de la creación (source_id/since/until/limit/only)
+    force: bool
+    total: int
+    frontier: int  # mensajes ya procesados (índice dentro del snapshot)
+    window_size: int
+    status: str  # active | done
+    spent_usd: float  # suma de cost_usd del history
+    busy: bool  # hay una corrida reprocess en curso (deshabilita avanzar)
+    defaults: dict[str, int]  # tamaño de ventana por medio (email/chat/social)
+    history: list[ProcessingLotWindow]
+    created_at: datetime
+
+
+class ProcessingLotAdvanceStatus(BaseModel):
+    """Respuesta inmediata de POST /processing/lot/advance[-rest] (corre en background)."""
+
+    run_id: int | None = None
+    status: str  # running | done (no quedaba nada)
+    window: dict[str, int] | None = None  # {start_idx, end_idx} de la próxima ventana (modo 1)
+
+
+class WindowDefaultsPatch(BaseModel):
+    """Edición de los defaults de ventana por medio; solo los kinds enviados se tocan."""
+
+    sizes: dict[str, int]
+
+
+class WindowDefaults(BaseModel):
+    sizes: dict[str, int]
+
+
 # --- Procesamiento: control runtime del scheduler ---
 class SchedulerSettingsPatch(BaseModel):
     """Cambio en runtime del daemon. `enabled_jobs` es CSV (mismo formato que el env)."""

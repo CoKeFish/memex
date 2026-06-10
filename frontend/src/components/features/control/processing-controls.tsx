@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Check, FlaskConical, Loader2, Play, Power } from "lucide-react"
+import { Check, FlaskConical, Layers, Loader2, Play, Power } from "lucide-react"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { ApiError } from "@/lib/api"
@@ -19,11 +19,13 @@ import { StatusBadge } from "@/components/common/led"
 import { CapBadge } from "@/components/common/cap-badge"
 import { RelativeTime } from "@/components/common/time"
 import { ErrorState } from "@/components/common/data-state"
-import { formatInt, formatPct } from "@/lib/format"
+import { formatInt, formatIsoInterval, formatPct, formatUsd, formatUsdFine } from "@/lib/format"
 import { sourceFullLabel } from "@/lib/inbox-format"
 import {
   type BatchingPolicy,
+  createLot,
   dryRunProcessing,
+  fetchLot,
   fetchModules,
   fetchProcessingRuns,
   fetchScheduler,
@@ -38,6 +40,7 @@ import {
   setScheduler,
 } from "@/data"
 import type { Source } from "@/types/domain"
+import { LotSection } from "./lot-control"
 
 function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
@@ -65,6 +68,34 @@ function LoadingRow({ label }: { label: string }) {
 }
 
 // ---- Scheduler (procesamiento automático) ---
+
+//: Etiquetas en español de los jobs. El slug (lo que se grepea en logs y DB) queda visible al lado.
+const JOB_LABELS: Record<string, string> = {
+  classify: "Clasificación",
+  summarize: "Resumen",
+  extract: "Extracción",
+  ocr: "OCR (adjuntos)",
+  calendar: "Calendario",
+  finance: "Finanzas",
+  identidades: "Identidades",
+  relevance: "Relevancia",
+  graph: "Grafo",
+  log_purge: "Purga de logs",
+}
+
+/** Costo de unas stats de corrida: `cost_usd` plano (reprocess) o `cost.total.cost_usd` (jobs). */
+function statsCost(stats: Record<string, unknown> | null | undefined): number | null {
+  if (!stats) return null
+  if (typeof stats.cost_usd === "number") return stats.cost_usd
+  const nested = (stats.cost as { total?: { cost_usd?: unknown } } | undefined)?.total?.cost_usd
+  if (typeof nested === "number") return nested
+  if (typeof nested === "string") {
+    const n = Number(nested)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
 export function SchedulerPanel() {
   const { data, loading, error, reload } = useAsync(() => fetchScheduler(), [])
   const [busy, setBusy] = useState(false)
@@ -132,43 +163,55 @@ export function SchedulerPanel() {
               />
             </div>
             <ul className="divide-y divide-border rounded-md border border-border">
-              {data.jobs.map((j) => (
-                <li key={j.name} className="flex items-center justify-between gap-3 px-3 py-2">
-                  <div className="flex items-center gap-2.5">
-                    <Switch
-                      checked={j.enabled}
-                      disabled={busy}
-                      onCheckedChange={(c) => toggleJob(j.name, c)}
-                      aria-label={`Habilitar ${j.name}`}
-                    />
-                    <span className="text-sm font-medium">{j.name}</span>
-                    <span className="num text-[11px] text-muted-foreground">{j.defaultInterval}</span>
-                  </div>
-                  <div className="num flex items-center gap-3 text-[11px] text-muted-foreground">
-                    {j.latest?.finishedAt && (
-                      <span>
-                        última <RelativeTime date={j.latest.finishedAt} />
-                      </span>
-                    )}
-                    {j.isStale ? (
-                      <StatusBadge tone="review" label="colgado" />
-                    ) : j.latest ? (
-                      <StatusBadge
-                        tone={
-                          j.latest.status === "ok"
-                            ? "ok"
-                            : j.latest.status === "error"
-                              ? "error"
-                              : "neutral"
-                        }
-                        label={j.latest.status}
+              {data.jobs.map((j) => {
+                const cost = statsCost(j.latest?.stats)
+                return (
+                  <li key={j.name} className="flex items-center justify-between gap-3 px-3 py-2">
+                    <div className="flex items-center gap-2.5">
+                      <Switch
+                        checked={j.enabled}
+                        disabled={busy}
+                        onCheckedChange={(c) => toggleJob(j.name, c)}
+                        aria-label={`Habilitar ${JOB_LABELS[j.name] ?? j.name}`}
                       />
-                    ) : (
-                      <StatusBadge tone="neutral" label="sin correr" />
-                    )}
-                  </div>
-                </li>
-              ))}
+                      <span className="text-sm font-medium">{JOB_LABELS[j.name] ?? j.name}</span>
+                      <span className="num text-[10px] text-muted-foreground/70">{j.name}</span>
+                      <span
+                        className="num text-[11px] text-muted-foreground"
+                        title={j.defaultInterval}
+                      >
+                        {formatIsoInterval(j.defaultInterval)}
+                      </span>
+                    </div>
+                    <div className="num flex items-center gap-3 text-[11px] text-muted-foreground">
+                      {j.latest?.finishedAt && (
+                        <span>
+                          última <RelativeTime date={j.latest.finishedAt} />
+                        </span>
+                      )}
+                      {cost != null && cost > 0 && (
+                        <span title={formatUsdFine(cost)}>{formatUsd(cost)}</span>
+                      )}
+                      {j.isStale ? (
+                        <StatusBadge tone="review" label="colgado" />
+                      ) : j.latest ? (
+                        <StatusBadge
+                          tone={
+                            j.latest.status === "ok"
+                              ? "ok"
+                              : j.latest.status === "error"
+                                ? "error"
+                                : "neutral"
+                          }
+                          label={j.latest.status}
+                        />
+                      ) : (
+                        <StatusBadge tone="neutral" label="sin correr" />
+                      )}
+                    </div>
+                  </li>
+                )
+              })}
             </ul>
           </>
         )}
@@ -198,7 +241,15 @@ function RunResults({ run }: { run: ProcessingRun }) {
             ) : (
               Object.entries(r ?? {}).map(([k, v]) => (
                 <span key={k} className="num rounded bg-muted/60 px-1.5 py-0.5">
-                  <span className="text-muted-foreground">{k}</span> {String(v)}
+                  {k === "cost_usd" ? (
+                    <span title={formatUsdFine(Number(v))}>
+                      <span className="text-muted-foreground">costo</span> {formatUsd(Number(v))}
+                    </span>
+                  ) : (
+                    <>
+                      <span className="text-muted-foreground">{k}</span> {String(v)}
+                    </>
+                  )}
                 </span>
               ))
             )}
@@ -209,9 +260,35 @@ function RunResults({ run }: { run: ProcessingRun }) {
   )
 }
 
+/** Costo total de una corrida: `stats.cost_usd` (nuevo) o la suma de etapas (corridas viejas). */
+function runTotalCost(run: ProcessingRun): number | null {
+  const direct = (run.stats as Record<string, unknown>).cost_usd
+  if (typeof direct === "number") return direct
+  const results = run.stats?.results
+  if (!results) return null
+  let sum = 0
+  let seen = false
+  for (const r of Object.values(results)) {
+    const v = r?.cost_usd
+    if (typeof v === "number") {
+      sum += v
+      seen = true
+    }
+  }
+  return seen ? sum : null
+}
+
+/** Marca de origen de una corrida disparada por el lote (run_config.lot). */
+function lotBadge(run: ProcessingRun): string | null {
+  const lot = (run.runConfig as { lot?: { mode?: string } }).lot
+  if (!lot) return null
+  return lot.mode === "rest" ? "lote · resto" : "lote · ventana"
+}
+
 export function ManualRunPanel() {
   const { data: sources } = useAsync<Source[]>(() => fetchSources(), [])
   const { data: runs, reload: reloadRuns } = useAsync(() => fetchProcessingRuns(5), [])
+  const { data: lot, reload: reloadLot } = useAsync(() => fetchLot(), [])
 
   const [stages, setStages] = useState<Set<ProcessingStage>>(new Set(["classify"]))
   const [sourceId, setSourceId] = useState<string>(ALL_SOURCES)
@@ -221,17 +298,22 @@ export function ManualRunPanel() {
   const [only, setOnly] = useState<string>("")
   const [force, setForce] = useState(false)
   const [dry, setDry] = useState<{ count: number; sampleIds: number[] } | null>(null)
-  const [busy, setBusy] = useState<null | "dry" | "run">(null)
+  const [busy, setBusy] = useState<null | "dry" | "run" | "lot">(null)
 
   const latest = runs?.[0]
   const running = latest?.status === "running" && !latest.isStale
+  const anyRunning = running || (lot?.busy ?? false)
 
-  // Polling: mientras la última corrida siga 'running', re-consultá cada 2.5s.
+  // Polling: mientras haya una corrida 'running' (manual o ventana del lote), re-consultá cada
+  // 2.5s — corridas Y lote, así la frontera/historial avanzan en vivo.
   useEffect(() => {
-    if (!running) return
-    const t = setTimeout(reloadRuns, 2500)
+    if (!anyRunning) return
+    const t = setTimeout(() => {
+      reloadRuns()
+      reloadLot()
+    }, 2500)
     return () => clearTimeout(t)
-  }, [running, runs, reloadRuns])
+  }, [anyRunning, runs, lot, reloadRuns, reloadLot])
 
   function toggleStage(s: ProcessingStage) {
     setStages((prev) => {
@@ -291,15 +373,35 @@ export function ManualRunPanel() {
     }
   }
 
+  async function onCreateLot() {
+    setBusy("lot")
+    try {
+      const state = await createLot(buildReq())
+      toast.success(`Lote creado: ${formatInt(state.total)} mensajes`, {
+        description: `ventana de ${state.windowSize} msj · ${state.stages.join(" → ")}`,
+      })
+      setDry(null)
+      reloadLot()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        toast.warning("Ya hay una corrida en curso", { description: "Esperá a que termine." })
+      } else {
+        toast.error("No se pudo crear el lote", { description: errMsg(e) })
+      }
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const noStages = stages.size === 0
-  const disabled = busy !== null || running || noStages
+  const disabled = busy !== null || anyRunning || noStages
 
   return (
     <Panel>
       <PanelHeader
         eyebrow="procesamiento · manual"
         title="Qué procesar"
-        sub="Elegí etapas y acotá por fuente, fecha o cantidad; el dry-run cuenta sin gastar y Ejecutar corre en background"
+        sub="Elegí etapas y acotá por fuente, fecha o cantidad; el dry-run cuenta sin gastar. Ejecutar corre todo de una; para un backlog grande creá un lote y avanzalo por ventanas mirando el costo"
         right={
           <CapBadge level="existe" title="corre in-process en el API (reprocess) + polling de progreso" />
         }
@@ -443,8 +545,22 @@ export function ManualRunPanel() {
           <Button size="sm" disabled={disabled} onClick={onRun}>
             <Spinner when={busy === "run"} fallback={<Play className="size-3.5" />} /> Ejecutar
           </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={disabled}
+            onClick={onCreateLot}
+            title={
+              lot
+                ? "reemplaza el lote actual con estos filtros (resetea frontera e historial)"
+                : "congela estos filtros como un lote y avanzalo por ventanas"
+            }
+          >
+            <Spinner when={busy === "lot"} fallback={<Layers className="size-3.5" />} />
+            {lot ? "Reconfigurar lote" : "Crear lote por ventanas"}
+          </Button>
           {noStages && <span className="text-xs text-status-review">Elegí al menos una etapa.</span>}
-          {running && (
+          {anyRunning && (
             <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Loader2 className="size-3.5 animate-spin" /> corrida en curso…
             </span>
@@ -466,36 +582,66 @@ export function ManualRunPanel() {
           </div>
         )}
 
+        {lot && (
+          <LotSection
+            lot={lot}
+            disabled={busy !== null || running}
+            onChanged={() => {
+              reloadLot()
+              reloadRuns()
+            }}
+          />
+        )}
+
         {runs && runs.length > 0 && (
           <div className="space-y-2">
             <div className="eyebrow">Corridas recientes</div>
-            {runs.map((run) => (
-              <div key={run.id} className="rounded-md border border-border p-2.5">
-                <div className="mb-1 flex items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="num text-muted-foreground">#{run.id}</span>
-                    <span className="num">{(run.runConfig.stages ?? []).join(" → ")}</span>
-                    <span className="num text-muted-foreground">
-                      {run.stats?.targets ?? run.runConfig.targets?.length ?? 0} obj.
-                    </span>
+            {runs.map((run) => {
+              const cost = runTotalCost(run)
+              const badge = lotBadge(run)
+              return (
+                <div key={run.id} className="rounded-md border border-border p-2.5">
+                  <div className="mb-1 flex items-center justify-between gap-2 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="num text-muted-foreground">#{run.id}</span>
+                      <span className="num">{(run.runConfig.stages ?? []).join(" → ")}</span>
+                      {badge && (
+                        <span className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px]">
+                          {badge}
+                        </span>
+                      )}
+                      <span className="num text-muted-foreground">
+                        {run.stats?.targets ?? run.runConfig.targets?.length ?? 0} obj.
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {cost != null && cost > 0 && (
+                        <span className="num text-[11px]" title={formatUsdFine(cost)}>
+                          {formatUsd(cost)}
+                        </span>
+                      )}
+                      {run.isStale ? (
+                        <StatusBadge tone="review" label="colgado" />
+                      ) : run.status === "running" ? (
+                        <span className="flex items-center gap-1 text-muted-foreground">
+                          <Loader2 className="size-3 animate-spin" /> corriendo
+                        </span>
+                      ) : (
+                        <StatusBadge
+                          tone={run.status === "ok" ? "ok" : "error"}
+                          label={run.status}
+                        />
+                      )}
+                    </div>
                   </div>
-                  {run.isStale ? (
-                    <StatusBadge tone="review" label="colgado" />
-                  ) : run.status === "running" ? (
-                    <span className="flex items-center gap-1 text-muted-foreground">
-                      <Loader2 className="size-3 animate-spin" /> corriendo
-                    </span>
+                  {run.error ? (
+                    <div className="text-[11px] text-status-error">{run.error}</div>
                   ) : (
-                    <StatusBadge tone={run.status === "ok" ? "ok" : "error"} label={run.status} />
+                    <RunResults run={run} />
                   )}
                 </div>
-                {run.error ? (
-                  <div className="text-[11px] text-status-error">{run.error}</div>
-                ) : (
-                  <RunResults run={run} />
-                )}
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </PanelBody>
@@ -504,7 +650,25 @@ export function ManualRunPanel() {
 }
 
 // ---- Módulos de extracción (toggle + cobertura) ---
-const POLICIES: BatchingPolicy[] = ["per_module", "grouped", "all"]
+
+//: Políticas de batching con label en español + explicación (el value es lo que viaja a la DB).
+const POLICIES: { value: BatchingPolicy; label: string; hint: string }[] = [
+  {
+    value: "grouped",
+    label: "agrupados",
+    hint: "los módulos elegidos comparten UNA llamada LLM por ventana (se parte solo si superan el tope) — lo más barato: cada mensaje viaja una sola vez",
+  },
+  {
+    value: "per_module",
+    label: "separados",
+    hint: "una llamada LLM por módulo — el mismo mensaje viaja N veces (lo más caro, útil para aislar un módulo)",
+  },
+  {
+    value: "all",
+    label: "todos juntos",
+    hint: "una sola llamada con todos los módulos, sin tope",
+  },
+]
 
 export function ModulesTogglePanel() {
   const { data, loading, error, reload } = useAsync<ModuleRow[]>(() => fetchModules(), [])
@@ -527,8 +691,8 @@ export function ModulesTogglePanel() {
       <PanelHeader
         eyebrow="procesamiento · módulos"
         title="Módulos de extracción"
-        sub="Habilitar + política de batching por módulo (module_settings) + cobertura real"
-        right={<CapBadge level="existe" title="GET/PATCH /modules — persiste en la DB" />}
+        sub="Habilitá cada módulo y elegí cómo comparten la llamada LLM al extraer (agrupados = el mensaje viaja una vez). La barra es cobertura real: cuántos mensajes elegibles ya pasaron por cada módulo"
+        right={<CapBadge level="existe" title="GET/PATCH /modules — persiste en module_settings" />}
       />
       <PanelBody className="space-y-2">
         {error ? (
@@ -561,20 +725,26 @@ export function ModulesTogglePanel() {
                       )
                     }
                   >
-                    <SelectTrigger className="h-7 w-auto gap-1 text-[11px]">
-                      <span className="text-muted-foreground">policy</span>
+                    <SelectTrigger
+                      className="h-7 w-auto gap-1 text-[11px]"
+                      title={POLICIES.find((p) => p.value === m.batchingPolicy)?.hint}
+                    >
+                      <span className="text-muted-foreground">batching</span>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       {POLICIES.map((p) => (
-                        <SelectItem key={p} value={p} className="text-xs">
-                          {p}
+                        <SelectItem key={p.value} value={p.value} className="text-xs" title={p.hint}>
+                          {p.label}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                  <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                    group_size
+                  <label
+                    className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+                    title="módulos por llamada agrupada (solo aplica con batching agrupados)"
+                  >
+                    tope del grupo
                     <Input
                       type="number"
                       min={1}

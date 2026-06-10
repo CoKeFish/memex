@@ -17,7 +17,7 @@ import asyncio
 import json
 from dataclasses import asdict
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import text
 
@@ -47,10 +47,17 @@ def select_targets(
     until: datetime | None = None,
     limit: int | None = None,
     only: str | None = None,
+    order: Literal["id", "occurred_at"] = "id",
 ) -> list[int]:
-    """Resuelve los inbox_id objetivo de un reproceso por lote (CLI). Sin filtros → todos."""
+    """Resuelve los inbox_id objetivo de un reproceso por lote (CLI). Sin filtros → todos.
+
+    `order="occurred_at"` (cronológico, `id` de desempate) es para el snapshot del lote por
+    ventanas: ahí "los próximos N" significa "los N más viejos", no orden de inserción.
+    """
     if only is not None and only not in ONLY_FILTERS:
         raise ValueError(f"only inválido: {only!r}; válidos: {sorted(ONLY_FILTERS)}")
+    if order not in ("id", "occurred_at"):
+        raise ValueError(f"order inválido: {order!r}")
     where = ["i.user_id = :uid"]
     params: dict[str, Any] = {"uid": user_id}
     if inbox_ids:
@@ -77,7 +84,8 @@ def select_targets(
             "OR EXISTS (SELECT 1 FROM media_assets m WHERE m.inbox_id = i.id "
             "AND m.ocr_status = 'error'))"
         )
-    sql = f"SELECT i.id FROM inbox i WHERE {' AND '.join(where)} ORDER BY i.id"
+    order_sql = "i.occurred_at, i.id" if order == "occurred_at" else "i.id"
+    sql = f"SELECT i.id FROM inbox i WHERE {' AND '.join(where)} ORDER BY {order_sql}"
     if limit is not None:
         sql += " LIMIT :limit"
         params["limit"] = limit
@@ -196,6 +204,7 @@ async def reprocess(
                     "deduped": s.deduped,
                     "truncated": s.truncated,
                     "errors": s.errors,
+                    "cost_usd": float(s.cost.total.cost_usd),
                 }
             elif stage == "classify":
                 per_stage["classify"] = await asyncio.to_thread(
@@ -210,5 +219,16 @@ async def reprocess(
             _log.error(
                 "reprocess.stage_failed", stage=stage, exc_type=type(e).__name__, exc_msg=str(e)
             )
-    _log.info("reprocess.done", user_id=user_id, targets=len(targets), stages=ordered)
+    # Costo total de la corrida = suma de las etapas que reportan `cost_usd` (una etapa fallada es
+    # `{"error": ...}` y suma 0). Redondeado: la suma de floats arrastra ruido binario.
+    out["cost_usd"] = round(
+        sum(float(r.get("cost_usd", 0) or 0) for r in per_stage.values() if isinstance(r, dict)), 6
+    )
+    _log.info(
+        "reprocess.done",
+        user_id=user_id,
+        targets=len(targets),
+        stages=ordered,
+        cost_usd=out["cost_usd"],
+    )
     return out

@@ -87,6 +87,26 @@ export function formatCompact(n: number): string {
   return String(Math.round(n))
 }
 
+/** Intervalo ISO-8601 ("PT15M" / "PT1H" / "P1D") → español: "cada 15 min" / "cada hora" / "cada
+ *  día". Compuestos quedan numéricos ("cada 1 d 12 h"); lo no parseable vuelve crudo. */
+export function formatIsoInterval(iso: string): string {
+  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(iso.trim().toUpperCase())
+  if (!m) return iso
+  const d = Number(m[1] ?? 0)
+  const h = Number(m[2] ?? 0)
+  const min = Number(m[3] ?? 0)
+  const s = Number(m[4] ?? 0)
+  if (!d && !h && !min && !s) return iso
+  if (d && !h && !min && !s) return d === 1 ? "cada día" : `cada ${d} días`
+  if (h && !d && !min && !s) return h === 1 ? "cada hora" : `cada ${h} h`
+  const parts: string[] = []
+  if (d) parts.push(`${d} d`)
+  if (h) parts.push(`${h} h`)
+  if (min) parts.push(`${min} min`)
+  if (s) parts.push(`${s} s`)
+  return `cada ${parts.join(" ")}`
+}
+
 export function formatDurationMs(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)} ms`
   const s = ms / 1000
