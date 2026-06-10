@@ -6,7 +6,7 @@ Mockea `ApifyClient` (monkeypatch en `_common`) para no pegarle a Apify real.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -18,6 +18,8 @@ from memex.core.cursors import AccountCursor, SocialCursor
 from memex.core.source import HealthResult, Source, SourceKind, SourceRecord
 from memex.ingestors.runner import run_ingestor
 from memex.ingestors.social._common import (
+    RunWindow,
+    _should_warn_saturation,
     advance_social_checkpoint,
     is_new_record,
     social_fetch,
@@ -29,6 +31,9 @@ from memex.ingestors.social.source import (
     FacebookSource,
     InstagramSource,
     XSource,
+    _facebook_run_input,
+    _instagram_run_input,
+    _x_run_input,
     make_facebook_source,
     make_instagram_source,
     make_x_source,
@@ -43,6 +48,12 @@ def _cfg(
     extract_media: bool = False,
     max_attachment_bytes: int = 10 * 1024 * 1024,
     max_video_bytes: int = 100 * 1024 * 1024,
+    fetch_mode: str = "incremental",
+    fetch_since: date | None = None,
+    fetch_until: date | None = None,
+    fetch_limit: int | None = None,
+    native_since: bool = True,
+    max_run_charge_usd: float | None = None,
 ) -> SocialConfig:
     return SocialConfig(
         platform="instagram",
@@ -51,6 +62,12 @@ def _cfg(
         accounts=accounts if accounts is not None else [AllowedAccount(account="utn.frba")],
         results_limit=results_limit,
         run_timeout_s=10,
+        fetch_mode=fetch_mode,
+        fetch_since=fetch_since,
+        fetch_until=fetch_until,
+        fetch_limit=fetch_limit,
+        native_since=native_since,
+        max_run_charge_usd=max_run_charge_usd,
         extract_media=extract_media,
         max_attachment_bytes=max_attachment_bytes,
         max_video_bytes=max_video_bytes,
@@ -78,6 +95,7 @@ def _fake_apify_returning(
     *,
     usage: float | None = 0.01,
     charged_events: dict[str, int] | None = None,
+    captured: dict[str, Any] | None = None,
 ) -> type:
     class _FakeApify:
         def __init__(self, token: str, **kwargs: Any) -> None:
@@ -89,7 +107,12 @@ def _fake_apify_returning(
         async def __aexit__(self, *a: object) -> None:
             return None
 
-        async def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
+        async def run_actor(
+            self, actor_id: str, run_input: dict[str, Any], **kwargs: Any
+        ) -> ApifyRunResult:
+            if captured is not None:
+                captured["run_input"] = run_input
+                captured["kwargs"] = kwargs
             return ApifyRunResult(
                 items=items, usage_usd=usage, run_id="R1", charged_events=charged_events
             )
@@ -108,7 +131,9 @@ def _fake_apify_raising(exc: Exception) -> type:
         async def __aexit__(self, *a: object) -> None:
             return None
 
-        async def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
+        async def run_actor(
+            self, actor_id: str, run_input: dict[str, Any], **kwargs: Any
+        ) -> ApifyRunResult:
             raise exc
 
     return _Fail
@@ -127,7 +152,9 @@ def _fake_apify_concurrency(tracker: dict[str, int]) -> type:
         async def __aexit__(self, *a: object) -> None:
             return None
 
-        async def run_actor(self, actor_id: str, run_input: dict[str, Any]) -> ApifyRunResult:
+        async def run_actor(
+            self, actor_id: str, run_input: dict[str, Any], **kwargs: Any
+        ) -> ApifyRunResult:
             tracker["cur"] += 1
             tracker["max"] = max(tracker["max"], tracker["cur"])
             await asyncio.sleep(0.01)
@@ -260,6 +287,156 @@ def test_fetch_scrapes_accounts_concurrently(monkeypatch: pytest.MonkeyPatch) ->
     accounts = [AllowedAccount(account=a) for a in ("a", "b", "c")]
     list(InstagramSource(_cfg(accounts=accounts)).fetch(SocialCursor()))
     assert tracker["max"] >= 2
+
+
+# ---- Modos con ventana (range / last / native_since) ---- #
+
+
+def test_run_input_builders_map_window() -> None:
+    w = RunWindow("range", date(2026, 1, 5), date(2026, 2, 1), 50)
+    ig = _instagram_run_input("nasa", w)
+    assert ig["resultsLimit"] == 50
+    assert ig["onlyPostsNewerThan"] == "2026-01-05"
+    assert "onlyPostsOlderThan" not in ig  # IG no tiene techo nativo (backstop client-side)
+    fb = _facebook_run_input("nasa", w)
+    assert fb["onlyPostsNewerThan"] == "2026-01-05"
+    assert fb["onlyPostsOlderThan"] == "2026-02-01"
+    x = _x_run_input("nasa", w)
+    assert (x["start"], x["end"], x["maxItems"]) == ("2026-01-05", "2026-02-01", 50)
+
+    bare = RunWindow("last", None, None, 7)
+    assert "onlyPostsNewerThan" not in _instagram_run_input("nasa", bare)
+    assert "start" not in _x_run_input("nasa", bare)
+    assert _x_run_input("nasa", bare)["maxItems"] == 7
+    assert _instagram_run_input("nasa", bare)["resultsLimit"] == 7
+
+
+def test_incremental_native_since_passes_cursor_minus_margin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "memex.ingestors.social._common.ApifyClient",
+        _fake_apify_returning([], captured=captured),
+    )
+    cursor = SocialCursor(
+        accounts={
+            "utn.frba": AccountCursor(
+                last_post_id="p1", last_posted_at=datetime(2026, 6, 8, 15, 0, tzinfo=UTC)
+            )
+        }
+    )
+    list(InstagramSource(_cfg()).fetch(cursor))
+    # cursor - 1 día de margen (precisión de día de los actores + pinned de IG).
+    assert captured["run_input"]["onlyPostsNewerThan"] == "2026-06-07"
+    assert captured["kwargs"]["max_items"] == 30
+    assert captured["kwargs"]["max_total_charge_usd"] is None
+
+
+def test_incremental_native_since_opt_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "memex.ingestors.social._common.ApifyClient",
+        _fake_apify_returning([], captured=captured),
+    )
+    cursor = SocialCursor(
+        accounts={
+            "utn.frba": AccountCursor(
+                last_post_id="p1", last_posted_at=datetime(2026, 6, 8, 15, 0, tzinfo=UTC)
+            )
+        }
+    )
+    list(InstagramSource(_cfg(native_since=False)).fetch(cursor))
+    assert "onlyPostsNewerThan" not in captured["run_input"]
+
+
+def test_incremental_without_cursor_sends_no_native_since(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "memex.ingestors.social._common.ApifyClient",
+        _fake_apify_returning([], captured=captured),
+    )
+    list(InstagramSource(_cfg()).fetch(SocialCursor()))
+    assert "onlyPostsNewerThan" not in captured["run_input"]
+
+
+def test_range_ignores_cursor_filter_and_applies_backstop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """range = backfill: el filtro de cursor NO aplica (puede traer posts viejos), pero el
+    backstop client-side recorta la ventana (since inclusivo / until exclusivo)."""
+    items = [
+        _ig("2026-02-02T00:00:00Z", "fuera-techo"),
+        _ig("2026-01-10T12:00:00Z", "dentro"),
+        _ig("2025-12-31T23:59:00Z", "fuera-piso"),
+    ]
+    monkeypatch.setattr("memex.ingestors.social._common.ApifyClient", _fake_apify_returning(items))
+    cursor_adelante = SocialCursor(
+        accounts={
+            "utn.frba": AccountCursor(
+                last_post_id="z", last_posted_at=datetime(2026, 6, 1, tzinfo=UTC)
+            )
+        }
+    )
+    cfg = _cfg(fetch_mode="range", fetch_since=date(2026, 1, 5), fetch_until=date(2026, 2, 1))
+    recs = list(InstagramSource(cfg).fetch(cursor_adelante))
+    assert [r.external_id for r in recs] == ["instagram:utn.frba:dentro"]
+
+
+def test_last_keeps_old_posts_and_caps_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    items = [
+        _ig("2025-01-02T00:00:00Z", "v2"),
+        _ig("2025-01-01T00:00:00Z", "v1"),
+    ]
+    monkeypatch.setattr(
+        "memex.ingestors.social._common.ApifyClient",
+        _fake_apify_returning(items, captured=captured),
+    )
+    cursor_adelante = SocialCursor(
+        accounts={
+            "utn.frba": AccountCursor(
+                last_post_id="z", last_posted_at=datetime(2026, 6, 1, tzinfo=UTC)
+            )
+        }
+    )
+    recs = list(InstagramSource(_cfg(fetch_mode="last", fetch_limit=2)).fetch(cursor_adelante))
+    assert len(recs) == 2  # más viejos que el cursor, igual entran (backfill)
+    assert captured["run_input"]["resultsLimit"] == 2
+    assert captured["kwargs"]["max_items"] == 2
+
+
+def test_max_run_charge_is_passed_to_actor(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "memex.ingestors.social._common.ApifyClient",
+        _fake_apify_returning([], captured=captured),
+    )
+    list(InstagramSource(_cfg(max_run_charge_usd=1.5)).fetch(SocialCursor()))
+    assert captured["kwargs"]["max_total_charge_usd"] == 1.5
+
+
+def test_should_warn_saturation_matrix() -> None:
+    cur = AccountCursor(last_post_id="p", last_posted_at=datetime(2026, 6, 1, tzinfo=UTC))
+    inc = RunWindow("incremental", None, None, 10)
+    inc_native = RunWindow("incremental", date(2026, 5, 31), None, 10)
+    # range/last: el corte es esperado (backfill acotado), nunca avisa.
+    assert not _should_warn_saturation(
+        RunWindow("range", None, None, 10), cur, scraped=10, saw_old=False
+    )
+    assert not _should_warn_saturation(
+        RunWindow("last", None, None, 10), cur, scraped=10, saw_old=False
+    )
+    # incremental sin cota nativa: tope sin ver viejos = no se alcanzó el cursor.
+    assert _should_warn_saturation(inc, cur, scraped=10, saw_old=False)
+    assert not _should_warn_saturation(inc, cur, scraped=10, saw_old=True)
+    assert not _should_warn_saturation(inc, cur, scraped=9, saw_old=False)
+    # incremental con cota nativa: traer el tope (todo nuevo) sigue indicando gap posible.
+    assert _should_warn_saturation(inc_native, cur, scraped=10, saw_old=False)
+    # sin cursor previo (primera corrida) nunca avisa.
+    assert not _should_warn_saturation(inc, None, scraped=10, saw_old=False)
 
 
 # ---- ActorRunReporting: reports de costo por run de actor ---- #

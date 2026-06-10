@@ -26,6 +26,7 @@ from memex.core.cursors import SocialCursor
 from memex.core.payloads import BasePayload, SocialPostPayload
 from memex.core.source import ActorRunReport, HealthResult, Source, SourceKind, SourceRecord
 from memex.ingestors.social._common import (
+    RunWindow,
     advance_social_checkpoint,
     social_fetch,
     social_health_probe,
@@ -39,27 +40,44 @@ from memex.ingestors.social.parser import (
 from memex.logging import get_logger
 
 
-def _instagram_run_input(account: str, results_limit: int) -> dict[str, Any]:
-    return {
+def _instagram_run_input(account: str, window: RunWindow) -> dict[str, Any]:
+    run_input: dict[str, Any] = {
         "directUrls": [f"https://www.instagram.com/{account}/"],
         "resultsType": "posts",
-        "resultsLimit": results_limit,
+        "resultsLimit": window.limit,
     }
+    # Cota inferior nativa (UTC, precisión de día). El actor NO tiene techo de fecha: el
+    # `until` del rango lo aplica el backstop client-side de _common (escanea desde hoy
+    # hacia atrás igual — el freno de costo es `resultsLimit`).
+    if window.since is not None:
+        run_input["onlyPostsNewerThan"] = window.since.isoformat()
+    return run_input
 
 
-def _facebook_run_input(account: str, results_limit: int) -> dict[str, Any]:
-    return {
+def _facebook_run_input(account: str, window: RunWindow) -> dict[str, Any]:
+    run_input: dict[str, Any] = {
         "startUrls": [{"url": f"https://www.facebook.com/{account}"}],
-        "resultsLimit": results_limit,
+        "resultsLimit": window.limit,
     }
+    # Ojo costo: usar filtro de fecha activa el add-on por post del actor de FB.
+    if window.since is not None:
+        run_input["onlyPostsNewerThan"] = window.since.isoformat()
+    if window.until is not None:
+        run_input["onlyPostsOlderThan"] = window.until.isoformat()
+    return run_input
 
 
-def _x_run_input(account: str, results_limit: int) -> dict[str, Any]:
-    return {
+def _x_run_input(account: str, window: RunWindow) -> dict[str, Any]:
+    run_input: dict[str, Any] = {
         "twitterHandles": [account],
-        "maxItems": results_limit,
+        "maxItems": window.limit,
         "sort": "Latest",
     }
+    if window.since is not None:
+        run_input["start"] = window.since.isoformat()
+    if window.until is not None:
+        run_input["end"] = window.until.isoformat()
+    return run_input
 
 
 class InstagramSource:

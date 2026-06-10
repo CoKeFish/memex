@@ -30,6 +30,7 @@ from dotenv import load_dotenv
 
 from memex.core.cursors import SocialCursor
 from memex.core.observability import ingestion_run, record_apify_runs
+from memex.core.sink import MemexSink
 from memex.core.source import ActorRunReporting, Source, SourceConfigError
 from memex.ingestors.memex_server_client import MemexAPIError, MemexServerClient
 from memex.ingestors.runner import run_ingestor
@@ -66,6 +67,16 @@ def _build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--chunk-sleep-ms", type=int, default=100, help="Sleep between chunks in ms (default 100)."
     )
+    # Ventana (simetría con POST /sources/{id}/fetch): range/last = backfill, NO avanzan el cursor.
+    run_p.add_argument(
+        "--mode",
+        choices=["incremental", "range", "last"],
+        default="incremental",
+        help="incremental (default) | range (since..until, backfill) | last (últimos N).",
+    )
+    run_p.add_argument("--since", default=None, help="range: YYYY-MM-DD inclusivo.")
+    run_p.add_argument("--until", default=None, help="range: YYYY-MM-DD exclusivo.")
+    run_p.add_argument("--limit", type=int, default=None, help="last/range: tope de posts/cuenta.")
 
     health_p = sub.add_parser("health", help="Validate the Apify token — no scrape, no spend.")
     health_p.add_argument("--source-id", type=int, required=True, help="Source id to health-check.")
@@ -118,6 +129,45 @@ def _build_source(src: dict[str, Any], cfg_override: dict[str, Any] | None = Non
     return factory(cfg_dict)
 
 
+def _window_override(args: argparse.Namespace) -> dict[str, Any]:
+    """Claves transitorias de ventana para el config (mismas que inyecta el fetch a demanda)."""
+    if args.mode == "incremental":
+        return {}
+    override: dict[str, Any] = {"fetch_mode": args.mode}
+    if args.since:
+        override["fetch_since"] = args.since
+    if args.until:
+        override["fetch_until"] = args.until
+    if args.limit is not None:
+        override["fetch_limit"] = args.limit
+    return override
+
+
+class _NoCheckpointSink:
+    """Sink que delega todo MENOS la persistencia del checkpoint (para range/last).
+
+    El sink del CLI (`MemexServerClient`) siempre persiste; sin este wrapper, un backfill de
+    posts viejos RETROCEDERÍA el cursor por-cuenta (advance_checkpoint setea last_posted_at
+    del record) y el próximo incremental re-pagaría todo el camino desde ahí. Espejo del
+    `persist_checkpoint=False` del camino API (InProcessSink).
+    """
+
+    def __init__(self, inner: MemexServerClient) -> None:
+        self._inner = inner
+
+    def get_sources_by_type(self, source_type: str) -> list[dict[str, Any]]:
+        return self._inner.get_sources_by_type(source_type)
+
+    def get_checkpoint(self, source_id: int) -> dict[str, Any] | None:
+        return self._inner.get_checkpoint(source_id)
+
+    def put_checkpoint(self, source_id: int, cursor: dict[str, Any]) -> None:
+        return None
+
+    def post_ingest_batch(self, records: list[dict[str, Any]]) -> dict[str, int]:
+        return self._inner.post_ingest_batch(records)
+
+
 def _drain_reports(
     source: Source[Any], *, uid: int, sid: int, run_id: str | None, log: Any
 ) -> None:
@@ -144,6 +194,9 @@ def _drain_reports(
 
 
 def _cmd_run(args: argparse.Namespace, client: MemexServerClient, log: Any) -> int:
+    if args.mode == "range" and not args.since:
+        log.error("social.cli.range_requires_since")
+        return 1
     sources = _select_sources(client, args.source_id, args.type)
     if not sources:
         if args.source_id is not None:
@@ -151,6 +204,10 @@ def _cmd_run(args: argparse.Namespace, client: MemexServerClient, log: Any) -> i
             return 1
         log.info("social.cli.no_sources_found")
         return 0
+
+    override = _window_override(args)
+    # range/last = backfill: NO debe persistir el cursor (ver _NoCheckpointSink).
+    sink: MemexSink = client if args.mode == "incremental" else _NoCheckpointSink(client)
 
     had_fatal = False
     for src in sources:
@@ -160,7 +217,7 @@ def _cmd_run(args: argparse.Namespace, client: MemexServerClient, log: Any) -> i
 
         with ingestion_run(user_id=uid, source_id=sid, trigger="cli") as run:
             try:
-                source = _build_source(src)
+                source = _build_source(src, cfg_override=override or None)
             except SourceConfigError as e:
                 log.error("social.cli.source.config_invalid", source_name=name, reason=str(e))
                 run.fail(e)
@@ -171,7 +228,7 @@ def _cmd_run(args: argparse.Namespace, client: MemexServerClient, log: Any) -> i
                 stats = run_ingestor(
                     source,
                     source_id=sid,
-                    sink=client,
+                    sink=sink,
                     chunk_size=args.chunk_size,
                     chunk_sleep_ms=args.chunk_sleep_ms,
                 )
