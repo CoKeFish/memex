@@ -18,9 +18,10 @@ from memex.api.schemas import (
     RelevanceCandidateList,
     SenderRelevanceList,
     SenderTierInfo,
+    SenderTierList,
     SenderTierRequest,
 )
-from memex.core.sender_tiers import clear_override, set_override
+from memex.core.sender_tiers import clear_override, list_overrides, set_override
 from memex.db import connection
 from memex.llm import LLMConfigError, LLMQuotaError
 from memex.logging import get_logger
@@ -76,6 +77,16 @@ async def clear_sender_tier_endpoint(
         ok = clear_override(conn, user_id=user_id, sender_email=sender_email)
     if not ok:
         raise HTTPException(status_code=404, detail="sin override")
+
+
+# Path estático: si algún día se agrega GET /senders/{key}, registrarla DESPUÉS de esta ruta.
+@router.get("/senders/tiers", response_model=SenderTierList)
+async def list_sender_tiers_endpoint(user_id: UserID) -> dict[str, Any]:
+    """Overrides de tier por remitente del usuario (gestión en /filtros). Recientes primero."""
+    with connection() as conn:
+        items = list_overrides(conn, user_id=user_id)
+    _log.info("quality.sender_tiers.list", user_id=user_id, rows=len(items))
+    return {"items": items}
 
 
 @router.get("/candidates", response_model=RelevanceCandidateList)

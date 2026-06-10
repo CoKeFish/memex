@@ -64,6 +64,26 @@ def set_override(
     return dict(row)
 
 
+def list_overrides(conn: Connection, *, user_id: int) -> list[dict[str, Any]]:
+    """Filas completas de los overrides del user (gestión en el dashboard), recientes primero."""
+    rows = (
+        conn.execute(
+            text(
+                """
+                SELECT sender_email, tier, reason, created_at, updated_at
+                FROM sender_tier_overrides
+                WHERE user_id = :uid
+                ORDER BY updated_at DESC, sender_email ASC
+                """
+            ),
+            {"uid": user_id},
+        )
+        .mappings()
+        .all()
+    )
+    return [dict(r) for r in rows]
+
+
 def clear_override(conn: Connection, *, user_id: int, sender_email: str) -> bool:
     """Borra el override de un remitente (vuelve a la heurística). False si no existía."""
     n = conn.execute(

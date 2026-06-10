@@ -3,6 +3,7 @@
 // posteriores.
 
 import { apiDelete, apiGet, apiPost } from "@/lib/api"
+import type { Tier } from "@/types/domain"
 
 /**
  * Relevancia agregada de un remitente. `relevancePct` cuenta SOLO los mensajes que produjeron un
@@ -78,7 +79,7 @@ export async function fetchSenderRelevance(limit = 200): Promise<SenderRelevance
 /** "No procesar" un remitente: fuerza el tier de sus mensajes futuros — POST /quality/senders/tier. */
 export async function setSenderTier(
   email: string,
-  tier = "blacklist",
+  tier: Tier = "blacklist",
   reason: string | null = null,
 ): Promise<void> {
   await apiPost("/quality/senders/tier", { sender_email: email, tier, reason })
@@ -87,6 +88,35 @@ export async function setSenderTier(
 /** Quita el override de tier de un remitente — DELETE /quality/senders/tier. */
 export async function clearSenderTier(email: string): Promise<void> {
   await apiDelete<void>(`/quality/senders/tier?sender_email=${encodeURIComponent(email)}`)
+}
+
+/** Override de tier por remitente (fila de sender_tier_overrides). */
+export interface SenderTierOverride {
+  senderEmail: string
+  tier: Tier
+  reason: string | null
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+interface SenderTierOverrideApi {
+  sender_email: string
+  tier: string
+  reason: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+/** Overrides de tier del usuario (recientes primero) — GET /quality/senders/tiers. */
+export async function fetchSenderTiers(): Promise<SenderTierOverride[]> {
+  const data = await apiGet<{ items: SenderTierOverrideApi[] }>("/quality/senders/tiers")
+  return data.items.map((it) => ({
+    senderEmail: it.sender_email,
+    tier: it.tier as Tier,
+    reason: it.reason,
+    createdAt: it.created_at,
+    updatedAt: it.updated_at,
+  }))
 }
 
 /** Candidato a filtrar detectado por el job (remitente email ruidoso). */

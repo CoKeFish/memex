@@ -26,8 +26,8 @@ diseño: drop puro.
     `{"subject": {"prefix": "[NEWSLETTER]"}}`
 
   Las keys del scope son paths DOT-NOTATION dentro del payload — `"from"`
-  matchea `payload["from"]`. Paths anidados (ej. `"from.email"`) son
-  futuros; v1 soporta solo top-level.
+  matchea `payload["from"]`; `"from.email"` desciende dicts anidados (ver
+  `_resolve`). Si un segmento falta o no es dict, la key no matchea.
 
 **Aplicación por orden de prioridad**: las reglas con prioridad mayor evalúan
 primero. La primera que matchea decide el destino del record. Reglas sin

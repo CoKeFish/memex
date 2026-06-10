@@ -20,7 +20,7 @@ from sqlalchemy import text
 
 from memex.classifier.worker import run_classification
 from memex.core.relevance_marks import set_mark
-from memex.core.sender_tiers import set_override
+from memex.core.sender_tiers import list_overrides, set_override
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.orchestrator import run_extraction
@@ -436,6 +436,46 @@ def test_sender_tier_endpoints(client: Any, seed_source: dict[str, Any]) -> None
     assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 204
     assert _sender_row(client, "c@x.com")["override_tier"] is None
     assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 404
+
+
+def test_sender_tier_list_endpoint(client: Any) -> None:
+    assert client.get("/quality/senders/tiers").json()["items"] == []
+
+    client.post("/quality/senders/tier", json={"sender_email": "b@x.com", "tier": "individual"})
+    client.post(
+        "/quality/senders/tier",
+        json={"sender_email": "c@x.com", "tier": "blacklist", "reason": "spam"},
+    )
+    items = client.get("/quality/senders/tiers").json()["items"]
+    by_email = {i["sender_email"]: i for i in items}
+    assert set(by_email) == {"b@x.com", "c@x.com"}
+    assert by_email["b@x.com"]["tier"] == "individual"
+    assert by_email["b@x.com"]["reason"] is None
+    assert by_email["c@x.com"]["tier"] == "blacklist"
+    assert by_email["c@x.com"]["reason"] == "spam"
+    assert all(i["created_at"] and i["updated_at"] for i in items)
+
+    # Upsert: re-POST no duplica y reordena (updated_at DESC → el recién tocado primero).
+    client.post("/quality/senders/tier", json={"sender_email": "b@x.com", "tier": "batch"})
+    items = client.get("/quality/senders/tiers").json()["items"]
+    assert len(items) == 2
+    assert items[0]["sender_email"] == "b@x.com"
+    assert items[0]["tier"] == "batch"
+
+    assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 204
+    items = client.get("/quality/senders/tiers").json()["items"]
+    assert [i["sender_email"] for i in items] == ["b@x.com"]
+
+
+def test_sender_tier_list_scoped_to_owner(client: Any) -> None:
+    with connection() as c:
+        c.execute(text("INSERT INTO users (id, email, display_name) VALUES (2, 'u2@local', 'u2')"))
+        set_override(c, user_id=1, sender_email="mine@x.com", tier="blacklist")
+        set_override(c, user_id=2, sender_email="theirs@x.com", tier="blacklist")
+    items = client.get("/quality/senders/tiers").json()["items"]  # client = user 1
+    assert [i["sender_email"] for i in items] == ["mine@x.com"]
+    with connection() as c:
+        assert [r["sender_email"] for r in list_overrides(c, user_id=2)] == ["theirs@x.com"]
 
 
 # --- (6) cola de candidatos (detección automática "por métricas") ---------------- #

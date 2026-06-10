@@ -306,6 +306,10 @@ class SenderTierInfo(BaseModel):
     updated_at: datetime | None = None
 
 
+class SenderTierList(BaseModel):
+    items: list[SenderTierInfo] = Field(default_factory=list)
+
+
 class RelevanceCandidate(BaseModel):
     """Candidato a filtrar detectado por el job (remitente email ruidoso, sin accionar)."""
 
