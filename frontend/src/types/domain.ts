@@ -4,7 +4,22 @@
 
 // ---- Sources / inbox ----------------------------------------------------------
 
-export type SourceType = "imap" | "telegram" | "social" | "calendar" | "gateway"
+export type SourceType =
+  | "imap"
+  | "outlook"
+  | "telegram"
+  | "social"
+  | "instagram"
+  | "facebook"
+  | "x"
+  | "calendar"
+  | "gateway"
+  | "dummy"
+
+/** De dónde resuelve el token de Apify una fuente social (espeja `SourceRow.token_source`):
+ * "vault" = secreto cifrado de la cuenta vinculada (pisa al env) · "env" = variable del contenedor
+ * (Doppler) · "missing" = no resuelve, el fetch fallará. */
+export type TokenSource = "vault" | "env" | "missing"
 
 export interface Source {
   id: number
@@ -13,6 +28,8 @@ export interface Source {
   enabled: boolean
   createdAt: string
   config: Record<string, unknown>
+  /** Solo redes; null/ausente = tipo sin token reportable. */
+  tokenSource?: TokenSource | null
 }
 
 // Payloads fieles (subconjunto usado por la UI). snake_case = claves del JSONB.
