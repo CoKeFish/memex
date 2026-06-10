@@ -532,6 +532,19 @@ class CoverageRange(BaseModel):
     count: int  # items dentro del tramo
 
 
+class CoverageSpan(BaseModel):
+    """Tramo BARRIDO por la ingesta (reclamado por un fetch de rango), haya o no mensajes.
+
+    Distingue "barrí y estaba vacío" de "nunca lo intenté". Sale de `ingest_swept_ranges`
+    (bitácora append-only) + el avance del backfill_job vigente ([range_start, frontier)),
+    con solapes/adyacencias fundidos.
+    """
+
+    start: date  # inclusive
+    end: date  # inclusive
+    days: int
+
+
 class CoverageLane(BaseModel):
     """Una pista del timeline (hoy: una fuente)."""
 
@@ -543,11 +556,12 @@ class CoverageLane(BaseModel):
     first_day: date | None
     last_day: date | None
     ranges: list[CoverageRange]
+    swept: list[CoverageSpan]
 
 
 class CoverageOut(BaseModel):
     lanes: list[CoverageLane]
-    domain_min: date | None  # min(first_day) entre lanes; None si no hay datos
+    domain_min: date | None  # extremos entre lanes (items Y barridos); None si no hay nada
     domain_max: date | None
     tz: str
     gap_days: int

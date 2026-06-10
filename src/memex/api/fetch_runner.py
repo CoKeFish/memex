@@ -16,6 +16,7 @@ range/last insertan pero no avanzan el cursor incremental (`persist_checkpoint` 
 from __future__ import annotations
 
 from contextlib import suppress
+from datetime import date
 from typing import Any
 
 from fastapi import HTTPException
@@ -74,6 +75,51 @@ def _persist_actor_reports(
         )
         return None
     return float(total) if total is not None else None
+
+
+def record_swept_range(
+    *,
+    user_id: int,
+    source_id: int,
+    since: str | None,
+    until: str | None,
+    posted: int,
+    limit: int | None,
+) -> None:
+    """Registra el rango de fechas BARRIDO por una corrida `range` exitosa (overlay del timeline).
+
+    Solo ventanas CERRADAS de fechas puras (`since` inclusivo + `until` exclusivo) y COMPLETAS:
+    si `posted >= limit` la ventana pudo quedar truncada por el cap → no se reclama (under-claim
+    deliberado; los rangos abiertos o con timestamps tampoco se reclaman). Append-only: el
+    solape/dedup lo funde el lector (GET /inbox/coverage). Nunca lanza — perder la marca no debe
+    tumbar una corrida que ya funcionó.
+    """
+    if not since or not until:
+        return
+    if limit is not None and posted >= limit:
+        return
+    try:
+        start, end = date.fromisoformat(since), date.fromisoformat(until)
+    except ValueError:
+        return
+    if end <= start:
+        return
+    try:
+        with connection() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO ingest_swept_ranges (user_id, source_id, range_start, range_end)"
+                    " VALUES (:uid, :sid, :rs, :re)"
+                ),
+                {"uid": user_id, "sid": source_id, "rs": start, "re": end},
+            )
+    except Exception as e:
+        _log.error(
+            "fetch.swept_range.persist_failed",
+            source_id=source_id,
+            exc_type=type(e).__name__,
+            exc_msg=str(e),
+        )
 
 
 def _acquire_fetch_lock(source_id: int) -> Connection | None:
@@ -222,6 +268,17 @@ async def run_fetch_window(
                     ingestion_run_id=run.id,
                 )
             stats.api_cost_usd = api_cost
+        # La corrida terminó sin excepción: si fue una ventana de rango cerrada, queda
+        # reclamada como BARRIDA (timeline de cobertura) aunque no haya traído nada.
+        if mode == "range":
+            record_swept_range(
+                user_id=user_id,
+                source_id=source_id,
+                since=since,
+                until=until,
+                posted=stats.posted,
+                limit=limit,
+            )
         return stats
     finally:
         if lock_conn is not None:
