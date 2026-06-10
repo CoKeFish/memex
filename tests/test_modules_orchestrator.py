@@ -626,6 +626,37 @@ def test_orchestrator_finance_runs_without_identidades(seed_source: dict[str, An
     assert _finance_fk() is None
 
 
+def test_routed_out_cursor_cuenta_atribucion_previa(seed_source: dict[str, Any]) -> None:
+    """Cursor ruteado-fuera: si el dominio YA atribuye hechos al mensaje (p. ej. de una corrida
+    previa cuyo ruteo eligió distinto), `item_count` los conserva en vez de degradarlos a 0 —
+    la señal de relevancia no depende de qué módulos rutee ESTA corrida."""
+    _enable("finance")
+    _enable("calendar")
+    iid = _seed(seed_source["id"], "m1", "individual", {"body_text": "reunión mañana"})
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_finance_transactions "
+                "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, "
+                " occurred_at_precision, counterparty) "
+                "VALUES (1, CAST(:ids AS BIGINT[]), 'egreso', 10, 'USD', :at, 'datetime', 'Tigo')"
+            ),
+            {"ids": [iid], "at": datetime(2026, 5, 28, 11, 0, tzinfo=UTC)},
+        )
+
+    asyncio.run(run_extraction(1, client=FakeExtractLLM(route_choose=["calendar"])))
+
+    with connection() as c:
+        cnt = c.execute(
+            text(
+                "SELECT item_count FROM module_extractions "
+                "WHERE inbox_id = :i AND module_slug = 'finance'"
+            ),
+            {"i": iid},
+        ).scalar()
+    assert cnt == 1
+
+
 def test_read_extractions_debug_exposes_finance_seam(seed_source: dict[str, Any]) -> None:
     """read_extractions_debug (vista DEBUG): expone el estado INTERNO de finance — la contraparte
     resuelta a identidad + el outcome de dedup. Solo módulos con CAP_DEBUG_INBOX (calendar/
