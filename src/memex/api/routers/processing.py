@@ -10,7 +10,13 @@ Dos superficies:
    deja rastro en `worker_runs` (`run_type='reprocess'`). La UI hace polling de `/runs`. Una corrida
    a la vez (409 si hay otra `running`) — coherente con "procesamiento vigilado".
 
-2. **Control runtime del scheduler** (`/processing/scheduler`). GET combina la config de DB
+2. **Lote por ventanas** (`/processing/lot[...]`). Para backlogs grandes: congela un snapshot con
+   los mismos filtros (orden cronológico) y se avanza en ventanas de N mensajes — N con default
+   por medio (`/processing/window-defaults`) — mirando costo por ventana. Cada avance corre en
+   background como una corrida más (`worker_runs`); la orquestación vive en
+   `memex.processing.lots`. Mismo candado de "una corrida a la vez".
+
+3. **Control runtime del scheduler** (`/processing/scheduler`). GET combina la config de DB
    (`scheduler_settings`) con el último run real de cada job (`worker_runs`, `run_type='job'`).
    PATCH prende/apaga el daemon y setea qué jobs corren; el daemon relee la DB cada tick. Off por
    default.
@@ -31,6 +37,10 @@ from sqlalchemy.engine import RowMapping
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
     ProcessingDryRun,
+    ProcessingLotAdvance,
+    ProcessingLotAdvanceStatus,
+    ProcessingLotConfig,
+    ProcessingLotState,
     ProcessingRunList,
     ProcessingRunRequest,
     ProcessingRunRow,
@@ -38,9 +48,12 @@ from memex.api.schemas import (
     SchedulerJobState,
     SchedulerSettingsPatch,
     SchedulerState,
+    WindowDefaults,
+    WindowDefaultsPatch,
 )
 from memex.db import connection
 from memex.logging import get_logger
+from memex.processing import lots
 from memex.reprocess import STAGE_ORDER, reprocess, select_targets
 from memex.scheduler import runs
 from memex.scheduler.jobs import all_jobs
@@ -130,13 +143,7 @@ async def run_batch(body: ProcessingRunRequest, user_id: UserID) -> dict[str, An
     ordered = _ordered_stages(body.stages)
 
     with connection() as conn:
-        busy = conn.execute(
-            text(
-                "SELECT 1 FROM worker_runs "
-                "WHERE user_id = :uid AND run_type = 'reprocess' AND status = 'running' LIMIT 1"
-            ),
-            {"uid": user_id},
-        ).first()
+        busy = lots.is_busy(conn, user_id)
     if busy:
         raise HTTPException(status_code=409, detail="ya hay una corrida de procesamiento en curso")
 
@@ -227,6 +234,170 @@ async def get_run(run_id: int, user_id: UserID) -> ProcessingRunRow:
     if not r:
         raise HTTPException(status_code=404, detail="not found")
     return _run_row(r)
+
+
+# --- lote por ventanas ---
+_NO_LOT = "no hay lote de procesamiento configurado"
+_BUSY = "ya hay una corrida de procesamiento en curso"
+
+
+def _lot_state(conn: Any, lot: lots.ProcessingLot) -> ProcessingLotState:
+    return ProcessingLotState(**lots.to_state(conn, lot))
+
+
+@router.get("/lot", response_model=ProcessingLotState)
+async def get_lot(user_id: UserID) -> ProcessingLotState:
+    """Estado del lote para restaurar la UI; 404 si no hay ninguno configurado."""
+    with connection() as conn:
+        lot = lots.get_lot(conn, user_id)
+        if lot is None:
+            raise HTTPException(status_code=404, detail=_NO_LOT)
+        return _lot_state(conn, lot)
+
+
+@router.post("/lot", response_model=ProcessingLotState)
+async def configure_lot(body: ProcessingLotConfig, user_id: UserID) -> ProcessingLotState:
+    """Crea o reconfigura EL lote (frontera 0, history vacío). 409 con una corrida en curso."""
+    if not body.stages:
+        raise HTTPException(status_code=422, detail="elegí al menos una etapa")
+    ordered = _ordered_stages(body.stages)
+    targets = select_targets(
+        user_id,
+        source_id=body.source_id,
+        since=_to_dt(body.since),
+        until=_to_dt(body.until),
+        limit=body.limit,
+        only=body.only,
+        order="occurred_at",
+    )
+    if not targets:
+        raise HTTPException(status_code=422, detail="el filtro no matchea ningún mensaje")
+    filters = {
+        "source_id": body.source_id,
+        "since": body.since.isoformat() if body.since else None,
+        "until": body.until.isoformat() if body.until else None,
+        "limit": body.limit,
+        "only": body.only,
+    }
+    with connection() as conn:
+        if lots.is_busy(conn, user_id):
+            raise HTTPException(status_code=409, detail=_BUSY)
+        window_size = lots.resolve_window_size(conn, user_id, targets, body.window_size)
+        lot = lots.upsert_lot(
+            conn,
+            user_id,
+            stages=ordered,
+            target_ids=targets,
+            filters=filters,
+            force=body.force,
+            window_size=window_size,
+        )
+        state = _lot_state(conn, lot)
+    _log.info(
+        "processing.lot.configured",
+        user_id=user_id,
+        targets=len(targets),
+        stages=ordered,
+        window_size=window_size,
+    )
+    return state
+
+
+@router.delete("/lot", status_code=204)
+async def delete_lot(user_id: UserID) -> None:
+    """Borra el lote (reset). 409 mientras una corrida lo esté avanzando."""
+    with connection() as conn:
+        if lots.is_busy(conn, user_id):
+            raise HTTPException(status_code=409, detail=_BUSY)
+        lots.delete_lot(conn, user_id)
+    _log.info("processing.lot.deleted", user_id=user_id)
+
+
+async def _enqueue_advance(
+    user_id: int, *, rest: bool, window_size: int | None
+) -> ProcessingLotAdvanceStatus:
+    """Lanza el avance en background como una corrida más (`worker_runs`, run_type='reprocess')."""
+    with connection() as conn:
+        lot = lots.get_lot(conn, user_id)
+        if lot is None:
+            raise HTTPException(status_code=404, detail=_NO_LOT)
+        if lots.is_busy(conn, user_id):
+            raise HTTPException(status_code=409, detail=_BUSY)
+    total = len(lot.target_ids)
+    if lot.frontier >= total:
+        return ProcessingLotAdvanceStatus(run_id=None, status="done", window=None)
+
+    size = window_size or lot.window_size
+    run_id = runs.start_run(user_id, "reprocess")
+    cfg = {
+        "stages": lot.stages,
+        "force": bool(lot.config.get("force", False)),
+        "lot": {
+            "mode": "rest" if rest else "window",
+            "from": lot.frontier,
+            "window_size": size,
+            "total": total,
+        },
+    }
+    with connection() as conn:
+        conn.execute(
+            text(
+                "UPDATE worker_runs SET run_type = 'reprocess', run_config = CAST(:cfg AS JSONB) "
+                "WHERE id = :id"
+            ),
+            {"cfg": json.dumps(cfg), "id": run_id},
+        )
+    task = asyncio.create_task(
+        lots.run_advance(user_id, run_id, rest=rest, window_size=window_size)
+    )
+    _RUNNING.add(task)
+    task.add_done_callback(_RUNNING.discard)
+    _log.info(
+        "processing.lot.advance_enqueued",
+        user_id=user_id,
+        run_id=run_id,
+        rest=rest,
+        from_idx=lot.frontier,
+        window_size=size,
+    )
+    window = (
+        None if rest else {"start_idx": lot.frontier, "end_idx": min(lot.frontier + size, total)}
+    )
+    return ProcessingLotAdvanceStatus(run_id=run_id, status="running", window=window)
+
+
+@router.post("/lot/advance", response_model=ProcessingLotAdvanceStatus)
+async def advance_lot(
+    user_id: UserID, body: ProcessingLotAdvance | None = None
+) -> ProcessingLotAdvanceStatus:
+    """Procesa la PRÓXIMA ventana (el override de tamaño queda como nuevo default del lote)."""
+    ov = body or ProcessingLotAdvance()
+    return await _enqueue_advance(user_id, rest=False, window_size=ov.window_size)
+
+
+@router.post("/lot/advance-rest", response_model=ProcessingLotAdvanceStatus)
+async def advance_lot_rest(
+    user_id: UserID, body: ProcessingLotAdvance | None = None
+) -> ProcessingLotAdvanceStatus:
+    """Procesa todo lo que queda, ventana a ventana (avance visible y reanudable)."""
+    ov = body or ProcessingLotAdvance()
+    return await _enqueue_advance(user_id, rest=True, window_size=ov.window_size)
+
+
+@router.get("/window-defaults", response_model=WindowDefaults)
+async def get_window_defaults(user_id: UserID) -> WindowDefaults:
+    """Tamaño de ventana por medio (para prellenar el form de alta sin lote configurado)."""
+    with connection() as conn:
+        return WindowDefaults(sizes=lots.window_defaults(conn, user_id))
+
+
+@router.patch("/window-defaults", response_model=WindowDefaults)
+async def patch_window_defaults(body: WindowDefaultsPatch, user_id: UserID) -> WindowDefaults:
+    """Edita los defaults por medio (solo los kinds enviados)."""
+    with connection() as conn:
+        sizes = lots.set_window_defaults(conn, user_id, body.sizes)
+    _log.info("processing.window_defaults.patched", user_id=user_id, sizes=body.sizes)
+    return WindowDefaults(sizes=sizes)
 
 
 # --- control runtime del scheduler ---

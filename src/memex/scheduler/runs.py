@@ -10,11 +10,20 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import text
 
 from memex.db import connection
+
+
+def _json_default(obj: Any) -> Any:
+    """Las stats de jobs cargan `Decimal` (CostBySource/CostAccum.cost_usd) que `json.dumps` no
+    serializa solo; va a float (es un agregado de display, no contabilidad). Resto → str."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return str(obj)
 
 
 def start_run(user_id: int, job: str) -> int:
@@ -39,9 +48,9 @@ def finish_run(run_id: int, *, status: str, stats: Any = None, error: str | None
     """
     payload = "{}"
     if stats is not None and dataclasses.is_dataclass(stats) and not isinstance(stats, type):
-        payload = json.dumps(dataclasses.asdict(stats))
+        payload = json.dumps(dataclasses.asdict(stats), default=_json_default)
     elif isinstance(stats, dict):
-        payload = json.dumps(stats)
+        payload = json.dumps(stats, default=_json_default)
     with connection() as conn:
         conn.execute(
             text(

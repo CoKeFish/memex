@@ -4,7 +4,7 @@
 // resto: toggle de fuentes, módulos (toggle + cobertura), scheduler (estado + control) y las
 // corridas por lote (dry-run, run en background, polling de /runs).
 
-import { apiGet, apiPatch, apiPost } from "@/lib/api"
+import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api"
 import type { Source, SourceType, WorkerJob, WorkerRunStatus } from "@/types/domain"
 
 // ---- Catálogo de etapas / filtros (para el form "qué procesar") ---------------------------------
@@ -300,4 +300,155 @@ export async function runProcessing(req: ProcessingRunRequest): Promise<Processi
 export async function fetchProcessingRuns(limit = 20): Promise<ProcessingRun[]> {
   const r = await apiGet<{ items: ProcessingRunApi[] }>(`/processing/runs?limit=${limit}`)
   return r.items.map(toRun)
+}
+
+// ---- lote por ventanas (router /processing/lot, 0056) --------------------------------------------
+// Espejo del backfill de ingesta pero sobre lo YA ingerido: snapshot cronológico + frontera por
+// índice + ventanas de N mensajes con costo por ventana. El avance corre en background como una
+// corrida más (worker_runs); la UI poll-ea fetchLot + fetchProcessingRuns.
+
+export interface LotWindow {
+  startIdx: number
+  endIdx: number // exclusivo
+  n: number
+  results: Record<string, StageResult>
+  errors: number
+  costUsd: number
+  msElapsed: number
+  at: string
+}
+
+export interface LotState {
+  stages: string[]
+  filters: Record<string, unknown>
+  force: boolean
+  total: number
+  frontier: number // mensajes ya procesados (índice dentro del snapshot)
+  windowSize: number
+  status: "active" | "done"
+  spentUsd: number
+  busy: boolean // hay una corrida reprocess en curso (deshabilita avanzar/reconfigurar)
+  defaults: Record<string, number> // tamaño de ventana por medio (email/chat/social)
+  history: LotWindow[]
+  createdAt: string
+}
+
+export interface LotAdvanceStatus {
+  runId: number | null
+  status: string // running | done
+  window: { startIdx: number; endIdx: number } | null
+}
+
+interface LotWindowApi {
+  start_idx: number
+  end_idx: number
+  n: number
+  results: Record<string, StageResult>
+  errors: number
+  cost_usd: number
+  ms_elapsed: number
+  at: string
+}
+interface LotStateApi {
+  stages: string[]
+  filters: Record<string, unknown>
+  force: boolean
+  total: number
+  frontier: number
+  window_size: number
+  status: "active" | "done"
+  spent_usd: number
+  busy: boolean
+  defaults: Record<string, number>
+  history: LotWindowApi[]
+  created_at: string
+}
+interface LotAdvanceApi {
+  run_id: number | null
+  status: string
+  window: { start_idx: number; end_idx: number } | null
+}
+
+function toLotWindow(w: LotWindowApi): LotWindow {
+  return {
+    startIdx: w.start_idx,
+    endIdx: w.end_idx,
+    n: w.n,
+    results: w.results ?? {},
+    errors: w.errors,
+    costUsd: w.cost_usd,
+    msElapsed: w.ms_elapsed,
+    at: w.at,
+  }
+}
+
+function toLotState(s: LotStateApi): LotState {
+  return {
+    stages: s.stages,
+    filters: s.filters ?? {},
+    force: s.force,
+    total: s.total,
+    frontier: s.frontier,
+    windowSize: s.window_size,
+    status: s.status,
+    spentUsd: s.spent_usd,
+    busy: s.busy,
+    defaults: s.defaults ?? {},
+    history: (s.history ?? []).map(toLotWindow),
+    createdAt: s.created_at,
+  }
+}
+
+/** Estado del lote (GET); `null` si no hay ninguno configurado. */
+export async function fetchLot(): Promise<LotState | null> {
+  try {
+    return toLotState(await apiGet<LotStateApi>("/processing/lot"))
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null
+    throw e
+  }
+}
+
+/** Crea o reconfigura EL lote con los mismos filtros de una corrida (+ tamaño de ventana). */
+export async function createLot(
+  req: ProcessingRunRequest,
+  windowSize?: number | null,
+): Promise<LotState> {
+  const body = { ...toRunBody(req), window_size: windowSize ?? null }
+  return toLotState(await apiPost<LotStateApi>("/processing/lot", body))
+}
+
+/** Borra el lote (reset). */
+export async function deleteLot(): Promise<void> {
+  await apiDelete<void>("/processing/lot")
+}
+
+/** Avanza UNA ventana (o el resto con `rest`); el override de tamaño queda como nuevo default. */
+export async function advanceLot(opts?: {
+  rest?: boolean
+  windowSize?: number | null
+}): Promise<LotAdvanceStatus> {
+  const path = opts?.rest ? "/processing/lot/advance-rest" : "/processing/lot/advance"
+  const r = await apiPost<LotAdvanceApi>(path, { window_size: opts?.windowSize ?? null })
+  return {
+    runId: r.run_id,
+    status: r.status,
+    window: r.window ? { startIdx: r.window.start_idx, endIdx: r.window.end_idx } : null,
+  }
+}
+
+/** Defaults de tamaño de ventana por medio (para prellenar el form sin lote configurado). */
+export async function fetchWindowDefaults(): Promise<Record<string, number>> {
+  const r = await apiGet<{ sizes: Record<string, number> }>("/processing/window-defaults")
+  return r.sizes
+}
+
+/** Edita los defaults por medio (solo los kinds enviados se tocan). */
+export async function patchWindowDefaults(
+  sizes: Record<string, number>,
+): Promise<Record<string, number>> {
+  const r = await apiPatch<{ sizes: Record<string, number> }>("/processing/window-defaults", {
+    sizes,
+  })
+  return r.sizes
 }
