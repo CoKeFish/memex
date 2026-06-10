@@ -24,7 +24,7 @@ from memex.modules.identidades.schema import IdentityItem
 class ResolvedIdentity:
     """Una referencia (nombre/email/handle) resuelta a una identidad canónica."""
 
-    kind: str  # 'persona' | 'organizacion'
+    kind: str  # 'persona' | 'organizacion' | 'producto'
     id: int
     method: str  # cómo matcheó: 'email'|'domain'|'handle'|'exact_name'|'alias'|'sender_email'
 
@@ -36,7 +36,8 @@ class IdentidadesDomain(Protocol):
     def resolve(
         self, *, name: str = "", email: str | None = None, handle: str | None = None
     ) -> ResolvedIdentity | None:
-        """Resuelve una referencia a una persona/org conocida del user, o None si no matchea."""
+        """Resuelve una referencia a una identidad conocida del user (persona, organización o
+        producto), o None si no matchea."""
         ...
 
 

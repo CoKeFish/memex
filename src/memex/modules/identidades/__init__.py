@@ -1,8 +1,9 @@
 """Módulo `identidades` (ADR-015, slice 1: directorio + extracción).
 
-Hogar de personas y organizaciones (el átomo "agente" del Design Doc "Relaciones entre dominios").
-Tres altitudes del dato: menciones (crudo por-mensaje) → entidades canónicas (persona/org) →
-(futuro) aristas. Fuentes del set canónico: sync de Google Contacts + lista manual de interés.
+Hogar de personas, organizaciones y productos (el átomo "agente" del Design Doc "Relaciones entre
+dominios"). Tres altitudes del dato: menciones (crudo por-mensaje) → entidades canónicas
+(persona/org/producto) → (futuro) aristas. Fuentes del set canónico: sync de Google Contacts +
+lista manual de interés.
 
 """
 

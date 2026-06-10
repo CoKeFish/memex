@@ -17,11 +17,13 @@ from pydantic import ConfigDict, field_validator
 
 from memex.modules.contract import ExtractionItem
 
-#: Tipos válidos de identidad mencionada (espejo de `mentioned_kind` en la migración 0027).
-IDENTITY_KINDS: tuple[str, ...] = ("persona", "organizacion", "producto", "agente", "unknown")
+#: Tipos válidos de identidad mencionada (espejo de `mentioned_kind` en la migración 0057).
+#: 'unknown' es SOLO el escape del extractor (pliega a persona al resolver); 'agente' salió de la
+#: taxonomía en 0057 (sus menciones son 'producto').
+IDENTITY_KINDS: tuple[str, ...] = ("persona", "organizacion", "producto", "unknown")
 _KIND_SET = frozenset(IDENTITY_KINDS)
 
-IdentityKind = Literal["persona", "organizacion", "producto", "agente", "unknown"]
+IdentityKind = Literal["persona", "organizacion", "producto", "unknown"]
 
 
 class IdentityItem(ExtractionItem):
@@ -40,8 +42,12 @@ class IdentityItem(ExtractionItem):
     @field_validator("kind", mode="before")
     @classmethod
     def _normalize_kind(cls, v: object) -> str:
-        """Tipo fuera de la lista → 'unknown' (no descarta la mención por un tipo inválido)."""
+        """Tipo fuera de la lista → 'unknown' (no descarta la mención por un tipo inválido).
+        'agente' (retirado de la taxonomía en 0057) → 'producto', espejo de la migración de datos:
+        una salida LLM rancia no debe caer a unknown→persona."""
         s = str(v or "").strip().lower()
+        if s == "agente":
+            return "producto"
         return s if s in _KIND_SET else "unknown"
 
     @field_validator("email", mode="before")

@@ -299,3 +299,53 @@ def test_merge_repunta_counterparty_de_finanzas(conn: Any) -> None:
         ).scalar_one()
         == surv
     )
+
+
+def _mk_producto(conn: Any, name: str) -> int:
+    return int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'producto',:n) RETURNING id"
+            ),
+            {"n": name},
+        ).scalar_one()
+    )
+
+
+def test_merge_producto_repunta_con_slug_producto(conn: Any) -> None:
+    # producto con producto fusiona y re-apunta aristas + membresía con el slug
+    # 'identidades:producto' (mapa IDENTITY_SLUG_BY_KIND; antes era KeyError).
+    surv = _mk_producto(conn, "Claude")
+    absb = _mk_producto(conn, "ClaudeAI")
+    conn.execute(
+        text(
+            "INSERT INTO relation_edges (user_id, src_slug, src_id, dst_slug, dst_id, producer) "
+            "VALUES (1,'identidades:producto',:a,'finance',99,'inbox')"
+        ),
+        {"a": absb},
+    )
+    cluster = _mk_cluster(conn, "IA", "6" * 64)
+    conn.execute(
+        text(
+            "INSERT INTO relation_cluster_members (user_id, cluster_id, member_slug, member_id) "
+            "VALUES (1,:c,'identidades:producto',:a)"
+        ),
+        {"c": cluster, "a": absb},
+    )
+    assert merge_identities(conn, 1, surv, absb) is True
+    assert conn.execute(text("SELECT src_id FROM relation_edges")).scalar_one() == surv
+    assert (
+        conn.execute(
+            text("SELECT member_id FROM relation_cluster_members WHERE cluster_id = :c"),
+            {"c": cluster},
+        ).scalar_one()
+        == surv
+    )
+
+
+def test_merge_kind_distinto_rechaza(conn: Any) -> None:
+    # producto y org NUNCA se funden (mismo-kind es invariante del merge)
+    org = _mk_org(conn, "Valve")
+    prod = _mk_producto(conn, "Steam")
+    assert merge_identities(conn, 1, org, prod) is False

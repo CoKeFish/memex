@@ -48,7 +48,7 @@ UserID = Annotated[int, Depends(current_user_id)]
 
 _log = get_logger("memex.api.identidades")
 
-_KINDS = frozenset({"persona", "organizacion"})
+_KINDS = frozenset({"persona", "organizacion", "producto"})
 _IDENTIFIER_KINDS = frozenset({"email", "phone", "handle", "domain", "url"})
 
 _IDENTITY_COLS = (
@@ -113,7 +113,7 @@ def _mention_row(r: Any) -> dict[str, Any]:
 async def list_identities(
     user_id: UserID,
     q: str | None = Query(default=None, description="Busca en display_name / aliases."),
-    kind: str | None = Query(default=None, description="persona | organizacion."),
+    kind: str | None = Query(default=None, description="persona | organizacion | producto."),
     interest: bool | None = Query(default=None, description="true=interés, false=Detectadas."),
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     cursor: int | None = Query(default=None, description="id > cursor for pagination"),

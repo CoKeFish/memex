@@ -95,7 +95,7 @@ async def disambiguate_pair(
     """Le pregunta al LLM si A y B son la misma identidad. Devuelve la decisión + el LLMResult (para
     el costo). Sesgo a coexistir aplicado en el parseo."""
     user_content = (
-        "¿Estas dos entradas son la MISMA identidad (persona u organización) del mundo real?\n\n"
+        "¿Estas dos entradas son la MISMA identidad del mundo real?\n\n"
         f"{_fmt_identity('A', a)}\n{_fmt_identity('B', b)}"
     )
     result = await llm.complete(

@@ -1,4 +1,5 @@
-"""`IdentidadesModule` — extractor de identidades (personas y organizaciones) al directorio.
+"""`IdentidadesModule` — extractor de identidades (personas, organizaciones y productos) al
+directorio.
 
 Satisface `InterestModule` estructuralmente. Por cada identidad detectada en un mensaje, `dedup`
 la resuelve contra el directorio (`mod_identidades`) por SEÑALES FUERTES deterministas (incluido el
@@ -47,6 +48,7 @@ from memex.modules.identidades.prompt import IDENTIDADES_SYSTEM_PROMPT
 from memex.modules.identidades.resolve import (
     KIND_ORG,
     KIND_PERSONA,
+    KIND_PRODUCTO,
     KnownIdentifier,
     KnownIdentity,
     KnownIndex,
@@ -57,13 +59,18 @@ from memex.relations.deterministic import weave_afiliacion
 
 _log = get_logger("memex.modules.identidades")
 
-#: kinds de mención que mapean a una ORGANIZACIÓN (el resto — persona/unknown — a PERSONA).
-_ORG_MENTION_KINDS = frozenset({"organizacion", "producto", "agente"})
+#: kind de la mención → kind canónico del directorio. 'unknown' (el escape del extractor) y
+#: cualquier valor fuera del mapa pliegan a PERSONA, como siempre.
+_IDENTITY_KIND_BY_MENTION = {
+    "persona": KIND_PERSONA,
+    "organizacion": KIND_ORG,
+    "producto": KIND_PRODUCTO,
+}
 
 
 def _identity_kind(mention_kind: str) -> str:
-    """Mapea el `kind` de la mención al `kind` de la identidad unificada (persona|organizacion)."""
-    return KIND_ORG if mention_kind in _ORG_MENTION_KINDS else KIND_PERSONA
+    """Mapea el `kind` de la mención al `kind` canónico (persona|organizacion|producto)."""
+    return _IDENTITY_KIND_BY_MENTION.get(mention_kind, KIND_PERSONA)
 
 
 @dataclass(frozen=True)
@@ -81,8 +88,8 @@ class IdentidadesModule:
 
     slug: ClassVar[str] = "identidades"
     interest: ClassVar[str] = (
-        "Personas y organizaciones/productos mencionados: contactos, empresas, marcas, "
-        "herramientas, agentes (IA) con los que la persona interactúa o sobre los que habla. "
+        "Personas, organizaciones y productos mencionados: contactos, empresas, instituciones, "
+        "marcas, apps, herramientas, IAs con los que la persona interactúa o sobre los que habla. "
         "NO la propia persona ni publicidad genérica."
     )
     extraction_schema: ClassVar[type[ExtractionItem]] = IdentityItem
@@ -631,8 +638,10 @@ def register_card(
     trae `org` (solo personas), asegura la organización, teje la afiliación persona↔org y su arista
     `afiliado` en el grafo. Idempotente. Devuelve la fila pública resuelta (+ `method` y, si hubo,
     `org`). Escribe todo en `conn` (atómico con la tx del caller)."""
-    if kind not in (KIND_PERSONA, KIND_ORG):
-        raise ValueError(f"kind inválido: {kind!r} (esperado 'persona' u 'organizacion')")
+    if kind not in (KIND_PERSONA, KIND_ORG, KIND_PRODUCTO):
+        raise ValueError(
+            f"kind inválido: {kind!r} (esperado 'persona', 'organizacion' o 'producto')"
+        )
     if org and kind != KIND_PERSONA:
         raise ValueError("'org' solo aplica a una persona (la afiliación es persona↔organización)")
 

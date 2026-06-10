@@ -20,8 +20,10 @@ from memex.llm.client import LLMQuotaError
 from memex.modules.identidades.hierarchy import (
     HierarchyLink,
     _apply_links,
+    _load_orgs,
     _parse_links,
     _resolve_or_create_parent,
+    _serialize_orgs,
     run_organize,
     would_create_cycle,
 )
@@ -189,6 +191,55 @@ def test_resolve_reuses_existing_parent_by_core(conn: Any) -> None:
     assert created is False and pid == existing
 
 
+# ----- productos colgables (producto→empresa) ------------------------------------ #
+
+
+def _mk_producto(conn: Any, name: str) -> int:
+    return int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'producto',:n) RETURNING id"
+            ),
+            {"n": name},
+        ).scalar_one()
+    )
+
+
+def test_load_orgs_incluye_productos(conn: Any) -> None:
+    org = _mk_org(conn, "Valve Corporation")
+    prod = _mk_producto(conn, "Steam")
+    entries = _load_orgs(conn, 1, 500)
+    by_id = {o.id: o for o in entries}
+    assert set(by_id) == {org, prod}
+    assert by_id[prod].kind == "producto"
+    # el producto va marcado en la lista que ve el LLM; la org no
+    serialized = _serialize_orgs(entries)
+    assert f"{prod}: Steam [producto]" in serialized
+    assert f"{org}: Valve Corporation\n" in serialized + "\n"
+
+
+def test_apply_links_producto_cuelga_de_org(conn: Any) -> None:
+    child = _mk_producto(conn, "Steam")
+    parent = _mk_org(conn, "Valve Corporation")
+    linked, created, _, skipped = _apply_links(
+        conn, 1, [HierarchyLink(child, parent, None, None)], apply_cleanup=False
+    )
+    assert (linked, created, skipped) == (1, 0, 0)
+    assert _parent_of(conn, child) == parent
+
+
+def test_resolve_parent_reusa_producto_existente(conn: Any) -> None:
+    # si el padre nombrado ya vive como PRODUCTO, se reusa — no se duplica como org
+    existing = _mk_producto(conn, "Battle.net")
+    pid, created = _resolve_or_create_parent(conn, 1, "Battle.net")
+    assert created is False and pid == existing
+    assert (
+        conn.execute(text("SELECT count(*) FROM mod_identidades WHERE user_id = 1")).scalar_one()
+        == 1
+    )
+
+
 def test_apply_links_skips_cycle_and_self(conn: Any) -> None:
     a = _mk_org(conn, "Uno")
     b = _mk_org(conn, "Dos")
@@ -234,6 +285,19 @@ def test_apply_links_cleanup_off_then_on(conn: Any) -> None:
 async def test_run_organize_links_by_id() -> None:
     with connection() as c:
         steam = _mk_org(c, "Steam")
+        valve = _mk_org(c, "Valve Corporation")
+    fake = FakeLLM(f'{{"links": [{{"child_id": {steam}, "parent_id": {valve}}}]}}')
+    stats = await run_organize(1, client=fake)
+    assert (stats.orgs, stats.linked, stats.created) == (2, 1, 0)
+    with connection() as c:
+        assert _parent_of(c, steam) == valve
+
+
+@pytest.mark.asyncio
+async def test_run_organize_producto_end_to_end() -> None:
+    # e2e con LLM falso: un producto cuelga de su empresa (Steam→Valve, ahora con kinds reales)
+    with connection() as c:
+        steam = _mk_producto(c, "Steam")
         valve = _mk_org(c, "Valve Corporation")
     fake = FakeLLM(f'{{"links": [{{"child_id": {steam}, "parent_id": {valve}}}]}}')
     stats = await run_organize(1, client=fake)

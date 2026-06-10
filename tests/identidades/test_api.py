@@ -45,6 +45,27 @@ def test_create_invalid_kind(client: Any) -> None:
     assert r.status_code == 422
 
 
+def test_producto_crud_filtro_y_limites(client: Any) -> None:
+    # producto es kind canónico: POST/PATCH/filtro funcionan; sedes y afiliación lo rechazan
+    prod = _create(client, kind="producto", display_name="Steam")
+    assert prod["kind"] == "producto"
+    pid_prod = prod["id"]
+
+    listed = client.get("/identidades?kind=producto").json()["items"]
+    assert [p["id"] for p in listed] == [pid_prod]
+    assert client.get("/identidades?kind=organizacion").json()["items"] == []
+
+    r = client.patch(f"/identidades/{pid_prod}", json={"kind": "producto", "notes": "tienda"})
+    assert r.status_code == 200 and r.json()["notes"] == "tienda"
+
+    # sedes: solo organizaciones
+    assert client.post(f"/identidades/{pid_prod}/sites", json={"address": "x"}).status_code == 422
+    # afiliación: sigue siendo persona → organización (producto en cualquier lado → 422)
+    persona = _create(client, kind="persona", display_name="Ada")["id"]
+    assert client.post(f"/identidades/{persona}/orgs", json={"org_id": pid_prod}).status_code == 422
+    assert client.post(f"/identidades/{pid_prod}/orgs", json={"org_id": persona}).status_code == 422
+
+
 def test_empty_listings(client: Any) -> None:
     assert client.get("/identidades").json() == {"items": [], "next_cursor": None}
     assert client.get("/identidades/mentions").json() == {"items": [], "next_cursor": None}

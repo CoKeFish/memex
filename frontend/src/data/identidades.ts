@@ -1,14 +1,14 @@
 // Superficie del dominio IDENTIDADES (modelo unificado) contra la API real (router /identidades).
 // Como `calendar.ts`/`finance.ts`: funciones async + transforms snake_case → camelCase. La vista
-// `/directorio` consume el directorio unificado (personas + organizaciones), el detalle de una
-// identidad (identificadores por-fuente, sedes, afiliaciones, menciones), la cola de candidatos de
-// merge (zona gris del difuso) y el estado de sync de contactos.
+// `/directorio` consume el directorio unificado (personas + organizaciones + productos), el detalle
+// de una identidad (identificadores por-fuente, sedes, afiliaciones, menciones), la cola de
+// candidatos de merge (zona gris del difuso) y el estado de sync de contactos.
 
 import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api"
 
 // ---- Tipos del dominio (camelCase) ------------------------------------------------------------
 
-export type IdentityKind = "persona" | "organizacion"
+export type IdentityKind = "persona" | "organizacion" | "producto"
 
 export interface Identity {
   id: number

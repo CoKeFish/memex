@@ -11,6 +11,8 @@ Subcomandos:
   interest     — `add` / `list` / `remove` de la lista manual de organizaciones de interés.
   merge        — desempate LLM (FASE 2) de los candidatos de merge de la zona gris del difuso.
   candidates   — lista los candidatos de merge pendientes.
+  backfill-productos — reclasifica orgs→producto por voto de menciones (DRY-RUN por default;
+                 `--apply` escribe). Determinista, sin LLM.
 
 La AUTORIZACIÓN de Google NO se hace acá: se conecta la cuenta desde el dashboard (/cuenta), que
 guarda el token cifrado en el vault (Decisión 6). Server-side: habla con la DB vía `connection()`,
@@ -34,6 +36,7 @@ from sqlalchemy.engine import Connection
 
 from memex.db import connection
 from memex.logging import get_logger, setup_logging
+from memex.modules.identidades.backfill import apply_reclassification, find_product_candidates
 from memex.modules.identidades.dedup_llm import run_merge_phase2
 from memex.modules.identidades.module import register_card
 from memex.modules.identidades.normalize import norm_identifier
@@ -58,17 +61,18 @@ def _emit_json(obj: Any) -> None:
     print(_safe(json.dumps(obj, default=str, ensure_ascii=False)))
 
 
-_HELP = """memex-identidades — directorio de personas y organizaciones (resolución determinista).
+_HELP = """memex-identidades — directorio de personas, organizaciones y productos (resolución
+determinista).
 
 Comandos del agente:
   add          registra/resuelve una tarjeta de contacto (resolve-or-create, no duplica)
   help         muestra esta ayuda
 
 Mantenimiento (no del agente; usar 'memex-identidades' directo, no 'memex identidad'):
-  sync · add-account · accounts · interest · merge · candidates
+  sync · add-account · accounts · interest · merge · candidates · backfill-productos
 
 add — desde una tarjeta de contacto / vCard (la lee el agente, no memex):
-  memex-identidades add --name "<nombre>" --kind <persona|organizacion> [--email <e>]
+  memex-identidades add --name "<nombre>" --kind <persona|organizacion|producto> [--email <e>]
       [--phone <t>] [--handle <@>] [--org "<empresa>"] [--role "<rol>"] [--json]
   - resuelve contra el directorio (señales fuertes + difuso) y crea si no existe; idempotente.
   - --org (solo personas) teje la afiliación persona↔organización.
@@ -83,9 +87,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     add_id = sub.add_parser("add", help="Registra/resuelve una identidad desde una tarjeta.")
     add_id.add_argument("--user", type=int, default=1, help="User id (default 1).")
-    add_id.add_argument("--name", required=True, help="Nombre de la persona u organización.")
     add_id.add_argument(
-        "--kind", required=True, choices=["persona", "organizacion"], help="Tipo de identidad."
+        "--name", required=True, help="Nombre de la persona, organización o producto."
+    )
+    add_id.add_argument(
+        "--kind",
+        required=True,
+        choices=["persona", "organizacion", "producto"],
+        help="Tipo de identidad.",
     )
     add_id.add_argument("--email", help="Email de contacto.")
     add_id.add_argument("--phone", help="Teléfono de contacto.")
@@ -148,6 +157,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
     cand_p = sub.add_parser("candidates", help="Lista los candidatos de merge pendientes.")
     cand_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+
+    bf_p = sub.add_parser(
+        "backfill-productos",
+        help="Reclasifica orgs→producto por voto de menciones (dry-run sin --apply).",
+    )
+    bf_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    bf_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Aplica la reclasificación. Sin esto solo imprime la lista (dry-run).",
+    )
 
     return parser
 
@@ -277,10 +297,13 @@ def _cmd_interest_add(args: argparse.Namespace) -> int:
     """Upsert por nombre normalizado (no hay UNIQUE de negocio en mod_identidades): busca la org del
     user por `name_norm`; actualiza o inserta; los dominios van a identificadores."""
     with connection() as conn:
+        # El lookup admite productos (una entidad ya reclasificada actualiza su interés en vez de
+        # duplicarse como org); el INSERT de abajo sigue creando organizaciones.
         row = conn.execute(
             text(
                 "SELECT id FROM mod_identidades "
-                "WHERE user_id = :u AND kind = 'organizacion' AND name_norm = memex_norm(:n)"
+                "WHERE user_id = :u AND kind IN ('organizacion','producto') "
+                "AND name_norm = memex_norm(:n)"
             ),
             {"u": args.user, "n": args.name},
         ).first()
@@ -326,7 +349,7 @@ def _cmd_interest_add(args: argparse.Namespace) -> int:
                 ),
                 {"u": args.user, "id": org_id, "v": d, "vn": norm_identifier("domain", d)},
             )
-    _say(f"\nEn la lista de interés: id={org_id} {args.name!r} (organizacion).\n")
+    _say(f"\nEn la lista de interés: id={org_id} {args.name!r}.\n")
     return 0
 
 
@@ -340,7 +363,8 @@ def _cmd_interest_list(args: argparse.Namespace) -> int:
                            (SELECT array_agg(value) FROM mod_identidades_identifiers
                             WHERE identity_id = mi.id AND kind = 'domain') AS domains
                     FROM mod_identidades mi
-                    WHERE mi.user_id = :uid AND mi.kind = 'organizacion' AND mi.interest
+                    WHERE mi.user_id = :uid AND mi.kind IN ('organizacion','producto')
+                      AND mi.interest
                     ORDER BY mi.display_name
                     """
                 ),
@@ -416,6 +440,30 @@ def _cmd_candidates(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_backfill_productos(args: argparse.Namespace) -> int:
+    """Dry-run por default: imprime la lista de orgs que el voto reclasificaría y NO escribe.
+    `--apply` aplica todo (kind + menciones + aristas + membresías + candidatos) en una tx."""
+    with connection() as conn:
+        cands = find_product_candidates(conn, args.user)
+        if not cands:
+            _say(f"\nSin candidatos org→producto para el user {args.user}.\n")
+            return 0
+        _say(f"\nCandidatos a reclasificar org→producto (user {args.user}):")
+        for c in cands:
+            _say(f"  [{c.id}] {c.display_name} votos={c.votos_producto}/{c.votos_total}")
+        if not args.apply:
+            _say(f"\nDRY-RUN: {len(cands)} candidatos; no se escribió nada. Aplicá con --apply.\n")
+            return 0
+        stats = apply_reclassification(conn, args.user, [c.id for c in cands])
+    _say(
+        f"\nReclasificadas {stats.reclassified} identidades a producto; "
+        f"menciones={stats.mentions} aristas={stats.edges} "
+        f"membresías={stats.cluster_members} "
+        f"candidatos de merge rechazados={stats.merge_candidates_rejected}.\n"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -441,6 +489,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_merge(args)
         if args.cmd == "candidates":
             return _cmd_candidates(args)
+        if args.cmd == "backfill-productos":
+            return _cmd_backfill_productos(args)
         if args.cmd == "interest":
             if args.interest_cmd == "add":
                 return _cmd_interest_add(args)
