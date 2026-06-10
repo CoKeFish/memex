@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import queue
+from typing import Any
 
 import structlog
 
+from memex.core import log_sink
+from memex.core.log_sink import _SinkState
 from memex.logging import (
     bind_request_context,
     clear_request_context,
+    get_logger,
     setup_logging,
 )
 
@@ -50,6 +55,35 @@ def test_clear_request_context_removes_all_bindings() -> None:
     assert "request_id" not in bound
     assert "user_id" not in bound
     assert "run_id" not in bound
+
+
+def test_logger_created_before_setup_logging_reaches_sink() -> None:
+    """REGRESIÓN (bug 2026-06-09): `_log = get_logger(...)` a nivel de módulo corre en el import,
+    ANTES de `setup_logging()`. El `.bind()` eager materializaba el logger con la config DEFAULT de
+    structlog (sin `persist_processor`) y `cache_logger_on_first_use` lo dejaba clavado ahí para
+    siempre: sus eventos jamás llegaban a `log_events` (ni en los CLIs ni en el API). El nombre
+    debe bindearse como initial value LAZY: el primer log ya corre con la config real y pasa por
+    el sink."""
+    # Simula el estado pre-configure del proceso (como en un import temprano).
+    structlog.reset_defaults()
+    log = get_logger("memex.test.pre_setup")  # ← equivale a un _log a nivel de módulo
+
+    setup_logging()
+
+    # Sink falso (cola en memoria, sin DB ni thread): solo importa que el processor encole.
+    original_state = log_sink._state
+    q: queue.Queue[dict[str, Any]] = queue.Queue()
+    log_sink._state = _SinkState(enabled=True, min_level_no=20, queue=q)
+    try:
+        log.info("pre_setup.event", foo="bar")
+    finally:
+        log_sink._state = original_state
+
+    assert q.qsize() == 1, "el evento de un logger pre-setup_logging no pasó por el sink"
+    rec = q.get_nowait()
+    assert rec["event"] == "pre_setup.event"
+    assert rec["logger"] == "memex.test.pre_setup"
+    assert json.loads(rec["fields"])["foo"] == "bar"
 
 
 def test_processor_pipeline_produces_valid_ndjson_with_contextvars() -> None:

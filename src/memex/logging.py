@@ -1,11 +1,31 @@
 import logging
 import sys
+from collections.abc import MutableMapping
 from typing import Any, cast
 
 import structlog
 
 from memex.config import settings
 from memex.core.log_sink import install_log_sink, persist_processor
+
+#: Clave interna con la que `get_logger` deja el nombre en los initial values del lazy proxy.
+#: No puede llamarse "logger" directo: `structlog.get_logger(**initial_values)` los reenvía a
+#: `wrap_logger(logger, ...)` y colisiona con su primer parámetro (TypeError).
+_LOGGER_NAME_KEY = "_logger_name"
+
+
+def _promote_logger_name(
+    logger: Any, method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Promueve el initial value `_logger_name` → campo `logger` del event_dict.
+
+    El campo `logger` es ADITIVO y lo leen el sink (columna/filtro de `log_events` + chequeo
+    anti-recursión) y la línea de stderr; por eso este processor corre temprano, antes de
+    `persist_processor`."""
+    name = event_dict.pop(_LOGGER_NAME_KEY, None)
+    if name is not None:
+        event_dict.setdefault("logger", name)
+    return event_dict
 
 
 def setup_logging() -> None:
@@ -15,6 +35,7 @@ def setup_logging() -> None:
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
+            _promote_logger_name,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.StackInfoRenderer(),
@@ -32,12 +53,18 @@ def setup_logging() -> None:
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
-    bound = structlog.get_logger(name)
-    if name is not None:
-        # Bindeamos `logger=name` como campo ADITIVO: así el nombre del logger aparece en el
-        # event_dict tanto para el sink (columna/filtro `logger`) como para la línea de stderr.
-        bound = bound.bind(logger=name)
-    return cast("structlog.stdlib.BoundLogger", bound)
+    if name is None:
+        return cast("structlog.stdlib.BoundLogger", structlog.get_logger())
+    # El nombre viaja como INITIAL VALUE del lazy proxy — NUNCA `.bind()` acá: `.bind()` sobre el
+    # proxy materializa el logger EN EL ACTO con la config vigente, y un `_log = get_logger(...)`
+    # a nivel de módulo corre en el import, ANTES de `setup_logging()` → quedaba clavado para
+    # siempre (cache_logger_on_first_use) en la config default de structlog, sin
+    # `persist_processor`: sus eventos jamás llegaban a `log_events`. El initial value se aplica
+    # recién en el primer log, ya con la config real (`_promote_logger_name` lo vuelca al campo
+    # `logger` del event_dict).
+    return cast(
+        "structlog.stdlib.BoundLogger", structlog.get_logger(name, **{_LOGGER_NAME_KEY: name})
+    )
 
 
 def bind_request_context(
