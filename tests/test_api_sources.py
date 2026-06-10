@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from sqlalchemy import text
 
 from memex.db import connection
@@ -249,3 +250,21 @@ def test_patch_source_rejects_sub_minimum_schedule(
         client.patch(f"/sources/{seed_source['id']}", json={"fetch_schedule": "PT15M"}).status_code
         == 200
     )
+
+
+# --- token_source: de dónde resuelve el token de Apify cada fuente social -------------------
+
+
+def test_token_source_env_and_missing(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    src = _make_social_source(client)
+    monkeypatch.delenv("MEMEX_APIFY_TOKEN", raising=False)
+    assert client.get(f"/sources/{src['id']}").json()["token_source"] == "missing"
+    monkeypatch.setenv("MEMEX_APIFY_TOKEN", "tok-123")
+    assert client.get(f"/sources/{src['id']}").json()["token_source"] == "env"
+    # En la lista viene calculado igual.
+    listed = {s["id"]: s for s in client.get("/sources").json()}
+    assert listed[src["id"]]["token_source"] == "env"
+
+
+def test_token_source_none_for_non_social(client: Any, seed_source: dict[str, Any]) -> None:
+    assert client.get(f"/sources/{seed_source['id']}").json()["token_source"] is None

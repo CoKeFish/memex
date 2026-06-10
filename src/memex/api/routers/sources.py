@@ -22,7 +22,9 @@ from memex.db import connection
 from memex.ingestors.runner import RunStats
 from memex.ingestors.social.config import normalize_account
 from memex.logging import get_logger
+from memex.security import vault
 from memex.sources import kind_for_type
+from memex.sources.resolver import env_satisfied_secrets
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
@@ -51,10 +53,37 @@ def _assert_owns_source(conn: Any, user_id: int, source_id: int) -> None:
         raise HTTPException(status_code=404, detail="source not found")
 
 
+#: Tipos cuyo token de Apify se reporta en `SourceRow.token_source`.
+_APIFY_TYPES = ("instagram", "facebook", "x")
+
+
+def _token_source(conn: Any, row: dict[str, Any]) -> str | None:
+    """De dónde resuelve el token de Apify una fuente social (sin descifrar nada).
+
+    "vault" = la cuenta vinculada tiene el secreto cifrado (pisa al env en `build_resolved_env`);
+    "env" = la variable del contenedor (p. ej. inyectada por Doppler); "missing" = no resuelve →
+    el fetch fallará. None para tipos sin token reportable. Presencia en el vault ≈ resolverá:
+    si falta la master key el resolver cae a env y lo loguea, acá solo se reporta estado.
+    """
+    if row.get("type") not in _APIFY_TYPES:
+        return None
+    account_id = row.get("account_id")
+    if account_id is not None:
+        names = {str(s["secret_name"]) for s in vault.list_secret_status(conn, account_id)}
+        if "apify_token" in names:
+            return "vault"
+    cfg = dict(row.get("config") or {})
+    if "apify_token" in env_satisfied_secrets(str(row["type"]), cfg):
+        return "env"
+    return "missing"
+
+
 def _source_row(conn: Any, source_id: int) -> dict[str, Any]:
     row = conn.execute(text(_SOURCE_SELECT), {"sid": source_id}).mappings().first()
     assert row is not None
-    return dict(row)
+    out = dict(row)
+    out["token_source"] = _token_source(conn, out)
+    return out
 
 
 def _assert_social(source_type: str) -> None:
@@ -91,7 +120,12 @@ async def list_sources(user_id: UserID) -> list[dict[str, Any]]:
             .mappings()
             .all()
         )
-    return [dict(r) for r in rows]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            d["token_source"] = _token_source(conn, d)
+            out.append(d)
+    return out
 
 
 @router.post("", response_model=SourceRow, status_code=status.HTTP_201_CREATED)
@@ -408,6 +442,10 @@ async def fetch_source(
     limit: Annotated[
         int | None, Query(ge=1, le=1000, description="last/range: tope de mensajes")
     ] = None,
+    accounts: Annotated[
+        list[str] | None,
+        Query(description="social: traer SOLO estas cuentas seguidas (subset de la allowlist)"),
+    ] = None,
 ) -> dict[str, Any]:
     """Dispara una corrida de ingesta a demanda DENTRO del proceso API (sin CLI).
 
@@ -416,6 +454,10 @@ async def fetch_source(
       - `incremental`: trae lo nuevo desde el checkpoint y lo AVANZA.
       - `range`: ventana `since`..`until` (backfill). NO toca el checkpoint.
       - `last`: los `limit` más recientes (backfill). NO toca el checkpoint.
+
+    `accounts` (solo redes) restringe la corrida a esas cuentas seguidas: una corrida de actor por
+    cuenta pedida en vez de toda la allowlist. El cursor social es por-cuenta, así que el avance de
+    las cuentas no pedidas queda intacto.
     """
     if mode not in ("incremental", "range", "last"):
         raise HTTPException(status_code=422, detail=f"mode {mode!r} inválido")
@@ -436,6 +478,28 @@ async def fetch_source(
         source_type = str(row["type"])
         cfg = dict(row["config"] or {})
         account_id = row["account_id"]
+
+    if accounts:
+        _assert_social(source_type)
+        allow = {normalize_account(str(a.get("account", ""))): a for a in _config_accounts(cfg)}
+        wanted: list[str] = []
+        for raw in accounts:
+            h = normalize_account(raw)
+            if h not in allow:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"la cuenta {raw!r} no está en la allowlist de esta fuente",
+                )
+            if h not in wanted:
+                wanted.append(h)
+        # Override transitorio (igual que fetch_mode): NO se persiste en sources.config.
+        cfg["accounts"] = [allow[h] for h in wanted]
+        _log.info(
+            "sources.fetch.account_subset",
+            user_id=user_id,
+            source_id=source_id,
+            accounts=wanted,
+        )
 
     # El camino resolve → sink → runner vive en `run_fetch_window` (lo comparte el backfill).
     stats = await run_fetch_window(

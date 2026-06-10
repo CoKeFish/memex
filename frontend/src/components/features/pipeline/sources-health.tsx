@@ -10,10 +10,15 @@ import type { SourceType } from "@/types/domain"
 
 const TYPE_LABEL: Record<SourceType, string> = {
   imap: "Email",
+  outlook: "Outlook",
   telegram: "Telegram",
   social: "Social",
+  instagram: "Instagram",
+  facebook: "Facebook",
+  x: "X",
   calendar: "Calendar",
   gateway: "Gateway",
+  dummy: "Test",
 }
 
 export function SourcesHealth({ items }: { items: SourceHealthRow[] }) {

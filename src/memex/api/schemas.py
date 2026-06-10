@@ -1423,6 +1423,10 @@ class SourceRow(BaseModel):
     account_alias: str | None = None
     # Agenda de ingesta (0025): intervalo ISO-8601 (PT1H, P1D…) o None = no se agenda.
     fetch_schedule: str | None = None
+    # De dónde resuelve el token de Apify esta fuente (solo redes): "vault" = secreto cifrado de la
+    # cuenta vinculada (pisa al env), "env" = variable del contenedor (Doppler), "missing" = no
+    # resuelve (el fetch fallará). None = tipo sin token reportable (correo/telegram/etc.).
+    token_source: Literal["vault", "env", "missing"] | None = None
 
 
 class CheckpointBody(BaseModel):

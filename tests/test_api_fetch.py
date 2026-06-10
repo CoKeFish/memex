@@ -182,3 +182,44 @@ def test_fetch_cross_tenant_is_404(client: Any, seed_user2: int) -> None:
         ).scalar()
     r = client.post(f"/sources/{sid}/fetch")
     assert r.status_code == 404
+
+
+# --- Fetch por-cuenta (redes): param `accounts` --------------------------------------------
+
+
+def _make_social_source(client: Any, handles: list[str]) -> int:
+    cfg = {"accounts": [{"account": h, "priority": False} for h in handles]}
+    r = client.post("/sources", json={"name": "x-fetch-test", "type": "x", "config": cfg})
+    assert r.status_code == 201
+    return int(r.json()["id"])
+
+
+def test_fetch_accounts_param_filters_allowlist(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = _make_social_source(client, ["nasa", "spacex"])
+    captured: dict[str, Any] = {}
+
+    def factory(cfg: dict[str, Any], env: Any = None) -> _StubSource:
+        captured.update(cfg)
+        return _StubSource([_record("p1")])
+
+    monkeypatch.setattr("memex.sources.resolve", lambda _t: factory)
+    r = client.post(f"/sources/{sid}/fetch", params={"accounts": ["@NASA"], "dry_run": True})
+    assert r.status_code == 200
+    # Solo la cuenta pedida llega al ingestor (normalizada)…
+    assert [a["account"] for a in captured["accounts"]] == ["nasa"]
+    # …y la allowlist persistida NO cambia (el override es transitorio).
+    full = client.get(f"/sources/{sid}").json()
+    assert [a["account"] for a in full["config"]["accounts"]] == ["nasa", "spacex"]
+
+
+def test_fetch_accounts_param_rejects_unknown_handle(client: Any) -> None:
+    sid = _make_social_source(client, ["nasa"])
+    r = client.post(f"/sources/{sid}/fetch", params={"accounts": ["spacex"]})
+    assert r.status_code == 422
+
+
+def test_fetch_accounts_param_rejects_non_social(client: Any, seed_source: dict[str, Any]) -> None:
+    r = client.post(f"/sources/{seed_source['id']}/fetch", params={"accounts": ["nasa"]})
+    assert r.status_code == 422

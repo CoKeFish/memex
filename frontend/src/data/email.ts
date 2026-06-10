@@ -63,6 +63,7 @@ interface SourceApiRow {
   enabled: boolean
   config: Record<string, unknown>
   created_at: string
+  token_source?: string | null
 }
 
 function toSource(r: SourceApiRow): Source {
@@ -73,6 +74,7 @@ function toSource(r: SourceApiRow): Source {
     enabled: r.enabled,
     createdAt: r.created_at,
     config: r.config,
+    tokenSource: (r.token_source ?? null) as Source["tokenSource"],
   }
 }
 
@@ -129,6 +131,9 @@ export interface FetchOpts {
   until?: string
   /** last/range: tope de mensajes */
   limit?: number
+  /** Solo redes: traer SOLO estas cuentas seguidas (subset de la allowlist). El cursor de las
+   * demás cuentas no se toca. */
+  accounts?: string[]
 }
 
 /** Dispara una corrida de ingesta a demanda. `dryRun` cuenta sin escribir. */
@@ -139,6 +144,7 @@ export async function triggerFetch(sourceId: number, opts?: FetchOpts): Promise<
   if (opts?.since) qs.set("since", opts.since)
   if (opts?.until) qs.set("until", opts.until)
   if (opts?.limit != null) qs.set("limit", String(opts.limit))
+  for (const a of opts?.accounts ?? []) qs.append("accounts", a)
   const q = qs.toString()
   return apiPost<FetchResult>(`/sources/${sourceId}/fetch${q ? `?${q}` : ""}`)
 }

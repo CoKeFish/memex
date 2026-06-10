@@ -6,7 +6,8 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { ErrorState } from "@/components/common/data-state"
+import { CollapsiblePanel } from "@/components/common/collapsible-panel"
+import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { formatInt } from "@/lib/format"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
@@ -15,9 +16,12 @@ import {
   advanceBackfillRest,
   configureBackfill,
   deleteBackfill,
+  fetchEmailSources,
   getBackfill,
 } from "@/data"
 import type { BackfillStateData, BackfillWindowUnit } from "@/data"
+import type { Source } from "@/types/domain"
+import { SourceSelect } from "./fetch-control"
 
 const UNITS: { v: BackfillWindowUnit; label: string }[] = [
   { v: "day", label: "Días" },
@@ -67,9 +71,9 @@ function HistoryRow({ w }: { w: BackfillStateData["history"][number] }) {
 }
 
 /**
- * Importación masiva (backfill) de UNA fuente de correo, embebida en la columna de acciones del
- * FetchControl. La fuente la decide el padre (la imap tildada en la lista); `sourceId == null` →
- * hint. El avance se persiste en el server, así recargar retoma la frontera.
+ * Importación masiva (backfill) de UNA fuente de correo. La fuente la decide el padre
+ * (`BackfillPanel` tiene su propio selector); `sourceId == null` → hint. El avance se persiste en
+ * el server, así recargar retoma la frontera.
  */
 export function BackfillSection({ sourceId }: { sourceId: number | null }) {
   const { data, loading, error, reload } = useAsync<BackfillStateData | null>(
@@ -181,7 +185,7 @@ export function BackfillSection({ sourceId }: { sourceId: number | null }) {
   if (sourceId == null) {
     return (
       <p className="text-xs text-muted-foreground">
-        Tildá una fuente de correo en la lista para importar su historial en ventanas.
+        Elegí una fuente de correo para importar su historial en ventanas.
       </p>
     )
   }
@@ -384,5 +388,47 @@ export function BackfillSection({ sourceId }: { sourceId: number | null }) {
         )}
       </div>
     </div>
+  )
+}
+
+/**
+ * Panel propio de Importación masiva, con su selector de fuente de correo (antes vivía embebido en
+ * "Traer a demanda" atado a "la primera imap tildada" — implícito y confuso). Colapsado por
+ * defecto: es una herramienta puntual para histórico, no parte del flujo diario.
+ */
+export function BackfillPanel() {
+  const { data: sources, loading, error, reload } = useAsync<Source[]>(() => fetchEmailSources(), [])
+  const [sel, setSel] = useState("")
+  const selId = sel ? Number(sel) : (sources?.[0]?.id ?? null)
+
+  return (
+    <CollapsiblePanel
+      eyebrow="ingesta · histórico"
+      title="Importación masiva (correo)"
+      sub="Backfill por ventanas de fechas sobre una fuente de correo; no afecta el avance del modo incremental"
+      bodyClassName="space-y-3"
+    >
+      {error ? (
+        <ErrorState detail={error} onRetry={reload} />
+      ) : loading ? (
+        <div className="flex items-center gap-2 px-2 py-6 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" /> Cargando fuentes…
+        </div>
+      ) : !sources || sources.length === 0 ? (
+        <EmptyState
+          title="Sin fuentes de correo"
+          hint="La importación masiva opera sobre correo (imap); creá una fuente para usarla."
+        />
+      ) : (
+        <>
+          <div className="max-w-sm">
+            <Field label="Fuente de correo">
+              <SourceSelect sources={sources} value={String(selId ?? "")} onChange={setSel} />
+            </Field>
+          </div>
+          <BackfillSection sourceId={selId} />
+        </>
+      )}
+    </CollapsiblePanel>
   )
 }

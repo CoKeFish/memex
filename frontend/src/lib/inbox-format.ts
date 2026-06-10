@@ -37,7 +37,9 @@ const ALIAS_NOISE = new Set([
  * crudo): quita ruido (imap/oauth/…) y el propio proveedor para no duplicar. El alias "real"
  * editable por el usuario vivirá en la vista Cuenta (pendiente, ver backlog). */
 function accountAlias(source: Source | undefined, providerLabel: string): string {
-  const tokens = String(source?.name ?? "").split(/[\s_\-./]+/).filter(Boolean)
+  // El "·" entra como separador: hay nombres de fuente que ya traen "Proveedor · alias" y sin esto
+  // el alias derivado duplica el punto medio ("Telegram · · personal").
+  const tokens = String(source?.name ?? "").split(/[\s_\-./·]+/).filter(Boolean)
   const noise = new Set([...ALIAS_NOISE, providerLabel.toLowerCase()])
   const kept = tokens.filter((t) => !noise.has(t.toLowerCase()))
   if (kept.length === 0) return ""

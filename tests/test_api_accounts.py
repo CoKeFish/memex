@@ -245,3 +245,21 @@ def test_health_reflects_last_ingestion_run(authed: TestClient) -> None:
     assert health() == "healthy"
     _seed_run(sid, _uid(authed), status="failed", started_at=datetime(2026, 6, 2, tzinfo=UTC))
     assert health() == "unhealthy"
+
+
+def test_source_token_source_vault_wins_over_env(
+    authed: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El reporte de `token_source` prioriza el vault: con secreto cifrado en la cuenta
+    vinculada reporta "vault" aunque el env también lo tenga (espeja build_resolved_env)."""
+    aid = _new_account(authed, "apify-x", provider="x", kind="social")
+    r = authed.post("/sources", json={"name": "x-vault", "type": "x", "config": {"accounts": []}})
+    assert r.status_code == 201, r.text
+    sid = r.json()["id"]
+
+    monkeypatch.setenv("MEMEX_APIFY_TOKEN", "env-tok")
+    assert authed.get(f"/sources/{sid}").json()["token_source"] == "env"
+
+    assert _set_cred(authed, aid, "apify_token", "vault-tok").status_code == 200
+    assert authed.patch(f"/sources/{sid}", json={"account_id": aid}).status_code == 200
+    assert authed.get(f"/sources/{sid}").json()["token_source"] == "vault"
