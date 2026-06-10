@@ -39,7 +39,12 @@ GRAPH_CLUSTER_PARTITION_SYSTEM_PROMPT = (
     "Un vértice puede quedar en NINGÚN grupo (no pertenece a ningún contexto claro): no lo "
     "incluyas. Si NO hay ningún contexto coherente (todo es ruido o rejunte), devolvé "
     "`groups: []`.\n\n"
+    "OPCIONAL — `rejected_edges`: si al leer el contexto ves que una arista de nivel `pista` "
+    "NO es una relación real (co-aparición casual, sin vínculo entre esos dos vértices), "
+    'listala como par de ids locales con el formato "a-b" (los MISMOS ids del bloque '
+    "ARISTAS). Solo pistas, y solo con SEGURIDAD: ante la duda, no la listes. Podés omitir el "
+    "campo.\n\n"
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
     '{"groups": [{"members": [<id>, ...], "name": "<nombre>", "description": "<desc>", '
-    '"confidence": <0..1>}, ...]}'
+    '"confidence": <0..1>}, ...], "rejected_edges": ["<a>-<b>", ...]}'
 )

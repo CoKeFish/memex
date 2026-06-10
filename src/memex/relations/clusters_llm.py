@@ -74,6 +74,7 @@ class ClusterPartitionStats:
     dissolved: int = 0  # hijos disueltos (su contexto desapareció del blob)
     rejected: int = 0  # blobs todo-ruido (memo de rechazo)
     promoted: int = 0  # pistas intra-grupo promovidas a confirmed
+    rejected_edges: int = 0  # pistas rechazadas por veredicto EXPLÍCITO del LLM (rejected_edges)
     skipped: int = 0  # blobs saltados (serialización > tope)
     errors: int = 0
     cost: CostAccum = field(default_factory=CostAccum)
@@ -180,10 +181,13 @@ class PartitionGroup:
 @dataclass(frozen=True)
 class PartitionResult:
     """Partición parseada. `valid=False` = JSON inválido (noop/reintenta, NO memoiza);
-    `valid=True, groups=()` = ruido (sin contexto coherente → memo de rechazo)."""
+    `valid=True, groups=()` = ruido (sin contexto coherente → memo de rechazo).
+    `rejected_pairs` = aristas-pista que el LLM marcó como NO-relación (pares de ids locales,
+    canónicos `a<b`); campo OPCIONAL de la respuesta — ausente = `()` = comportamiento previo."""
 
     groups: tuple[PartitionGroup, ...]
     valid: bool
+    rejected_pairs: tuple[tuple[int, int], ...] = ()
 
 
 def _clean_member_ids(raw: object, n: int) -> list[int]:
@@ -198,11 +202,40 @@ def _clean_member_ids(raw: object, n: int) -> list[int]:
     return out
 
 
+def _clean_rejected_pairs(raw: object, n: int) -> tuple[tuple[int, int], ...]:
+    """Pares `"a-b"` de `rejected_edges` válidos: ids locales 1..n, `a != b`, canónicos `(min,
+    max)`, dedup preservando orden. La basura se IGNORA sin invalidar la partición (molde
+    `_clean_member_ids`)."""
+    out: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    if not isinstance(raw, list):
+        return ()
+    for x in raw:
+        if not isinstance(x, str):
+            continue
+        a_s, sep, b_s = x.partition("-")
+        if not sep:
+            continue
+        try:
+            a, b = int(a_s), int(b_s)
+        except ValueError:
+            continue
+        if not (1 <= a <= n and 1 <= b <= n) or a == b:
+            continue
+        pair = (a, b) if a < b else (b, a)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        out.append(pair)
+    return tuple(out)
+
+
 def parse_partition(content: str, n_members: int) -> PartitionResult:
-    """Parsea `{groups:[{members,name,description,confidence}]}`. ULTRA-DEFENSIVO: basura →
-    `valid=False` (no memoiza). Normaliza determinista: ids 1..n sin bool/duplicados; ordena los
-    grupos por su id mínimo y asigna cada vértice al PRIMER grupo que lo lista (dedup entre grupos);
-    descarta grupos de < 2 miembros; clampa confianza 0..1. `valid=True, groups=()` = ruido."""
+    """Parsea `{groups:[{members,name,description,confidence}], rejected_edges:["a-b",...]}`.
+    ULTRA-DEFENSIVO: basura → `valid=False` (no memoiza). Normaliza determinista: ids 1..n sin
+    bool/duplicados; ordena los grupos por su id mínimo y asigna cada vértice al PRIMER grupo que
+    lo lista (dedup entre grupos); descarta grupos de < 2 miembros; clampa confianza 0..1.
+    `valid=True, groups=()` = ruido. `rejected_edges` es opcional (ausente/basura → `()`)."""
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError):
@@ -239,7 +272,9 @@ def parse_partition(content: str, n_members: int) -> PartitionResult:
             continue
         used.update(own)
         groups.append(PartitionGroup(tuple(own), name, desc, confidence))
-    return PartitionResult(tuple(groups), True)
+    return PartitionResult(
+        tuple(groups), True, _clean_rejected_pairs(data.get("rejected_edges"), n_members)
+    )
 
 
 async def partition_cluster(
@@ -278,6 +313,7 @@ def _cascade_edges(
     *,
     survivors: frozenset[Ref] | None,
     confidence: float,
+    rejected_pairs: frozenset[frozenset[Ref]] = frozenset(),
 ) -> tuple[int, int]:
     """Promueve/rechaza en cascada las PISTAS internas de co-ocurrencia (las ÚNICAS promovibles; las
     aristas `confirmed` deterministas —contraparte/afiliado/cumple/…— NUNCA se tocan, por eso el
@@ -285,14 +321,17 @@ def _cascade_edges(
     CONTEXTO: una pista la confirma el juicio del cúmulo, no de a pares.
 
     NO-DESTRUCTIVO: solo CONFIRMA lo que el LLM avala; nada se mata por no encajar.
+    - `rejected_pairs` (veredicto EXPLÍCITO del LLM, `rejected_edges` de la respuesta): esa pista
+      es una NO-relación → `rejected` (terminal en la arista misma: status + decided_at). Es la
+      única poda a nivel arista; va ANTES del juicio por membresía.
     - `survivors` set (cúmulo confirmado): pista entre dos sobrevivientes → `confirmed` (estampa la
       confianza del cúmulo + `evidence='cluster:{id}'`); pista que toca un PODADO → se DEJA `pista`
       (el LLM dijo "no pertenece a ESTE cúmulo", no "no es relación"; queda para otro contexto).
     - `survivors=None` (cúmulo rechazado): toda pista interna → `rejected` (el caller ya consultó
       `cluster_reject_pistas`; el rechazo terminal es opt-in, solo para ruido explícito).
 
-    `resolve_edge` es monótono (no re-evalúa terminales) e idempotente. Devuelve (promovidas,
-    rechazadas)."""
+    `resolve_edge` es monótono (no re-evalúa terminales) e idempotente: con varios grupos del mismo
+    blob, el par rechazado se cuenta UNA vez. Devuelve (promovidas, rechazadas)."""
     conf = Decimal(str(round(confidence, 3)))
     ev = f"cluster:{cluster_id}"
     promoted = rejected = 0
@@ -302,6 +341,9 @@ def _cascade_edges(
             and e.producer == PRODUCER_INBOX
             and e.relation_type == RELTYPE_COOCURRENCIA
         ):
+            continue
+        if frozenset((e.src, e.dst)) in rejected_pairs:  # absorbe la orientación src/dst
+            rejected += int(resolve_edge(conn, e.id, status=STATUS_REJECTED))
             continue
         if survivors is None:  # cúmulo rechazado (caller gateó cluster_reject_pistas)
             rejected += int(resolve_edge(conn, e.id, status=STATUS_REJECTED))
@@ -359,14 +401,16 @@ def _apply_partition(
     pc: _Pending,
     part: PartitionResult,
     internal: list[RelationEdge],
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     """Aplica la partición de UN blob en su tx. Cada contexto con confianza ≥ umbral crea un hijo
     confirmed NUEVO o sincroniza EN SITIO el hijo que matchea (identidad preservada al crecer);
-    promueve sus pistas intra-grupo; disuelve los hijos viejos del blob que ningún contexto reclama;
-    consume el candidato. Sin contexto confiado → memo de rechazo. JSON basura → no-op (el candidate
-    queda, se reintenta). Devuelve `(created, synced, dissolved, promoted, rejected)`."""
+    promueve sus pistas intra-grupo y RECHAZA las que el LLM vetó explícitamente
+    (`rejected_pairs`); disuelve los hijos viejos del blob que ningún contexto reclama; consume el
+    candidato. Sin contexto confiado → memo de rechazo (ahí los `rejected_pairs` NO se aplican: el
+    memo es no-destructivo y no hay cascada). JSON basura → no-op (el candidate queda, se
+    reintenta). Devuelve `(created, synced, dissolved, promoted, rejected, rejected_edges)`."""
     if not part.valid:
-        return (0, 0, 0, 0, 0)
+        return (0, 0, 0, 0, 0, 0)
     blob_sig = pc.signature
     gate = settings.cluster_partition_min_confidence
     groups: list[tuple[frozenset[Ref], PartitionGroup]] = [
@@ -382,10 +426,15 @@ def _apply_partition(
         for c in overlapping:
             mark_dissolved(conn, user_id, c.id)
         reject_cluster(conn, user_id, pc.id, blob_sig)
-        return (0, 0, len(overlapping), 0, 1)
+        return (0, 0, len(overlapping), 0, 1, 0)
+    # Los ids locales de `rejected_pairs` ya vienen validados 1..n (n = len(pc.members), el mismo
+    # n que vio parse_partition). frozenset de 2 Refs → la orientación src/dst no importa.
+    rej: frozenset[frozenset[Ref]] = frozenset(
+        frozenset((pc.members[a - 1], pc.members[b - 1])) for a, b in part.rejected_pairs
+    )
     matched = _greedy_match_groups(groups, overlapping)
     matched_children: set[int] = set()
-    created = synced = promoted = 0
+    created = synced = promoted = rejected_edges = 0
     for gi, (gmembers, g) in enumerate(groups):
         if gi in matched:
             cid = matched[gi]
@@ -404,15 +453,18 @@ def _apply_partition(
                 has_confirmed_edge=_group_has_confirmed(gmembers, internal),
             )
             created += 1
-        p, _ = _cascade_edges(conn, cid, internal, survivors=gmembers, confidence=g.confidence)
+        p, r = _cascade_edges(
+            conn, cid, internal, survivors=gmembers, confidence=g.confidence, rejected_pairs=rej
+        )
         promoted += p
+        rejected_edges += r
     dissolved = 0
     for c in overlapping:  # hijo viejo del blob que ningún contexto reclamó → su contexto se fue.
         if c.id not in matched_children:
             mark_dissolved(conn, user_id, c.id)
             dissolved += 1
     delete_cluster(conn, pc.id)  # consume el candidato; los hijos llevan su blob_signature
-    return (created, synced, dissolved, promoted, 0)
+    return (created, synced, dissolved, promoted, 0, rejected_edges)
 
 
 # --- worker ------------------------------------------------------------------------ #
@@ -465,7 +517,7 @@ async def run_cluster_partition(
                 continue
             stats.blobs += 1
             with connection() as conn:
-                created, synced, dissolved, promoted, rejected = _apply_partition(
+                created, synced, dissolved, promoted, rejected, rejected_edges = _apply_partition(
                     conn, user_id, pc, part, internal
                 )
             stats.created += created
@@ -474,6 +526,7 @@ async def run_cluster_partition(
             stats.dissolved += dissolved
             stats.promoted += promoted
             stats.rejected += rejected
+            stats.rejected_edges += rejected_edges
             record_llm_call(
                 user_id=user_id,
                 purpose="graph_cluster_partition",
@@ -511,6 +564,7 @@ async def run_cluster_partition(
         dissolved=stats.dissolved,
         rejected=stats.rejected,
         promoted=stats.promoted,
+        rejected_edges=stats.rejected_edges,
         skipped=stats.skipped,
         errors=stats.errors,
         llm_calls=stats.cost.calls,
