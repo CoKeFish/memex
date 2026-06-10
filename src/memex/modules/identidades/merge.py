@@ -12,6 +12,9 @@ identidad, esta primitiva las colapsa en la superviviente y borra la absorbida, 
      limpia el self-loop si el superviviente colgaba del absorbido (el padre final se decide abajo);
   4c. re-apunta el `counterparty_identity_id` de finanzas (consolidado + crudas): el FK es ON DELETE
      SET NULL, así que sin esto el DELETE de la absorbida perdería el vínculo finance↔identidad;
+  4d. re-apunta la membresía de cúmulos (`relation_cluster_members`); si el superviviente ya era
+     miembro del mismo cúmulo, la fila de la absorbida se borra (gana la del superviviente,
+     incluido su `pruned`);
   5. agrega el nombre + alias de la absorbida a los alias de la superviviente;
   6. fill-only de columnas NULL de la superviviente (given/family/birthday/foto/provider*/notes y el
      `parent_identity_id`, sin crear self-parent);
@@ -207,6 +210,30 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
         text(
             "UPDATE mod_finance_transactions SET counterparty_identity_id = :surv "
             "WHERE user_id = :u AND counterparty_identity_id = :absb"
+        ),
+        p,
+    )
+
+    # 4d. membresía de cúmulos: sin esto la fila de la absorbida queda apuntando a un vértice
+    #     muerto y cada build re-crea + poda su arista `miembro_de` (churn). Si el superviviente ya
+    #     es miembro del mismo cúmulo gana su fila (incluido su `pruned`, respetando la UNIQUE);
+    #     si no, se re-apunta.
+    conn.execute(
+        text(
+            """
+            DELETE FROM relation_cluster_members a
+            WHERE a.user_id = :u AND a.member_slug = :slug AND a.member_id = :absb AND EXISTS (
+              SELECT 1 FROM relation_cluster_members s
+              WHERE s.cluster_id = a.cluster_id
+                AND s.member_slug = :slug AND s.member_id = :surv)
+            """
+        ),
+        p,
+    )
+    conn.execute(
+        text(
+            "UPDATE relation_cluster_members SET member_id = :surv "
+            "WHERE user_id = :u AND member_slug = :slug AND member_id = :absb"
         ),
         p,
     )

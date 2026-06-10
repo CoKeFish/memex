@@ -1,6 +1,6 @@
 """`merge_identities`: funde dos identidades canónicas — mueve identificadores/afiliaciones,
-re-apunta menciones y aristas del grafo (colapsando dup lógico/self-loop), suma alias, deja
-auditoría y borra la absorbida. Contra la DB real."""
+re-apunta menciones, aristas del grafo (colapsando dup lógico/self-loop) y membresías de cúmulo,
+suma alias, deja auditoría y borra la absorbida. Contra la DB real."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import text
 
 from memex.modules.identidades.merge import merge_identities
+from memex.relations.deterministic import build_relations
 
 
 def _mk_person(conn: Any, name: str, email: str | None = None) -> int:
@@ -176,6 +177,84 @@ def _mk_org(conn: Any, name: str) -> int:
             {"n": name},
         ).scalar_one()
     )
+
+
+def _mk_cluster(conn: Any, name: str, sig: str) -> int:
+    return int(
+        conn.execute(
+            text(
+                "INSERT INTO relation_clusters "
+                "(user_id, status, name, signature, blob_signature, member_count) "
+                "VALUES (1,'confirmed',:n,:s,:s,2) RETURNING id"
+            ),
+            {"n": name, "s": sig},
+        ).scalar_one()
+    )
+
+
+def _add_member(conn: Any, cluster_id: int, member_id: int, *, pruned: bool = False) -> None:
+    conn.execute(
+        text(
+            "INSERT INTO relation_cluster_members "
+            "(user_id, cluster_id, member_slug, member_id, pruned) "
+            "VALUES (1,:c,'identidades:person',:m,:p)"
+        ),
+        {"c": cluster_id, "m": member_id, "p": pruned},
+    )
+
+
+def test_merge_repunta_membresia_de_cumulo(conn: Any) -> None:
+    # la absorbida era miembro de un cúmulo y la superviviente no → la membresía se re-apunta.
+    surv = _mk_person(conn, "Ada")
+    absb = _mk_person(conn, "Ada L.")
+    cid = _mk_cluster(conn, "Contexto", "4" * 64)
+    _add_member(conn, cid, absb)
+    assert merge_identities(conn, 1, surv, absb) is True
+    members = (
+        conn.execute(
+            text("SELECT member_id FROM relation_cluster_members WHERE cluster_id = :c"),
+            {"c": cid},
+        )
+        .scalars()
+        .all()
+    )
+    assert list(members) == [surv]
+
+
+def test_merge_membresia_duplicada_gana_superviviente(conn: Any) -> None:
+    # ambas eran miembros del MISMO cúmulo: la fila de la absorbida se borra (la UNIQUE impediría
+    # el re-apuntado) y queda la del superviviente con su estado, incluido `pruned`.
+    surv = _mk_person(conn, "Rodion")
+    absb = _mk_person(conn, "CoKeFish")
+    cid = _mk_cluster(conn, "Blizzard", "5" * 64)
+    _add_member(conn, cid, surv, pruned=True)
+    _add_member(conn, cid, absb)
+    assert merge_identities(conn, 1, surv, absb) is True
+    rows = conn.execute(
+        text("SELECT member_id, pruned FROM relation_cluster_members WHERE cluster_id = :c"),
+        {"c": cid},
+    ).all()
+    assert [(int(r[0]), bool(r[1])) for r in rows] == [(surv, True)]
+
+
+def test_merge_membresia_sin_churn_en_build(conn: Any) -> None:
+    # regresión del churn observado en dev: la membresía huérfana de la absorbida hacía que cada
+    # build re-creara su arista `miembro_de` (a un vértice muerto) y la podara como huérfana.
+    surv = _mk_person(conn, "Rodion")
+    absb = _mk_person(conn, "CoKeFish")
+    cid = _mk_cluster(conn, "Blizzard", "6" * 64)
+    _add_member(conn, cid, absb)
+    assert merge_identities(conn, 1, surv, absb) is True
+    stats = build_relations(conn, 1)
+    assert stats.orphans_pruned == 0
+    assert stats.cluster_edges == 1  # la miembro_de del superviviente, viva
+    pair = conn.execute(
+        text(
+            "SELECT src_slug, src_id FROM relation_edges "
+            "WHERE user_id = 1 AND relation_type = 'miembro_de'"
+        )
+    ).all()
+    assert [(r[0], int(r[1])) for r in pair] == [("identidades:person", surv)]
 
 
 def test_merge_repunta_counterparty_de_finanzas(conn: Any) -> None:
