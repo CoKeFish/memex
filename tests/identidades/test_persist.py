@@ -233,6 +233,45 @@ async def test_sender_does_not_swallow_other_mentions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_producto_mention_creates_producto_identity() -> None:
+    # 'producto' ya NO se pliega a organizacion (0057): crea/resuelve kind='producto'.
+    # 'unknown' (el escape del extractor) sigue plegando a persona.
+    items = [
+        IdentityItem(source_inbox_ids=(5,), name="Hearthstone", kind="producto"),
+        IdentityItem(source_inbox_ids=(6,), name="Misterio", kind="unknown"),
+    ]
+    assert await _persist(items) == 2
+    m = _mentions()
+    assert m["Hearthstone"]["mentioned_kind"] == "producto"
+    assert m["Hearthstone"]["resolved_kind"] == "producto"
+    hs = next(i for i in _identities("producto") if i["display_name"] == "Hearthstone")
+    assert m["Hearthstone"]["resolved_identity_id"] == hs["id"]
+    assert m["Misterio"]["resolved_kind"] == "persona"
+
+
+@pytest.mark.asyncio
+async def test_producto_strong_signal_resolves_to_existing_org() -> None:
+    # Las señales FUERTES (nombre exacto) cruzan kinds a propósito: el directorio manda. Una
+    # mención producto 'Steam' con la org 'Steam' ya en el directorio ata a ESA identidad (no
+    # duplica); la reclasificación org→producto es trabajo del backfill por voto, no del resolver.
+    with connection() as c:
+        steam = int(
+            c.execute(
+                text(
+                    "INSERT INTO mod_identidades (user_id, kind, display_name, source) "
+                    "VALUES (1,'organizacion','Steam','manual') RETURNING id"
+                )
+            ).scalar_one()
+        )
+    await _persist([IdentityItem(source_inbox_ids=(5,), name="Steam", kind="producto")])
+    m = _mentions()
+    assert m["Steam"]["mentioned_kind"] == "producto"  # el voto del backfill queda registrado
+    assert m["Steam"]["resolved_identity_id"] == steam
+    assert m["Steam"]["resolved_kind"] == "organizacion"
+    assert m["Steam"]["resolution_method"] == "exact_name"
+
+
+@pytest.mark.asyncio
 async def test_persist_empty_is_noop() -> None:
     assert await _persist([]) == 0
     assert _mentions() == {}

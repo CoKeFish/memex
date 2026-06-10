@@ -47,6 +47,41 @@ def test_interest_add_is_idempotent_upsert(capsys: pytest.CaptureFixture[str]) -
     assert rows[0][0] == ["claude.ai"]
 
 
+def test_interest_list_incluye_productos(capsys: pytest.CaptureFixture[str]) -> None:
+    # una entidad reclasificada a producto con interest=TRUE sigue saliendo en el listado
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name, interest, source) "
+                "VALUES (1,'producto','Steam',TRUE,'manual')"
+            )
+        )
+    assert main(["interest", "list"]) == 0
+    assert "Steam" in capsys.readouterr().out
+
+
+def test_interest_add_reusa_producto_existente(capsys: pytest.CaptureFixture[str]) -> None:
+    # si la entidad ya existe como producto, el add actualiza su interés (no duplica como org)
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name, interest, source) "
+                "VALUES (1,'producto','Recraft',FALSE,'extraction')"
+            )
+        )
+    assert main(["interest", "add", "--name", "Recraft"]) == 0
+    capsys.readouterr()
+    with connection() as c:
+        rows = c.execute(
+            text(
+                "SELECT kind, interest FROM mod_identidades "
+                "WHERE user_id = 1 AND display_name = 'Recraft'"
+            )
+        ).all()
+    assert len(rows) == 1  # no se creó una org duplicada
+    assert (rows[0][0], rows[0][1]) == ("producto", True)
+
+
 def test_accounts_empty(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["accounts"]) == 0
     assert "Sin cuentas" in capsys.readouterr().out

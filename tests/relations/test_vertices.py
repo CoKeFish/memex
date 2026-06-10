@@ -1,6 +1,6 @@
 """Proyección de vértices (Fase 1): las tablas `mod_*` se leen como una lista uniforme de vértices
-`(slug, id, label, kind)`. calendar -> consolidado (sin borrados); identidades -> person/org; inbox
-NO es vértice; scoping por usuario.
+`(slug, id, label, kind)`. calendar -> consolidado (sin borrados); identidades ->
+person/org/producto; inbox NO es vértice; scoping por usuario.
 """
 
 from __future__ import annotations
@@ -47,12 +47,18 @@ def _seed_all(user_id: int = 1) -> dict[str, int]:
         "VALUES (:u, 'organizacion', 'Acme') RETURNING id",
         u=user_id,
     )
+    producto = _exec(
+        "INSERT INTO mod_identidades (user_id, kind, display_name) "
+        "VALUES (:u, 'producto', 'Steam') RETURNING id",
+        u=user_id,
+    )
     return {
         "finance": int(fin),
         "hackathones": int(hack),
         "calendar": int(cal),
         "identidades:person": int(person),
         "identidades:org": int(org),
+        "identidades:producto": int(producto),
     }
 
 
@@ -85,6 +91,9 @@ def test_proyecta_todos_los_tipos() -> None:
     assert by_slug["calendar"].kind == "evento"
     assert by_slug["identidades:person"].label == "Juan Valdez"
     assert by_slug["identidades:org"].kind == "organizacion"
+    assert by_slug["identidades:producto"].kind == "producto"
+    assert by_slug["identidades:producto"].label == "Steam"
+    assert by_slug["identidades:producto"].id == ids["identidades:producto"]
     assert by_slug["bienestar"].kind == "registro"
     assert by_slug["bienestar"].label == "almuerzo"
     assert by_slug["bienestar:habito"].kind == "habito"

@@ -3,7 +3,8 @@ uniforme de vértices `(slug, id, label, kind)`, para que las aristas y el front
 
 Solo LEE (ADR-001/ADR-015): cada módulo sigue dueño de su tabla; esta capa no copia ni escribe. El
 `slug` es la clave de direccionamiento del grafo (igual que en `Ref`): codifica el subtipo de
-identidades (`identidades:person`/`identidades:org`) y apunta a lo CONSOLIDADO (calendar y finance,
+identidades (`identidades:person`/`identidades:org`/`identidades:producto`) y apunta a lo
+CONSOLIDADO (calendar y finance,
 no a los crudos) — un vértice por entidad real, no por fila duplicada. inbox NO es vértice: es
 procedencia (`source_inbox_ids`), accesible por drill-down, no un nodo del grafo. Los cúmulos
 (vértices NATIVOS del grafo) se proyectan de `relation_clusters` (solo los confirmados).
@@ -48,7 +49,8 @@ class NodeSource:
 
 #: Registro de proyección: una entrada por TIPO de vértice de dominio. Son literales internos (NO
 #: input de usuario) → seguro interpolarlos en el SQL; `user_id`/`id` van por bind. calendar apunta
-#: al consolidado; identidades proyecta DOS slugs; inbox NO está (es atributo, no vértice).
+#: al consolidado; identidades proyecta TRES slugs (uno por kind); inbox NO está (es atributo, no
+#: vértice).
 NODE_SOURCES: tuple[NodeSource, ...] = (
     NodeSource(
         "finance", "mod_finance_consolidated", "counterparty", "transaccion", where="NOT deleted"
@@ -64,6 +66,13 @@ NODE_SOURCES: tuple[NodeSource, ...] = (
         "display_name",
         "organizacion",
         where="kind = 'organizacion'",
+    ),
+    NodeSource(
+        "identidades:producto",
+        "mod_identidades",
+        "display_name",
+        "producto",
+        where="kind = 'producto'",
     ),
     NodeSource(
         "bienestar",
@@ -82,6 +91,16 @@ NODE_SOURCES: tuple[NodeSource, ...] = (
 )
 
 _BY_SLUG: dict[str, NodeSource] = {s.slug: s for s in NODE_SOURCES}
+
+#: Slug de grafo por `kind` de identidad — la otra mitad del contrato de las TRES proyecciones de
+#: `mod_identidades` de arriba. Único punto de verdad (lo consumen deterministic, relations_llm y
+#: merge). Indexar DIRECTO: un kind desconocido debe fallar ruidoso (KeyError), no caer a un slug
+#: equivocado que la poda de huérfanas barrería en silencio.
+IDENTITY_SLUG_BY_KIND: dict[str, str] = {
+    "persona": "identidades:person",
+    "organizacion": "identidades:org",
+    "producto": "identidades:producto",
+}
 
 
 def _select_for(src: NodeSource, *, by_id: bool = False) -> str:

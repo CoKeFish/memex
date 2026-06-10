@@ -3,6 +3,7 @@ import { CollapsiblePanel } from "@/components/common/collapsible-panel"
 import { Led } from "@/components/common/led"
 import { AdHocIngest, FetchControl } from "@/components/features/control/fetch-control"
 import { BackfillPanel } from "@/components/features/control/backfill-control"
+import { IngestCoveragePanel } from "@/components/features/control/ingest-coverage"
 import {
   IngestRunsPanel,
   IngestSchedulerPanel,
@@ -17,6 +18,7 @@ export function IngestPage() {
       <FetchControl />
       <IngestSchedulerPanel />
       <IngestRunsPanel />
+      <IngestCoveragePanel />
       <BackfillPanel />
       <AdHocIngest />
       <CollapsiblePanel

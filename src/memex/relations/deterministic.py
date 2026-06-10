@@ -45,7 +45,7 @@ from memex.relations.edges import (
     list_edges,
     propose_edge,
 )
-from memex.relations.vertices import list_vertices
+from memex.relations.vertices import IDENTITY_SLUG_BY_KIND, list_vertices
 
 _log = get_logger("memex.relations.deterministic")
 
@@ -131,7 +131,7 @@ def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
         {"u": user_id},
     ).mappings():
         ids = [int(x) for x in (r["ids"] or [])]
-        slug = "identidades:person" if r["kind"] == "persona" else "identidades:org"
+        slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
         prov[Ref(slug, int(r["iid"]))].update(ids)
 
     return dict(prov)
@@ -233,8 +233,8 @@ def _materialize_pertenencia(conn: Connection, user_id: int) -> int:
         ),
         {"u": user_id},
     ).mappings():
-        child_slug = "identidades:person" if r["child_kind"] == "persona" else "identidades:org"
-        parent_slug = "identidades:person" if r["parent_kind"] == "persona" else "identidades:org"
+        child_slug = IDENTITY_SLUG_BY_KIND[str(r["child_kind"])]
+        parent_slug = IDENTITY_SLUG_BY_KIND[str(r["parent_kind"])]
         propose_edge(
             conn,
             user_id,
@@ -271,7 +271,7 @@ def _materialize_contraparte(
         ),
         params,
     ).mappings():
-        slug = "identidades:person" if r["kind"] == "persona" else "identidades:org"
+        slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
         propose_edge(
             conn,
             user_id,

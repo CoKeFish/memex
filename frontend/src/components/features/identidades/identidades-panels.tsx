@@ -5,6 +5,7 @@ import {
   GitMerge,
   Loader2,
   Network,
+  Package,
   Plus,
   RefreshCw,
   Star,
@@ -46,6 +47,7 @@ const inputCls =
 const KIND_ICON: Record<IdentityKind, typeof Building2> = {
   persona: UserRound,
   organizacion: Building2,
+  producto: Package,
 }
 const IDENTIFIER_KINDS = ["email", "phone", "handle", "domain", "url"] as const
 
@@ -193,7 +195,7 @@ export function DirectoryPanel({
       <PanelHeader
         eyebrow="directorio · identidades"
         title="Directorio"
-        sub="Personas y organizaciones — interés o Detectada"
+        sub="Personas, organizaciones y productos — interés o Detectada"
         right={
           <div className="flex items-center gap-2">
             <Button
@@ -232,6 +234,7 @@ export function DirectoryPanel({
             <option value="">Todo tipo</option>
             <option value="persona">Personas</option>
             <option value="organizacion">Organizaciones</option>
+            <option value="producto">Productos</option>
           </select>
           <select
             name="identity-estado-filter"
@@ -266,6 +269,7 @@ export function DirectoryPanel({
           >
             <option value="organizacion">Org</option>
             <option value="persona">Persona</option>
+            <option value="producto">Producto</option>
           </select>
           <Button type="submit" size="sm" disabled={creating || !newName.trim()}>
             {creating ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
@@ -359,7 +363,16 @@ export function HierarchyPanel({
   refresh: number
   onSelect: (id: number) => void
 }) {
-  const { data, loading, error } = useAsync(() => fetchIdentities({ kind: "organizacion" }), [refresh])
+  // Colgables = organizaciones + productos (producto→empresa); el filtro del API es de un solo
+  // kind, así que se piden los dos y se concatenan.
+  const { data, loading, error } = useAsync(
+    () =>
+      Promise.all([
+        fetchIdentities({ kind: "organizacion" }),
+        fetchIdentities({ kind: "producto" }),
+      ]).then(([orgRows, prodRows]) => [...orgRows, ...prodRows]),
+    [refresh],
+  )
   const orgs = data ?? []
 
   const childrenOf = new Map<number, Identity[]>()
@@ -402,8 +415,8 @@ export function HierarchyPanel({
         ) : orgs.length === 0 ? (
           <EmptyState
             icon={<Building2 className="size-5" />}
-            title="Sin organizaciones"
-            hint="Cuando haya organizaciones, acá vas a ver el árbol de pertenencia."
+            title="Sin organizaciones ni productos"
+            hint="Cuando haya organizaciones o productos, acá vas a ver el árbol de pertenencia."
           />
         ) : (
           <ul className="max-h-[420px] overflow-y-auto py-1">
@@ -646,8 +659,8 @@ export function IdentityDetailPanel({
           )}
         </div>
 
-        {/* Pertenece a (solo orgs): de qué identidad cuelga + selector para cambiarlo */}
-        {identity.kind === "organizacion" && (
+        {/* Pertenece a (orgs y productos): de qué identidad cuelga + selector para cambiarlo */}
+        {(identity.kind === "organizacion" || identity.kind === "producto") && (
           <div>
             <div className="eyebrow mb-1">Pertenece a</div>
             {identity.parentName && identity.parentId != null ? (

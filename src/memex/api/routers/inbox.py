@@ -1,6 +1,7 @@
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
@@ -9,6 +10,7 @@ from memex.api.auth import current_user_id
 from memex.api.schemas import (
     ClassificationInfo,
     ClassifyRequest,
+    CoverageOut,
     ExtractResponse,
     FeedbackInfo,
     FeedbackRequest,
@@ -29,6 +31,7 @@ from memex.core.feedback import InvalidFeedbackError, get_feedback, record_feedb
 from memex.core.relevance_marks import clear_mark, get_mark, set_mark
 from memex.db import connection
 from memex.logging import bind_request_context, get_logger
+from memex.sources import kind_for_type
 
 router = APIRouter(prefix="/inbox", tags=["inbox"])
 
@@ -64,6 +67,45 @@ def _map_list_row(r: Any) -> dict[str, Any]:
     d["summarized"] = bool(d.pop("_summarized", False))
     d["extracted"] = bool(d.pop("_extracted", False))
     return d
+
+
+#: TZ por defecto del bucket de cobertura (cuando el cliente no manda `tz`). El front pasa su TZ
+#: activa para que los días del timeline coincidan con su reloj de pared (patrón de metrics.py).
+_BUCKET_TZ = "America/Bogota"
+
+
+def _resolve_tz(tz: str | None) -> str:
+    """Valida/resuelve la TZ del bucket. None → `_BUCKET_TZ`; nombre IANA inválido → 422.
+
+    El valor va al SQL como bind param (`:tz` en `AT TIME ZONE`), no es injection; pero un nombre
+    inválido reventaría en Postgres, así que se valida acá contra el catálogo IANA (helper copiado
+    inline a propósito, como en logs.py/metrics.py).
+    """
+    if tz is None:
+        return _BUCKET_TZ
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"timezone inválida: {tz}") from exc
+    return tz
+
+
+def _merge_day_buckets(buckets: list[tuple[date, int]], gap_days: int) -> list[dict[str, Any]]:
+    """Funde días-bucket ORDENADOS en rangos; huecos de <= `gap_days` días se absorben.
+
+    Días consecutivos difieren en 1; un hueco de `g` días faltantes da diferencia `g + 1`,
+    de ahí el `<= gap_days + 1`.
+    """
+    ranges: list[dict[str, Any]] = []
+    for day, n in buckets:
+        if ranges and (day - ranges[-1]["end"]).days <= gap_days + 1:
+            ranges[-1]["end"] = day
+            ranges[-1]["count"] += n
+        else:
+            ranges.append({"start": day, "end": day, "count": n})
+    for r in ranges:
+        r["days"] = (r["end"] - r["start"]).days + 1
+    return ranges
 
 
 @router.get("", response_model=InboxList)
@@ -135,6 +177,97 @@ async def stats(user_id: UserID) -> dict[str, Any]:
         for r in rows
     }
     return {"sources": sources}
+
+
+# NOTA: declarado ANTES de `GET /{inbox_id}` — si quedara después, FastAPI intentaría parsear
+# "coverage" como int y la ruta moriría en 422.
+@router.get("/coverage", response_model=CoverageOut)
+async def inbox_coverage(
+    user_id: UserID,
+    tz: str | None = None,
+    gap_days: Annotated[int, Query(ge=0, le=365)] = 2,
+    source_id: int | None = None,
+    kind: Literal["email", "chat", "social", "other"] | None = None,
+) -> dict[str, Any]:
+    """Rangos de FECHAS DE ORIGEN (`occurred_at`) ya ingeridos, por fuente.
+
+    Para el timeline de cobertura del historial: un día (en la tz pedida) está cubierto si tiene
+    >= 1 item; días separados por <= `gap_days` se funden en un rango. Las fuentes sin items
+    salen como lane vacía (eso también es información: "de acá no hay nada ingerido").
+    """
+    resolved_tz = _resolve_tz(tz)
+
+    src_where = ["user_id = :uid"]
+    bucket_where = ["i.user_id = :uid"]
+    params: dict[str, Any] = {"uid": user_id}
+    if source_id is not None:
+        src_where.append("id = :sid")
+        bucket_where.append("i.source_id = :sid")
+        params["sid"] = source_id
+
+    with connection() as conn:
+        src_rows = (
+            conn.execute(
+                text(
+                    "SELECT id, name, type, enabled FROM sources "
+                    f"WHERE {' AND '.join(src_where)} ORDER BY id"
+                ),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+        # Buckets diarios por fuente; el índice inbox_user_occurred cubre las tres columnas.
+        bucket_rows = conn.execute(
+            text(
+                f"""
+                SELECT i.source_id,
+                       (i.occurred_at AT TIME ZONE :tz)::date AS day,
+                       COUNT(*) AS n
+                FROM inbox i
+                WHERE {" AND ".join(bucket_where)}
+                GROUP BY i.source_id, day
+                ORDER BY i.source_id, day
+                """
+            ),
+            {**params, "tz": resolved_tz},
+        ).all()
+
+    buckets_by_source: dict[int, list[tuple[date, int]]] = {}
+    for sid, day, n in bucket_rows:
+        buckets_by_source.setdefault(sid, []).append((day, n))
+
+    lanes: list[dict[str, Any]] = []
+    for src in src_rows:
+        try:
+            src_kind = kind_for_type(src["type"]).value
+        except KeyError:
+            src_kind = "other"  # tipos sin SourceKind registrada (p.ej. seeds viejos)
+        if kind is not None and src_kind != kind:
+            continue
+        ranges = _merge_day_buckets(buckets_by_source.get(src["id"], []), gap_days)
+        lanes.append(
+            {
+                "id": src["id"],
+                "label": src["name"],
+                "kind": src_kind,
+                "enabled": src["enabled"],
+                "total": sum(r["count"] for r in ranges),
+                "first_day": ranges[0]["start"] if ranges else None,
+                "last_day": ranges[-1]["end"] if ranges else None,
+                "ranges": ranges,
+            }
+        )
+
+    firsts = [lane["first_day"] for lane in lanes if lane["first_day"] is not None]
+    lasts = [lane["last_day"] for lane in lanes if lane["last_day"] is not None]
+    return {
+        "lanes": lanes,
+        "domain_min": min(firsts) if firsts else None,
+        "domain_max": max(lasts) if lasts else None,
+        "tz": resolved_tz,
+        "gap_days": gap_days,
+    }
 
 
 @router.get("/{inbox_id}", response_model=InboxRow)

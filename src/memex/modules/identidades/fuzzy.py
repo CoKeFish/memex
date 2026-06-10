@@ -3,8 +3,10 @@
 Cuando las señales fuertes (`resolve.KnownIndex`) no atan una mención, se buscan candidatos por
 SIMILITUD DE TRIGRAMAS (`pg_trgm`) contra el directorio:
 
-  - personas: `similarity(name_norm, memex_norm(probe))`
-  - orgs:     `similarity(org_core, memex_org_core(probe))`  (núcleo sin sufijos legales)
+  - personas:        `similarity(name_norm, memex_norm(probe))`
+  - orgs/productos:  `similarity(org_core, memex_org_core(probe))`  (núcleo sin sufijos legales)
+
+El match es kind-scoped (`WHERE kind = :kind`): un producto solo matchea contra productos.
 
 El `%` usa el índice GIN (`gin_trgm_ops`) para acotar candidatos; luego se filtra por umbral real y
 se ordena por similitud desc, con `levenshtein` como desempate determinista. El consumidor
