@@ -77,10 +77,18 @@ target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# T20 (flake8-print): print/pprint prohibidos en código de app (ADR-007: todo sale por structlog
+# hacia log_events). Los CLIs/experiments/scripts quedan exentos abajo: print ES su UI.
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "T20"]
 
 [tool.ruff.lint.per-file-ignores]
 "migrations/*" = ["E501"]
+"src/**/cli.py" = ["T20"]
+"src/**/*_cli.py" = ["T20"]
+"src/memex/cli/*" = ["T20"]
+"tests/**" = ["T20"]
+"experiments/**" = ["T20"]
+"scripts/**" = ["T20"]
 
 [tool.mypy]
 python_version = "3.12"
