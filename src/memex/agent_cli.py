@@ -84,7 +84,9 @@ bienestar (salud y bienestar):
   memex bienestar habit        define hábitos (add/list/rm)
 
 finance (gastos/ingresos):
-  memex finance register       registra una transacción
+  memex finance register       registra una transacción (--json devuelve consolidated_id)
+  memex finance show           detalle de un pago consolidado (incluye el lugar resuelto)
+  memex finance set-place      asocia un lugar del catálogo a un pago ("este pago fue en X")
 
 identidad (directorio de personas/organizaciones/productos):
   memex identidad add          registra/resuelve una tarjeta de contacto (no duplica)

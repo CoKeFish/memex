@@ -732,6 +732,9 @@ export interface FinanceTransaction {
   evidence: string
   sourceInboxIds: number[]
   createdAt: string
+  /** Lugar resuelto del catálogo geo (null si el pago no tiene lugar asociado), como en eventos. */
+  placeName: string | null
+  placeAddress: string | null
 }
 
 // ---- Módulo hackathones (extractor puro) --------------------------------------

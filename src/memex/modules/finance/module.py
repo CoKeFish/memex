@@ -616,4 +616,7 @@ def register(
     )
     out = dict(row)
     out["amount"] = float(out["amount"])
+    # El id consolidado va en la respuesta para que el agente pueda encadenar (p.ej.
+    # `memex finance set-place --id <consolidated_id> ...`).
+    out["consolidated_id"] = cons_id
     return out

@@ -76,8 +76,9 @@ flowchart TB
 
 El dueño lleva **registro de los lugares** donde está/estuvo. Jerarquía de confianza: el **ping GPS**
 (cuando exista la app) es la **única fuente fiable** de posición real; un **evento de calendario con
-lugar físico** = **posibilidad** de presencia; los pagos con geo, ídem (futuro). La inferencia de
-presencia (cruzar ping↔evento por ventana de tiempo) está **explícitamente diferida** a la app móvil.
+lugar físico** = **posibilidad** de presencia; un **pago con lugar**, ídem. La inferencia de
+presencia (cruzar ping↔evento/pago por ventana de tiempo) está **explícitamente diferida** a la app
+móvil.
 
 - **`geo_places`** — el catálogo canónico por usuario (single-writer: `geo/places.py`). La identidad
   fuerte la da el `provider_place_id`: dos grafías del mismo lugar ("Gabriel Giraldo S.J. 3-507" y
@@ -88,16 +89,30 @@ presencia (cruzar ping↔evento por ventana de tiempo) está **explícitamente d
   y tampoco se reintenta. **No confundir** con `geo_place_cache` (caché **global por celda** de
   coordenada, para el reverse geocoding de pings): son direcciones opuestas.
 - **Los dominios referencian a geo, no al revés** (patrón identidades): el calendario tiene
-  `mod_calendar_consolidated.place_id` (FK al catálogo) y geo no conoce dominios por nombre — la
-  correlación rica la teje el grafo de relaciones. OJO: el `geo_place_id` TEXT que ya existía (0047)
-  es el id del **proveedor** (denormalizado); el FK nuevo es `place_id` BIGINT.
-- **Cómo se llena**: al final de cada consolidación del calendario (gateado por
+  `mod_calendar_consolidated.place_id` (FK al catálogo, 0062) y finanzas tiene
+  `mod_finance_consolidated.place_id` (0063); geo no conoce dominios por nombre — la correlación
+  rica la teje el grafo de relaciones. OJO: el `geo_place_id` TEXT que ya existía (0047) es el id
+  del **proveedor** (denormalizado); el FK es `place_id` BIGINT.
+- **Cómo se llena (calendario)**: al final de cada consolidación (gateado por
   `MEMEX_CALENDAR_GEOCODE=1`), cada `location` físico se resuelve contra el catálogo (los virtuales
   —links de Meet/URLs— se saltan). Borrar un lugar del catálogo deja los FK en NULL y la próxima
   consolidación lo **recrea** gastando una llamada: "borrar" no significa "no quiero este lugar".
-- **Superficies**: `memex-geo places` (inventario + cuántos eventos referencian cada lugar),
-  `memex calendario show` (lugar resuelto), `GET /calendar/events` (`place_name`/`place_address`) y
-  el inspector del dashboard.
+- **Cómo se llena (finanzas)** — dos fuentes, en orden de confianza:
+  1. **El seam GPS** (`memex-finance geo`, on-demand): el ping más cercano al instante del cobro se
+     resuelve a POI (caché global por celda) y el lugar se **da de alta/colapsa** en el catálogo con
+     `source='gps'` (la identidad sigue siendo el `provider_place_id` cuando el POI lo trae). El id
+     queda en `metadata.geo.catalog_place_id` de la cruda y se propaga a la consolidada — directo si
+     ya existe, o en la próxima consolidación (que lee el metadata, sin red). El GPS **pisa** una
+     asociación manual previa al re-consolidar (es la fuente más fiable).
+  2. **Asociación manual** (`memex finance set-place --id <consolidado>` con `--place-id`, `--text`
+     o `--clear`): el camino del agente mientras no existe la app de pings ("este pago fue en X").
+     `--text` reusa la resolución texto→catálogo (caché primero; el miss geocodifica).
+  El **counterparty NUNCA se geocodifica** solo: "Rappi" o "Éxito" son cadenas, no lugares — geo
+  opera sobre coordenadas/direcciones estructuradas; texto libre solo por pedido explícito.
+- **Superficies**: `memex-geo places` (inventario + cuántos eventos **y pagos** referencian cada
+  lugar), `memex calendario show` / `memex finance show` (lugar resuelto), `GET /calendar/events` y
+  `GET /finance/transactions` (`place_name`/`place_address`), el inspector de eventos y la tabla de
+  movimientos del dashboard.
 
 ## Decisiones tomadas
 
@@ -135,9 +150,12 @@ presencia (cruzar ping↔evento por ventana de tiempo) está **explícitamente d
   **sin cambiar su firma** — tu ubicación real ya puede alimentar el "estimar viaje".
 - Resolución de lugares (coords → dirección/POI) con caché global por celda (~11m) y `in_transit`.
 
-**✅ Hecho además (0047 + 0062):** el calendario SÍ llama a geo — su consolidación resuelve cada
-`location` físico contra el **catálogo de lugares** (`geo_places`, FK `place_id` en el consolidado)
-con dedupe por texto + colapso por `provider_place_id` (ver sección arriba).
+**✅ Hecho además (0047 + 0062 + 0063):** el calendario SÍ llama a geo — su consolidación resuelve
+cada `location` físico contra el **catálogo de lugares** (`geo_places`, FK `place_id` en el
+consolidado) con dedupe por texto + colapso por `provider_place_id` (ver sección arriba). Y
+**finanzas también**: FK `place_id` en `mod_finance_consolidated`, poblada por el seam GPS
+(`memex-finance geo` → catálogo con `source='gps'` → propagación vía la consolidación) o a mano
+(`memex finance set-place`).
 
 **⏳ Falta:**
 - **Clustering** de puntos → "lugares donde estuve" (solo está la base de leer pings por rango).
@@ -158,7 +176,9 @@ con dedupe por texto + colapso por `provider_place_id` (ver sección arriba).
 | `geo/service.py` | Orquestación pura: `geocode_address`, `estimate_trip`, `estimate_trip_from_source` (seam con calendar), `reverse_geocode`, `nearby_place`, `resolve_place`. |
 | `geo/client.py` | Contrato: `GeoProvider`, `GeoPoint`, `TravelEstimate`, `PlaceResult`, `ResolvedPlace` (`in_transit`), `LocationSource` (v0 `ManualLocationSource`). |
 | `geo/google.py` · `geo/ors.py` | Proveedores: Google Maps (geocode + rutas + Places) y OpenRouteService (geocode + rutas; sin Places). |
-| `geo/places.py` | **Catálogo de lugares** (single-writer): `resolve_place` (texto→catálogo, resolve-or-create con caché), `get_place`, `list_places`. No confundir con `service.resolve_place` (coordenada→POI). |
+| `geo/places.py` | **Catálogo de lugares** (single-writer): `resolve_place` (texto→catálogo, resolve-or-create con caché), `upsert_place_from_poi` (POI ya resuelto → catálogo, p.ej. del seam GPS de finanzas), `get_place`, `list_places` (refs de calendario + finanzas). No confundir con `service.resolve_place` (coordenada→POI). |
 | `geo/cli.py` (`memex-geo`) | CLI: `geocode` / `trip` / `place` (proveedor) + `places` (catálogo, solo DB). |
+| `modules/finance/geo_places.py` | El seam GPS de finanzas (`memex-finance geo`): ping del instante del cobro → POI → alta en el catálogo (`source='gps'`) + `metadata.geo.catalog_place_id` + propagación a la consolidada. |
+| `modules/finance/manual.py` | Operaciones manuales sobre el pago consolidado: `set_place` (asociación al catálogo) y `show_transaction` (detalle con lugar). CLI: `memex finance set-place` / `show`. |
 | `migrations/0042_geo_location_pings.py` · `0043_geo_place_cache.py` | Tablas: `geo_location_pings` (por usuario, append-only) y `geo_place_cache` (global, por celda — reverse). |
-| `migrations/0047_calendar_geo_coords.py` · `0062_geo_places.py` | Integración calendario: coords denormalizadas en el consolidado (0047) + catálogo `geo_places`/`geo_place_resolutions` y FK `place_id` (0062). |
+| `migrations/0047_calendar_geo_coords.py` · `0062_geo_places.py` · `0063_finance_place.py` | Integración de dominios: coords denormalizadas en el consolidado de calendario (0047) + catálogo `geo_places`/`geo_place_resolutions` y FK `place_id` en calendario (0062) + FK `place_id` en finanzas (0063). |

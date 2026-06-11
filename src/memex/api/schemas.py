@@ -610,6 +610,10 @@ class FinanceTransactionRow(BaseModel):
     evidence: str
     source_inbox_ids: list[int]
     created_at: datetime
+    # Lugar resuelto del catálogo (`geo_places` vía `place_id`), como en /calendar/events:
+    # NULL si el pago no tiene lugar asociado (seam GPS o `memex finance set-place`).
+    place_name: str | None = None
+    place_address: str | None = None
 
 
 class FinanceTransactionList(BaseModel):

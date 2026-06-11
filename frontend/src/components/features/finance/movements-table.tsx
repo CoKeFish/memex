@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { ArrowDown, ArrowUp, Search } from "lucide-react"
+import { ArrowDown, ArrowUp, MapPin, Search } from "lucide-react"
 import { Link } from "react-router-dom"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
@@ -40,7 +40,7 @@ export function MovementsTable({ txns, currency }: { txns: FinanceTransaction[];
     const r = all.filter((t) => {
       if (direction !== "all" && t.direction !== direction) return false
       if (category !== "all" && t.category !== category) return false
-      if (q && !`${t.merchant} ${t.description} ${t.evidence}`.toLowerCase().includes(q)) return false
+      if (q && !`${t.merchant} ${t.description} ${t.evidence} ${t.placeName ?? ""}`.toLowerCase().includes(q)) return false
       return true
     })
     r.sort((a, b) => {
@@ -129,6 +129,14 @@ export function MovementsTable({ txns, currency }: { txns: FinanceTransaction[];
                     <td className="px-3 py-2">
                       <div className="font-medium">{t.merchant}</div>
                       <div className="truncate text-[11px] text-muted-foreground" title={t.evidence}>{t.evidence}</div>
+                      {t.placeName && (
+                        <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                          <MapPin className="size-3 shrink-0" />
+                          <span className="truncate" title={[t.placeName, t.placeAddress].filter(Boolean).join(" — ")}>
+                            {[t.placeName, t.placeAddress].filter(Boolean).join(" — ")}
+                          </span>
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-2"><CategoryChip category={t.category} /></td>
                     <td className={cn("num px-3 py-2 text-right font-medium", t.direction === "egreso" ? "text-status-error" : "text-status-ok")}>

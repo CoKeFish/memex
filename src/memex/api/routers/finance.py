@@ -59,9 +59,11 @@ async def list_transactions(
     sql = f"""
         SELECT c.id, c.direction, c.amount, c.currency, c.category, c.counterparty, c.place,
                c.occurred_at, c.occurred_at_precision, c.description, c.created_at,
+               p.name AS place_name, p.formatted_address AS place_address,
                COALESCE(w.evidence, '') AS evidence,
                COALESCE(sib.ids, ARRAY[]::bigint[]) AS source_inbox_ids
         FROM mod_finance_consolidated c
+        LEFT JOIN geo_places p ON p.id = c.place_id
         LEFT JOIN mod_finance_transactions w ON w.id = c.winner_transaction_id
         LEFT JOIN (
             SELECT l.consolidated_id, array_agg(DISTINCT s) AS ids

@@ -12,6 +12,13 @@ Consolidación geo-prioridad (decisión del dueño): si geo resuelve un lugar, e
 `place` canónico (geo gana sobre el texto del comprobante), pero el texto extraído se preserva en
 `metadata.place_extracted` y se compara (`metadata.geo.matches_extracted`). Nada se pierde. Lo ya
 resuelto (`metadata.geo` presente) no se reprocesa; `no_fix` (sin ping cerca) sigue candidato.
+
+Catálogo de lugares: cada POI resuelto se da de alta (o colapsa por `provider_place_id`) en
+`geo_places` con `source='gps'` vía el single-writer `memex.geo.places`; el id queda en
+`metadata.geo.catalog_place_id` y se propaga a `mod_finance_consolidated.place_id` — directo si
+la consolidada ya existe (vía links), o en la próxima consolidación (que lee el metadata) si la
+cruda todavía no consolidó. El counterparty NUNCA se geocodifica acá: la única fuente de este
+worker es la coordenada del ping.
 """
 
 from __future__ import annotations
@@ -32,6 +39,7 @@ from memex.geo import (
     build_provider_from_env,
     resolve_place_at,
 )
+from memex.geo import places as place_catalog
 from memex.logging import get_logger
 
 _log = get_logger("memex.modules.finance.geo")
@@ -98,9 +106,17 @@ def _matches_extracted(extracted: str, resolved: str) -> bool:
     return bool(a) and bool(b) and (a in b or b in a)
 
 
-def _apply_resolved(conn: Connection, c: _Candidate, place: ResolvedPlace) -> None:
+def _apply_resolved(
+    conn: Connection,
+    c: _Candidate,
+    place: ResolvedPlace,
+    *,
+    provider_name: str,
+    catalog_place_id: int,
+) -> None:
     """Consolida con geo-prioridad: `place` ← lugar de geo; preserva el texto extraído y guarda el
-    detalle geo + la señal de comparación en `metadata`."""
+    detalle geo + la señal de comparación en `metadata`. `catalog_place_id` (la fila de
+    `geo_places`) queda en el metadata para que la consolidación lo propague a `place_id`."""
     resolved_name = place.name or place.formatted_address
     meta = dict(c.metadata)
     meta.setdefault("place_extracted", c.place)  # preserva el original (solo la 1ª vez)
@@ -110,6 +126,8 @@ def _apply_resolved(conn: Connection, c: _Candidate, place: ResolvedPlace) -> No
         "lat": place.point.lat,
         "lng": place.point.lng,
         "place_id": place.provider_place_id,
+        "provider": provider_name,
+        "catalog_place_id": catalog_place_id,
         "types": list(place.types),
         "in_transit": False,
         "matches_extracted": _matches_extracted(c.place, resolved_name),
@@ -121,6 +139,26 @@ def _apply_resolved(conn: Connection, c: _Candidate, place: ResolvedPlace) -> No
             "WHERE id = :id"
         ),
         {"id": c.id, "place": resolved_name, "meta": json.dumps(meta)},
+    )
+
+
+def _propagate_to_consolidated(
+    conn: Connection, user_id: int, transaction_id: int, catalog_place_id: int
+) -> None:
+    """Estampa el lugar en la consolidada de la cruda (vía links), si ya existe — efecto inmediato
+    al correr `memex-finance geo`. El GPS es la fuente más confiable: pisa lo que hubiera (una
+    asociación manual previa incluida). Si la cruda aún no consolidó, no hace nada: la próxima
+    consolidación lee `metadata.geo.catalog_place_id` y lo propaga igual."""
+    conn.execute(
+        text(
+            """
+            UPDATE mod_finance_consolidated c
+            SET place_id = :pid, updated_at = NOW()
+            FROM mod_finance_transaction_links l
+            WHERE l.transaction_id = :tid AND c.id = l.consolidated_id AND c.user_id = :uid
+            """
+        ),
+        {"pid": catalog_place_id, "tid": transaction_id, "uid": user_id},
     )
 
 
@@ -196,7 +234,23 @@ async def resolve_transaction_places(
                     )
                     stats.in_transit += 1
                     continue
-                _apply_resolved(conn, c, place)
+                # Alta/colapso en el catálogo (source='gps'). El provider name sale del provider
+                # ACTIVO: la caché por celda no lo persiste, y el proveedor configurado por env es
+                # el mismo que la pobló.
+                catalog_place_id = place_catalog.upsert_place_from_poi(
+                    conn,
+                    user_id,
+                    name=place.name or place.formatted_address,
+                    formatted_address=place.formatted_address,
+                    lat=place.point.lat,
+                    lng=place.point.lng,
+                    provider=provider.name,
+                    provider_place_id=place.provider_place_id,
+                )
+                _apply_resolved(
+                    conn, c, place, provider_name=provider.name, catalog_place_id=catalog_place_id
+                )
+                _propagate_to_consolidated(conn, user_id, c.id, catalog_place_id)
                 stats.resolved += 1
     finally:
         await provider.aclose()

@@ -14,6 +14,7 @@ from memex.db import connection
 from memex.geo.client import GeocodeResult, GeoNotFoundError, GeoPoint, PlaceResult
 from memex.geo.store import PingInput, insert_pings
 from memex.modules.finance import geo_places
+from memex.modules.finance.consolidate import run_consolidation
 from memex.modules.finance.geo_places import resolve_transaction_places
 
 _AT = datetime(2026, 6, 8, 14, 0, tzinfo=UTC)
@@ -21,7 +22,10 @@ _PT = GeoPoint(4.65, -74.05)
 
 
 class _FakeProvider:
-    """Provider fake: `reverse_geocode` + `nearby_place` + `aclose`. Sin red."""
+    """Provider fake: `reverse_geocode` + `nearby_place` + `aclose`. Sin red. `name` lo exige el
+    alta en el catálogo (`geo_places.provider`)."""
+
+    name = "fake"
 
     def __init__(
         self, *, address: GeocodeResult | None = None, poi: PlaceResult | None = None
@@ -100,6 +104,35 @@ def _use_fake(monkeypatch: pytest.MonkeyPatch, provider: object) -> None:
     monkeypatch.setattr(geo_places, "build_provider_from_env", lambda *a, **k: provider)
 
 
+def _catalog_rows() -> list[dict[str, Any]]:
+    with connection() as c:
+        return [
+            dict(r)
+            for r in c.execute(
+                text(
+                    "SELECT id, name, provider, provider_place_id, source FROM geo_places "
+                    "ORDER BY id"
+                )
+            )
+            .mappings()
+            .all()
+        ]
+
+
+def _consolidated_place(tid: int) -> int | None:
+    """El `place_id` de la consolidada linkeada a la cruda `tid` (None si no hay link)."""
+    with connection() as c:
+        row = c.execute(
+            text(
+                "SELECT c.place_id FROM mod_finance_consolidated c "
+                "JOIN mod_finance_transaction_links l ON l.consolidated_id = c.id "
+                "WHERE l.transaction_id = :tid"
+            ),
+            {"tid": tid},
+        ).first()
+    return None if row is None else (int(row[0]) if row[0] is not None else None)
+
+
 @pytest.mark.asyncio
 async def test_resolves_with_geo_priority(monkeypatch: pytest.MonkeyPatch) -> None:
     tid = _seed_tx(place="rappi")
@@ -120,6 +153,61 @@ async def test_resolves_with_geo_priority(monkeypatch: pytest.MonkeyPatch) -> No
     assert geo["in_transit"] is False
     assert geo["matches_extracted"] is False  # "rappi" ≠ "juan valdez café"
     assert row["metadata"]["place_extracted"] == "rappi"  # original preservado, no se pierde
+    # El POI quedó en el catálogo (source='gps') y referenciado desde el metadata.
+    places = _catalog_rows()
+    assert [(p["name"], p["provider"], p["provider_place_id"], p["source"]) for p in places] == [
+        ("Juan Valdez Café", "fake", "P1", "gps")
+    ]
+    assert geo["catalog_place_id"] == places[0]["id"]
+    assert geo["provider"] == "fake"
+
+
+@pytest.mark.asyncio
+async def test_place_propagates_to_existing_consolidated(monkeypatch: pytest.MonkeyPatch) -> None:
+    tid = _seed_tx(place="rappi")
+    run_consolidation(1)  # la consolidada (y su link) existe ANTES de resolver geo
+    assert _consolidated_place(tid) is None
+    _seed_ping(speed_mps=0.2)
+    _use_fake(monkeypatch, _FakeProvider(poi=_poi()))
+
+    await resolve_transaction_places(1)
+
+    places = _catalog_rows()
+    assert len(places) == 1
+    assert _consolidated_place(tid) == places[0]["id"]  # efecto inmediato vía links
+
+
+@pytest.mark.asyncio
+async def test_unconsolidated_tx_gets_place_on_next_consolidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tid = _seed_tx(place="rappi")  # cruda SIN consolidar (el batch todavía no corrió)
+    _seed_ping(speed_mps=0.2)
+    _use_fake(monkeypatch, _FakeProvider(poi=_poi()))
+
+    await resolve_transaction_places(1)
+    assert _consolidated_place(tid) is None  # sin link aún: nada que estampar
+
+    run_consolidation(1)  # la consolidación lee metadata.geo.catalog_place_id (sin red)
+    places = _catalog_rows()
+    assert _consolidated_place(tid) == places[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_same_poi_collapses_for_many_transactions(monkeypatch: pytest.MonkeyPatch) -> None:
+    a = _seed_tx(place="rappi")
+    b = _seed_tx(place="éxito")
+    run_consolidation(1)
+    _seed_ping(speed_mps=0.2)
+    _use_fake(monkeypatch, _FakeProvider(poi=_poi()))
+
+    stats = await resolve_transaction_places(1)
+
+    assert stats.resolved == 2
+    places = _catalog_rows()
+    assert len(places) == 1  # mismo provider_place_id → UNA fila del catálogo
+    assert _consolidated_place(a) == places[0]["id"]
+    assert _consolidated_place(b) == places[0]["id"]
 
 
 @pytest.mark.asyncio

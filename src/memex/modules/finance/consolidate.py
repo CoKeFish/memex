@@ -13,6 +13,11 @@ Calca `calendar/consolidate.py` pero SIN ecos de proveedor, conflictos ni enriqu
 
 NO fusiona ni borra crudas: `mod_finance_transactions` es append/coexistencia; la consolidación es
 una capa de proyección por encima (la que lee el dashboard).
+
+Lugar (`place_id` → `geo_places`): determinista y SIN red — solo propaga el `catalog_place_id`
+que el seam GPS (`memex-finance geo`) dejó en `metadata.geo` de las crudas. Jerarquía: el GPS
+pisa (COALESCE en el UPDATE); la asociación manual (`memex finance set-place`) vive solo en la
+consolidada y sobrevive mientras las crudas no aporten lugar.
 """
 
 from __future__ import annotations
@@ -51,6 +56,7 @@ class ConsTx:
     description: str
     recency: datetime  # created_at (desempate por más reciente)
     counterparty_identity_id: int | None = None
+    place_catalog_id: int | None = None  # geo_places: lo dejó el seam GPS en metadata.geo
 
 
 @dataclass(frozen=True)
@@ -68,6 +74,7 @@ class ConsolidatedFields:
     description: str
     winner_transaction_id: int
     counterparty_identity_id: int | None = None
+    place_catalog_id: int | None = None
 
 
 # --- PURO: agrupamiento + elección del ganador ------------------------------------- #
@@ -142,6 +149,9 @@ def merge_fields(members: Sequence[ConsTx]) -> ConsolidatedFields:
     # La identidad del grupo es única (el veto del dedup impide agrupar identidades distintas): la
     # del ganador, o la primera no-nula del resto si el ganador no resolvió.
     counterparty_identity_id = winner.counterparty_identity_id
+    # El lugar del catálogo es por-grupo (las crudas son EL MISMO pago): el del ganador o el
+    # primero no-nulo del resto (el seam GPS pudo enriquecer cualquier cruda del grupo).
+    place_catalog_id = winner.place_catalog_id
 
     for m in ordered:
         if not counterparty.strip() and m.counterparty.strip():
@@ -152,6 +162,8 @@ def merge_fields(members: Sequence[ConsTx]) -> ConsolidatedFields:
             description = m.description
         if counterparty_identity_id is None and m.counterparty_identity_id is not None:
             counterparty_identity_id = m.counterparty_identity_id
+        if place_catalog_id is None and m.place_catalog_id is not None:
+            place_catalog_id = m.place_catalog_id
         # Adoptar una fecha más precisa si la del ganador no es la mejor (ordered ya está por
         # precisión dentro de la misma completitud, pero el ganador pudo ganar por completitud con
         # una fecha inferida; tomamos la mejor fecha del grupo).
@@ -170,6 +182,7 @@ def merge_fields(members: Sequence[ConsTx]) -> ConsolidatedFields:
         description=description,
         winner_transaction_id=winner.transaction_id,
         counterparty_identity_id=counterparty_identity_id,
+        place_catalog_id=place_catalog_id,
     )
 
 
@@ -196,7 +209,8 @@ def _load_transactions(
                 f"""
                 SELECT id, direction, amount, currency, category, counterparty,
                        counterparty_identity_id, place, occurred_at, occurred_at_precision,
-                       description, created_at
+                       description, created_at,
+                       (metadata->'geo'->>'catalog_place_id')::BIGINT AS place_catalog_id
                 FROM mod_finance_transactions
                 WHERE user_id = :uid{scope}
                 ORDER BY id
@@ -224,6 +238,9 @@ def _load_transactions(
                 int(r["counterparty_identity_id"])
                 if r["counterparty_identity_id"] is not None
                 else None
+            ),
+            place_catalog_id=(
+                int(r["place_catalog_id"]) if r["place_catalog_id"] is not None else None
             ),
         )
         for r in rows
@@ -271,6 +288,7 @@ def _write_consolidated(
         "precision": fields.precision,
         "description": fields.description,
         "winner": fields.winner_transaction_id,
+        "place_catalog": fields.place_catalog_id,
     }
     if cons_id is None:
         return int(
@@ -280,16 +298,20 @@ def _write_consolidated(
                     INSERT INTO mod_finance_consolidated
                       (user_id, direction, amount, currency, category, counterparty,
                        counterparty_identity_id, place, occurred_at, occurred_at_precision,
-                       description, winner_transaction_id)
+                       description, winner_transaction_id, place_id)
                     VALUES
                       (:uid, :direction, :amount, :currency, :category, :counterparty,
-                       :identity_id, :place, :occurred_at, :precision, :description, :winner)
+                       :identity_id, :place, :occurred_at, :precision, :description, :winner,
+                       :place_catalog)
                     RETURNING id
                     """
                 ),
                 params,
             ).scalar_one()
         )
+    # `place_id` con COALESCE: el GPS de las crudas (la fuente más confiable) gana cuando aporta;
+    # si las crudas no traen lugar, se conserva el de la fila (la asociación manual sobrevive a
+    # las re-consolidaciones).
     conn.execute(
         text(
             """
@@ -297,7 +319,8 @@ def _write_consolidated(
               direction = :direction, amount = :amount, currency = :currency, category = :category,
               counterparty = :counterparty, counterparty_identity_id = :identity_id,
               place = :place, occurred_at = :occurred_at, occurred_at_precision = :precision,
-              description = :description, winner_transaction_id = :winner, deleted = FALSE,
+              description = :description, winner_transaction_id = :winner,
+              place_id = COALESCE(:place_catalog, place_id), deleted = FALSE,
               updated_at = NOW()
             WHERE id = :id
             """
@@ -365,6 +388,22 @@ def _consolidate_group(
                 text(
                     "UPDATE mod_finance_transaction_links SET consolidated_id = :keep "
                     "WHERE consolidated_id = ANY(:others)"
+                ),
+                {"keep": cons_id, "others": others},
+            )
+            # El lugar asociado MANUALMENTE vive solo en la consolidada: si el keep no tiene y un
+            # tombstoneado sí, heredarlo antes de tombstonear (el reescrito de abajo lo conserva
+            # vía COALESCE; el GPS de las crudas, si aporta, lo pisa igual).
+            conn.execute(
+                text(
+                    """
+                    UPDATE mod_finance_consolidated SET place_id = (
+                        SELECT place_id FROM mod_finance_consolidated
+                        WHERE id = ANY(:others) AND place_id IS NOT NULL
+                        ORDER BY id LIMIT 1
+                    )
+                    WHERE id = :keep AND place_id IS NULL
+                    """
                 ),
                 {"keep": cons_id, "others": others},
             )

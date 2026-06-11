@@ -1,8 +1,8 @@
 """Catálogo de LUGARES del usuario (`geo_places`) + resolución texto→lugar con caché.
 
-Este módulo es el SINGLE-WRITER del catálogo. Los dominios (calendario hoy; pagos a futuro)
-referencian lugares por FK — geo no conoce dominios por nombre (patrón identidades): el lugar es
-dato canónico transversal y la correlación rica la teje el grafo de relaciones.
+Este módulo es el SINGLE-WRITER del catálogo. Los dominios (calendario y finanzas) referencian
+lugares por FK — geo no conoce dominios por nombre (patrón identidades): el lugar es dato
+canónico transversal y la correlación rica la teje el grafo de relaciones.
 
 Dedupe en dos niveles (pedido del dueño):
 - `geo_place_resolutions` cachea cada TEXTO normalizado ya resuelto (mismo texto = 0 llamadas a
@@ -107,6 +107,76 @@ def _cache_resolution(
     )
 
 
+def _upsert_place(
+    conn: Connection,
+    user_id: int,
+    *,
+    name: str,
+    formatted_address: str,
+    lat: float,
+    lng: float,
+    provider: str,
+    provider_place_id: str | None,
+    source: str,
+) -> tuple[int, bool]:
+    """Upsert de UNA fila del catálogo → `(place_id, created)`. Con `provider_place_id` colapsa
+    por el UNIQUE parcial; sin él, fila suelta. Lo comparten `resolve_place` (texto geocodificado,
+    source='geocode') y `upsert_place_from_poi` (POI de un ping GPS, source='gps')."""
+    if provider_place_id is not None:
+        # `DO UPDATE` no-op deliberado: garantiza RETURNING bajo concurrencia (scheduler y
+        # «Sincronizar ahora» pueden consolidar a la vez). En colisión NO se pisa nada: ni el
+        # name (el primer texto que lo resolvió gana) ni address/coords/source (estables).
+        row = conn.execute(
+            text(
+                """
+                INSERT INTO geo_places
+                  (user_id, name, formatted_address, lat, lng, provider, provider_place_id,
+                   source)
+                VALUES (:uid, :name, :addr, :lat, :lng, :prov, :pid, :source)
+                ON CONFLICT (user_id, provider, provider_place_id)
+                  WHERE provider_place_id IS NOT NULL
+                  DO UPDATE SET provider_place_id = EXCLUDED.provider_place_id
+                RETURNING id, (xmax = 0) AS created
+                """
+            ),
+            {
+                "uid": user_id,
+                "name": name,
+                "addr": formatted_address,
+                "lat": lat,
+                "lng": lng,
+                "prov": provider,
+                "pid": provider_place_id,
+                "source": source,
+            },
+        ).first()
+        assert row is not None  # RETURNING siempre devuelve con el DO UPDATE no-op
+        return int(row[0]), bool(row[1])
+    # Proveedor sin id estable → fila suelta (no colapsa grafías; documentado).
+    place_id = int(
+        conn.execute(
+            text(
+                """
+                INSERT INTO geo_places
+                  (user_id, name, formatted_address, lat, lng, provider, source)
+                VALUES (:uid, :name, :addr, :lat, :lng, :prov, :source)
+                RETURNING id
+                """
+            ),
+            {
+                "uid": user_id,
+                "name": name,
+                "addr": formatted_address,
+                "lat": lat,
+                "lng": lng,
+                "prov": provider,
+                "source": source,
+            },
+        ).scalar_one()
+    )
+    return place_id, True
+
+
 async def resolve_place(
     conn: Connection, user_id: int, query_text: str, provider: GeoProvider
 ) -> int | None:
@@ -134,59 +204,17 @@ async def resolve_place(
         return None
 
     name = query_text.strip()
-    if result.provider_place_id is not None:
-        # `DO UPDATE` no-op deliberado: garantiza RETURNING bajo concurrencia (scheduler y
-        # «Sincronizar ahora» pueden consolidar a la vez). En colisión NO se pisa nada: ni el
-        # name (el primer texto que lo resolvió gana) ni address/coords (estables).
-        row = conn.execute(
-            text(
-                """
-                INSERT INTO geo_places
-                  (user_id, name, formatted_address, lat, lng, provider, provider_place_id,
-                   source)
-                VALUES (:uid, :name, :addr, :lat, :lng, :prov, :pid, 'geocode')
-                ON CONFLICT (user_id, provider, provider_place_id)
-                  WHERE provider_place_id IS NOT NULL
-                  DO UPDATE SET provider_place_id = EXCLUDED.provider_place_id
-                RETURNING id, (xmax = 0) AS created
-                """
-            ),
-            {
-                "uid": user_id,
-                "name": name,
-                "addr": result.formatted_address,
-                "lat": result.point.lat,
-                "lng": result.point.lng,
-                "prov": provider.name,
-                "pid": result.provider_place_id,
-            },
-        ).first()
-        assert row is not None  # RETURNING siempre devuelve con el DO UPDATE no-op
-        place_id, created = int(row[0]), bool(row[1])
-    else:
-        # Proveedor sin id estable → fila suelta por texto (no colapsa grafías; documentado).
-        place_id = int(
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO geo_places
-                      (user_id, name, formatted_address, lat, lng, provider, source)
-                    VALUES (:uid, :name, :addr, :lat, :lng, :prov, 'geocode')
-                    RETURNING id
-                    """
-                ),
-                {
-                    "uid": user_id,
-                    "name": name,
-                    "addr": result.formatted_address,
-                    "lat": result.point.lat,
-                    "lng": result.point.lng,
-                    "prov": provider.name,
-                },
-            ).scalar_one()
-        )
-        created = True
-
+    place_id, created = _upsert_place(
+        conn,
+        user_id,
+        name=name,
+        formatted_address=result.formatted_address,
+        lat=result.point.lat,
+        lng=result.point.lng,
+        provider=provider.name,
+        provider_place_id=result.provider_place_id,
+        source="geocode",
+    )
     if created:
         _log.info("geo.places.created", user_id=user_id, place_id=place_id, name=name)
     _cache_resolution(conn, user_id, query_norm, place_id)
@@ -194,24 +222,64 @@ async def resolve_place(
     return place_id
 
 
+def upsert_place_from_poi(
+    conn: Connection,
+    user_id: int,
+    *,
+    name: str,
+    formatted_address: str,
+    lat: float,
+    lng: float,
+    provider: str,
+    provider_place_id: str | None,
+    source: str = "gps",
+) -> int:
+    """Da de alta (o colapsa) en el catálogo un lugar que YA viene resuelto a coordenadas/POI —
+    el reverse geocoding de un ping GPS (seam de finanzas). Sin red y sin tocar
+    `geo_place_resolutions` (no hay texto de búsqueda: la identidad es el `provider_place_id`
+    cuando el POI lo trae; sin él, fila suelta). `source` distingue cómo nació la fila
+    ('gps' vs 'geocode'); la columna no tiene CHECK a propósito."""
+    place_id, created = _upsert_place(
+        conn,
+        user_id,
+        name=name,
+        formatted_address=formatted_address,
+        lat=lat,
+        lng=lng,
+        provider=provider,
+        provider_place_id=provider_place_id,
+        source=source,
+    )
+    if created:
+        _log.info(
+            "geo.places.created", user_id=user_id, place_id=place_id, name=name, source=source
+        )
+    return place_id
+
+
 def list_places(conn: Connection, user_id: int, *, limit: int = 100) -> list[dict[str, Any]]:
-    """Inventario del catálogo con cuántos eventos de calendario referencian cada lugar.
+    """Inventario del catálogo con cuántas referencias entrantes tiene cada lugar por dominio:
+    eventos de calendario (`event_count`) y pagos consolidados (`payment_count`).
 
     La lectura cross-tabla es deliberada (contar referencias entrantes es inventario, no
-    acoplamiento): geo sigue sin escribir ni conocer la semántica del dominio."""
+    acoplamiento): geo sigue sin escribir ni conocer la semántica del dominio. `COUNT(DISTINCT)`
+    porque los dos LEFT JOIN multiplican filas entre sí (eventos x pagos del mismo lugar)."""
     rows = (
         conn.execute(
             text(
                 """
                 SELECT p.id, p.name, p.formatted_address, p.lat, p.lng, p.provider,
                        p.provider_place_id, p.source, p.created_at,
-                       COUNT(c.id) AS event_count
+                       COUNT(DISTINCT c.id) AS event_count,
+                       COUNT(DISTINCT f.id) AS payment_count
                 FROM geo_places p
                 LEFT JOIN mod_calendar_consolidated c
                        ON c.place_id = p.id AND c.user_id = p.user_id AND NOT c.deleted
+                LEFT JOIN mod_finance_consolidated f
+                       ON f.place_id = p.id AND f.user_id = p.user_id AND NOT f.deleted
                 WHERE p.user_id = :uid
                 GROUP BY p.id
-                ORDER BY event_count DESC, p.id
+                ORDER BY COUNT(DISTINCT c.id) + COUNT(DISTINCT f.id) DESC, p.id
                 LIMIT :limit
                 """
             ),
@@ -232,6 +300,7 @@ def list_places(conn: Connection, user_id: int, *, limit: int = 100) -> list[dic
             "source": r["source"],
             "created_at": r["created_at"],
             "event_count": int(r["event_count"]),
+            "payment_count": int(r["payment_count"]),
         }
         for r in rows
     ]

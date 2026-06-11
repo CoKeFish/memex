@@ -6,7 +6,8 @@ Subcomandos:
              explícito (`--from-point`, ejercita el seam `LocationSource`) o de una
              dirección de origen (`--from`), con `--depart` opcional para una hora futura.
   places   — el CATÁLOGO de lugares del usuario (`geo_places`) con cuántos eventos de
-             calendario referencian cada uno. Solo DB: no necesita key de Maps.
+             calendario y pagos consolidados referencian cada uno. Solo DB: no necesita
+             key de Maps.
 
 Server-side: `geocode`/`trip`/`place` hablan con el proveedor vía httpx (key por env var,
 Doppler → correr con `doppler run -- memex-geo ...`); `places` habla con la DB de memex.
@@ -152,7 +153,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     places_p = sub.add_parser(
         "places",
-        help="Catálogo de lugares del usuario (geo_places) + cuántos eventos los referencian.",
+        help="Catálogo de lugares del usuario (geo_places) + cuántos eventos/pagos lo refieren.",
     )
     places_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     places_p.add_argument("--limit", type=int, default=50, help="Máximo de lugares (default 50).")
@@ -329,7 +330,7 @@ def _cmd_places(args: argparse.Namespace) -> int:
         addr = f" — {p['formatted_address']}" if p["formatted_address"] else ""
         _say(
             f"  [{p['id']}] {p['name']}{addr} ({p['lat']:.5f}, {p['lng']:.5f}) "
-            f"· {p['event_count']} eventos · {p['provider']}"
+            f"· {p['event_count']} eventos · {p['payment_count']} pagos · {p['provider']}"
         )
     _say("")
     return 0

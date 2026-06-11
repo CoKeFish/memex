@@ -86,6 +86,8 @@ def test_register_creates_consolidated(conn: Connection) -> None:
         {"t": int(row["id"])},
     ).scalar_one()
     assert cons is not None
+    # El id consolidado viaja en la respuesta (el agente encadena con `set-place --id`).
+    assert row["consolidated_id"] == int(cons)
     assert list_edges(conn, 1, producer="event") == []  # sin evento → ninguna arista de evento
 
 

@@ -13,7 +13,7 @@ from sqlalchemy import text
 
 from memex.db import connection
 from memex.geo.client import GeocodeResult, GeoNotFoundError, GeoPoint
-from memex.geo.places import get_place, list_places, resolve_place
+from memex.geo.places import get_place, list_places, resolve_place, upsert_place_from_poi
 
 _PT = GeoPoint(lat=4.6286, lng=-74.0650)
 
@@ -190,4 +190,94 @@ async def test_list_places_counts_calendar_refs(seed_user2: int) -> None:
     assert [(i["name"], i["event_count"]) for i in items] == [
         ("Aula 301", 2),  # el tombstoneado no cuenta
         ("Consultorio", 1),
+    ]
+
+
+# ----- alta desde POI (seam GPS de finanzas) -------------------------------------- #
+
+
+def _upsert_poi(*, name: str = "Juan Valdez Café", pid: str | None = "PID-1") -> int:
+    with connection() as c:
+        return upsert_place_from_poi(
+            c,
+            1,
+            name=name,
+            formatted_address="Cra 7 #40-62, Bogotá",
+            lat=_PT.lat,
+            lng=_PT.lng,
+            provider="fake",
+            provider_place_id=pid,
+        )
+
+
+def test_upsert_from_poi_creates_with_gps_source() -> None:
+    place_id = _upsert_poi()
+    with connection() as c:
+        place = get_place(c, 1, place_id)
+    assert place is not None
+    assert place.name == "Juan Valdez Café"
+    assert place.source == "gps"  # cómo nació la fila (≠ 'geocode')
+    assert place.provider_place_id == "PID-1"
+    assert _resolutions() == []  # sin texto de búsqueda no se toca el caché por texto
+
+
+@pytest.mark.asyncio
+async def test_upsert_from_poi_collapses_with_geocoded_place() -> None:
+    fake = FakeProvider({"Juan Valdez Cra 7": _result(pid="PID-1")})
+    geocoded = await _resolve(fake, "Juan Valdez Cra 7")
+
+    poi = _upsert_poi(name="Otro nombre del POI", pid="PID-1")
+
+    assert poi == geocoded  # mismo provider_place_id = UN lugar
+    assert _places_count() == 1
+    with connection() as c:
+        place = get_place(c, 1, poi)
+    assert place is not None
+    assert place.name == "Juan Valdez Cra 7"  # en colisión nada se pisa (ni name ni source)
+    assert place.source == "geocode"
+
+
+def test_upsert_from_poi_without_pid_creates_loose_rows() -> None:
+    a = _upsert_poi(pid=None)
+    b = _upsert_poi(pid=None)
+    assert a != b  # sin id estable no hay colapso (documentado)
+    assert _places_count() == 2
+
+
+def _seed_payment(place_id: int | None, *, deleted: bool = False, user_id: int = 1) -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_finance_consolidated "
+                "(user_id, direction, amount, currency, occurred_at, place_id, deleted) "
+                "VALUES (:u, 'egreso', 100, 'COP', TIMESTAMPTZ '2026-06-08 14:00+00', :p, :d)"
+            ),
+            {"u": user_id, "p": place_id, "d": deleted},
+        )
+
+
+@pytest.mark.asyncio
+async def test_list_places_counts_finance_refs() -> None:
+    fake = FakeProvider({"Aula 301": _result(pid="P1")})
+    aula = await _resolve(fake, "Aula 301")
+    assert aula is not None
+
+    with connection() as c:
+        for i in range(2):  # dos eventos del mismo lugar (cruza con los pagos: COUNT DISTINCT)
+            c.execute(
+                text(
+                    "INSERT INTO mod_calendar_consolidated (user_id, title, starts_on, place_id) "
+                    "VALUES (1, :t, DATE '2026-07-01', :p)"
+                ),
+                {"t": f"Evento {i}", "p": aula},
+            )
+    _seed_payment(aula)
+    _seed_payment(aula)
+    _seed_payment(aula)
+    _seed_payment(aula, deleted=True)  # el tombstoneado no cuenta
+
+    with connection() as c:
+        items = list_places(c, 1)
+    assert [(i["name"], i["event_count"], i["payment_count"]) for i in items] == [
+        ("Aula 301", 2, 3)
     ]

@@ -30,6 +30,7 @@ def _cons(
     category: str = "otros",
     precision: str = "datetime",
     occurred_at: datetime | None = None,
+    place_catalog_id: int | None = None,
 ) -> ConsTx:
     return ConsTx(
         transaction_id=tid,
@@ -43,6 +44,7 @@ def _cons(
         precision=precision,
         description=description,
         recency=datetime(2026, 6, 3, tzinfo=UTC),
+        place_catalog_id=place_catalog_id,
     )
 
 
@@ -76,6 +78,14 @@ def test_merge_fields_fill_only() -> None:
     assert merged.winner_transaction_id == 3
     assert merged.counterparty == "Rappi"
     assert merged.place == "Calle 1"  # rellenado desde el otro miembro
+
+
+def test_merge_fields_place_catalog_from_any_member() -> None:
+    winner = _cons(3, counterparty="Rappi", description="compra", category="comida")
+    member = _cons(1, place_catalog_id=7)  # el seam GPS enriqueció OTRA cruda del grupo
+    merged = merge_fields([winner, member])
+    assert merged.winner_transaction_id == 3
+    assert merged.place_catalog_id == 7
 
 
 def test_merge_fields_adopts_better_date() -> None:
@@ -189,3 +199,97 @@ def test_pending_pair_keeps_pending_outcome() -> None:
             ).all()
         }
     assert outcomes == {"pending"}  # no se les fija outcome mientras haya un par 'candidate'
+
+
+# ----- lugar (place_id → geo_places) ---------------------------------------------- #
+
+
+def _seed_place(name: str = "Juan Valdez Café") -> int:
+    with connection() as c:
+        return int(
+            c.execute(
+                text(
+                    "INSERT INTO geo_places "
+                    "(user_id, name, formatted_address, lat, lng, provider, provider_place_id, "
+                    " source) "
+                    "VALUES (1, :n, 'Cra 7 #1-2', 4.65, -74.05, 'fake', :n, 'gps') RETURNING id"
+                ),
+                {"n": name},
+            ).scalar_one()
+        )
+
+
+def _mark_gps_place(tid: int, place_id: int) -> None:
+    """Estampa `metadata.geo.catalog_place_id` como lo deja el seam GPS."""
+    with connection() as c:
+        c.execute(
+            text(
+                "UPDATE mod_finance_transactions SET metadata = "
+                "jsonb_build_object('geo', jsonb_build_object('catalog_place_id', :p)) "
+                "WHERE id = :id"
+            ),
+            {"p": place_id, "id": tid},
+        )
+
+
+def _consolidated_place_ids() -> list[int | None]:
+    with connection() as c:
+        return [
+            int(r[0]) if r[0] is not None else None
+            for r in c.execute(
+                text("SELECT place_id FROM mod_finance_consolidated WHERE NOT deleted ORDER BY id")
+            ).all()
+        ]
+
+
+def test_gps_metadata_populates_consolidated_place() -> None:
+    tid = _seed_tx()
+    pid = _seed_place()
+    _mark_gps_place(tid, pid)
+    run_consolidation(1)
+    assert _consolidated_place_ids() == [pid]
+
+
+def test_manual_place_survives_reconsolidation() -> None:
+    a = _seed_tx()
+    run_consolidation(1)
+    pid = _seed_place()
+    with connection() as c:  # asociación manual (lo que hace `memex finance set-place`)
+        c.execute(text("UPDATE mod_finance_consolidated SET place_id = :p"), {"p": pid})
+    b = _seed_tx()
+    _seed_pair(a, b, status="confirmed")  # membresía cambia → reescritura REAL del consolidado
+    run_consolidation(1)
+    assert _consolidated_place_ids() == [pid]  # las crudas no aportan lugar → el manual queda
+
+
+def test_gps_overrides_manual_on_reconsolidation() -> None:
+    tid = _seed_tx()
+    run_consolidation(1)
+    manual = _seed_place("Manual")
+    with connection() as c:
+        c.execute(text("UPDATE mod_finance_consolidated SET place_id = :p"), {"p": manual})
+    gps = _seed_place("GPS")
+    _mark_gps_place(tid, gps)
+    # La reescritura solo pasa si la membresía cambió: confirmar un par con una cruda nueva.
+    other = _seed_tx()
+    _seed_pair(tid, other, status="confirmed")
+    run_consolidation(1)
+    assert _consolidated_place_ids() == [gps]  # el ping es la fuente más fiable: pisa el manual
+
+
+def test_merge_inherits_place_from_tombstoned() -> None:
+    a, b = _seed_tx(), _seed_tx()
+    run_consolidation(1)  # dos consolidadas separadas
+    pid = _seed_place()
+    with connection() as c:  # el lugar manual vive en la consolidada que va a ser tombstoneada
+        c.execute(
+            text(
+                "UPDATE mod_finance_consolidated SET place_id = :p "
+                "WHERE id = (SELECT max(id) FROM mod_finance_consolidated)"
+            ),
+            {"p": pid},
+        )
+    _seed_pair(a, b, status="confirmed")  # FASE 2 confirmó: los grupos se fusionan
+    stats = run_consolidation(1)
+    assert stats.merges == 1
+    assert _consolidated_place_ids() == [pid]  # el keep heredó el lugar antes del tombstone

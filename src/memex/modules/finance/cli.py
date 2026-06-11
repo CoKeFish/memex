@@ -2,6 +2,8 @@
 
 Subcomandos:
   register     — registra una transacción determinista (entrada por agente, sin LLM).
+  show         — detalle de un pago consolidado, con el lugar resuelto del catálogo.
+  set-place    — asocia un lugar del catálogo (`geo_places`) a un pago consolidado.
   dedup        — FASE 2: resuelve con LLM los pares candidatos (confirmar/rechazar).
   consolidate  — reconstruye la proyección consolidada (grupos + ganador por completitud).
   geo          — resuelve el lugar GPS (dónde estuviste) de transacciones con hora precisa.
@@ -29,11 +31,13 @@ from dotenv import load_dotenv
 from sqlalchemy.engine import Connection
 
 from memex.db import connection
-from memex.geo import GeoConfigError, GeoError
+from memex.geo import GeoConfigError, GeoError, build_provider_from_env
+from memex.geo import places as place_catalog
 from memex.logging import get_logger, setup_logging
 from memex.modules.finance.consolidate import run_consolidation
 from memex.modules.finance.dedup_llm import run_dedup_phase2
 from memex.modules.finance.geo_places import resolve_transaction_places
+from memex.modules.finance.manual import set_place, show_transaction
 from memex.modules.finance.module import register
 
 
@@ -72,6 +76,8 @@ _HELP = """memex-finance — finanzas: transacciones + dedup + consolidación.
 
 Comandos:
   register     registra una transacción; asegura su consolidado y teje aristas en el acto
+  show         detalle de un pago consolidado (incluye el lugar resuelto del catálogo)
+  set-place    asocia un lugar del catálogo a un pago consolidado ("este pago fue en X")
   dedup        FASE 2 de dedup con LLM (mantenimiento)
   consolidate  reconstruye la proyección consolidada (reconciliador/mantenimiento)
   geo          resuelve el lugar GPS de transacciones con hora precisa (on-demand, sin LLM)
@@ -80,6 +86,12 @@ Comandos:
 register (entrada del agente):
   --amount <n> --currency <ISO4217> [--direction ingreso|egreso] [--category]
   [--counterparty "<comercio>"] [--place] [--occurred-at ISO] [--event <id>] [--json]
+
+show / set-place (sobre el pago CONSOLIDADO; register --json devuelve consolidated_id):
+  show      --id <n> [--json]
+  set-place --id <n> (--place-id <catálogo> | --text "<lugar>" | --clear) [--json]
+            --text geocodifica si el texto no está cacheado (gasta una llamada a Maps);
+            el counterparty NUNCA se geocodifica solo.
 
 Reglas:
   --event <id>  hechos del MISMO mensaje comparten el id (factura = gasto + comida)
@@ -140,6 +152,44 @@ def _build_parser() -> argparse.ArgumentParser:
         "--event", default=None, help="Id de correlación (hechos del mismo mensaje)."
     )
     reg_p.add_argument("--json", action="store_true", dest="as_json")
+
+    show_p = sub.add_parser(
+        "show", help="Detalle de un pago consolidado (incluye el lugar resuelto del catálogo)."
+    )
+    show_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    show_p.add_argument(
+        "--id",
+        type=int,
+        required=True,
+        help="Id del pago consolidado (register --json lo devuelve como consolidated_id).",
+    )
+    show_p.add_argument("--json", action="store_true", dest="as_json")
+
+    place_p = sub.add_parser(
+        "set-place",
+        help="Asocia un lugar del catálogo (geo_places) a un pago consolidado.",
+    )
+    place_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    place_p.add_argument(
+        "--id",
+        type=int,
+        required=True,
+        help="Id del pago consolidado (register --json lo devuelve como consolidated_id).",
+    )
+    how = place_p.add_mutually_exclusive_group(required=True)
+    how.add_argument(
+        "--place-id",
+        type=int,
+        default=None,
+        help="Lugar por id del catálogo (listalos con 'memex-geo places').",
+    )
+    how.add_argument(
+        "--text",
+        default=None,
+        help="Lugar por texto: se resuelve contra el catálogo (geocodifica si hace falta).",
+    )
+    how.add_argument("--clear", action="store_true", help="Quita la asociación de lugar del pago.")
+    place_p.add_argument("--json", action="store_true", dest="as_json")
 
     return parser
 
@@ -227,7 +277,93 @@ def _cmd_register(args: argparse.Namespace) -> int:
         _emit_json(row)
     else:
         cp = f" · {row['counterparty']}" if row["counterparty"] else ""
-        _say(f"registrada #{row['id']}: {row['direction']} {row['amount']} {row['currency']}{cp}")
+        _say(
+            f"registrada #{row['id']}: {row['direction']} {row['amount']} {row['currency']}{cp} "
+            f"(consolidado #{row['consolidated_id']})"
+        )
+    return 0
+
+
+def _print_detail(detail: dict[str, Any]) -> None:
+    """Bloque humano del pago consolidado (estilo `memex calendario show`)."""
+    _say(
+        f"\npago #{detail['id']}: {detail['direction']} {detail['amount']} "
+        f"{detail['currency']} · {detail['category']}"
+    )
+    if detail["counterparty"]:
+        _say(f"  contraparte:    {detail['counterparty']}")
+    if detail["place"]:
+        _say(f"  lugar (texto):  {detail['place']}")
+    if detail["place_id"] is not None:
+        addr = f" — {detail['place_address']}" if detail["place_address"] else ""
+        _say(f"  lugar resuelto: {detail['place_name']}{addr} (lugar #{detail['place_id']})")
+    _say(f"  cuándo:         {detail['occurred_at']} ({detail['occurred_at_precision']})")
+    if detail["description"]:
+        _say(f"  descripción:    {detail['description']}")
+    _say("")
+
+
+def _cmd_show(args: argparse.Namespace) -> int:
+    with connection() as conn:
+        detail = show_transaction(conn, args.user, args.id)
+    if detail is None:
+        _say(f"el pago consolidado #{args.id} no existe", err=True)
+        return 1
+    if args.as_json:
+        _emit_json(detail)
+    else:
+        _print_detail(detail)
+    return 0
+
+
+async def _set_place_by_text(
+    user_id: int, consolidated_id: int, query_text: str
+) -> dict[str, Any] | None:
+    """Valida el pago, resuelve el texto contra el catálogo (caché primero; geocodifica el miss) y
+    asocia. None = ZERO_RESULTS (sin lugar para ese texto). La validación va ANTES de geocodificar
+    para no gastar la llamada a Maps si el pago no existe."""
+    provider = build_provider_from_env()
+    try:
+        with connection() as conn:
+            if show_transaction(conn, user_id, consolidated_id) is None:
+                raise ValueError(f"el pago consolidado #{consolidated_id} no existe")
+            place_id = await place_catalog.resolve_place(conn, user_id, query_text, provider)
+            if place_id is None:
+                return None
+            return set_place(conn, user_id, consolidated_id, place_id)
+    finally:
+        await provider.aclose()
+
+
+def _cmd_set_place(args: argparse.Namespace) -> int:
+    try:
+        if args.text is not None:
+            try:
+                detail = asyncio.run(_set_place_by_text(args.user, args.id, args.text))
+            except GeoConfigError as e:  # subclase de GeoError → atrapar primero
+                _say(
+                    f"Config geo inválida: {e}. ¿Corriste con `doppler run -- memex-finance "
+                    "set-place`? ¿Está seteada GMAPS_API_KEY?",
+                    err=True,
+                )
+                return 1
+            except GeoError as e:
+                _say(f"Error del proveedor de mapas: {e}", err=True)
+                return 1
+            if detail is None:
+                _say(f"sin resultados para {args.text!r}: no se asoció lugar.", err=True)
+                return 1
+        else:
+            place_id = None if args.clear else args.place_id
+            with connection() as conn:
+                detail = set_place(conn, args.user, args.id, place_id)
+    except ValueError as e:
+        _say(str(e), err=True)
+        return 1
+    if args.as_json:
+        _emit_json(detail)
+    else:
+        _print_detail(detail)
     return 0
 
 
@@ -252,6 +388,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_geo(args)
         if args.cmd == "register":
             return _cmd_register(args)
+        if args.cmd == "show":
+            return _cmd_show(args)
+        if args.cmd == "set-place":
+            return _cmd_set_place(args)
         log.error("finance.cli.unknown_command", cmd=args.cmd)
         return 1
     except Exception as e:

@@ -19,6 +19,8 @@ interface FinanceTransactionApiRow {
   evidence: string
   source_inbox_ids: number[]
   created_at: string
+  place_name: string | null
+  place_address: string | null
 }
 
 interface FinanceTransactionApiList {
@@ -51,6 +53,8 @@ function toFinanceTransaction(r: FinanceTransactionApiRow): FinanceTransaction {
     evidence: r.evidence,
     sourceInboxIds: r.source_inbox_ids,
     createdAt: r.created_at,
+    placeName: r.place_name ?? null,
+    placeAddress: r.place_address ?? null,
   }
 }
 
