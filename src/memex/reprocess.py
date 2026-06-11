@@ -93,9 +93,14 @@ def select_targets(
         return [int(r[0]) for r in conn.execute(text(sql), params)]
 
 
-def _classify_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[str, int]:
-    """Clasifica (determinista) cada inbox. `force` re-clasifica (borra la fila previa)."""
+def _classify_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[str, Any]:
+    """Clasifica (determinista) cada inbox. `force` re-clasifica (borra la fila previa).
+
+    Paridad con el worker standalone (`classifier.run.end`): devuelve el desglose `by_tier`
+    (misma forma que sus stats) y emite `reprocess.classify.done` — así cada corrida de lote
+    también cuenta en /logs cuántos mensajes cayeron a cada tier, no solo el total."""
     classified = already = missing = 0
+    by_tier: dict[str, int] = {}
     with connection() as conn:
         for iid in inbox_ids:
             payload = conn.execute(
@@ -121,7 +126,16 @@ def _classify_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[s
                 {"u": user_id, "i": iid, "t": result.tier, "m": json.dumps(result.metadata)},
             )
             classified += 1
-    return {"classified": classified, "already": already, "missing": missing}
+            by_tier[result.tier] = by_tier.get(result.tier, 0) + 1
+    _log.info(
+        "reprocess.classify.done",
+        n=len(inbox_ids),
+        classified=classified,
+        already=already,
+        missing=missing,
+        **{f"tier_{tier}": count for tier, count in by_tier.items()},
+    )
+    return {"classified": classified, "already": already, "missing": missing, "by_tier": by_tier}
 
 
 async def _summarize_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[str, Any]:
