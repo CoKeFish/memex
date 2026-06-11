@@ -23,7 +23,7 @@ from sqlalchemy import text
 
 from memex.classifier.rules import classify
 from memex.db import connection
-from memex.logging import get_logger
+from memex.logging import bound_log_context, get_logger
 from memex.media_backfill import backfill_inbox_media
 from memex.modules.orchestrator import extract_inbox, run_extraction
 from memex.ocr.worker import run_ocr
@@ -181,7 +181,12 @@ async def _extract_targets(user_id: int, inbox_ids: list[int], force: bool) -> d
 async def reprocess(
     user_id: int, *, stages: list[str], targets: list[int], force: bool = False
 ) -> dict[str, Any]:
-    """Corre `stages` (en `STAGE_ORDER`) sobre `targets`. Devuelve el resultado por etapa."""
+    """Corre `stages` (en `STAGE_ORDER`) sobre `targets`. Devuelve el resultado por etapa.
+
+    Correlación: con UN solo target se bindea `inbox_id` a contextvars por el scope de la corrida
+    (los lotes de a 1 y el camino individual quedan filtrables por `/logs?inbox_id=`); con varios,
+    la atribución por mensaje la dan los eventos que llevan `inbox_id`/`inbox_ids` explícitos
+    (OCR por asset, unidades del orquestador)."""
     invalid = [s for s in stages if s not in VALID_STAGES]
     if invalid:
         raise ValueError(f"stages inválidas: {invalid}; válidas: {sorted(VALID_STAGES)}")
@@ -191,6 +196,18 @@ async def reprocess(
     if not targets:
         return out
 
+    with bound_log_context(inbox_id=targets[0] if len(targets) == 1 else None):
+        return await _run_stages(user_id, ordered, targets, force, per_stage, out)
+
+
+async def _run_stages(
+    user_id: int,
+    ordered: list[str],
+    targets: list[int],
+    force: bool,
+    per_stage: dict[str, Any],
+    out: dict[str, Any],
+) -> dict[str, Any]:
     for stage in ordered:
         try:
             if stage == "media":

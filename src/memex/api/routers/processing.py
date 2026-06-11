@@ -60,7 +60,7 @@ from memex.api.schemas import (
     WindowDefaultsPatch,
 )
 from memex.db import connection
-from memex.logging import get_logger
+from memex.logging import bound_log_context, get_logger
 from memex.processing import lots
 from memex.reprocess import STAGE_ORDER, reprocess, select_targets
 from memex.scheduler import runs
@@ -106,15 +106,20 @@ def _ordered_stages(stages: Sequence[str]) -> list[str]:
 async def _run_batch(
     user_id: int, run_id: int, stages: list[str], targets: list[int], force: bool
 ) -> None:
-    """Corre `reprocess()` y cierra la fila de `worker_runs` (ok/error). Corre en background."""
-    log = _log.bind(run_id=run_id, user_id=user_id)
-    try:
-        result = await reprocess(user_id, stages=stages, targets=targets, force=force)
-        runs.finish_run(run_id, status="ok", stats=result)
-        log.info("processing.run.done", targets=len(targets), stages=stages)
-    except Exception as e:  # best-effort: el error queda en la fila para el post-mortem
-        runs.finish_run(run_id, status="error", error=str(e))
-        log.error("processing.run.failed", error=str(e), exc_type=type(e).__name__)
+    """Corre `reprocess()` y cierra la fila de `worker_runs` (ok/error). Corre en background.
+
+    El run_id va por CONTEXTVARS (no `.bind()` local): todo lo que corre adentro — reprocess,
+    orquestador, módulos, llm.call — hereda la correlación en sus eventos, y `/logs?run_id=`
+    reconstruye la corrida entera. El bind corre DENTRO de la task (afecta solo su copia del
+    contexto)."""
+    with bound_log_context(run_id=str(run_id), user_id=user_id):
+        try:
+            result = await reprocess(user_id, stages=stages, targets=targets, force=force)
+            runs.finish_run(run_id, status="ok", stats=result)
+            _log.info("processing.run.done", targets=len(targets), stages=stages)
+        except Exception as e:  # best-effort: el error queda en la fila para el post-mortem
+            runs.finish_run(run_id, status="error", error=str(e))
+            _log.error("processing.run.failed", error=str(e), exc_type=type(e).__name__)
 
 
 def _run_row(r: RowMapping) -> ProcessingRunRow:
@@ -188,7 +193,7 @@ async def run_batch(body: ProcessingRunRequest, user_id: UserID) -> dict[str, An
     _log.info(
         "processing.run.enqueued",
         user_id=user_id,
-        run_id=run_id,
+        run_id=str(run_id),
         stages=ordered,
         targets=len(targets),
     )
@@ -364,7 +369,7 @@ async def _enqueue_advance(
     _log.info(
         "processing.lot.advance_enqueued",
         user_id=user_id,
-        run_id=run_id,
+        run_id=str(run_id),
         rest=rest,
         from_idx=lot.frontier,
         window_size=size,

@@ -19,10 +19,11 @@ import asyncio
 import json
 import sys
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from dotenv import load_dotenv
 
-from memex.logging import get_logger, setup_logging
+from memex.logging import bound_log_context, get_logger, setup_logging
 from memex.reprocess import ONLY_FILTERS, STAGE_ORDER, reprocess, select_targets
 
 
@@ -85,7 +86,16 @@ def main(argv: list[str] | None = None) -> int:
             only=args.only,
         )
     )
-    log.info("reprocess.cli.start", user=args.user, stages=args.stage, targets=len(targets))
+    # run_id de log (uuid, como las corridas de ingesta): correlaciona la corrida CLI entera en
+    # /logs?run_id= — el CLI no crea fila en worker_runs, así que el id es propio del log.
+    run_id = f"cli-{uuid4().hex[:12]}"
+    log.info(
+        "reprocess.cli.start",
+        user=args.user,
+        stages=args.stage,
+        targets=len(targets),
+        run_id=run_id,
+    )
 
     if args.dry_run:
         print(f"\ndry-run: {len(targets)} objetivo(s), etapas={args.stage}")
@@ -95,10 +105,12 @@ def main(argv: list[str] | None = None) -> int:
         print("\nsin objetivos para el filtro dado.\n")
         return 0
 
+    print(f"\nrun_id de logs: {run_id} (filtrá /logs?run_id={run_id})")
     try:
-        results = asyncio.run(
-            reprocess(args.user, stages=args.stage, targets=targets, force=args.force)
-        )
+        with bound_log_context(run_id=run_id, user_id=args.user):
+            results = asyncio.run(
+                reprocess(args.user, stages=args.stage, targets=targets, force=args.force)
+            )
     except Exception as e:  # error de args/validación; las etapas internas son best-effort
         log.exception("reprocess.cli.fatal", exc_type=type(e).__name__, exc_msg=str(e))
         print(f"\nERROR: {e}\n", file=sys.stderr)
