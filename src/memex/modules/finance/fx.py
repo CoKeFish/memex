@@ -20,6 +20,14 @@ import os
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 
+from memex.logging import get_logger
+
+_log = get_logger("memex.modules.finance.fx")
+
+#: Monedas ya avisadas como no-tabuladas — un warning POR PROCESO por moneda, no por comparación
+#: (el dedup compara muchos pares; una moneda nueva en los datos se repetiría en cada uno).
+_WARNED_UNKNOWN: set[str] = set()
+
 #: Env var con overrides de tasas (JSON `{moneda: USD_por_unidad}`).
 _FX_ENV = "MEMEX_FX_RATES"
 #: Env var con la banda de tolerancia relativa (fracción 0..1).
@@ -97,7 +105,9 @@ def convert(
 ) -> Decimal | None:
     """Convierte `amount` de `from_ccy` a `to_ccy` con la tabla (default global si `rates=None`).
     Misma moneda → el monto tal cual. Si alguna moneda no está tabulada → `None` (no se puede
-    comparar; el caller hace coexistir las filas en vez de adivinar)."""
+    comparar; el caller hace coexistir las filas en vez de adivinar) + warning
+    `finance.fx.unknown_currency` (una vez por proceso por moneda): sin él, una moneda nueva en
+    los datos degradaba el dedup cross-moneda en silencio."""
     src = from_ccy.strip().upper()
     dst = to_ccy.strip().upper()
     if src == dst:
@@ -106,6 +116,10 @@ def convert(
     rate_src = table.get(src)
     rate_dst = table.get(dst)
     if rate_src is None or rate_dst is None or rate_dst == 0:
+        for ccy, rate in ((src, rate_src), (dst, rate_dst)):
+            if rate is None and ccy not in _WARNED_UNKNOWN:
+                _WARNED_UNKNOWN.add(ccy)
+                _log.warning("finance.fx.unknown_currency", currency=ccy)
         return None
     return amount * rate_src / rate_dst
 

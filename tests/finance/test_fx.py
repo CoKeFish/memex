@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -11,6 +13,25 @@ from memex.modules.finance import fx
 
 def test_convert_same_currency_is_identity() -> None:
     assert fx.convert(Decimal("100"), "USD", "USD") == Decimal("100")
+
+
+def test_convert_unknown_currency_warns_once_per_currency(
+    sink_capture: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Moneda no tabulada → None con `finance.fx.unknown_currency` UNA vez por proceso por
+    moneda: sin rastro, una moneda nueva en los datos degradaba el dedup cross-moneda en
+    silencio (mismo molde que `llm.pricing.unknown_model`)."""
+    monkeypatch.setattr(fx, "_WARNED_UNKNOWN", set())  # aislar del resto de la suite
+    assert fx.convert(Decimal("100"), "USD", "ZZZ-FANTASMA") is None
+    assert fx.convert(Decimal("100"), "ZZZ-FANTASMA", "USD") is None  # 2ª vez: sin duplicar
+
+    records = []
+    while not sink_capture.empty():
+        records.append(sink_capture.get_nowait())
+    warned = [r for r in records if r["event"] == "finance.fx.unknown_currency"]
+    assert len(warned) == 1
+    assert warned[0]["level"] == "warning"
+    assert json.loads(warned[0]["fields"])["currency"] == "ZZZ-FANTASMA"
 
 
 def test_convert_known_pair() -> None:
