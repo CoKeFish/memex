@@ -7,7 +7,7 @@ coexistir ante respuesta no parseable, e idempotencia (solo toca `candidate`).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
@@ -50,7 +50,15 @@ class FakeLLM:
         )
 
 
-def _seed_event(title: str, *, start_time: time | None = None) -> int:
+#: Fecha FUTURA relativa: con `llm_on_past_events` apagado por default, un seed en fecha fija
+#: pasada dejaría los pares fuera del juzgado (gate de pasados) y estos tests no ejercitarían
+#: el LLM. El gate en sí se cubre en test_settings.py.
+_FUTURE = date.today() + timedelta(days=20)
+
+
+def _seed_event(
+    title: str, *, start_time: time | None = None, starts_on: date | None = None
+) -> int:
     with connection() as c:
         return int(
             c.execute(
@@ -59,7 +67,7 @@ def _seed_event(title: str, *, start_time: time | None = None) -> int:
                     "(user_id, source_inbox_ids, title, starts_on, start_time) "
                     "VALUES (1, ARRAY[]::bigint[], :t, :d, :st) RETURNING id"
                 ),
-                {"t": title, "d": date(2026, 6, 3), "st": start_time},
+                {"t": title, "d": starts_on or _FUTURE, "st": start_time},
             ).scalar_one()
         )
 

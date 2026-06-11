@@ -963,6 +963,19 @@ class CalendarSyncNowResponse(BaseModel):
     status: str
 
 
+class CalendarSettings(BaseModel):
+    """Perillas del módulo calendar (`module_settings.config`).
+
+    `llm_on_past_events`: ¿el dedup FASE 2 y el merge (pasos que GASTAN LLM) procesan eventos ya
+    vencidos? Default False — no gastar en lo que ya pasó; lo salteado se retoma al prenderla."""
+
+    llm_on_past_events: bool
+
+
+class CalendarSettingsPatch(BaseModel):
+    llm_on_past_events: bool
+
+
 # ---- Módulo identidades (tablas `mod_identidades_*`) --------------------------------------------
 
 

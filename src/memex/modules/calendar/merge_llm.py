@@ -26,6 +26,7 @@ from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.logging import get_logger
 from memex.modules.calendar.prompt import CALENDAR_MERGE_SYSTEM_PROMPT
+from memex.modules.calendar.settings import llm_on_past_events
 
 _log = get_logger("memex.modules.calendar.merge_llm")
 
@@ -120,15 +121,42 @@ class _ConsGroup:
     members: list[MergeMember]  # ganador primero
 
 
-def _load_groups(conn: Connection, user_id: int, limit: int) -> list[_ConsGroup]:
+#: Un consolidado está VENCIDO si su fecha efectiva de fin quedó antes de hoy.
+_CONS_IS_CURRENT_SQL = "COALESCE(ends_on, starts_on) >= CURRENT_DATE"
+
+
+def _count_past_groups(conn: Connection, user_id: int) -> int:
+    """Consolidados VENCIDOS multi-copia que el gate de `llm_on_past_events` deja sin enriquecer
+    (para el log: nada de saltos silenciosos)."""
+    return int(
+        conn.execute(
+            text(
+                f"""
+                SELECT count(*)
+                FROM mod_calendar_consolidated c
+                WHERE c.user_id = :uid AND NOT c.deleted AND NOT ({_CONS_IS_CURRENT_SQL})
+                  AND (SELECT count(*) FROM mod_calendar_event_links l
+                        WHERE l.consolidated_id = c.id) > 1
+                """
+            ),
+            {"uid": user_id},
+        ).scalar_one()
+    )
+
+
+def _load_groups(
+    conn: Connection, user_id: int, limit: int, *, include_past: bool
+) -> list[_ConsGroup]:
     """Consolidados NO borrados con >1 miembro, sus copias (ganador primero) y la firma guardada."""
+    past_filter = "" if include_past else f"AND {_CONS_IS_CURRENT_SQL}"
     cons_rows = (
         conn.execute(
             text(
-                """
+                f"""
                 SELECT id, winner_event_id, merge_signature
                 FROM mod_calendar_consolidated
                 WHERE user_id = :uid AND NOT deleted
+                  {past_filter}
                 ORDER BY id
                 LIMIT :limit
                 """
@@ -207,10 +235,18 @@ async def run_merge(
 ) -> MergeStats:
     """Enriquece con el LLM los consolidados multi-copia cuyo grupo cambió desde el último merge.
 
-    Idempotente vía `merge_signature`. Best-effort por consolidado. `client` inyectable."""
+    Idempotente vía `merge_signature`. Best-effort por consolidado. `client` inyectable.
+
+    Si `llm_on_past_events` está apagado (default), los consolidados VENCIDOS no se enriquecen
+    (sin gasto); se retoman si la perilla se prende."""
     stats = MergeStats()
     with connection() as conn:
-        groups = _load_groups(conn, user_id, limit)
+        include_past = llm_on_past_events(conn, user_id)
+        groups = _load_groups(conn, user_id, limit, include_past=include_past)
+        if not include_past:
+            skipped_past = _count_past_groups(conn, user_id)
+            if skipped_past:
+                _log.info("calendar.merge.past_skipped", user_id=user_id, groups=skipped_past)
     if not groups:
         _log.info("calendar.merge.empty", user_id=user_id)
         return stats

@@ -25,6 +25,7 @@ from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.logging import get_logger
 from memex.modules.calendar.prompt import CALENDAR_DEDUP_SYSTEM_PROMPT
+from memex.modules.calendar.settings import llm_on_past_events
 
 _log = get_logger("memex.modules.calendar.dedup_llm")
 
@@ -133,11 +134,41 @@ class _Candidate:
     b: PairEventView
 
 
-def _load_candidates(conn: Connection, user_id: int, limit: int) -> list[_Candidate]:
+#: Un par está VENCIDO si la fecha efectiva de fin de AMBOS eventos quedó antes de hoy.
+_PAIR_IS_CURRENT_SQL = (
+    "GREATEST(COALESCE(ea.ends_on, ea.starts_on), COALESCE(eb.ends_on, eb.starts_on)) "
+    ">= CURRENT_DATE"
+)
+
+
+def _count_past_candidates(conn: Connection, user_id: int) -> int:
+    """Pares `candidate` VENCIDOS que el gate de `llm_on_past_events` deja sin juzgar (para el
+    log: nada de saltos silenciosos)."""
+    return int(
+        conn.execute(
+            text(
+                f"""
+                SELECT count(*)
+                FROM mod_calendar_dedup_candidates c
+                JOIN mod_calendar_events ea ON ea.id = c.event_a_id
+                JOIN mod_calendar_events eb ON eb.id = c.event_b_id
+                WHERE c.user_id = :uid AND c.status = 'candidate'
+                  AND NOT ({_PAIR_IS_CURRENT_SQL})
+                """
+            ),
+            {"uid": user_id},
+        ).scalar_one()
+    )
+
+
+def _load_candidates(
+    conn: Connection, user_id: int, limit: int, *, include_past: bool
+) -> list[_Candidate]:
+    past_filter = "" if include_past else f"AND {_PAIR_IS_CURRENT_SQL}"
     rows = (
         conn.execute(
             text(
-                """
+                f"""
                 SELECT c.id AS pair_id, c.event_a_id, c.event_b_id,
                        ea.title AS a_title, ea.starts_on AS a_starts, ea.ends_on AS a_ends,
                        ea.start_time AS a_st, ea.end_time AS a_et,
@@ -149,6 +180,7 @@ def _load_candidates(conn: Connection, user_id: int, limit: int) -> list[_Candid
                 JOIN mod_calendar_events ea ON ea.id = c.event_a_id
                 JOIN mod_calendar_events eb ON eb.id = c.event_b_id
                 WHERE c.user_id = :uid AND c.status = 'candidate'
+                  {past_filter}
                 ORDER BY c.id
                 LIMIT :limit
                 """
@@ -232,10 +264,18 @@ async def run_dedup_phase2(
     client: LLMClient | None = None,
 ) -> DedupPhase2Stats:
     """Resuelve los pares `candidate` del user con el LLM. Best-effort por par. Idempotente
-    (solo toca `candidate`). `client` inyectable (tests con fake)."""
+    (solo toca `candidate`). `client` inyectable (tests con fake).
+
+    Si `llm_on_past_events` está apagado (default), los pares VENCIDOS no se juzgan: quedan
+    `candidate` (sin gasto) y se retoman si la perilla se prende."""
     stats = DedupPhase2Stats()
     with connection() as conn:
-        candidates = _load_candidates(conn, user_id, limit)
+        include_past = llm_on_past_events(conn, user_id)
+        candidates = _load_candidates(conn, user_id, limit, include_past=include_past)
+        if not include_past:
+            skipped_past = _count_past_candidates(conn, user_id)
+            if skipped_past:
+                _log.info("calendar.dedup2.past_skipped", user_id=user_id, pairs=skipped_past)
     if not candidates:
         _log.info("calendar.dedup2.empty", user_id=user_id)
         return stats
