@@ -12,6 +12,7 @@ export const KIND_COLOR: Record<string, string> = {
   producto: "#f43f5e",
   registro: "#eab308",
   habito: "#ec4899",
+  canal: "#0ea5e9",
   cumulo: CUMULO_COLOR,
 }
 
@@ -24,6 +25,7 @@ export const KIND_LABEL: Record<string, string> = {
   producto: "Producto",
   registro: "Registro",
   habito: "Hábito",
+  canal: "Canal",
   cumulo: "Cúmulo",
 }
 

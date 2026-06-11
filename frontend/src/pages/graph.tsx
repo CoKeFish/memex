@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
-import { Boxes, Clock, Hammer, Loader2, Maximize2, Sparkles } from "lucide-react"
+import { Boxes, Clock, Hammer, Loader2, Maximize2, Minimize2, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/common/page-header"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
@@ -9,6 +9,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { buildGraph, clusterGraph, fetchGraph, validateClusters } from "@/data"
 import type { GraphData, GraphEdge, GraphNode } from "@/data/graph"
+// El plegado por cúmulo (miembros ocultos + aristas re-ruteadas al nodo cúmulo) es una función pura.
+import { collapseClusters, type CollapsedEdge } from "@/lib/graph-collapse"
 import { CUMULO_COLOR, KIND_LABEL, kindColor } from "@/lib/graph-kind"
 // El layout (d3-force por componente conexa + shelf packing) vive en graph-layout: funciones puras.
 import { baseRadius, layoutGraph, nodeKey, type Bounds } from "@/lib/graph-layout"
@@ -46,11 +48,21 @@ function fitView(b: Bounds): View {
   return { k, x: VW / 2 - cx * k, y: VH / 2 - cy * k }
 }
 
-function edgeStyle(e: GraphEdge): { stroke: string; width: number; dash?: string } {
+function edgeStyle(e: CollapsedEdge): { stroke: string; width: number; dash?: string } {
+  if (e.relationType === "agregada") {
+    // sintética del plegado: agrega N aristas re-ruteadas al cúmulo → trazo escalado por N
+    const w = 1.5 + Math.min(e.aggregateCount ?? 1, 6) * 0.35
+    return e.status === "confirmed" ? { stroke: "#22c55e", width: w } : { stroke: "#94a3b8", width: w }
+  }
   if (e.relationType === "miembro_de") return { stroke: CUMULO_COLOR, width: 2.2 } // membresía de cúmulo
   if (e.status === "confirmed") return { stroke: "#22c55e", width: 2 }
   if (e.status === "rejected") return { stroke: "#ef4444", width: 1.5, dash: "2 4" }
   return { stroke: "#94a3b8", width: 1.5, dash: "5 4" } // pista
+}
+
+function edgeTitle(e: CollapsedEdge): string {
+  if (e.relationType === "agregada") return `${e.aggregateCount ?? 1} relaciones (plegadas) · ${e.status}`
+  return `${e.relationType || "—"} · ${e.status} · ${e.producer}`
 }
 
 function GraphCanvas({
@@ -170,7 +182,7 @@ function GraphCanvas({
               strokeDasharray={st.dash ? st.dash.split(" ").map((n) => Number(n) / view.k).join(" ") : undefined}
               opacity={lit ? 0.85 : 0.07}
             >
-              <title>{`${e.relationType || "—"} · ${e.status} · ${e.producer}`}</title>
+              <title>{edgeTitle(e)}</title>
             </line>
           )
         })}
@@ -233,16 +245,26 @@ function DetailPanel({
   edges,
   nodesByKey,
   inboxKinds,
+  expandedClusters,
+  showFull,
+  onToggleCluster,
 }: {
   node: GraphNode
   edges: GraphEdge[]
   nodesByKey: Map<string, GraphNode>
   inboxKinds: Record<number, string>
+  expandedClusters: ReadonlySet<number>
+  showFull: boolean
+  onToggleCluster: (id: number) => void
 }) {
   const mine = edges.filter(
     (e) => nodeKey(e.srcSlug, e.srcId) === nodeKey(node.slug, node.id) || nodeKey(e.dstSlug, e.dstId) === nodeKey(node.slug, node.id),
   )
   const isCumulo = node.slug === "cumulo"
+  const memberCount = isCumulo
+    ? edges.filter((e) => e.relationType === "miembro_de" && e.dstSlug === "cumulo" && e.dstId === node.id).length
+    : 0
+  const isExpanded = expandedClusters.has(node.id)
   return (
     <div className="w-full shrink-0 space-y-3 rounded-lg border bg-card p-3 text-sm md:w-72">
       <div>
@@ -264,6 +286,23 @@ function DetailPanel({
         >
           <Clock className="size-3.5" /> Abrir cronología
         </Link>
+      )}
+      {isCumulo && !showFull && memberCount > 0 && (
+        <button
+          type="button"
+          onClick={() => onToggleCluster(node.id)}
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1.5 text-xs font-medium hover:bg-muted/60"
+        >
+          {isExpanded ? (
+            <>
+              <Minimize2 className="size-3.5" /> Plegar miembros
+            </>
+          ) : (
+            <>
+              <Maximize2 className="size-3.5" /> Expandir miembros ({memberCount})
+            </>
+          )}
+        </button>
       )}
       <div>
         <div className="mb-1 text-xs font-medium text-muted-foreground">
@@ -305,7 +344,8 @@ function DetailPanel({
             Mensajes de origen ({node.sourceInboxIds.length})
           </div>
           <ul className="flex flex-wrap gap-1.5">
-            {node.sourceInboxIds.map((iid) => (
+            {/* tope: un canal/remitente activo arrastra MILES de mensajes; el panel no es la lista */}
+            {node.sourceInboxIds.slice(0, 40).map((iid) => (
               <li key={iid}>
                 <Link
                   to={`/datos/${iid}`}
@@ -315,6 +355,11 @@ function DetailPanel({
                 </Link>
               </li>
             ))}
+            {node.sourceInboxIds.length > 40 && (
+              <li className="px-1 py-0.5 text-xs text-muted-foreground">
+                +{node.sourceInboxIds.length - 40} más
+              </li>
+            )}
           </ul>
         </div>
       )}
@@ -383,6 +428,10 @@ export function GraphPage() {
   const [status, setStatus] = useState<string>("todas")
   const [onlyConnected, setOnlyConnected] = useState(true)
   const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(() => new Set())
+  // Plegado por cúmulo: default TODO plegado (los miembros se ocultan y sus aristas se re-rutean
+  // al nodo cúmulo); `expanded` guarda los cúmulos abiertos y «Ver completo» lo apaga entero.
+  const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set())
+  const [showFull, setShowFull] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [building, setBuilding] = useState(false)
   const [clustering, setClustering] = useState(false)
@@ -393,17 +442,21 @@ export function GraphPage() {
   )
   const full = data ?? EMPTY_GRAPH
 
-  // Filtros del front en 3 etapas: (1) tipos ocultos por la leyenda, (2) aristas con algún extremo
-  // oculto, (3) "solo conectados" sobre las aristas RESTANTES (esconde aislados, ruido para una
-  // vista de relaciones).
+  // Filtros del front en 4 etapas: (1) tipos ocultos por la leyenda, (2) aristas con algún extremo
+  // oculto, (3) PLEGADO por cúmulo (salvo «Ver completo»), (4) "solo conectados" sobre lo que
+  // queda (esconde aislados; los cúmulos se eximen: plegados, sus aristas son internas y un
+  // contexto confirmado merece verse aunque no toque nada externo).
   const shown = useMemo<GraphData>(() => {
-    const nodes = hiddenKinds.size
+    const visible = hiddenKinds.size
       ? full.nodes.filter((n) => !hiddenKinds.has(n.kind))
       : full.nodes
-    const present = new Set(nodes.map((n) => nodeKey(n.slug, n.id)))
-    const edges = full.edges.filter(
+    const present = new Set(visible.map((n) => nodeKey(n.slug, n.id)))
+    const visibleEdges = full.edges.filter(
       (e) => present.has(nodeKey(e.srcSlug, e.srcId)) && present.has(nodeKey(e.dstSlug, e.dstId)),
     )
+    const { nodes, edges } = showFull
+      ? { nodes: visible, edges: visibleEdges }
+      : collapseClusters(visible, visibleEdges, expanded)
     if (!onlyConnected) return { nodes, edges, inboxKinds: full.inboxKinds }
     const connected = new Set<string>()
     for (const e of edges) {
@@ -411,18 +464,38 @@ export function GraphPage() {
       connected.add(nodeKey(e.dstSlug, e.dstId))
     }
     return {
-      nodes: nodes.filter((n) => connected.has(nodeKey(n.slug, n.id))),
+      nodes: nodes.filter((n) => n.slug === "cumulo" || connected.has(nodeKey(n.slug, n.id))),
       edges,
       inboxKinds: full.inboxKinds,
     }
-  }, [full, onlyConnected, hiddenKinds])
+  }, [full, onlyConnected, hiddenKinds, showFull, expanded])
 
   const nodesByKey = useMemo(
     () => new Map(full.nodes.map((n) => [nodeKey(n.slug, n.id), n])),
     [full.nodes],
   )
+  // Si el nodo elegido queda oculto (plegado/filtro), soltarlo — mismo patrón "derivar al cambiar"
+  // que el re-encuadre del canvas (sin effect ni frame intermedio).
+  const shownKeys = useMemo(
+    () => new Set(shown.nodes.map((n) => nodeKey(n.slug, n.id))),
+    [shown.nodes],
+  )
+  const [prevShownKeys, setPrevShownKeys] = useState(shownKeys)
+  if (prevShownKeys !== shownKeys) {
+    setPrevShownKeys(shownKeys)
+    if (selected && !shownKeys.has(selected)) setSelected(null)
+  }
   const selectedNode = selected ? nodesByKey.get(selected) ?? null : null
   const hiddenCount = full.nodes.length - shown.nodes.length
+
+  function toggleCluster(id: number) {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
 
   // Tipos presentes en el grafo (orden de la leyenda; los desconocidos al final) con su conteo.
   const legendKinds = useMemo(() => {
@@ -448,9 +521,12 @@ export function GraphPage() {
     setBuilding(true)
     try {
       const r = await buildGraph()
-      const reales = r.afiliacionReales + r.pertenenciaReales + r.contraparteReales
+      const reales =
+        r.afiliacionReales + r.pertenenciaReales + r.contraparteReales + r.participaReales
       toast.success(
         `Grafo armado: ${r.cooccurrencePistas} pistas, ${reales} reales (${r.contraparteReales} contraparte)` +
+          (r.canales ? ` · ${r.canales} canales` : "") +
+          (r.chatSenders ? ` · ${r.chatSenders} remitentes nuevos` : "") +
           (r.highFanoutSkipped ? ` · ${r.highFanoutSkipped} mensajes saltados` : ""),
       )
       reload()
@@ -510,6 +586,10 @@ export function GraphPage() {
                 {inboxRefLabel(inboxId, full.inboxKinds)} · quitar filtro ✕
               </Link>
             )}
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Switch checked={showFull} onCheckedChange={setShowFull} aria-label="Ver completo" />
+              Ver completo
+            </label>
             <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Switch checked={onlyConnected} onCheckedChange={setOnlyConnected} aria-label="Solo conectados" />
               Solo conectados
@@ -584,6 +664,9 @@ export function GraphPage() {
                   edges={full.edges}
                   nodesByKey={nodesByKey}
                   inboxKinds={full.inboxKinds}
+                  expandedClusters={expanded}
+                  showFull={showFull}
+                  onToggleCluster={toggleCluster}
                 />
               )}
             </div>
