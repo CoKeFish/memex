@@ -38,6 +38,7 @@ from memex.db import connection
 from memex.logging import get_logger, setup_logging
 from memex.modules.calendar.consolidate import run_consolidation
 from memex.modules.calendar.dedup_llm import run_dedup_phase2
+from memex.modules.calendar.health import sync_health
 from memex.modules.calendar.manual import (
     EventChanges,
     ManualEventError,
@@ -257,6 +258,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--series", action="store_true", help="Borra TODAS las instancias de la serie."
     )
     rm_p.add_argument("--json", action="store_true", dest="as_json", help="Salida JSON.")
+
+    ss_p = sub.add_parser(
+        "sync-status", help="¿La sincronización con el proveedor está funcionando?"
+    )
+    ss_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    ss_p.add_argument("--json", action="store_true", dest="as_json", help="Salida JSON.")
 
     return parser
 
@@ -553,6 +560,78 @@ def _cmd_rm(args: argparse.Namespace) -> int:
     return 0
 
 
+_OVERALL_LABEL = {
+    "ok": "OK — funcionando",
+    "desactualizado": "DESACTUALIZADO",
+    "error": "ERROR — la última sincronización falló",
+    "nunca": "NUNCA sincronizó",
+    "sin_cuentas": "SIN CUENTAS de proveedor",
+}
+
+_CURSOR_LABEL = {
+    "incremental": "al día (incremental)",
+    "full_resync_pendiente": "hará una sync completa",
+    "sin_primera_sync": "sin primera sync",
+}
+
+
+def _age_str(hours: float | None) -> str:
+    if hours is None:
+        return "nunca corrió"
+    if hours < 1:
+        return f"hace {int(hours * 60)} min"
+    if hours < 48:
+        return f"hace {hours:.0f} h"
+    return f"hace {hours / 24:.0f} días"
+
+
+def _cmd_sync_status(args: argparse.Namespace) -> int:
+    with connection() as conn:
+        data = sync_health(conn, args.user)
+    if args.as_json:
+        _emit_json(data)
+        return 0
+    _say(f"\nSincronización de calendario (user {args.user}):")
+    ages = [
+        a["last_pull_age_hours"]
+        for a in data["accounts"]
+        if a["enabled"] and a["last_pull_age_hours"] is not None
+    ]
+    estado = _OVERALL_LABEL.get(str(data["overall"]), str(data["overall"]))
+    if ages:
+        estado += f" — última bajada desde el proveedor {_age_str(min(ages))}."
+    _say(f"  Estado: {estado}")
+    if data["auto_sync_active"]:
+        _say("  Sync automática: ACTIVA (el scheduler corre el ciclo de calendar).")
+    else:
+        _say("  Sync automática: APAGADA — los datos solo se actualizan a mano.")
+    for a in data["accounts"]:
+        flags = []
+        if not a["enabled"]:
+            flags.append("deshabilitada")
+        if a["write_back"]:
+            flags.append("write-back ON (escribe en el proveedor)")
+        extra = f" [{' · '.join(flags)}]" if flags else ""
+        _say(f"  [{a['account_id']}] {a['provider']}/{a['account_label']}{extra}")
+        pull_status = f" — {a['last_pull_status']}" if a["last_pull_status"] else ""
+        _say(
+            f"      bajada (pull): {_age_str(a['last_pull_age_hours'])}{pull_status} · "
+            f"cursor: {_CURSOR_LABEL.get(str(a['cursor_state']), a['cursor_state'])}"
+        )
+        push_when = (
+            "nunca corrió"
+            if a["last_push_at"] is None
+            else f"{a['last_push_at']} — {a['last_push_status']}"
+        )
+        _say(f"      subida (push): {push_when}")
+    if data["accounts"]:
+        first = data["accounts"][0]["account_id"]
+        _say(f"Para bajar ahora: memex-calendar-sync pull --account {first}\n")
+    else:
+        _say("Conectá una cuenta con: memex-calendar-sync add-account\n")
+    return 0
+
+
 def _cmd_add_account(args: argparse.Namespace) -> int:
     if args.provider not in known_providers():
         _say(
@@ -680,6 +759,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_update(args)
         if args.cmd == "rm":
             return _cmd_rm(args)
+        if args.cmd == "sync-status":
+            return _cmd_sync_status(args)
         log.error("calendar.cli.unknown_command", cmd=args.cmd)
         return 1
     except ManualEventError as e:

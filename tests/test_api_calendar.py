@@ -444,3 +444,56 @@ def test_list_provider_accounts_cross_tenant_scoped(client: Any, seed_user2: int
     _seed_provider_account(seed_user2, account_label="ajeno")
     items = client.get("/calendar/provider-accounts").json()["items"]
     assert len(items) == 1 and items[0]["account_label"] == "mío"
+
+
+# ---- /calendar/sync-health + /calendar/accounts/{id}/sync ----------------------------------------
+
+
+def test_sync_health_shape_without_secrets(client: Any) -> None:
+    acc = _seed_provider_account(1, sync_token="CAES-secreto-opaco")
+    body = client.get("/calendar/sync-health").json()
+    assert body["overall"] == "nunca"  # cuenta sin corridas todavía
+    assert body["auto_sync_active"] is False
+    a = body["accounts"][0]
+    assert a["account_id"] == acc
+    assert a["cursor_state"] == "incremental"
+    assert a["last_pull_at"] is None
+    assert "CAES-secreto-opaco" not in str(body)  # el cursor jamás cruza el wire
+
+
+def test_sync_now_unknown_account_404(client: Any, seed_user2: int) -> None:
+    ajena = _seed_provider_account(seed_user2, account_label="ajena")
+    assert client.post("/calendar/accounts/99999/sync").status_code == 404
+    assert client.post(f"/calendar/accounts/{ajena}/sync").status_code == 404  # de otro user
+
+
+def test_sync_now_pulls_and_consolidates(client: Any, monkeypatch: Any) -> None:
+    from memex.modules.calendar.sync import SyncStats
+
+    acc = _seed_provider_account(1)
+
+    async def fake_run_pull(user_id: int, account_id: int, **kw: Any) -> SyncStats:
+        assert (user_id, account_id) == (1, acc)
+        return SyncStats(pulled=2, created=2)
+
+    monkeypatch.setattr("memex.api.routers.calendar.run_pull", fake_run_pull)
+    resp = client.post(f"/calendar/accounts/{acc}/sync")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["created"] == 2
+    assert data["status"] == "ok"
+    assert "orphans" in data  # la consolidación corrió después del pull
+
+
+def test_sync_now_provider_error_is_502(client: Any, monkeypatch: Any) -> None:
+    from memex.modules.calendar.providers.base import CalendarProviderError
+
+    acc = _seed_provider_account(1)
+
+    async def boom(user_id: int, account_id: int, **kw: Any) -> Any:
+        raise CalendarProviderError(401, "client error 401")
+
+    monkeypatch.setattr("memex.api.routers.calendar.run_pull", boom)
+    resp = client.post(f"/calendar/accounts/{acc}/sync")
+    assert resp.status_code == 502
+    assert "No se pudo sincronizar" in resp.json()["detail"]

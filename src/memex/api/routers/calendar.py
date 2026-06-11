@@ -1,19 +1,23 @@
-"""Router de SOLO LECTURA del dominio `calendar` para el dashboard.
+"""Router del dominio `calendar` para el dashboard.
 
-Expone la capa que la vista `/calendario` necesita (hoy era 100% mock): la capa consolidada
+Expone la capa que la vista `/calendario` necesita: la capa consolidada
 (`mod_calendar_consolidated` + sus miembros crudos vía `event_links`), los pares de dedup, los
-conflictos pendientes, las corridas de sync y las cuentas de proveedor. Calca el patrón de
+conflictos pendientes, las corridas de sync, las cuentas de proveedor y la SALUD de la
+sincronización (`/sync-health`, compartida con el CLI `sync-status`). Calca el patrón de
 `finance.py`: `connection()` + SQL crudo + `.mappings()`, paginación por cursor, coerción
-NUMERIC→float, scoping por `user_id`. Todo GET — la UI no muta nada en este slice.
+NUMERIC→float, scoping por `user_id`. Única mutación: POST `/accounts/{id}/sync` («Sincronizar
+ahora»: pull + consolidación in-process, sin LLM ni push — patrón POST /sources/{id}/fetch).
+Necesita las env vars de OAuth en el proceso del API (mismo gotcha que el botón de reproceso).
 
 NO expone secretos: de las cuentas de proveedor solo cruza `token_path_env` (el NOMBRE de la env
 var, ADR-001) y un booleano `sync_token_present`, nunca el token/cursor.
 """
 
+import asyncio
 from datetime import date
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 
 from memex.api.auth import current_user_id
@@ -22,10 +26,16 @@ from memex.api.schemas import (
     CalendarDedupList,
     CalendarEventList,
     CalendarProviderAccountList,
+    CalendarSyncHealth,
+    CalendarSyncNowResponse,
     CalendarSyncRunList,
 )
 from memex.db import connection
 from memex.logging import get_logger
+from memex.modules.calendar.consolidate import run_consolidation
+from memex.modules.calendar.health import sync_health
+from memex.modules.calendar.providers.base import CalendarProviderError
+from memex.modules.calendar.sync import run_pull
 from memex.modules.contract import normalize
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
@@ -389,6 +399,71 @@ async def list_sync_runs(
     next_cursor = items[-1]["id"] if len(items) == limit else None
     _log.info("calendar.sync_runs.listed", user_id=user_id, count=len(items))
     return {"items": items, "next_cursor": next_cursor}
+
+
+@router.get("/sync-health", response_model=CalendarSyncHealth)
+async def get_sync_health(user_id: UserID) -> dict[str, Any]:
+    """¿La sincronización está funcionando? Salud por cuenta + automatización, en llano.
+
+    La arma `memex.modules.calendar.health.sync_health` (la misma fuente que consume el CLI
+    `memex calendario sync-status`): última bajada/subida con edad y resultado, estado del cursor,
+    y si el scheduler tiene el ciclo de calendar activo."""
+    with connection() as conn:
+        data = sync_health(conn, user_id)
+    _log.info("calendar.sync_health.read", user_id=user_id, overall=data["overall"])
+    return data
+
+
+@router.post("/accounts/{account_id}/sync", response_model=CalendarSyncNowResponse)
+async def sync_account_now(account_id: int, user_id: UserID) -> dict[str, Any]:
+    """«Sincronizar ahora»: pull (ingress) de la cuenta + consolidación, in-process.
+
+    SIN dedup FASE 2 (LLM), SIN merge y SIN push: barato y predecible. Los fallos del proveedor
+    (token vencido, red) salen como 502 con mensaje en llano. Requiere las env vars de OAuth en
+    el proceso del API."""
+    with connection() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM mod_calendar_provider_accounts WHERE id = :id AND user_id = :uid"),
+            {"id": account_id, "uid": user_id},
+        ).first()
+    if exists is None:
+        raise HTTPException(status_code=404, detail="cuenta de calendario inexistente")
+
+    try:
+        stats = await run_pull(user_id, account_id)
+    except CalendarProviderError as e:
+        _log.error("calendar.sync_now.provider_error", account_id=account_id, msg=str(e))
+        raise HTTPException(
+            status_code=502, detail=f"No se pudo sincronizar con el proveedor: {e}"
+        ) from e
+    except Exception as e:  # token ilegible / config rota → mensaje accionable, no traceback
+        _log.error("calendar.sync_now.failed", account_id=account_id, error=str(e))
+        raise HTTPException(
+            status_code=502,
+            detail=f"No se pudo sincronizar (¿OAuth configurado en el proceso del API?): {e}",
+        ) from e
+    cons_stats = await asyncio.to_thread(run_consolidation, user_id)
+    _log.info(
+        "calendar.sync_now.done",
+        user_id=user_id,
+        account_id=account_id,
+        pulled=stats.pulled,
+        created=stats.created,
+        errors=stats.errors,
+        orphans=cons_stats.orphans,
+    )
+    return {
+        "pulled": stats.pulled,
+        "created": stats.created,
+        "modified": stats.modified,
+        "deleted": stats.deleted,
+        "unchanged": stats.unchanged,
+        "dedup_pairs": stats.dedup_pairs,
+        "errors": stats.errors,
+        "groups": cons_stats.groups,
+        "orphans": cons_stats.orphans,
+        "status": "error" if stats.errors else "ok",
+    }
 
 
 @router.get("/provider-accounts", response_model=CalendarProviderAccountList)

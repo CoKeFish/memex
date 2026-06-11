@@ -911,6 +911,58 @@ class CalendarProviderAccountList(BaseModel):
     items: list[CalendarProviderAccountRow]
 
 
+class CalendarAccountHealth(BaseModel):
+    """Salud de sync de UNA cuenta de proveedor, en términos operables.
+
+    `cursor_state`: 'incremental' (cursor delta vivo: la próxima bajada trae solo cambios) |
+    'full_resync_pendiente' (sin cursor pero ya sincronizó: la próxima será completa) |
+    'sin_primera_sync' (nunca bajó nada).
+    """
+
+    account_id: int
+    provider: str
+    account_label: str
+    enabled: bool
+    write_back: bool
+    cursor_state: str
+    last_pull_at: datetime | None
+    last_pull_status: str | None
+    last_pull_age_hours: float | None
+    last_push_at: datetime | None
+    last_push_status: str | None
+
+
+class CalendarSyncHealth(BaseModel):
+    """¿La sincronización de calendario está funcionando? (UI y CLI comparten esta fuente).
+
+    `overall`: 'ok' (última bajada <24 h y sin error) | 'desactualizado' | 'error' (la última
+    bajada falló) | 'nunca' (jamás sincronizó) | 'sin_cuentas'. `auto_sync_active` = el daemon
+    del scheduler está prendido Y el job `calendar` habilitado (si no, los datos solo se
+    actualizan a mano)."""
+
+    overall: str
+    auto_sync_active: bool
+    daemon_enabled: bool
+    calendar_job_enabled: bool
+    last_cycle_at: datetime | None
+    accounts: list[CalendarAccountHealth]
+
+
+class CalendarSyncNowResponse(BaseModel):
+    """Resultado de POST /calendar/accounts/{id}/sync: pull + consolidación (sin LLM ni push)."""
+
+    pulled: int
+    created: int
+    modified: int
+    deleted: int
+    unchanged: int
+    dedup_pairs: int
+    errors: int
+    groups: int
+    orphans: int
+    status: str
+
+
 # ---- Módulo identidades (tablas `mod_identidades_*`) --------------------------------------------
 
 
