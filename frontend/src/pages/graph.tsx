@@ -39,7 +39,8 @@ const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.m
 function fitView(b: Bounds): View {
   const w = b.maxX - b.minX || 1
   const h = b.maxY - b.minY || 1
-  const k = clamp(Math.min((VW - 2 * FIT_PAD) / w, (VH - 2 * FIT_PAD) / h), 0.15, 3)
+  // el piso del zoom es bajo a propósito: el mosaico de componentes debe entrar ENTERO al encuadrar
+  const k = clamp(Math.min((VW - 2 * FIT_PAD) / w, (VH - 2 * FIT_PAD) / h), 0.05, 3)
   const cx = (b.minX + b.maxX) / 2
   const cy = (b.minY + b.maxY) / 2
   return { k, x: VW / 2 - cx * k, y: VH / 2 - cy * k }

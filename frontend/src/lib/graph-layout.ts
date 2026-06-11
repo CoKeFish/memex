@@ -185,9 +185,9 @@ export function layoutGraph(nodes: GraphNode[], edges: GraphEdge[]): GraphLayout
           "link",
           forceLink<SimNode, SimulationLinkDatum<SimNode>>(links)
             .id((d) => d.key)
-            .distance(70),
+            .distance(48),
         )
-        .force("charge", forceManyBody<SimNode>().strength(-220).distanceMax(380))
+        .force("charge", forceManyBody<SimNode>().strength(-130).distanceMax(300))
         .force("x", forceX<SimNode>(0).strength(0.08))
         // un pelo más fuerte en Y → cajas más anchas que altas (acompaña el viewport apaisado)
         .force("y", forceY<SimNode>(0).strength(0.1))
