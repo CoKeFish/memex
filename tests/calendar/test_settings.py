@@ -198,6 +198,29 @@ async def test_dedup2_judges_past_pairs_when_on() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gate_uses_event_date_not_ingestion_date() -> None:
+    # «Vencido» es por la fecha en que el evento SUCEDE (starts_on/ends_on), JAMÁS por cuándo se
+    # ingirió/procesó: un evento agendado hace un año para una fecha futura se procesa normal.
+    a = _seed_event("Congreso anual", starts_on=_FUTURE)
+    b = _seed_event("Congreso anual bis", starts_on=_FUTURE)
+    with connection() as c:
+        c.execute(
+            text(
+                "UPDATE mod_calendar_events SET created_at = NOW() - interval '400 days', "
+                "processed_at = NOW() - interval '400 days' WHERE id = ANY(:ids)"
+            ),
+            {"ids": [a, b]},
+        )
+    _seed_pair(a, b)
+
+    fake = FakeLLM('{"same": true, "confidence": 0.9, "rationale": "mismo"}')
+    await run_dedup_phase2(1, client=fake)
+
+    assert fake.calls == 1  # la antigüedad de la INGESTA no importa: el evento es futuro
+    assert _pair_status(a, b) == "confirmed"
+
+
+@pytest.mark.asyncio
 async def test_dedup2_pair_current_if_one_side_future() -> None:
     # Multi-día que termina en el futuro: NO está vencido aunque arranque en el pasado.
     a = _seed_event("Conferencia larga", starts_on=_PAST)
