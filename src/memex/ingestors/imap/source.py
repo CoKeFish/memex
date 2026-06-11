@@ -47,7 +47,7 @@ class ImapSource:
 
     def __init__(self, cfg: ImapConfig) -> None:
         self.cfg = cfg
-        self._log = get_logger("memex.ingestors.imap.source").bind(server=cfg.server)
+        self._log = get_logger("memex.ingestors.imap.source", server=cfg.server)
 
     async def health_check(self) -> HealthResult:
         """Verify IMAP auth + connectivity by opening + closing a session.

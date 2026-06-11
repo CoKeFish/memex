@@ -73,7 +73,7 @@ def run_ingestor(
     `dict` or `None`. If a Source has no prior checkpoint, the runner
     constructs `checkpoint_schema()` (Pydantic defaults) and passes that.
     """
-    log = get_logger("memex.ingestors.runner").bind(source_id=source_id)
+    log = get_logger("memex.ingestors.runner", source_id=source_id)
     stats = RunStats()
     started = time.monotonic()
 

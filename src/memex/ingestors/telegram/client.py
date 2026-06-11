@@ -58,7 +58,8 @@ class TelegramClientWrapper:
         # handlers concurrentes lo correrían. El polling no usa update dispatch,
         # así que su default (False) es indiferente.
         self._sequential_updates = sequential_updates
-        self._log = get_logger("memex.ingestors.telegram.client").bind(
+        self._log = get_logger(
+            "memex.ingestors.telegram.client",
             phone=cfg.phone_masked,
             session_name=cfg.session_name,
         )
