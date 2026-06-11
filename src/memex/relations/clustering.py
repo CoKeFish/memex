@@ -7,10 +7,11 @@ barato la garantía de Leiden: cúmulos bien conectados) y emite `CandidateClust
 persistencia y la reconciliación viven en `cluster_store` / `reconcile`; la validación, en
 `clusters_llm`.
 
-Substrato (config `MEMEX_CLUSTER_*`): por default SOLO aristas `confirmed` (reales=1.0,
-co-ocurrencia confirmada-por-LLM=0.6); las PISTAS van con peso 0 (excluidas) — una pista es
-co-PRESENCIA, no relación asegurada. El peso se decide por `(status, relation_type)` porque
-`producer` solo no distingue (la co-ocurrencia confirmada usa el mismo `producer='llm'`).
+Substrato (config `MEMEX_CLUSTER_*`): por default reales=1.0, co-ocurrencia confirmada-por-LLM=0.6
+y PISTAS=0.3 (sí participan: una pista es co-PRESENCIA, señal débil pero útil; el resultado se midió
+insensible en [0.3,1.0] — `cluster_w_pista=0` las excluye del todo). El peso se decide por
+`(status, relation_type)` porque `producer` solo no distingue (la co-ocurrencia confirmada usa el
+mismo `producer='llm'`).
 
 Determinismo: nodos insertados en orden `(slug, id)` ANTES de las aristas (el orden de nodos de
 networkx = orden de inserción) + `seed` fijo en Louvain → misma partición entre corridas (con
@@ -30,6 +31,7 @@ from sqlalchemy.engine import Connection
 from memex.config import Settings, settings
 from memex.logging import get_logger
 from memex.relations.edges import (
+    CANAL_SLUG,
     CUMULO_SLUG,
     RELTYPE_COOCURRENCIA,
     RELTYPE_MIEMBRO_DE,
@@ -83,12 +85,14 @@ def _edge_weight(status: str, relation_type: str, cfg: Settings) -> float:
 
 
 def build_cluster_graph(conn: Connection, user_id: int, cfg: Settings | None = None) -> nx.Graph:
-    """Arma el grafo networkx ponderado a clusterizar: vértices vivos (excluye `cumulo`) como
-    nodos + aristas con peso `> 0` (excluye `miembro_de`, extremos `cumulo`, extremo no-vivo, peso
-    ≤ 0). Multi-aristas del mismo par se suman con tope `pair_weight_max`. Quita nodos aislados (no
-    clusterizan). Cada arista lleva `real` (¿es confirmed-real?) para el `has_confirmed_edge`."""
+    """Arma el grafo networkx ponderado a clusterizar: vértices vivos (excluye `cumulo`; `canal`
+    SOLO si `cluster_exclude_canal`, el escape anti-hub) como nodos + aristas con peso `> 0`
+    (excluye `miembro_de`, extremos excluidos, extremo no-vivo, peso ≤ 0). Multi-aristas del mismo
+    par se suman con tope `pair_weight_max`. Quita nodos aislados (no clusterizan). Cada arista
+    lleva `real` (¿es confirmed-real?) para el `has_confirmed_edge`."""
     cfg = cfg or settings
-    verts = [v for v in list_vertices(conn, user_id) if v.slug != CUMULO_SLUG]
+    excluded = {CUMULO_SLUG} | ({CANAL_SLUG} if cfg.cluster_exclude_canal else set())
+    verts = [v for v in list_vertices(conn, user_id) if v.slug not in excluded]
     g: nx.Graph = nx.Graph()
     # Determinismo: nodos en orden (slug, id) ANTES de las aristas.
     for v in sorted(verts, key=lambda v: (v.slug, v.id)):

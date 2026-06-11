@@ -80,6 +80,10 @@ def test_proyecta_todos_los_tipos() -> None:
         "VALUES (1, 'confirmed', 'Mi contexto', :sig, :sig, 2)",
         sig="0" * 64,
     )
+    _exec(
+        "INSERT INTO mod_canales (user_id, platform, external_id, display_name) "
+        "VALUES (1, 'telegram', '900', 'Parche')"
+    )
     with connection() as c:
         verts = list_vertices(c, 1)
     by_slug = {v.slug: v for v in verts}
@@ -101,6 +105,8 @@ def test_proyecta_todos_los_tipos() -> None:
     assert by_slug["bienestar:habito"].id == habito
     assert by_slug["cumulo"].kind == "cumulo"
     assert by_slug["cumulo"].label == "Mi contexto"
+    assert by_slug["canal"].kind == "canal"
+    assert by_slug["canal"].label == "Parche"
 
 
 def test_cumulo_proyecta_solo_confirmed() -> None:

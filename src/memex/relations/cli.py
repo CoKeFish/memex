@@ -58,6 +58,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     b = sub.add_parser("build", help="Paso determinista del grafo (build_relations).")
     b.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    b.add_argument(
+        "--cooccurrence-cap",
+        type=int,
+        default=None,
+        help="Tope de vértices por mensaje para la co-ocurrencia "
+        "(default: settings.cooccurrence_cap).",
+    )
 
     c = sub.add_parser("cluster", help="Detecta y reconcilia los cúmulos (sin LLM).")
     c.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -68,6 +75,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     cy = sub.add_parser("cycle", help="build → cluster → validate, de corrido.")
     cy.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    cy.add_argument(
+        "--cooccurrence-cap",
+        type=int,
+        default=None,
+        help="Tope de vértices por mensaje para la co-ocurrencia "
+        "(default: settings.cooccurrence_cap).",
+    )
 
     li = sub.add_parser("list", help="Lista los cúmulos del user.")
     li.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -80,13 +94,24 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _cooccurrence_cap(args: argparse.Namespace) -> int:
+    """El cap del flag o, sin él, el de settings — la MISMA fuente que el API y el scheduler."""
+    if args.cooccurrence_cap is not None:
+        return int(args.cooccurrence_cap)
+    from memex.config import settings  # import local: estilo del módulo
+
+    return settings.cooccurrence_cap
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     with connection() as conn:
-        stats = build_relations(conn, args.user)
+        stats = build_relations(conn, args.user, cooccurrence_cap=_cooccurrence_cap(args))
     _say(
         f"\ngraph build: pistas={stats.cooccurrence_pistas} afiliacion={stats.afiliacion_reales} "
         f"pertenencia={stats.pertenencia_reales} contraparte={stats.contraparte_reales} "
         f"mismo_evento={stats.same_event_reales} cumple={stats.cumple_reales} "
+        f"participa={stats.participa_reales} canales={stats.canales} "
+        f"remitentes_chat={stats.chat_senders} "
         f"saltados={stats.high_fanout_skipped} huerfanas_podadas={stats.orphans_pruned}\n"
     )
     return 0
@@ -116,7 +141,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 def _cmd_cycle(args: argparse.Namespace) -> int:
     with connection() as conn:
-        b = build_relations(conn, args.user)
+        b = build_relations(conn, args.user, cooccurrence_cap=_cooccurrence_cap(args))
         r = detect_and_reconcile(conn, args.user)
     v = asyncio.run(run_cluster_partition(args.user))
     _say(

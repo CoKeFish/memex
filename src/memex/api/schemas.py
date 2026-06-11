@@ -2129,9 +2129,12 @@ class GraphBuildResult(BaseModel):
     pertenencia_reales: int = 0
     contraparte_reales: int = 0
     cumple_reales: int = 0
+    participa_reales: int = 0
     high_fanout_skipped: int
     orphans_pruned: int = 0
     cluster_edges: int = 0
+    chat_senders: int = 0
+    canales: int = 0
 
 
 class GraphClusterResult(BaseModel):

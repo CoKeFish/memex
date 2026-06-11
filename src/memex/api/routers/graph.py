@@ -149,6 +149,9 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         pertenencia=stats.pertenencia_reales,
         contraparte=stats.contraparte_reales,
         cumple=stats.cumple_reales,
+        participa=stats.participa_reales,
+        canales=stats.canales,
+        chat_senders=stats.chat_senders,
         skipped=stats.high_fanout_skipped,
         orphans_pruned=stats.orphans_pruned,
     )
@@ -158,9 +161,12 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         "pertenencia_reales": stats.pertenencia_reales,
         "contraparte_reales": stats.contraparte_reales,
         "cumple_reales": stats.cumple_reales,
+        "participa_reales": stats.participa_reales,
         "high_fanout_skipped": stats.high_fanout_skipped,
         "orphans_pruned": stats.orphans_pruned,
         "cluster_edges": stats.cluster_edges,
+        "chat_senders": stats.chat_senders,
+        "canales": stats.canales,
     }
 
 

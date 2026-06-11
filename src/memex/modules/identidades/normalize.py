@@ -131,9 +131,12 @@ def norm_identifier(kind: str, value: str) -> str:
     - handle: lower + strip + sin `@` inicial.
     - domain: parte tras el último `@` (si la hay), lower + strip.
     - url: lower + strip + sin `/` final.
+    - platform_id: strip tal cual (el id que asigna la plataforma es opaco; sin lower-tricks).
     - otro: lower + strip.
     """
     v = value.strip()
+    if kind == "platform_id":
+        return v
     if kind == "phone":
         return re.sub(r"[^0-9+]", "", v)
     if kind == "handle":

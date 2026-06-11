@@ -82,6 +82,12 @@ NODE_SOURCES: tuple[NodeSource, ...] = (
     ),
     NodeSource("bienestar:habito", "mod_bienestar_habits", "name", "habito", where="active"),
     NodeSource(
+        "canal",
+        "mod_canales",
+        "COALESCE(NULLIF(display_name, ''), platform || ' ' || external_id)",
+        "canal",
+    ),
+    NodeSource(
         "cumulo",
         "relation_clusters",
         "COALESCE(NULLIF(name, ''), '(cúmulo)')",

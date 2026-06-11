@@ -44,6 +44,7 @@ PRODUCER_LLM = "llm"  #: relación semántica / pertenencia a cúmulo decidida p
 PRODUCER_HUMANO = "humano"  #: confirmada/creada por el usuario
 PRODUCER_EVENT = "event"  #: hechos correlacionados por Hermes en un mismo mensaje (mismo event_id)
 PRODUCER_BIENESTAR = "bienestar"  #: un registro de bienestar cumple un hábito (match determinista)
+PRODUCER_CANAL = "canal"  #: estructura del medio: quién escribe en qué canal (remitente resuelto)
 #: Conocidos (referencia); el `producer` real es texto libre — agregar uno NO requiere migración.
 PRODUCERS: frozenset[str] = frozenset(
     {
@@ -56,6 +57,7 @@ PRODUCERS: frozenset[str] = frozenset(
         PRODUCER_HUMANO,
         PRODUCER_EVENT,
         PRODUCER_BIENESTAR,
+        PRODUCER_CANAL,
     }
 )
 
@@ -70,6 +72,12 @@ RELTYPE_COOCURRENCIA = "co-ocurrencia"
 #: Slug del vértice NATIVO del grafo «cúmulo» (no sale de una tabla `mod_*`: lo proyecta
 #: `relation_clusters`). Es el destino de las aristas `miembro_de`.
 CUMULO_SLUG = "cumulo"
+#: Participación en un canal de chat: arista REAL `persona → canal` (el remitente resuelto que
+#: escribió ahí), `producer='canal'`, confirmed determinista.
+RELTYPE_PARTICIPA_EN = "participa_en"
+#: Slug del vértice «canal» (lo proyecta `mod_canales`, tabla del grafo derivada de inbox). El
+#: canal NO cuenta para el cap de co-ocurrencia (es estructural, está en TODO mensaje del chat).
+CANAL_SLUG = "canal"
 
 
 @dataclass(frozen=True)

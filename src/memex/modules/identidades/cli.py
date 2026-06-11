@@ -173,10 +173,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def register_add_from_args(
-    conn: Connection, user_id: int, args: argparse.Namespace
+    conn: Connection, user_id: int, args: argparse.Namespace, *, event_id: str | None = None
 ) -> dict[str, Any]:
     """Mapea `args` (ya parseados) → `register_card` sobre un `conn` DADO. Lo reusan `_cmd_add` (que
-    abre su propia tx) y el cierre de evento del agente (tx compartida)."""
+    abre su propia tx) y el cierre de evento del agente (tx compartida, que pasa su `event_id` para
+    que la identidad correlacione vía `mismo_evento` con los otros hechos del evento)."""
     return register_card(
         conn,
         user_id,
@@ -187,6 +188,7 @@ def register_add_from_args(
         phone=args.phone,
         org=args.org,
         role=args.role,
+        event_id=event_id,
     )
 
 

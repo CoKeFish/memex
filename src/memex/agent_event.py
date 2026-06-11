@@ -166,7 +166,7 @@ def close_event(conn: Connection, user_id: int) -> dict[str, Any]:
         kind = str(f["kind"])
         args = parse_fact(kind, list(f["argv"]))
         if kind == "identidad":
-            row = identidades_cli.register_add_from_args(conn, user_id, args)
+            row = identidades_cli.register_add_from_args(conn, user_id, args, event_id=event_id)
             _index_identity(name_to_id, args, row)
             out["identidad"].append(row)
         elif kind == "finance":

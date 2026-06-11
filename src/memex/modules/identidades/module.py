@@ -56,7 +56,7 @@ from memex.modules.identidades.resolve import (
     Resolution,
 )
 from memex.modules.identidades.schema import IdentityItem
-from memex.relations.deterministic import weave_afiliacion
+from memex.relations.deterministic import weave_afiliacion, weave_event
 
 _log = get_logger("memex.modules.identidades")
 
@@ -505,16 +505,23 @@ def _propose_merge_candidate(
     )
 
 
-def _insert_mention(conn: Connection, user_id: int, item: IdentityItem, res: Resolution) -> None:
+def _insert_mention(
+    conn: Connection,
+    user_id: int,
+    item: IdentityItem,
+    res: Resolution,
+    *,
+    event_id: str | None = None,
+) -> None:
     conn.execute(
         text(
             """
             INSERT INTO mod_identidades_mentions
               (user_id, source_inbox_ids, evidence, mentioned_name, mentioned_kind, email, handle,
                org_hint, role_hint, confidence, resolved_kind, resolved_identity_id,
-               resolution_method)
+               resolution_method, event_id)
             VALUES (:uid, :ids, :evidence, :name, :kind, :email, :handle, :org, :role, :confidence,
-                    :rkind, :rid, :method)
+                    :rkind, :rid, :method, :event_id)
             """
         ),
         {
@@ -531,6 +538,7 @@ def _insert_mention(conn: Connection, user_id: int, item: IdentityItem, res: Res
             "rkind": res.kind,
             "rid": res.identity_id,
             "method": res.method,
+            "event_id": event_id,
         },
     )
 
@@ -678,12 +686,16 @@ def register_card(
     phone: str | None = None,
     org: str | None = None,
     role: str | None = None,
+    event_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve-or-create de UNA identidad desde una tarjeta de contacto (manual, sin LLM): la pasa
     por la MISMA resolución que la extracción y vuelca sus identificadores (email/handle/phone). Si
     trae `org` (solo personas), asegura la organización, teje la afiliación persona↔org y su arista
-    `afiliado` en el grafo. Idempotente. Devuelve la fila pública resuelta (+ `method` y, si hubo,
-    `org`). Escribe todo en `conn` (atómico con la tx del caller)."""
+    `afiliado` en el grafo. Con `event_id` (cierre de un evento del agente) registra además la
+    MENCIÓN-evento (la evidencia del avistamiento) y teje incremental las aristas `mismo_evento`
+    con los otros hechos del evento; la org de `--org` NO recibe mención-evento (ya queda atada por
+    `afiliado`). Idempotente. Devuelve la fila pública resuelta (+ `method` y, si hubo, `org`).
+    Escribe todo en `conn` (atómico con la tx del caller)."""
     if kind not in (KIND_PERSONA, KIND_ORG, KIND_PRODUCTO):
         raise ValueError(
             f"kind inválido: {kind!r} (esperado 'persona', 'organizacion' o 'producto')"
@@ -700,10 +712,14 @@ def register_card(
             "handle": handle,
             "org": org,
             "role": role,
+            "evidence": f"agent:{event_id}" if event_id else "",
         }
     )
     res = resolve_or_create_identity(conn, user_id, item, source="manual")
     assert res.identity_id is not None  # resolve_or_create_identity siempre ata o crea
+    if event_id:
+        _insert_mention(conn, user_id, item, res, event_id=event_id)
+        weave_event(conn, user_id, event_id)
     _store_card_identifiers(conn, user_id, res.identity_id, email=email, handle=handle, phone=phone)
     result = _public_identity(conn, user_id, res.identity_id)
     result["method"] = res.method

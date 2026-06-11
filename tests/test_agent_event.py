@@ -110,13 +110,28 @@ def test_end_processes_event_and_links_counterparty(capsys: pytest.CaptureFixtur
             )
         ).scalar_one()
         assert contraparte == 1
-        mismo = c.execute(
+        # la identidad del evento dejó su mención-evento (la evidencia del avistamiento)
+        m = c.execute(
             text(
-                "SELECT count(*) FROM relation_edges WHERE user_id = 1 "
+                "SELECT event_id, resolved_identity_id FROM mod_identidades_mentions "
+                "WHERE user_id = 1"
+            )
+        ).one()
+        assert m.event_id == event_id
+        assert m.resolved_identity_id == org_id
+        # los TRES hechos del evento correlacionan entre sí: identidad↔finance,
+        # identidad↔bienestar y finance↔bienestar (tejidos incrementales en el cierre).
+        mismo_slugs = c.execute(
+            text(
+                "SELECT src_slug, dst_slug FROM relation_edges WHERE user_id = 1 "
                 "AND relation_type = 'mismo_evento'"
             )
-        ).scalar_one()
-        assert mismo >= 1
+        ).all()
+        assert len(mismo_slugs) == 3
+        pares = {frozenset(p) for p in mismo_slugs}
+        assert frozenset({"identidades:org", "finance"}) in pares
+        assert frozenset({"identidades:org", "bienestar"}) in pares
+        assert frozenset({"finance", "bienestar"}) in pares
         beid = c.execute(
             text("SELECT event_id FROM mod_bienestar_registros WHERE user_id = 1")
         ).scalar_one()

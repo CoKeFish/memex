@@ -17,8 +17,12 @@ Produce las clases de arista (ver `memex.relations.edges`):
 - REALES de cumplimiento (`producer='bienestar'`, `status='confirmed'`): registro de bienestar →
   hábito que cumple, por match determinista de `activity` (normalizada) o `category` — la misma
   lógica que la adherencia (`habits._period_counts`).
+- REALES de participación (`producer='canal'`, `status='confirmed'`): persona → canal de chat en
+  el que escribió (remitente resuelto por su identifier `platform_id`). La estructura del medio,
+  independiente del cap de co-ocurrencia.
 
-La provenance vértice→mensaje NO es arista (inbox es atributo): vive en `source_inbox_ids`.
+La provenance vértice→mensaje NO es arista (inbox es atributo): vive en `source_inbox_ids` (o se
+DERIVA del payload: remitente y canal).
 """
 
 from __future__ import annotations
@@ -32,13 +36,17 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
+from memex.relations.canales import sync_canales
 from memex.relations.edges import (
+    CANAL_SLUG,
     PRODUCER_BIENESTAR,
+    PRODUCER_CANAL,
     PRODUCER_EVENT,
     PRODUCER_FINANCE,
     PRODUCER_IDENTIDADES,
     PRODUCER_INBOX,
     RELTYPE_COOCURRENCIA,
+    RELTYPE_PARTICIPA_EN,
     STATUS_CONFIRMED,
     STATUS_PISTA,
     Ref,
@@ -77,12 +85,55 @@ class RelationStats:
     orphans_pruned: int = 0
     redundant_pruned: int = 0  # pistas cooc podadas: ya hay confirmada entre los mismos vértices
     cluster_edges: int = 0  # aristas miembro_de vivas tras materializar los cúmulos confirmados
+    chat_senders: int = 0  # identidades creadas para remitentes de chat desconocidos
+    canales: int = 0  # canales de chat vivos tras el sync
+    participa_reales: int = 0  # aristas identidad→canal materializadas
+
+
+#: Brazos de REMITENTE de la provenance: el remitente de un mensaje, resuelto DETERMINISTA contra
+#: `mod_identidades_identifiers`, entra a la provenance de ese mensaje (→ co-ocurre con lo
+#: extraído de él) SIN persistir menciones (derivado on-the-fly, igual que la procedencia
+#: transitiva de finance/calendar). Solo RESUELVE: la creación de remitentes de chat desconocidos
+#: vive en `chat_senders.ensure_chat_sender_identities` (corre antes, desde `build_relations`).
+#: Bots y mensajes de servicio quedan fuera (relay ≠ persona). El identifier social debe llevar la
+#: `platform` real (`instagram|facebook|x`); un handle manual con platform='unknown' NO matchea
+#: (estricto a propósito: evita falsos positivos cross-plataforma).
+_SENDER_PROVENANCE_SQL = """
+    SELECT i.id AS mid, idf.identity_id AS iid, ident.kind AS kind
+    FROM inbox i
+    JOIN mod_identidades_identifiers idf
+      ON idf.user_id = i.user_id AND idf.kind = 'email'
+     AND idf.value_norm = lower(i.payload->'from'->>'email')
+    JOIN mod_identidades ident ON ident.id = idf.identity_id
+    WHERE i.user_id = :u AND i.payload->'from'->>'email' IS NOT NULL
+    UNION
+    SELECT i.id AS mid, idf.identity_id AS iid, ident.kind AS kind
+    FROM inbox i
+    JOIN mod_identidades_identifiers idf
+      ON idf.user_id = i.user_id AND idf.platform = 'telegram'
+     AND idf.kind = 'platform_id'
+     AND idf.value_norm = i.payload->'sender'->>'user_id'
+    JOIN mod_identidades ident ON ident.id = idf.identity_id
+    WHERE i.user_id = :u AND i.payload->'sender'->>'user_id' IS NOT NULL
+      AND (i.payload->'sender'->>'is_bot')::boolean IS NOT TRUE
+    UNION
+    SELECT i.id AS mid, idf.identity_id AS iid, ident.kind AS kind
+    FROM inbox i
+    JOIN mod_identidades_identifiers idf
+      ON idf.user_id = i.user_id AND idf.kind = 'handle'
+     AND idf.platform = i.payload->>'platform'
+     AND idf.value_norm = lower(i.payload->>'account')
+    JOIN mod_identidades ident ON ident.id = idf.identity_id
+    WHERE i.user_id = :u AND i.payload->>'post_id' IS NOT NULL
+      AND i.payload->>'account' IS NOT NULL
+"""
 
 
 def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
     """Mapa vértice → ids de los mensajes (inbox) de los que salió. Directo para hackathones
     (`source_inbox_ids`); TRANSITIVO para finance y calendar (consolidado→crudos) e identidades
-    (persona/org ← menciones). Base de la co-ocurrencia (y, luego, del pre-filtro)."""
+    (persona/org ← menciones); DERIVADO para el remitente (payload→identifiers, sin filas
+    intermedias). Base de la co-ocurrencia (y, luego, del pre-filtro)."""
     prov: dict[Ref, set[int]] = defaultdict(set)
 
     for slug, table in _DIRECT_SOURCES:
@@ -134,6 +185,25 @@ def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
         slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
         prov[Ref(slug, int(r["iid"]))].update(ids)
 
+    for r in conn.execute(text(_SENDER_PROVENANCE_SQL), {"u": user_id}).mappings():
+        slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
+        prov[Ref(slug, int(r["iid"]))].add(int(r["mid"]))
+
+    # CANAL (derivado): el canal está en TODO mensaje de su chat → co-ocurre con lo que salga de
+    # cada uno. NO cuenta para el cap (es estructural, ver `_materialize_cooccurrence`).
+    for r in conn.execute(
+        text(
+            """
+            SELECT c.id AS cid, i.id AS mid
+            FROM mod_canales c
+            JOIN inbox i ON i.user_id = c.user_id AND i.payload->>'chat_id' = c.external_id
+            WHERE c.user_id = :u AND i.payload->>'chat_id' IS NOT NULL
+            """
+        ),
+        {"u": user_id},
+    ).mappings():
+        prov[Ref(CANAL_SLUG, int(r["cid"]))].add(int(r["mid"]))
+
     return dict(prov)
 
 
@@ -145,10 +215,14 @@ def _materialize_cooccurrence(
     confirmed_pairs: set[frozenset[Ref]],
 ) -> tuple[int, int]:
     """Por cada mensaje, una arista-pista entre cada par de vértices que salieron de él (par
-    canónico ordenado). Salta mensajes con más de `cap` vértices y los pares de `confirmed_pairs`
-    (ya hay arista confirmada entre ambos, cualquier orientación): la pista no aporta sobre una
-    relación vouchada y, promovida por la cascada, doble-contaría el peso del par en la
-    clusterización. Devuelve (pistas, saltados)."""
+    canónico ordenado). Salta mensajes con más de `cap` vértices de CONTENIDO y los pares de
+    `confirmed_pairs` (ya hay arista confirmada entre ambos, cualquier orientación): la pista no
+    aporta sobre una relación vouchada y, promovida por la cascada, doble-contaría el peso del par
+    en la clusterización. El CANAL no cuenta para el cap (es estructural y fijo en todo mensaje de
+    chat; contarlo acercaría injustamente los chats al tope — el remitente SÍ cuenta, es contenido
+    real); los pares de un mensaje no saltado se emiten canal incluido. DIFERIDO: un mensaje
+    saltado pierde también sus pares cross-type — el relevo LLM (`relations_llm`) solo cubre
+    identidad↔identidad; un relevo mixto queda pendiente. Devuelve (pistas, saltados)."""
     by_msg: dict[int, set[Ref]] = defaultdict(set)
     for ref, ids in prov.items():
         for mid in ids:
@@ -161,9 +235,10 @@ def _materialize_cooccurrence(
         uniq = sorted(refs, key=lambda r: (r.slug, r.id))
         if len(uniq) < 2:
             continue
-        if len(uniq) > cap:
+        content = sum(1 for r in uniq if r.slug != CANAL_SLUG)
+        if content > cap:
             skipped += 1
-            _log.info("relation.cooccurrence.skip_high_fanout", inbox_id=mid, vertices=len(uniq))
+            _log.info("relation.cooccurrence.skip_high_fanout", inbox_id=mid, vertices=content)
             continue
         for i in range(len(uniq)):
             for j in range(i + 1, len(uniq)):
@@ -285,16 +360,24 @@ def _materialize_contraparte(
     return n
 
 
+#: CASE SQL kind→slug de identidad, generado desde el único punto de verdad (vertices.py). El ELSE
+#: NULL es defensivo: un kind fuera del mapa no emite arista (y el SELECT final lo filtra).
+_IDENTITY_KIND_CASE = " ".join(f"WHEN '{k}' THEN '{v}'" for k, v in IDENTITY_SLUG_BY_KIND.items())
+
+
 def _materialize_same_event(
     conn: Connection, user_id: int, *, event_ids: Sequence[str] | None = None
 ) -> int:
     """Una arista REAL «mismo_evento» entre hechos que comparten `event_id` — los que el agente
-    (Hermes) correlacionó en un mismo mensaje. CROSS-MODULE: bienestar (el registro) y finanzas (la
-    transacción mapeada a su CONSOLIDADO, el vértice del grafo); `event_id` NULL no correlaciona.
-    Par canónico por `(slug, id)`. Con `event_ids` acota a esos eventos (uso incremental, ambos
-    brazos del CTE); sin él, barre todos (full-sweep). Idempotente. Devuelve cuántas."""
+    (Hermes) correlacionó en un mismo mensaje. CROSS-MODULE: bienestar (el registro), finanzas (la
+    transacción mapeada a su CONSOLIDADO, el vértice del grafo) e identidades (la mención-evento
+    que crea `register_card` al cerrar el evento, resuelta a su identidad); `event_id` NULL no
+    correlaciona. Par canónico por `(slug, id)`. Con `event_ids` acota a esos eventos (uso
+    incremental, todos los brazos del CTE); sin él, barre todos (full-sweep). Idempotente.
+    Devuelve cuántas."""
     scope_b = "" if event_ids is None else " AND event_id = ANY(:eids)"
     scope_f = "" if event_ids is None else " AND t.event_id = ANY(:eids)"
+    scope_m = "" if event_ids is None else " AND m.event_id = ANY(:eids)"
     params: dict[str, Any] = {"u": user_id}
     if event_ids is not None:
         params["eids"] = list(event_ids)
@@ -312,10 +395,18 @@ def _materialize_same_event(
                 JOIN mod_finance_transaction_links l ON l.transaction_id = t.id
                 JOIN mod_finance_consolidated c ON c.id = l.consolidated_id AND NOT c.deleted
                 WHERE t.user_id = :u AND t.event_id IS NOT NULL{scope_f}
+                UNION
+                SELECT (CASE i.kind {_IDENTITY_KIND_CASE} ELSE NULL END) AS slug,
+                       m.resolved_identity_id AS vid, m.event_id
+                FROM mod_identidades_mentions m
+                JOIN mod_identidades i ON i.id = m.resolved_identity_id
+                WHERE m.user_id = :u AND m.event_id IS NOT NULL
+                  AND m.resolved_identity_id IS NOT NULL{scope_m}
             )
             SELECT a.slug AS a_slug, a.vid AS a_vid, b.slug AS b_slug, b.vid AS b_vid
             FROM facts a
             JOIN facts b ON a.event_id = b.event_id AND (a.slug, a.vid) < (b.slug, b.vid)
+            WHERE a.slug IS NOT NULL AND b.slug IS NOT NULL
             """
         ),
         params,
@@ -386,6 +477,45 @@ def _materialize_cumple(
     return n
 
 
+def _materialize_participa_en(conn: Connection, user_id: int) -> int:
+    """Una arista REAL «participa_en» identidad→canal por cada remitente RESUELTO (identifier
+    `platform_id`) que escribió en ese canal. Dirigida (quién → dónde). La estructura del medio:
+    sobrevive aunque el mensaje sea over-cap (no depende de la co-ocurrencia). Bots fuera (relay ≠
+    persona). Full-sweep idempotente. Devuelve cuántas."""
+    n = 0
+    for r in conn.execute(
+        text(
+            """
+            SELECT DISTINCT c.id AS canal_id, idf.identity_id AS iid, ident.kind AS kind
+            FROM inbox i
+            JOIN mod_canales c ON c.user_id = i.user_id AND c.platform = 'telegram'
+                              AND c.external_id = i.payload->>'chat_id'
+            JOIN mod_identidades_identifiers idf
+              ON idf.user_id = i.user_id AND idf.platform = 'telegram'
+             AND idf.kind = 'platform_id'
+             AND idf.value_norm = i.payload->'sender'->>'user_id'
+            JOIN mod_identidades ident ON ident.id = idf.identity_id
+            WHERE i.user_id = :u AND i.payload->>'chat_id' IS NOT NULL
+              AND (i.payload->'sender'->>'is_bot')::boolean IS NOT TRUE
+            """
+        ),
+        {"u": user_id},
+    ).mappings():
+        slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
+        propose_edge(
+            conn,
+            user_id,
+            Ref(slug, int(r["iid"])),
+            Ref(CANAL_SLUG, int(r["canal_id"])),
+            producer=PRODUCER_CANAL,
+            relation_type=RELTYPE_PARTICIPA_EN,
+            status=STATUS_CONFIRMED,
+            evidence="sender",
+        )
+        n += 1
+    return n
+
+
 def _prune_redundant_cooccurrence(
     conn: Connection, user_id: int, confirmed_pairs: set[frozenset[Ref]]
 ) -> int:
@@ -429,6 +559,14 @@ def build_relations(
 ) -> RelationStats:
     """Materializa las aristas deterministas del user (idempotente). Consume lo disponible; NO
     dispara extracción/consolidación. Devuelve el resumen."""
+    # Canales de chat (upsert desde payloads) y remitentes desconocidos → identidades (una sola
+    # vez), ANTES de la provenance: los brazos derivados resuelven por `mod_canales` y por el
+    # identifier `platform_id` que esto garantiza. Import local de chat_senders: identidades
+    # importa este módulo (los weave_*) — el diferido evita el ciclo.
+    from memex.modules.identidades.chat_senders import ensure_chat_sender_identities
+
+    canales = sync_canales(conn, user_id)
+    chat_senders = ensure_chat_sender_identities(conn, user_id)
     # REALES primero: la co-ocurrencia consulta las confirmadas (las de ESTA corrida incluidas)
     # para suprimir pistas redundantes sobre pares ya vouchados.
     afil = _materialize_afiliacion(conn, user_id)
@@ -436,6 +574,7 @@ def build_relations(
     contraparte = _materialize_contraparte(conn, user_id)
     same_event = _materialize_same_event(conn, user_id)
     cumple = _materialize_cumple(conn, user_id)
+    participa = _materialize_participa_en(conn, user_id)
     confirmed_pairs = {
         frozenset((e.src, e.dst)) for e in list_edges(conn, user_id, status=STATUS_CONFIRMED)
     }
@@ -463,6 +602,9 @@ def build_relations(
         orphans_pruned=pruned,
         redundant_pruned=redundant,
         cluster_edges=cluster_edges,
+        chat_senders=chat_senders,
+        canales=canales,
+        participa_reales=participa,
     )
     _log.info(
         "relation.build.done",
@@ -473,10 +615,13 @@ def build_relations(
         contraparte_reales=contraparte,
         same_event_reales=same_event,
         cumple_reales=cumple,
+        participa_reales=participa,
         high_fanout_skipped=skipped,
         orphans_pruned=pruned,
         redundant_pruned=redundant,
         cluster_edges=cluster_edges,
+        chat_senders=chat_senders,
+        canales=canales,
     )
     return stats
 

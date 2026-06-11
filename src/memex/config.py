@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     cluster_validate_limit: int = 25  # cúmulos por corrida del validador LLM
     cluster_reject_pistas: bool = False  # rechazar pistas al rechazar el cúmulo (off = dejarlas)
     cluster_partition_min_confidence: float = 0.75  # umbral del PARTIDOR (gap medido 0.7-0.8)
+    # Escape: sacar los vértices 'canal' del grafo a clusterizar si un canal-hub degenera los
+    # cúmulos (blobs > cluster_max_members que el partidor salta). Default: el canal SÍ participa
+    # (los chats del usuario son contextos concretos; el partidor maneja el off-topic).
+    cluster_exclude_canal: bool = False
 
     # --- Sistema de calidad: detección automática de remitentes no relevantes ("por métricas") ---
     # El job `relevance` (apagado por default) marca como CANDIDATO a un remitente email con volumen

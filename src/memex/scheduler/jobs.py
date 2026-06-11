@@ -370,8 +370,10 @@ class GraphCycleStats:
 
 def _graph_detect(user_id: int) -> Any:
     """build_relations + detect_and_reconcile en una tx (sync, para `to_thread`)."""
+    from memex.config import settings  # import local: estilo del módulo (evita ciclos al importar)
+
     with connection() as conn:
-        build_relations(conn, user_id)
+        build_relations(conn, user_id, cooccurrence_cap=settings.cooccurrence_cap)
         return detect_and_reconcile(conn, user_id)
 
 

@@ -127,6 +127,10 @@ def test_build_y_lectura(client: Any) -> None:
     built = client.post("/graph/build").json()
     assert built["cooccurrence_pistas"] == 1
     assert built["afiliacion_reales"] == 0
+    # los campos de canal/remitente siempre vienen (0 sin datos de chat)
+    assert built["participa_reales"] == 0
+    assert built["canales"] == 0
+    assert built["chat_senders"] == 0
 
     body = client.get("/graph").json()
     assert len(body["nodes"]) == 2
