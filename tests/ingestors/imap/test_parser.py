@@ -66,6 +66,32 @@ def test_simple_text_email() -> None:
 # ---------- 2. HTML only (must strip) -------------------------------------- #
 
 
+def test_html_parse_failure_logs_partial_extraction(sink_capture: Any, monkeypatch: Any) -> None:
+    """Si el HTMLParser revienta a mitad, el cuerpo queda PARCIAL (lo acumulado hasta el fallo):
+    el recorte debe dejar `imap.html_to_text.partial` en log_events, no pasar inadvertido."""
+    import json
+
+    from memex.ingestors.imap import parser as parser_mod
+
+    def boom(self: Any, data: str) -> None:
+        raise RuntimeError("html venenoso")
+
+    monkeypatch.setattr(parser_mod._TextExtractor, "feed", boom)
+    out = parser_mod._html_to_text("<p>hola</p>")
+
+    assert out == ""  # nada alcanzó a acumularse; el mensaje sigue parseando sin reventar
+    records = []
+    while not sink_capture.empty():
+        records.append(sink_capture.get_nowait())
+    partial = [r for r in records if r["event"] == "imap.html_to_text.partial"]
+    assert len(partial) == 1
+    assert partial[0]["level"] == "warning"
+    fields = json.loads(partial[0]["fields"])
+    assert fields["exc_type"] == "RuntimeError"
+    assert fields["html_len"] == len("<p>hola</p>")
+    assert fields["extracted_len"] == 0
+
+
 def test_html_only_strips_to_text() -> None:
     html = (
         "<html><head><style>p { color: red; }</style></head>"

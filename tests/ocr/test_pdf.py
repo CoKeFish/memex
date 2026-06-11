@@ -6,6 +6,10 @@ binarios checkeados al repo y todo es reproducible en CI.
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
+import pymupdf
 import pytest
 
 from memex.ocr.pdf import (
@@ -16,6 +20,13 @@ from memex.ocr.pdf import (
     extract_pdf,
 )
 from tests.ocr._pdf_fixtures import digital_pdf, encrypted_pdf, scanned_pdf
+
+
+def _drain_events(q: Any, event: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    while not q.empty():
+        records.append(q.get_nowait())
+    return [r for r in records if r["event"] == event]
 
 
 def test_digital_text_only() -> None:
@@ -76,6 +87,51 @@ def test_text_min_chars_threshold_override() -> None:
     ex = extract_pdf(digital_pdf(text="hola"), caps=PdfCaps(text_min_chars=3))
     assert ex.mode == "text"
     assert "hola" in ex.text_layer
+
+
+# ---------- fallos por-imagen / por-página: se saltan CON rastro ------------------- #
+
+
+def test_broken_embedded_image_skipped_with_log(
+    sink_capture: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Una imagen embebida que no normaliza se salta del OCR (best-effort) — su contenido se
+    pierde de la transcripción, así que debe quedar `ocr.pdf.image_skipped` con el porqué."""
+    pdf = digital_pdf(image_px=(300,))  # construir ANTES de romper Pixmap
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("pixmap roto")
+
+    monkeypatch.setattr(pymupdf, "Pixmap", boom)
+    ex = extract_pdf(pdf, caps=PdfCaps())
+
+    assert ex.mode == "text"
+    assert ex.images == ()  # la única imagen calificante se saltó
+    events = _drain_events(sink_capture, "ocr.pdf.image_skipped")
+    assert len(events) == 1
+    assert events[0]["level"] == "warning"
+    fields = json.loads(events[0]["fields"])
+    assert fields["exc_type"] == "RuntimeError"
+    assert isinstance(fields["xref"], int)
+
+
+def test_page_raster_failure_skipped_with_log(
+    sink_capture: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Una página que no rasteriza se salta (best-effort) — esa página nunca se OCR-ea, así que
+    debe quedar `ocr.pdf.page_raster_failed` por cada hueco."""
+    pdf = scanned_pdf(pages=2)  # construir ANTES de romper get_pixmap
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("raster roto")
+
+    monkeypatch.setattr(pymupdf.Page, "get_pixmap", boom)
+    ex = extract_pdf(pdf, caps=PdfCaps())
+
+    assert ex.mode == "scanned"
+    assert ex.images == ()
+    events = _drain_events(sink_capture, "ocr.pdf.page_raster_failed")
+    assert [json.loads(e["fields"])["page"] for e in events] == [1, 2]
 
 
 def test_corrupt_bytes_raise() -> None:

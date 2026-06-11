@@ -314,8 +314,16 @@ def _html_to_text(html: str) -> str:
     try:
         parser.feed(html)
         parser.close()
-    except Exception:
-        pass
+    except Exception as e:
+        # El cuerpo queda PARCIAL (solo lo acumulado hasta el fallo); sin rastro, el recorte
+        # del texto del mensaje era invisible.
+        _log.warning(
+            "imap.html_to_text.partial",
+            exc_type=type(e).__name__,
+            exc_msg=str(e),
+            html_len=len(html),
+            extracted_len=len(parser.text()),
+        )
     raw = parser.text()
     lines = [re.sub(r"\s+", " ", line).strip() for line in raw.split("\n")]
     return "\n".join(line for line in lines if line)

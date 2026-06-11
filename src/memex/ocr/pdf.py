@@ -24,7 +24,10 @@ from typing import Literal
 
 import pymupdf
 
+from memex.logging import get_logger
 from memex.ocr.client import OcrError
+
+_log = get_logger("memex.ocr.pdf")
 
 #: Modo con que se resolvió un PDF — útil para logging/auditoría y para el sufijo de `ocr_model`.
 PdfMode = Literal["text", "skipped_images", "scanned", "empty"]
@@ -158,7 +161,10 @@ def _png_from_xref(doc: pymupdf.Document, xref: int) -> bytes | None:
         if pix.n - pix.alpha >= 4:  # CMYK (4 componentes de color) → convertir a RGB
             pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
         return bytes(pix.tobytes("png"))
-    except Exception:
+    except Exception as e:
+        # La imagen se salta del OCR: lo que diga ahí se pierde de la transcripción — que al
+        # menos quede el rastro de QUÉ se perdió y por qué.
+        _log.warning("ocr.pdf.image_skipped", xref=xref, exc_type=type(e).__name__, exc_msg=str(e))
         return None
 
 
@@ -168,7 +174,14 @@ def _rasterize_pages(doc: pymupdf.Document, caps: PdfCaps) -> list[PdfImage]:
     for i in range(min(caps.max_pages, int(doc.page_count))):
         try:
             png = bytes(doc[i].get_pixmap(dpi=caps.raster_dpi).tobytes("png"))
-        except Exception:
+        except Exception as e:
+            # Página saltada = su contenido nunca se OCR-ea; el hueco debe quedar registrado.
+            _log.warning(
+                "ocr.pdf.page_raster_failed",
+                page=i + 1,
+                exc_type=type(e).__name__,
+                exc_msg=str(e),
+            )
             continue
         images.append(PdfImage(png_bytes=png, origin=f"page{i + 1}-raster"))
     return images
