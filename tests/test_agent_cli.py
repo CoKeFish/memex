@@ -23,6 +23,7 @@ def test_help_lists_groups(capsys: pytest.CaptureFixture[str]) -> None:
     assert "bienestar" in out
     assert "finance" in out
     assert "identidad" in out
+    assert "calendario" in out
     assert "--event" in out
     # comandos del flujo de evento
     assert "start" in out
@@ -82,6 +83,43 @@ def test_identidad_exposes_only_add(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["identidad", "interest", "list"]) == 2
     assert main(["identidad", "candidates"]) == 2
     assert main(["identidad", "help"]) == 0
+    assert "add" in capsys.readouterr().out
+
+
+def test_dispatch_calendario_add_and_list(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = main(
+        [
+            "calendario",
+            "add",
+            "--title",
+            "Dentista",
+            "--date",
+            "2026-06-20",
+            "--time",
+            "09:00",
+            "--json",
+        ]
+    )
+    assert rc == 0
+    row = _last_json(capsys.readouterr().out)
+    assert row["instances"] == 1
+    assert row["consolidated_ids"]
+
+    rc = main(["calendario", "list", "--since", "2026-06-19", "--json"])
+    assert rc == 0
+    listed = _last_json(capsys.readouterr().out)
+    assert [i["title"] for i in listed["items"]] == ["Dentista"]
+
+
+def test_calendario_exposes_only_agent_commands(capsys: pytest.CaptureFixture[str]) -> None:
+    # El mantenimiento (sync/oauth/ciclo) NO se expone al agente.
+    assert main(["calendario", "pull", "--account", "1"]) == 2
+    assert main(["calendario", "push", "--account", "1"]) == 2
+    assert main(["calendario", "authorize", "--account", "1"]) == 2
+    assert main(["calendario", "consolidate"]) == 2
+    err = capsys.readouterr().err
+    assert "memex-calendar-sync" in err  # el mensaje apunta a la CLI de mantenimiento real
+    assert main(["calendario", "help"]) == 0
     assert "add" in capsys.readouterr().out
 
 

@@ -1,9 +1,10 @@
 """CLI `memex` — la interfaz ÚNICA del AGENTE (Hermes) sobre memex.
 
-Despacha a las CLIs de dominio (`memex-bienestar`, `memex-finance`, `memex-identidades`) exponiendo
-SOLO los comandos que el agente usa para registrar/consultar la vida del usuario; los de
-MANTENIMIENTO quedan fuera (blocklist/allowlist). No reimplementa nada: forwardea el resto de argv
-al `main` del dominio, así los flags y el `--json` (ÚLTIMA línea de stdout) son idénticos.
+Despacha a las CLIs de dominio (`memex-bienestar`, `memex-finance`, `memex-identidades`,
+`memex-calendar-sync`) exponiendo SOLO los comandos que el agente usa para registrar/consultar la
+vida del usuario; los de MANTENIMIENTO quedan fuera (blocklist/allowlist). No reimplementa nada:
+forwardea el resto de argv al `main` del dominio, así los flags y el `--json` (ÚLTIMA línea de
+stdout) son idénticos.
 
 Además implementa el flujo de EVENTO multi-hecho (`memex.agent_event`): `start` abre un evento y, a
 partir de ahí, los `register` se ENCOLAN (staging) en vez de persistir; `end` los procesa JUNTOS en
@@ -29,6 +30,7 @@ from memex.agent_event import (
 )
 from memex.db import connection
 from memex.modules.bienestar.cli import main as _bienestar_main
+from memex.modules.calendar.cli import main as _calendar_main
 from memex.modules.finance.cli import main as _finance_main
 from memex.modules.identidades.cli import main as _identidades_main
 
@@ -37,14 +39,28 @@ _GROUPS: dict[str, Callable[[list[str]], int]] = {
     "bienestar": _bienestar_main,
     "finance": _finance_main,
     "identidad": _identidades_main,
+    "calendario": _calendar_main,
 }
 
 #: Subcomandos de MANTENIMIENTO (no del agente): se bloquean en la superficie `memex`.
 _BLOCKED: dict[str, frozenset[str]] = {"finance": frozenset({"dedup", "consolidate"})}
 
 #: Grupos donde el agente SOLO usa estos subcomandos (allowlist): el resto es mantenimiento.
-#: `identidad` tiene mucho mantenimiento (sync/merge/…) y un único verbo del agente.
-_ALLOWED: dict[str, frozenset[str]] = {"identidad": frozenset({"add", "help"})}
+#: `identidad` tiene mucho mantenimiento (sync/merge/…) y un único verbo del agente; `calendario`
+#: ídem (pull/push/authorize/… son del operador, no del agente).
+_ALLOWED: dict[str, frozenset[str]] = {
+    "identidad": frozenset({"add", "help"}),
+    "calendario": frozenset(
+        {"add", "list", "show", "update", "rm", "conflicts", "sync-status", "help"}
+    ),
+}
+
+#: Nombre de la CLI de MANTENIMIENTO por grupo (para los mensajes de bloqueo); el default
+#: `memex-<grupo>` no siempre existe (calendario → memex-calendar-sync).
+_MAINT_CLI: dict[str, str] = {
+    "identidad": "memex-identidades",
+    "calendario": "memex-calendar-sync",
+}
 
 #: (grupo, subcomando) → kind del hecho: los register que se ENCOLAN cuando hay un evento abierto.
 _STAGEABLE: dict[tuple[str, str], str] = {
@@ -72,6 +88,15 @@ finance (gastos/ingresos):
 
 identidad (directorio de personas/organizaciones/productos):
   memex identidad add          registra/resuelve una tarjeta de contacto (no duplica)
+
+calendario (eventos y agenda):
+  memex calendario add         crea un evento (o una serie con --every/--until)
+  memex calendario list        próximos eventos (capa consolidada)
+  memex calendario show        detalle de un evento (fuentes, serie, conflictos)
+  memex calendario update      corrige un evento (o toda la serie con --series)
+  memex calendario rm          borra un evento (o la serie); definitivo
+  memex calendario conflicts   choques de horario pendientes de revisión
+  memex calendario sync-status ¿la sincronización con Google está funcionando?
 
 evento multi-hecho (una factura = varios hechos del MISMO evento):
   memex start                  abre un evento (los register siguientes se ENCOLAN, no persisten)
@@ -204,13 +229,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     dispatch = _GROUPS.get(cmd)
     if dispatch is None:
         return _err(f"comando desconocido: '{cmd}'. Probá: memex help")
+    maint_cli = _MAINT_CLI.get(cmd, f"memex-{cmd}")
     if rest and rest[0] in _BLOCKED.get(cmd, frozenset()):
-        return _err(f"'{rest[0]}' es de mantenimiento, no del agente; usá 'memex-{cmd}' directo.")
+        return _err(f"'{rest[0]}' es de mantenimiento, no del agente; usá '{maint_cli}' directo.")
     allowed = _ALLOWED.get(cmd)
     if allowed is not None and rest and rest[0] not in allowed:
         return _err(
             f"'{rest[0]}' no es del agente; con '{cmd}' solo: {', '.join(sorted(allowed))}. "
-            f"Mantenimiento: 'memex-{cmd}' directo."
+            f"Mantenimiento: '{maint_cli}' directo."
         )
     # Con un evento ABIERTO, los register se ENCOLAN (no persisten) hasta 'memex end'.
     staged = _maybe_stage(cmd, rest)
