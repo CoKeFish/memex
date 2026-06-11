@@ -12,7 +12,10 @@ export function CalendarPage() {
   const [selected, setSelected] = useState<ConsolidatedEvent | null>(null)
   const [conflict, setConflict] = useState<CalendarConflict | null>(null)
   // El calendario mensual y la agenda comparten la misma capa consolidada (GET /calendar/events).
-  const { data, loading, error } = useAsync<ConsolidatedEvent[]>(() => fetchCalendarEvents(), [])
+  const { data, loading, error, reload } = useAsync<ConsolidatedEvent[]>(
+    () => fetchCalendarEvents(),
+    [],
+  )
   const events = data ?? []
   const eventsLoading = loading && !data
   // Al enfocar un conflicto: saltar el calendario a la ocurrencia y resaltar sus dos eventos.
@@ -39,7 +42,7 @@ export function CalendarPage() {
       <div className="grid gap-5 lg:grid-cols-2 xl:grid-cols-3">
         <DedupDecisions />
         <ConflictsList onSelect={setConflict} />
-        <SyncPanel />
+        <SyncPanel onSynced={reload} />
       </div>
       <EventInspector event={selected} onClose={() => setSelected(null)} />
       <ConflictInspector conflict={conflict} onClose={() => setConflict(null)} />

@@ -2,7 +2,7 @@ import { ArrowUpRight, Lock } from "lucide-react"
 import { Link } from "react-router-dom"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { StatusBadge } from "@/components/common/led"
-import { formatDate } from "@/lib/format"
+import { formatDateOnly } from "@/lib/format"
 import { originChart, originLabel } from "@/lib/status"
 import type { CalendarOutcome, ConsolidatedEvent } from "@/types/domain"
 
@@ -39,7 +39,7 @@ export function EventInspector({ event, onClose }: { event: ConsolidatedEvent | 
             </SheetHeader>
             <div className="space-y-4 p-4">
               <dl className="num space-y-1.5 text-sm">
-                <Row k="Fecha" v={formatDate(event.startsOn) + (event.endsOn ? ` – ${formatDate(event.endsOn)}` : "")} />
+                <Row k="Fecha" v={formatDateOnly(event.startsOn) + (event.endsOn ? ` – ${formatDateOnly(event.endsOn)}` : "")} />
                 <Row k="Horario" v={event.startTime ? `${event.startTime}${event.endTime ? `–${event.endTime}` : ""}` : "todo el día"} />
                 {event.location && <Row k="Lugar" v={event.location} />}
                 <Row k="Prioridad" v={`rank ${event.priorityRank}${event.protected ? " · protegido" : ""}`} />

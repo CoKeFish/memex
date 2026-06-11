@@ -1,7 +1,7 @@
 import { CalendarClock, Lock, MapPin, Repeat } from "lucide-react"
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { StatusBadge } from "@/components/common/led"
-import { formatDate } from "@/lib/format"
+import { formatDateOnly } from "@/lib/format"
 import type { Tone } from "@/lib/status"
 import type { CalendarConflict, ConsolidatedEventLite } from "@/types/domain"
 
@@ -19,7 +19,7 @@ function Side({ e }: { e: ConsolidatedEventLite }) {
         <span className="text-sm font-medium">{e.title}</span>
       </div>
       <div className="num mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
-        <span>{formatDate(e.startsOn)}</span>
+        <span>{formatDateOnly(e.startsOn)}</span>
         <span>{e.startTime ? `${e.startTime}${e.endTime ? `–${e.endTime}` : ""}` : "todo el día"}</span>
         {e.location && (
           <span className="inline-flex items-center gap-0.5">
@@ -78,8 +78,8 @@ export function ConflictInspector({
               <Side e={conflict.b} />
               {conflict.recurring && (
                 <p className="text-[11px] leading-relaxed text-muted-foreground">
-                  Se repite {conflict.instanceCount} veces entre {formatDate(conflict.firstOn)} y{" "}
-                  {formatDate(conflict.lastOn)} (dos series recurrentes que coinciden). Arriba se muestra
+                  Se repite {conflict.instanceCount} veces entre {formatDateOnly(conflict.firstOn)} y{" "}
+                  {formatDateOnly(conflict.lastOn)} (dos series recurrentes que coinciden). Arriba se muestra
                   la ocurrencia más próxima.
                 </p>
               )}

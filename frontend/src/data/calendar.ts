@@ -2,13 +2,16 @@
 // funciones async + transforms snake_case → camelCase. La vista `/calendario` consume la capa
 // consolidada + dedup + conflictos + sync, todo de SOLO LECTURA (GET /calendar/*).
 
-import { apiGet } from "@/lib/api"
+import { apiGet, apiPost } from "@/lib/api"
 import type {
+  CalendarAccountHealth,
   CalendarConflict,
   CalendarEventLite,
   CalendarOrigin,
   CalendarOutcome,
   CalendarRawMember,
+  CalendarSyncHealth,
+  CalendarSyncNowResult,
   CalendarSyncRun,
   ConsolidatedEvent,
   ConsolidatedEventLite,
@@ -119,6 +122,42 @@ interface ProviderAccountApi {
   enabled: boolean
   write_back: boolean
   sync_token_present: boolean
+}
+
+interface AccountHealthApi {
+  account_id: number
+  provider: string
+  account_label: string
+  enabled: boolean
+  write_back: boolean
+  cursor_state: CalendarAccountHealth["cursorState"]
+  last_pull_at: string | null
+  last_pull_status: CalendarAccountHealth["lastPullStatus"]
+  last_pull_age_hours: number | null
+  last_push_at: string | null
+  last_push_status: CalendarAccountHealth["lastPushStatus"]
+}
+
+interface SyncHealthApi {
+  overall: CalendarSyncHealth["overall"]
+  auto_sync_active: boolean
+  daemon_enabled: boolean
+  calendar_job_enabled: boolean
+  last_cycle_at: string | null
+  accounts: AccountHealthApi[]
+}
+
+interface SyncNowApi {
+  pulled: number
+  created: number
+  modified: number
+  deleted: number
+  unchanged: number
+  dedup_pairs: number
+  errors: number
+  groups: number
+  orphans: number
+  status: CalendarSyncNowResult["status"]
 }
 
 interface ListApi<T> {
@@ -298,4 +337,50 @@ export async function fetchCalendarSyncRuns(): Promise<CalendarSyncRun[]> {
 export async function fetchCalendarProviderAccounts(): Promise<ProviderAccount[]> {
   const page = await apiGet<{ items: ProviderAccountApi[] }>("/calendar/provider-accounts")
   return page.items.map(toProviderAccount)
+}
+
+function toAccountHealth(a: AccountHealthApi): CalendarAccountHealth {
+  return {
+    accountId: a.account_id,
+    provider: a.provider,
+    accountLabel: a.account_label,
+    enabled: a.enabled,
+    writeBack: a.write_back,
+    cursorState: a.cursor_state,
+    lastPullAt: a.last_pull_at,
+    lastPullStatus: a.last_pull_status,
+    lastPullAgeHours: a.last_pull_age_hours,
+    lastPushAt: a.last_push_at,
+    lastPushStatus: a.last_push_status,
+  }
+}
+
+/** Salud de la sincronización (GET /calendar/sync-health) — la misma fuente que el CLI. */
+export async function fetchCalendarSyncHealth(): Promise<CalendarSyncHealth> {
+  const r = await apiGet<SyncHealthApi>("/calendar/sync-health")
+  return {
+    overall: r.overall,
+    autoSyncActive: r.auto_sync_active,
+    daemonEnabled: r.daemon_enabled,
+    calendarJobEnabled: r.calendar_job_enabled,
+    lastCycleAt: r.last_cycle_at,
+    accounts: r.accounts.map(toAccountHealth),
+  }
+}
+
+/** «Sincronizar ahora»: pull + consolidación in-process (sin LLM ni push). */
+export async function syncCalendarAccountNow(accountId: number): Promise<CalendarSyncNowResult> {
+  const r = await apiPost<SyncNowApi>(`/calendar/accounts/${accountId}/sync`)
+  return {
+    pulled: r.pulled,
+    created: r.created,
+    modified: r.modified,
+    deleted: r.deleted,
+    unchanged: r.unchanged,
+    dedupPairs: r.dedup_pairs,
+    errors: r.errors,
+    groups: r.groups,
+    orphans: r.orphans,
+    status: r.status,
+  }
 }

@@ -1,33 +1,35 @@
 import { useState } from "react"
 import { Link } from "react-router-dom"
-import { ArrowUpRight, Bot, CalendarClock, Hand, Loader2, Lock, MapPin, Repeat } from "lucide-react"
+import { ArrowUpRight, Bot, CalendarClock, Hand, Loader2, Lock, MapPin, RefreshCw, Repeat } from "lucide-react"
+import { toast } from "sonner"
 import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { StatusBadge } from "@/components/common/led"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { RelativeTime } from "@/components/common/time"
 import { VirtualList } from "@/components/common/virtual-list"
-import { formatDate } from "@/lib/format"
-import { recentWindow, upcoming } from "@/lib/calendar-window"
+import { formatDateOnly } from "@/lib/format"
+import { recentWindow, todayKey, upcoming } from "@/lib/calendar-window"
+import { ApiError } from "@/lib/api"
 import { originChart, originLabel, type Tone } from "@/lib/status"
 import {
+  fetchCalendarSyncHealth,
   fetchCalendarConflicts,
-  fetchCalendarProviderAccounts,
   fetchCalendarSyncRuns,
   fetchDedupDecisions,
-  NOW,
+  syncCalendarAccountNow,
 } from "@/data"
 import { useAsync } from "@/lib/use-async"
 import type {
+  CalendarAccountHealth,
   CalendarConflict,
   CalendarOrigin,
+  CalendarSyncHealth,
   CalendarSyncRun,
   ConsolidatedEvent,
   DedupDecision,
-  ProviderAccount,
 } from "@/types/domain"
-
-const todayStr = `${NOW.getFullYear()}-${String(NOW.getMonth() + 1).padStart(2, "0")}-${String(NOW.getDate()).padStart(2, "0")}`
 
 function PanelLoader({ label }: { label: string }) {
   return (
@@ -89,7 +91,17 @@ export function Agenda({
   loading?: boolean
   error?: string | null
 }) {
-  const upcoming = events.filter((e) => e.startsOn >= todayStr).slice(0, 12)
+  // Orden CRONOLÓGICO antes de cortar: la API lista por id (orden de consolidación), no por
+  // fecha — sin el sort, "próximos" eran 12 eventos arbitrarios. El «hoy» se calcula en render.
+  const todayStr = todayKey()
+  const next = events
+    .filter((e) => e.startsOn >= todayStr)
+    .sort(
+      (a, b) =>
+        a.startsOn.localeCompare(b.startsOn) ||
+        (a.startTime ?? "").localeCompare(b.startTime ?? ""),
+    )
+    .slice(0, 12)
   return (
     <Panel className="overflow-hidden">
       <PanelHeader eyebrow="calendario · agenda" title="Próximos eventos" sub="Capa consolidada (mod_calendar_consolidated)" />
@@ -98,11 +110,11 @@ export function Agenda({
           <ErrorState detail={error} />
         ) : loading ? (
           <PanelLoader label="Cargando agenda…" />
-        ) : upcoming.length === 0 ? (
+        ) : next.length === 0 ? (
           <EmptyState title="Sin eventos próximos" />
         ) : (
           <ul className="max-h-[420px] divide-y divide-border overflow-y-auto">
-            {upcoming.map((e) => (
+            {next.map((e) => (
               <li key={e.id}>
                 <button
                   type="button"
@@ -110,7 +122,7 @@ export function Agenda({
                   className="flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-accent/40"
                 >
                   <div className="num w-12 shrink-0 text-center">
-                    <div className="text-[11px] uppercase text-muted-foreground">{formatDate(e.startsOn).split(" ")[1]}</div>
+                    <div className="text-[11px] uppercase text-muted-foreground">{formatDateOnly(e.startsOn).split(" ")[1]}</div>
                     <div className="text-base font-semibold leading-tight">{new Date(e.startsOn).getUTCDate()}</div>
                   </div>
                   <div className="min-w-0 flex-1">
@@ -169,7 +181,7 @@ export function DedupDecisions() {
               <span className="mx-1.5 text-muted-foreground">↔</span>
               <span className="font-medium">{dD.b.title}</span>
             </div>
-            <div className="num mt-0.5 text-[11px] text-muted-foreground">{formatDate(dD.a.startsOn)}</div>
+            <div className="num mt-0.5 text-[11px] text-muted-foreground">{formatDateOnly(dD.a.startsOn)}</div>
           </div>
           <StatusBadge tone={dec.tone} label={dec.label} />
         </button>
@@ -187,7 +199,7 @@ export function DedupDecisions() {
                     <div className="min-w-0 flex-1">
                       <div className="text-xs font-medium text-foreground">{e.title}</div>
                       <div className="num mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
-                        <span>{formatDate(e.startsOn)}</span>
+                        <span>{formatDateOnly(e.startsOn)}</span>
                         {e.startTime && <span>{e.startTime}</span>}
                         {e.location && <span>· {e.location}</span>}
                         {e.provider && <span>· {e.provider}</span>}
@@ -311,7 +323,7 @@ export function ConflictsList({ onSelect }: { onSelect: (c: CalendarConflict) =>
             </span>
           </div>
           <div className="num mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>{c.recurring ? `${formatDate(c.firstOn)} – ${formatDate(c.lastOn)}` : formatDate(c.a.startsOn)}</span>
+            <span>{c.recurring ? `${formatDateOnly(c.firstOn)} – ${formatDateOnly(c.lastOn)}` : formatDateOnly(c.a.startsOn)}</span>
             {c.recurring && (
               <span className="inline-flex items-center gap-0.5 rounded bg-origin-provider/15 px-1 py-0.5 text-[10px] font-medium text-origin-provider">
                 <Repeat className="size-2.5" /> ×{c.instanceCount}
@@ -364,74 +376,184 @@ export function ConflictsList({ onSelect }: { onSelect: (c: CalendarConflict) =>
   )
 }
 
-const TOKEN_STATE: Record<ProviderAccount["tokenState"], { label: string; tone: Tone }> = {
-  delta: { label: "delta", tone: "ok" },
-  "full-resync": { label: "410", tone: "review" },
-  never: { label: "nuevo", tone: "neutral" },
+/** Edad en horas → texto en llano para el panel de sync. */
+function ageStr(hours: number | null): string {
+  if (hours == null) return "nunca corrió"
+  if (hours < 1) return `hace ${Math.round(hours * 60)} min`
+  if (hours < 48) return `hace ${Math.round(hours)} h`
+  return `hace ${Math.round(hours / 24)} días`
 }
 
-export function SyncPanel() {
-  const accountsState = useAsync<ProviderAccount[]>(() => fetchCalendarProviderAccounts(), [])
-  const runsState = useAsync<CalendarSyncRun[]>(() => fetchCalendarSyncRuns(), [])
-  const providers = accountsState.data ?? []
+const CURSOR_STATE: Record<CalendarAccountHealth["cursorState"], { label: string; tone: Tone; hint: string }> = {
+  incremental: {
+    label: "al día (incremental)",
+    tone: "ok",
+    hint: "Hay cursor delta: la próxima sincronización trae solo los cambios.",
+  },
+  full_resync_pendiente: {
+    label: "hará una sync completa",
+    tone: "review",
+    hint: "El cursor venció o se perdió: la próxima sincronización vuelve a traer todo.",
+  },
+  sin_primera_sync: {
+    label: "sin primera sync",
+    tone: "neutral",
+    hint: "Esta cuenta todavía no bajó nada de Google.",
+  },
+}
+
+/** LED + frase que responde «¿está funcionando?» (overall lo decide el servidor). */
+function overallLine(h: CalendarSyncHealth): { tone: Tone; text: string } {
+  const ages = h.accounts
+    .filter((a) => a.enabled && a.lastPullAgeHours != null)
+    .map((a) => a.lastPullAgeHours as number)
+  const age = ages.length > 0 ? ageStr(Math.min(...ages)) : null
+  switch (h.overall) {
+    case "ok":
+      return { tone: "ok", text: `Funcionando: última actualización desde el proveedor ${age}.` }
+    case "desactualizado":
+      return { tone: "review", text: `Desactualizado: la última actualización fue ${age}.` }
+    case "error":
+      return { tone: "error", text: "La última sincronización falló — revisá las corridas." }
+    case "nunca":
+      return { tone: "neutral", text: "Nunca se sincronizó con el proveedor." }
+    case "sin_cuentas":
+      return { tone: "neutral", text: "Sin cuentas de proveedor conectadas." }
+  }
+}
+
+function SyncNowButton({ accountId, onDone }: { accountId: number; onDone: () => void }) {
+  const [busy, setBusy] = useState(false)
+  async function run() {
+    setBusy(true)
+    try {
+      const res = await syncCalendarAccountNow(accountId)
+      toast.success("Sincronizado con el proveedor", {
+        description: `+${res.created} nuevos · ~${res.modified} cambiados · −${res.deleted} borrados · ${res.unchanged} sin cambios`,
+      })
+      onDone()
+    } catch (e) {
+      toast.error("No se pudo sincronizar", {
+        description: e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e),
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <Button variant="outline" size="sm" className="h-7 text-xs" disabled={busy} onClick={run}>
+      {busy ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+      Sincronizar ahora
+    </Button>
+  )
+}
+
+export function SyncPanel({ onSynced }: { onSynced?: () => void }) {
+  const [refresh, setRefresh] = useState(0)
+  const healthState = useAsync<CalendarSyncHealth>(() => fetchCalendarSyncHealth(), [refresh])
+  const runsState = useAsync<CalendarSyncRun[]>(() => fetchCalendarSyncRuns(), [refresh])
+  const health = healthState.data
   const runs = runsState.data ?? []
-  const loading = (accountsState.loading && !accountsState.data) || (runsState.loading && !runsState.data)
-  const error = accountsState.error ?? runsState.error
+  const loading = (healthState.loading && !health) || (runsState.loading && !runsState.data)
+  const error = healthState.error ?? runsState.error
+  const refreshAll = () => {
+    setRefresh((r) => r + 1)
+    onSynced?.()
+  }
   return (
     <Panel className="overflow-hidden">
-      <PanelHeader eyebrow="calendario · sync" title="Proveedores y sincronización" sub="Ingress/egress con Google (mod_calendar_sync_runs)" />
+      <PanelHeader
+        eyebrow="calendario · sync"
+        title="Sincronización con el proveedor"
+        sub="¿Está funcionando? Estado por cuenta y corridas recientes"
+      />
       <PanelBody className="space-y-3">
         {error ? (
           <ErrorState detail={error} />
-        ) : loading ? (
+        ) : loading || !health ? (
           <PanelLoader label="Cargando sincronización…" />
-        ) : providers.length === 0 && runs.length === 0 ? (
-          <EmptyState title="Sin cuentas de proveedor" hint="Conectá una cuenta con memex-calendar-sync." />
         ) : (
           <>
-            <div className="space-y-2">
-              {providers.map((p) => {
-                const ts = TOKEN_STATE[p.tokenState]
-                return (
-                  <div key={p.id} className="flex items-center justify-between gap-2 rounded-md border border-border bg-background/40 px-3 py-2">
-                    <div className="text-sm">
-                      <span className="font-medium capitalize">
-                        {p.provider} · {p.accountLabel}
-                      </span>
-                      <span className="num ml-2 text-[11px] text-muted-foreground">
-                        {p.lastSyncAt ? <RelativeTime date={p.lastSyncAt} /> : "sin sync"}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      <StatusBadge tone={ts.tone} label={ts.label} />
-                      {p.writeBack && <StatusBadge tone="ok" label="write-back" />}
-                    </div>
+            {(() => {
+              const o = overallLine(health)
+              return (
+                <div className="space-y-1.5 rounded-md border border-border bg-background/40 px-3 py-2">
+                  <div className="flex items-center gap-2 text-sm">
+                    <StatusBadge tone={o.tone} label={health.overall.replace("_", " ")} />
+                    <span>{o.text}</span>
                   </div>
-                )
-              })}
-            </div>
+                  {!health.autoSyncActive && (
+                    <p className="text-xs text-muted-foreground">
+                      La sincronización automática está apagada — los datos solo se actualizan
+                      cuando sincronizás a mano (acá o por CLI).
+                    </p>
+                  )}
+                </div>
+              )
+            })()}
+            {health.accounts.length === 0 ? (
+              <EmptyState title="Sin cuentas de proveedor" hint="Conectá una cuenta con memex-calendar-sync add-account." />
+            ) : (
+              <div className="space-y-2">
+                {health.accounts.map((a) => {
+                  const cs = CURSOR_STATE[a.cursorState]
+                  return (
+                    <div key={a.accountId} className="space-y-1.5 rounded-md border border-border bg-background/40 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0 text-sm">
+                          <span className="font-medium capitalize">
+                            {a.provider} · {a.accountLabel}
+                          </span>
+                          {!a.enabled && <span className="eyebrow ml-2">deshabilitada</span>}
+                        </div>
+                        <SyncNowButton accountId={a.accountId} onDone={refreshAll} />
+                      </div>
+                      <div className="num flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                        <span>
+                          bajada: {ageStr(a.lastPullAgeHours)}
+                          {a.lastPullStatus === "error" && <span className="text-status-error"> — falló</span>}
+                        </span>
+                        <span title={cs.hint}>
+                          <StatusBadge tone={cs.tone} label={cs.label} />
+                        </span>
+                        {a.writeBack && (
+                          <span title="memex puede crear/editar/borrar eventos en esta cuenta al hacer push (write-back).">
+                            <StatusBadge tone="ok" label="escribe en el proveedor" />
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
             <div>
               <div className="eyebrow mb-1.5">corridas recientes</div>
               {runs.length === 0 ? (
                 <p className="px-1 text-xs text-muted-foreground">Sin corridas de sync todavía.</p>
               ) : (
-                <ul className="divide-y divide-border rounded-md border border-border">
-                  {runs.map((r) => (
-                    <li key={r.id} className="flex items-center justify-between gap-2 px-3 py-1.5 text-xs">
-                      <span className="flex items-center gap-2">
-                        <span className={cn("num rounded px-1 py-0.5 text-[10px]", r.direction === "ingress" ? "bg-origin-provider/15 text-origin-provider" : "bg-brand/15 text-brand")}>
-                          {r.direction}
+                <>
+                  <ul className="divide-y divide-border rounded-md border border-border">
+                    {runs.map((r) => (
+                      <li key={r.id} className="flex items-center justify-between gap-2 px-3 py-1.5 text-xs">
+                        <span className="flex items-center gap-2">
+                          <span className={cn("num rounded px-1 py-0.5 text-[10px]", r.direction === "ingress" ? "bg-origin-provider/15 text-origin-provider" : "bg-brand/15 text-brand")}>
+                            {r.direction === "ingress" ? "proveedor → memex" : "memex → proveedor"}
+                          </span>
+                          <span className="truncate">{r.account}</span>
                         </span>
-                        <span className="truncate">{r.account}</span>
-                      </span>
-                      <span className="num flex items-center gap-2 text-muted-foreground">
-                        <span title="created/modified/deleted">+{r.created}/~{r.modified}/-{r.deleted}</span>
-                        {r.errors > 0 && <span className="text-status-error">{r.errors} err</span>}
-                        <RelativeTime date={r.startedAt} />
-                      </span>
-                    </li>
-                  ))}
-                </ul>
+                        <span className="num flex items-center gap-2 text-muted-foreground">
+                          <span>+{r.created} · ~{r.modified} · −{r.deleted}</span>
+                          {r.errors > 0 && <span className="text-status-error">{r.errors} err</span>}
+                          <RelativeTime date={r.startedAt} />
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-1 px-1 text-[10px] text-muted-foreground">
+                    + nuevos · ~ cambiados · − borrados (eventos de esa corrida)
+                  </p>
+                </>
               )}
             </div>
           </>

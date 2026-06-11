@@ -1,17 +1,18 @@
 // Helpers de ventana para los paneles del calendario (puros, testeables). Evitan listas larguísimas:
 // por defecto se muestra un recorte relevante (próximos / este mes / últimos N + próximos M) y el
-// usuario expande a "Todos". La referencia temporal es `NOW` (igual que month-grid/Agenda).
-
-import { NOW } from "@/data"
+// usuario expande a "Todos". El «hoy» se calcula POR LLAMADA (no al cargar el módulo): una pestaña
+// que queda abierta días no congela la referencia temporal.
 
 /** Hoy como `YYYY-MM-DD` (local). */
 export function todayKey(): string {
-  return `${NOW.getFullYear()}-${String(NOW.getMonth() + 1).padStart(2, "0")}-${String(NOW.getDate()).padStart(2, "0")}`
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
 }
 
 /** Mes actual como `YYYY-MM`. */
 export function monthKey(): string {
-  return `${NOW.getFullYear()}-${String(NOW.getMonth() + 1).padStart(2, "0")}`
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`
 }
 
 /** Items cuya fecha (accessor) es de hoy en adelante (próximos / vigentes). */

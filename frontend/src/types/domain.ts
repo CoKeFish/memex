@@ -822,6 +822,45 @@ export interface CalendarSyncRun {
   finishedAt: string | null
 }
 
+/** Salud de sync de una cuenta (GET /calendar/sync-health), en términos operables. */
+export interface CalendarAccountHealth {
+  accountId: number
+  provider: string
+  accountLabel: string
+  enabled: boolean
+  writeBack: boolean
+  cursorState: "incremental" | "full_resync_pendiente" | "sin_primera_sync"
+  lastPullAt: string | null
+  lastPullStatus: "ok" | "error" | null
+  lastPullAgeHours: number | null
+  lastPushAt: string | null
+  lastPushStatus: "ok" | "error" | null
+}
+
+/** ¿La sincronización está funcionando? — la misma fuente que el CLI `sync-status`. */
+export interface CalendarSyncHealth {
+  overall: "ok" | "desactualizado" | "error" | "nunca" | "sin_cuentas"
+  autoSyncActive: boolean
+  daemonEnabled: boolean
+  calendarJobEnabled: boolean
+  lastCycleAt: string | null
+  accounts: CalendarAccountHealth[]
+}
+
+/** Resultado de POST /calendar/accounts/{id}/sync (pull + consolidación, sin LLM ni push). */
+export interface CalendarSyncNowResult {
+  pulled: number
+  created: number
+  modified: number
+  deleted: number
+  unchanged: number
+  dedupPairs: number
+  errors: number
+  groups: number
+  orphans: number
+  status: "ok" | "error"
+}
+
 // ---- Controles de ingesta / procesamiento -------------------------------------
 
 export interface ModuleSetting {
