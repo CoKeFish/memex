@@ -84,6 +84,7 @@ class RelationStats:
     cumple_reales: int = 0
     orphans_pruned: int = 0
     redundant_pruned: int = 0  # pistas cooc podadas: ya hay confirmada entre los mismos vértices
+    stale_pruned: int = 0  # reales reconciliadas: su enlace de origen ya no existe en el directorio
     cluster_edges: int = 0  # aristas miembro_de vivas tras materializar los cúmulos confirmados
     chat_senders: int = 0  # identidades creadas para remitentes de chat desconocidos
     canales: int = 0  # canales de chat vivos tras el sync
@@ -262,11 +263,15 @@ def _materialize_cooccurrence(
 
 
 def _materialize_afiliacion(
-    conn: Connection, user_id: int, *, person_ids: Sequence[int] | None = None
+    conn: Connection,
+    user_id: int,
+    *,
+    person_ids: Sequence[int] | None = None,
+    live: set[tuple[Ref, Ref]] | None = None,
 ) -> int:
     """Una arista REAL persona→org por cada enlace explícito del directorio. Con `person_ids` acota
     a esas personas (uso incremental); sin él, barre todas (full-sweep). Idempotente. Devuelve
-    cuántas."""
+    cuántas. Con `live` (full-sweep) acumula los pares vigentes para la reconciliación."""
     scope = "" if person_ids is None else " AND person_id = ANY(:pids)"
     params: dict[str, Any] = {"u": user_id}
     if person_ids is not None:
@@ -278,23 +283,29 @@ def _materialize_afiliacion(
         ),
         params,
     ).mappings():
+        src = Ref("identidades:person", int(r["person_id"]))
+        dst = Ref("identidades:org", int(r["org_id"]))
         propose_edge(
             conn,
             user_id,
-            Ref("identidades:person", int(r["person_id"])),
-            Ref("identidades:org", int(r["org_id"])),
+            src,
+            dst,
             producer=PRODUCER_IDENTIDADES,
             relation_type="afiliado",
             status=STATUS_CONFIRMED,
         )
+        if live is not None:
+            live.add((src, dst))
         n += 1
     return n
 
 
-def _materialize_pertenencia(conn: Connection, user_id: int) -> int:
+def _materialize_pertenencia(
+    conn: Connection, user_id: int, *, live: set[tuple[Ref, Ref]] | None = None
+) -> int:
     """Una arista REAL «pertenece_a» sub→padre por cada `parent_identity_id` del directorio (la
     jerarquía genérica «sub»: programa→universidad, producto→empresa, …). Dirigida (hijo→padre).
-    Devuelve cuántas."""
+    Devuelve cuántas. Con `live` acumula los pares vigentes para la reconciliación."""
     n = 0
     for r in conn.execute(
         text(
@@ -308,28 +319,35 @@ def _materialize_pertenencia(conn: Connection, user_id: int) -> int:
         ),
         {"u": user_id},
     ).mappings():
-        child_slug = IDENTITY_SLUG_BY_KIND[str(r["child_kind"])]
-        parent_slug = IDENTITY_SLUG_BY_KIND[str(r["parent_kind"])]
+        src = Ref(IDENTITY_SLUG_BY_KIND[str(r["child_kind"])], int(r["child_id"]))
+        dst = Ref(IDENTITY_SLUG_BY_KIND[str(r["parent_kind"])], int(r["parent_id"]))
         propose_edge(
             conn,
             user_id,
-            Ref(child_slug, int(r["child_id"])),
-            Ref(parent_slug, int(r["parent_id"])),
+            src,
+            dst,
             producer=PRODUCER_IDENTIDADES,
             relation_type="pertenece_a",
             status=STATUS_CONFIRMED,
         )
+        if live is not None:
+            live.add((src, dst))
         n += 1
     return n
 
 
 def _materialize_contraparte(
-    conn: Connection, user_id: int, *, consolidated_ids: Sequence[int] | None = None
+    conn: Connection,
+    user_id: int,
+    *,
+    consolidated_ids: Sequence[int] | None = None,
+    live: set[tuple[Ref, Ref]] | None = None,
 ) -> int:
     """Una arista REAL «contraparte» cobro→identidad por cada transacción CONSOLIDADA cuya
     contraparte resolvió a una identidad del directorio (`counterparty_identity_id`). Dirigida (el
     cobro/pago → quién cobró/pagó). El enlace por identidad finanzas↔directorio. Con
-    `consolidated_ids` acota a esos consolidados (incremental); sin él, barre todos. Idempotente."""
+    `consolidated_ids` acota a esos consolidados (incremental); sin él, barre todos. Idempotente.
+    Con `live` (full-sweep) acumula los pares vigentes para la reconciliación."""
     scope = "" if consolidated_ids is None else " AND c.id = ANY(:cids)"
     params: dict[str, Any] = {"u": user_id}
     if consolidated_ids is not None:
@@ -346,18 +364,55 @@ def _materialize_contraparte(
         ),
         params,
     ).mappings():
-        slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
+        src = Ref("finance", int(r["cid"]))
+        dst = Ref(IDENTITY_SLUG_BY_KIND[str(r["kind"])], int(r["iid"]))
         propose_edge(
             conn,
             user_id,
-            Ref("finance", int(r["cid"])),
-            Ref(slug, int(r["iid"])),
+            src,
+            dst,
             producer=PRODUCER_FINANCE,
             relation_type="contraparte",
             status=STATUS_CONFIRMED,
         )
+        if live is not None:
+            live.add((src, dst))
         n += 1
     return n
+
+
+def _prune_stale_reales(
+    conn: Connection,
+    user_id: int,
+    *,
+    producer: str,
+    relation_type: str,
+    live: set[tuple[Ref, Ref]],
+) -> int:
+    """Reconciliación de las aristas REALES derivadas del directorio/finanzas: borra las
+    (producer + relation_type) cuyo enlace de ORIGEN ya no existe (padre quitado o cambiado,
+    afiliación borrada, contraparte re-resuelta). Los materializadores son aditivos y
+    `prune_orphan_edges` solo ve extremos muertos: sin esto, una corrección dejaría la arista
+    vieja viva para siempre (ambos vértices siguen proyectando). Solo full-sweep. Devuelve
+    cuántas borró."""
+    stale = [
+        e.id
+        for e in list_edges(conn, user_id, producer=producer)
+        if e.relation_type == relation_type and (e.src, e.dst) not in live
+    ]
+    if stale:
+        conn.execute(
+            text("DELETE FROM relation_edges WHERE user_id = :u AND id = ANY(:ids)"),
+            {"u": user_id, "ids": stale},
+        )
+        _log.info(
+            "relation.reconcile.pruned",
+            user_id=user_id,
+            producer=producer,
+            relation_type=relation_type,
+            pruned=len(stale),
+        )
+    return len(stale)
 
 
 #: CASE SQL kind→slug de identidad, generado desde el único punto de verdad (vertices.py). El ELSE
@@ -569,12 +624,32 @@ def build_relations(
     chat_senders = ensure_chat_sender_identities(conn, user_id)
     # REALES primero: la co-ocurrencia consulta las confirmadas (las de ESTA corrida incluidas)
     # para suprimir pistas redundantes sobre pares ya vouchados.
-    afil = _materialize_afiliacion(conn, user_id)
-    pert = _materialize_pertenencia(conn, user_id)
-    contraparte = _materialize_contraparte(conn, user_id)
+    afil_live: set[tuple[Ref, Ref]] = set()
+    pert_live: set[tuple[Ref, Ref]] = set()
+    contra_live: set[tuple[Ref, Ref]] = set()
+    afil = _materialize_afiliacion(conn, user_id, live=afil_live)
+    pert = _materialize_pertenencia(conn, user_id, live=pert_live)
+    contraparte = _materialize_contraparte(conn, user_id, live=contra_live)
     same_event = _materialize_same_event(conn, user_id)
     cumple = _materialize_cumple(conn, user_id)
     participa = _materialize_participa_en(conn, user_id)
+    # Reconciliación ANTES de confirmed_pairs: una confirmada stale (corrección del directorio)
+    # suprimiría pistas de co-ocurrencia legítimas sobre ese par.
+    stale = (
+        _prune_stale_reales(
+            conn, user_id, producer=PRODUCER_IDENTIDADES, relation_type="afiliado", live=afil_live
+        )
+        + _prune_stale_reales(
+            conn,
+            user_id,
+            producer=PRODUCER_IDENTIDADES,
+            relation_type="pertenece_a",
+            live=pert_live,
+        )
+        + _prune_stale_reales(
+            conn, user_id, producer=PRODUCER_FINANCE, relation_type="contraparte", live=contra_live
+        )
+    )
     confirmed_pairs = {
         frozenset((e.src, e.dst)) for e in list_edges(conn, user_id, status=STATUS_CONFIRMED)
     }
@@ -601,6 +676,7 @@ def build_relations(
         cumple_reales=cumple,
         orphans_pruned=pruned,
         redundant_pruned=redundant,
+        stale_pruned=stale,
         cluster_edges=cluster_edges,
         chat_senders=chat_senders,
         canales=canales,
@@ -619,6 +695,7 @@ def build_relations(
         high_fanout_skipped=skipped,
         orphans_pruned=pruned,
         redundant_pruned=redundant,
+        stale_pruned=stale,
         cluster_edges=cluster_edges,
         chat_senders=chat_senders,
         canales=canales,

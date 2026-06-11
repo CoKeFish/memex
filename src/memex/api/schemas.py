@@ -2153,6 +2153,7 @@ class GraphBuildResult(BaseModel):
     participa_reales: int = 0
     high_fanout_skipped: int
     orphans_pruned: int = 0
+    stale_pruned: int = 0
     cluster_edges: int = 0
     chat_senders: int = 0
     canales: int = 0

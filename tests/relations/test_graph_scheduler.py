@@ -10,36 +10,29 @@ from sqlalchemy.engine import Connection
 from memex.db import connection
 from memex.llm.client import LLMQuotaError
 from memex.relations.clusters_llm import ClusterPartitionStats
-from memex.relations.edges import PRODUCER_IDENTIDADES, STATUS_CONFIRMED, Ref, propose_edge
 from memex.scheduler import jobs as jobs_mod
 from memex.scheduler.config import SchedulerSettings, build_jobs
 
 
-def _person(conn: Connection, name: str) -> int:
+def _registro(conn: Connection, activity: str, event_id: str) -> int:
     return int(
         conn.execute(
             text(
-                "INSERT INTO mod_identidades (user_id, kind, display_name) "
-                "VALUES (1, 'persona', :n) RETURNING id"
+                "INSERT INTO mod_bienestar_registros (user_id, activity, occurred_at, event_id) "
+                "VALUES (1, :a, NOW(), :e) RETURNING id"
             ),
-            {"n": name},
+            {"a": activity, "e": event_id},
         ).scalar_one()
     )
 
 
 def _seed_triangle() -> None:
+    """Tres hechos del MISMO evento → el build materializa el triángulo «mismo_evento» desde la
+    fuente de verdad (antes se sembraban aristas `afiliado` directas sin respaldo en
+    `person_orgs`; la reconciliación del build ahora las barrería, como corresponde)."""
     with connection() as c:
-        a, b, d = _person(c, "A"), _person(c, "B"), _person(c, "C")
-        for x, y in ((a, b), (b, d), (a, d)):
-            propose_edge(
-                c,
-                1,
-                Ref("identidades:person", x),
-                Ref("identidades:person", y),
-                producer=PRODUCER_IDENTIDADES,
-                relation_type="afiliado",
-                status=STATUS_CONFIRMED,
-            )
+        for act in ("a", "b", "c"):
+            _registro(c, act, "evt-triangulo")
 
 
 def test_graph_job_registrado() -> None:

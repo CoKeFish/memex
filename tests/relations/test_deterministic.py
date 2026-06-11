@@ -351,6 +351,81 @@ def test_contraparte_real_cobro_a_identidad() -> None:
     assert (e.dst.slug, e.dst.id) == ("identidades:org", org)
 
 
+# ----- reconciliación: una corrección del directorio borra la arista vieja -------- #
+
+
+def test_reconcile_pertenencia_quitada() -> None:
+    # quitar el padre (set-parent --clear / PATCH) debe borrar la arista en el siguiente build:
+    # ambos vértices siguen vivos → prune_orphan_edges no la ve; la reconciliación sí.
+    parent = _org("Valve Corporation")
+    child = _producto("Celeste")
+    _set_parent(child, parent)
+    with connection() as c:
+        build_relations(c, 1)
+        assert len(list_edges(c, 1, producer="identidades")) == 1
+    _exec("UPDATE mod_identidades SET parent_identity_id = NULL WHERE id = :c", c=child)
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="identidades")
+    assert stats.stale_pruned == 1
+    assert edges == []
+
+
+def test_reconcile_pertenencia_cambiada() -> None:
+    # cambiar de padre: la arista al padre viejo se borra, queda solo la del nuevo.
+    viejo = _org("Uber")
+    nuevo = _org("Maddy Makes Games")
+    child = _producto("Celeste")
+    _set_parent(child, viejo)
+    with connection() as c:
+        build_relations(c, 1)
+    _set_parent(child, nuevo)
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = [
+            e for e in list_edges(c, 1, producer="identidades") if e.relation_type == "pertenece_a"
+        ]
+    assert stats.stale_pruned == 1
+    assert len(edges) == 1
+    assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:org", nuevo)
+
+
+def test_reconcile_afiliacion_borrada() -> None:
+    p = _person("Juan")
+    o = _org("Acme")
+    _link_person_org(p, o)
+    with connection() as c:
+        build_relations(c, 1)
+        assert len(list_edges(c, 1, producer="identidades")) == 1
+    _exec("DELETE FROM mod_identidades_person_orgs WHERE user_id = 1 AND person_id = :p", p=p)
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="identidades")
+    assert stats.stale_pruned == 1
+    assert edges == []
+
+
+def test_reconcile_contraparte_reapuntada() -> None:
+    # re-resolver la contraparte de un pago: la arista a la identidad vieja se borra.
+    vieja = _org("Uber")
+    nueva = _org("Uber Colombia")
+    fin = _finance("Uber", [12], identity_id=vieja)
+    with connection() as c:
+        build_relations(c, 1)
+        assert len(list_edges(c, 1, producer="finance")) == 1
+    _exec(
+        "UPDATE mod_finance_consolidated SET counterparty_identity_id = :n WHERE id = :f",
+        n=nueva,
+        f=fin,
+    )
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="finance")
+    assert stats.stale_pruned == 1
+    assert len(edges) == 1
+    assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:org", nueva)
+
+
 def test_contraparte_sin_identidad_no_edge() -> None:
     # cobro sin counterparty_identity_id (no resolvió) → no hay arista de contraparte.
     _finance("Comercio X", [13])

@@ -154,6 +154,7 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         chat_senders=stats.chat_senders,
         skipped=stats.high_fanout_skipped,
         orphans_pruned=stats.orphans_pruned,
+        stale_pruned=stats.stale_pruned,
     )
     return {
         "cooccurrence_pistas": stats.cooccurrence_pistas,
@@ -164,6 +165,7 @@ async def build_graph(user_id: UserID) -> dict[str, Any]:
         "participa_reales": stats.participa_reales,
         "high_fanout_skipped": stats.high_fanout_skipped,
         "orphans_pruned": stats.orphans_pruned,
+        "stale_pruned": stats.stale_pruned,
         "cluster_edges": stats.cluster_edges,
         "chat_senders": stats.chat_senders,
         "canales": stats.canales,
