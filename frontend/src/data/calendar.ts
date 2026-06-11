@@ -41,6 +41,8 @@ interface ConsolidatedApi {
   end_time: string | null
   location: string
   description: string
+  place_name: string | null
+  place_address: string | null
   member_count: number
   origins: CalendarOrigin[]
   protected: boolean
@@ -195,6 +197,8 @@ function toConsolidatedEvent(r: ConsolidatedApi): ConsolidatedEvent {
     endTime: hhmm(r.end_time),
     location: r.location,
     description: r.description,
+    placeName: r.place_name,
+    placeAddress: r.place_address,
     memberCount: r.member_count,
     origins: r.origins,
     protected: r.protected,

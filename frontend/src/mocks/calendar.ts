@@ -80,6 +80,8 @@ for (const t of TPLS) {
       endTime: t.end,
       location: t.location,
       description: "",
+      placeName: null,
+      placeAddress: null,
       memberCount: t.origins.length,
       origins: t.origins,
       protected: t.protected ?? false,

@@ -783,6 +783,9 @@ export interface ConsolidatedEvent {
   endTime: string | null
   location: string
   description: string
+  /** Lugar canónico del catálogo geo (FK place_id); null si no resuelto o virtual. */
+  placeName: string | null
+  placeAddress: string | null
   /** mod_calendar_event_links: cuántos eventos crudos lo componen. */
   memberCount: number
   origins: CalendarOrigin[]

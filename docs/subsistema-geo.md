@@ -1,10 +1,10 @@
 # Subsistema geo (ubicación)
 
 > **Estado: parcialmente construido.** El **plano de ubicación** (entrada de GPS por el gateway +
-> almacenamiento + lectura) y la **resolución de lugares** ya están **hechos** (commit `c7759df`,
-> migraciones 0042/0043). Falta lo **reactivo**: el clustering de "lugares donde estuve", el daemon de
-> transporte, la integración con el calendario, y la app móvil. Geo dejó de ser "solo un servicio de
-> mapas".
+> almacenamiento + lectura), la **resolución de lugares** (migraciones 0042/0043) y el **catálogo de
+> lugares** con su integración al calendario (0047 + 0062) ya están **hechos**. Falta lo **reactivo**:
+> el clustering de "lugares donde estuve", el daemon de transporte, y la app móvil. Geo dejó de ser
+> "solo un servicio de mapas".
 
 **Geo NO es un módulo de extracción** como finanzas o calendario (esos sacan datos de los mensajes y
 procesan por lotes). Es un **subsistema de ubicación**: tiene su propia entrada (el GPS del teléfono,
@@ -72,6 +72,33 @@ flowchart TB
   + el tiempo de viaje (del servicio) y disparará el aviso. El seam para leer tu ubicación **ya está
   enchufado**, pero nadie lo consume todavía.
 
+## Catálogo de lugares y resolución por texto (hecho, 0062)
+
+El dueño lleva **registro de los lugares** donde está/estuvo. Jerarquía de confianza: el **ping GPS**
+(cuando exista la app) es la **única fuente fiable** de posición real; un **evento de calendario con
+lugar físico** = **posibilidad** de presencia; los pagos con geo, ídem (futuro). La inferencia de
+presencia (cruzar ping↔evento por ventana de tiempo) está **explícitamente diferida** a la app móvil.
+
+- **`geo_places`** — el catálogo canónico por usuario (single-writer: `geo/places.py`). La identidad
+  fuerte la da el `provider_place_id`: dos grafías del mismo lugar ("Gabriel Giraldo S.J. 3-507" y
+  "gabriel giraldo 3507") colapsan en **una** fila. `name` = cómo lo conoce el usuario (el **primer
+  texto crudo** que lo resolvió; editable a futuro).
+- **`geo_place_resolutions`** — caché texto→lugar **por usuario**: cada texto normalizado se resuelve
+  **una sola vez** (mismo texto = 0 llamadas a Maps); un ZERO_RESULTS se cachea como `place_id NULL`
+  y tampoco se reintenta. **No confundir** con `geo_place_cache` (caché **global por celda** de
+  coordenada, para el reverse geocoding de pings): son direcciones opuestas.
+- **Los dominios referencian a geo, no al revés** (patrón identidades): el calendario tiene
+  `mod_calendar_consolidated.place_id` (FK al catálogo) y geo no conoce dominios por nombre — la
+  correlación rica la teje el grafo de relaciones. OJO: el `geo_place_id` TEXT que ya existía (0047)
+  es el id del **proveedor** (denormalizado); el FK nuevo es `place_id` BIGINT.
+- **Cómo se llena**: al final de cada consolidación del calendario (gateado por
+  `MEMEX_CALENDAR_GEOCODE=1`), cada `location` físico se resuelve contra el catálogo (los virtuales
+  —links de Meet/URLs— se saltan). Borrar un lugar del catálogo deja los FK en NULL y la próxima
+  consolidación lo **recrea** gastando una llamada: "borrar" no significa "no quiero este lugar".
+- **Superficies**: `memex-geo places` (inventario + cuántos eventos referencian cada lugar),
+  `memex calendario show` (lugar resuelto), `GET /calendar/events` (`place_name`/`place_address`) y
+  el inspector del dashboard.
+
 ## Decisiones tomadas
 
 1. **El GPS entra por el gateway** ✅ — implementado: la app móvil manda los pings al gateway, igual
@@ -108,12 +135,16 @@ flowchart TB
   **sin cambiar su firma** — tu ubicación real ya puede alimentar el "estimar viaje".
 - Resolución de lugares (coords → dirección/POI) con caché global por celda (~11m) y `in_transit`.
 
+**✅ Hecho además (0047 + 0062):** el calendario SÍ llama a geo — su consolidación resuelve cada
+`location` físico contra el **catálogo de lugares** (`geo_places`, FK `place_id` en el consolidado)
+con dedupe por texto + colapso por `provider_place_id` (ver sección arriba).
+
 **⏳ Falta:**
 - **Clustering** de puntos → "lugares donde estuve" (solo está la base de leer pings por rango).
 - **Daemon de transporte** (reactivo): leer ubicación + próximo evento del calendario, calcular el
   leave-by, y disparar el aviso vía el agente. No hay job en el scheduler.
-- **Integración con el calendario** — el seam está tendido pero **sin consumidor** (calendar no llama
-  a geo todavía).
+- **Inferencia de presencia** ping↔evento (diferida a la app móvil): el catálogo ya deja a ambos
+  hablar el mismo idioma (lugares con coordenadas + eventos con FK + pings con coordenadas).
 - **App móvil** que capture el GPS y mande los pings.
 - **Retención/purga** de los pings.
 
@@ -127,5 +158,7 @@ flowchart TB
 | `geo/service.py` | Orquestación pura: `geocode_address`, `estimate_trip`, `estimate_trip_from_source` (seam con calendar), `reverse_geocode`, `nearby_place`, `resolve_place`. |
 | `geo/client.py` | Contrato: `GeoProvider`, `GeoPoint`, `TravelEstimate`, `PlaceResult`, `ResolvedPlace` (`in_transit`), `LocationSource` (v0 `ManualLocationSource`). |
 | `geo/google.py` · `geo/ors.py` | Proveedores: Google Maps (geocode + rutas + Places) y OpenRouteService (geocode + rutas; sin Places). |
-| `geo/cli.py` (`memex-geo`) | CLI de pruebas: `geocode` / `trip` / `place`. |
-| `migrations/0042_geo_location_pings.py` · `0043_geo_place_cache.py` | Tablas: `geo_location_pings` (por usuario, append-only) y `geo_place_cache` (global, por celda). |
+| `geo/places.py` | **Catálogo de lugares** (single-writer): `resolve_place` (texto→catálogo, resolve-or-create con caché), `get_place`, `list_places`. No confundir con `service.resolve_place` (coordenada→POI). |
+| `geo/cli.py` (`memex-geo`) | CLI: `geocode` / `trip` / `place` (proveedor) + `places` (catálogo, solo DB). |
+| `migrations/0042_geo_location_pings.py` · `0043_geo_place_cache.py` | Tablas: `geo_location_pings` (por usuario, append-only) y `geo_place_cache` (global, por celda — reverse). |
+| `migrations/0047_calendar_geo_coords.py` · `0062_geo_places.py` | Integración calendario: coords denormalizadas en el consolidado (0047) + catálogo `geo_places`/`geo_place_resolutions` y FK `place_id` (0062). |

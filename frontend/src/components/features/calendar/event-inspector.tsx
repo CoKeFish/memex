@@ -41,7 +41,16 @@ export function EventInspector({ event, onClose }: { event: ConsolidatedEvent | 
               <dl className="num space-y-1.5 text-sm">
                 <Row k="Fecha" v={formatDateOnly(event.startsOn) + (event.endsOn ? ` – ${formatDateOnly(event.endsOn)}` : "")} />
                 <Row k="Horario" v={event.startTime ? `${event.startTime}${event.endTime ? `–${event.endTime}` : ""}` : "todo el día"} />
-                {event.location && <Row k="Lugar" v={event.location} />}
+                {(event.placeName || event.location) && (
+                  <Row
+                    k="Lugar"
+                    v={
+                      event.placeName
+                        ? [event.placeName, event.placeAddress].filter(Boolean).join(" — ")
+                        : event.location
+                    }
+                  />
+                )}
                 <Row k="Prioridad" v={`rank ${event.priorityRank}${event.protected ? " · protegido" : ""}`} />
               </dl>
 
