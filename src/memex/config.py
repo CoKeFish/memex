@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     resolve_min_confidence: float = 0.7  # confirm/reject del LLM exigen confianza >= esto
     resolve_max_pairs_per_call: int = 40  # tope defensivo de pares serializados por llamada
     resolve_render_max_chars: int = 6000  # truncado del mensaje renderizado (prompt y grounding)
+    # Resumen previo del mensaje (summarizer) como CONTEXTO AUXILIAR del veredicto: entra al
+    # prompt truncado a este largo, delimitado como derivado y NUNCA fuente de la cita (el
+    # grounding sigue contra el render). 0 = apagado (sin bloque; la sig del memo degenera a la
+    # plana). Costo extra acotado ~200-250 tok/llamada. Toggle = churn one-time: los memos
+    # `dejar` de pares con resumen cambian de sig y se re-evalúan una vez.
+    resolve_summary_max_chars: int = 800
     # Las señales de correo masivo (list_unsubscribe/precedence/...) son PRIOR y contexto, no
     # veredicto (un recibo legítimo puede traerlas): por default la zona bulk va al LLM igual.
     # On: un par cuya evidencia es TODA bulk se rechaza determinista (rule='bulk'), costo cero.

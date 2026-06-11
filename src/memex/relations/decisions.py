@@ -19,7 +19,7 @@ statement+references.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -61,9 +61,28 @@ class EdgeDecision:
 
 def evidence_signature(inbox_ids: Iterable[int]) -> str:
     """sha256 del set de mensajes-evidencia de un par, ordenado — determinista e independiente del
-    orden de entrada (mismo molde que `cluster_signature`). Cambia ⇔ la evidencia cambió."""
+    orden de entrada (mismo molde que `cluster_signature`). Cambia ⇔ la evidencia cambió.
+
+    La usan los veredictos TERMINALES (confirm/reject) y el reporte de staleness, que compara
+    contra sigs guardadas: la fórmula no debe cambiar. El memo `dejar` usa `memo_signature`."""
     raw = ",".join(str(i) for i in sorted(set(inbox_ids)))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def memo_signature(inbox_ids: Iterable[int], summary_ids: Mapping[int, int]) -> str:
+    """La sig del memo `dejar`: evidencia + resúmenes vigentes. Un mensaje con resumen entra como
+    `{id}@s{summary_id}`; sin resumen, como `{id}` — con el mapa vacío el raw es BIT-IDÉNTICO al
+    de `evidence_signature` (los memos previos de pares sin resumen siguen vigentes).
+
+    Aparecer un resumen (o re-resumir con force → summary_id nuevo) cambia la sig: el memo deja
+    de matchear y el par se re-evalúa UNA vez con el contexto nuevo; misma evidencia + mismos
+    resúmenes → misma sig → skip (idempotente). Eso aplica a cualquier memo con sig plana cuyo
+    par gane resúmenes — incluidos los anteriores a esta fórmula y futuros `method='humano'`.
+    Apagar/encender `resolve_summary_max_chars` produce el mismo churn one-time."""
+    parts = [
+        f"{i}@s{summary_ids[i]}" if i in summary_ids else str(i) for i in sorted(set(inbox_ids))
+    ]
+    return hashlib.sha256(",".join(parts).encode("utf-8")).hexdigest()
 
 
 def record_decision(

@@ -10,7 +10,8 @@ sesguen.
 Resolver: el LLM recibe UN mensaje real + los pares de entidades que co-ocurrieron en él, y decide
 por PAR si el mensaje evidencia una relación real (con cita textual OBLIGATORIA, verificada
 determinista por el grounder) o una co-aparición casual. Las señales deterministas (encabezados de
-correo masivo) van como contexto NEUTRO, nunca como veredicto sembrado.
+correo masivo) van como contexto NEUTRO, nunca como veredicto sembrado; el resumen previo del
+summarizer (si existe) va como contexto DERIVADO, nunca citable.
 """
 
 from __future__ import annotations
@@ -73,6 +74,11 @@ GRAPH_RESOLVE_SYSTEM_PROMPT = (
     "Juzgá SOLO lo que este mensaje muestra: no uses conocimiento externo sobre las entidades. "
     "Si el mensaje trae una nota de señales deterministas (p.ej. encabezados de correo masivo), "
     "es CONTEXTO, no un veredicto: un correo masivo igual puede contener una relación real.\n\n"
+    "A veces va un bloque RESUMEN PREVIO: un resumen DERIVADO que se generó antes (puede cubrir "
+    "un lote de varios mensajes). Usalo solo para orientar la lectura; NO es evidencia. La "
+    "`quote` de un confirm se copia del MENSAJE, nunca del resumen (una cita del resumen se "
+    "descarta). Tampoco rechaces solo por lo que dice el resumen: si el MENSAJE no alcanza "
+    "para decidir, es dejar.\n\n"
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
     '{"verdicts": [{"pair": <id del par>, "verdict": "confirm|reject|dejar", '
     '"quote": "<fragmento textual o vacío>", "confidence": <0..1>}, ...]}'

@@ -8,6 +8,12 @@ del MISMO texto renderizado/truncado que vio el LLM, verificada determinista por
 compartido (`memex.llm.grounding`); sin cita verificable se degrada a `dejar` (sesgo a precisión,
 ODKE+).
 
+Si el summarizer ya pagó un resumen del mensaje, entra al prompt como CONTEXTO AUXILIAR en un
+bloque delimitado como DERIVADO (`_summary_block`, truncado a `resolve_summary_max_chars`). El
+resumen jamás se concatena al render: el grounding sigue verificando solo contra el original,
+así que una cita sacada del resumen no groundea y degrada a `dejar` por construcción. Un mensaje
+purgado con resumen vivo queda igual que hoy (render vacío): el resumen no lo sustituye.
+
 Agregación por par multi-mensaje: algún confirm grounded con confianza ≥ umbral → `confirmed`
 (la mejor cita gana); TODOS sus mensajes evaluados y todos `reject` ≥ umbral → `rejected`;
 evaluado completo sin veredicto → memo `dejar` (por `evidence_sig`). Un par que el presupuesto
@@ -23,6 +29,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -49,6 +56,7 @@ from memex.relations.edges import STATUS_CONFIRMED, STATUS_REJECTED, Ref, resolv
 from memex.relations.prompt import GRAPH_RESOLVE_SYSTEM_PROMPT
 from memex.relations.resolve import LABEL_BULK, MessageLabeler, ResolvePair, ResolveStats
 from memex.relations.vertices import Vertex, list_vertices
+from memex.summarizer.lookup import InboxSummary
 
 _log = get_logger("memex.relations.resolve_llm")
 
@@ -142,11 +150,40 @@ def _vlabel(ref: Ref, vmap: dict[Ref, Vertex]) -> str:
     return f"{v.label} ({v.kind})" if v is not None else f"{ref.slug}#{ref.id}"
 
 
-def _serialize(rendered: str, pairs: list[ResolvePair], vmap: dict[Ref, Vertex], note: str) -> str:
-    """El cuerpo del prompt: nota de señales (si hay) + MENSAJE renderizado + PARES numerados."""
+def _summary_block(info: InboxSummary | None) -> str:
+    """El bloque RESUMEN PREVIO pre-formateado para el prompt; `""` si no hay resumen o el knob
+    está en 0 (cero cambio de prompt). El contenido se trunca a `resolve_summary_max_chars` y
+    NUNCA entra al string de grounding: citarlo no verifica → degrada a `dejar`."""
+    max_chars = settings.resolve_summary_max_chars
+    if info is None or max_chars <= 0:
+        return ""
+    lines = [
+        "RESUMEN PREVIO (derivado del mensaje, NO citable — la cita debe salir del MENSAJE):",
+        info.content[:max_chars],
+    ]
+    if info.n > 1:
+        lines.append(
+            f"[Resumen de un LOTE de {info.n} mensajes: puede mencionar cosas que no están "
+            "en ESTE mensaje.]"
+        )
+    return "\n".join(lines)
+
+
+def _serialize(
+    rendered: str,
+    pairs: list[ResolvePair],
+    vmap: dict[Ref, Vertex],
+    note: str,
+    summary_block: str = "",
+) -> str:
+    """El cuerpo del prompt: nota de señales (si hay) + RESUMEN PREVIO (si hay) + MENSAJE
+    renderizado + PARES numerados."""
     lines: list[str] = []
     if note:
         lines.append(note)
+        lines.append("")
+    if summary_block:
+        lines.append(summary_block)
         lines.append("")
     lines.append("MENSAJE:")
     lines.append(rendered if rendered else "(mensaje vacío o purgado)")
@@ -163,13 +200,14 @@ async def judge_message(
     pairs: list[ResolvePair],
     vmap: dict[Ref, Vertex],
     note: str = "",
+    summary_block: str = "",
 ) -> tuple[dict[int, PairVerdict], LLMResult]:
     """UNA llamada que juzga todos los pares grises de UN mensaje. Devuelve los veredictos
     parseados (por id local 1..n) + el LLMResult (costo)."""
     result = await llm.complete(
         [
             ChatMessage("system", GRAPH_RESOLVE_SYSTEM_PROMPT),
-            ChatMessage("user", _serialize(rendered, pairs, vmap, note)),
+            ChatMessage("user", _serialize(rendered, pairs, vmap, note, summary_block)),
         ],
         response_format="json_object",
         temperature=0.0,
@@ -262,7 +300,7 @@ def _apply_gray_verdicts(
                 p.edge.id,
                 verdict=VERDICT_DEJAR,
                 method=METHOD_LLM,
-                evidence_sig=p.sig,
+                evidence_sig=p.memo_sig,
                 run_id=run_id,
             )
             stats.llm_dejar += 1
@@ -280,12 +318,15 @@ async def resolve_gray_zone(
     budget: int,
     run_id: str,
     stats: ResolveStats,
+    summaries: Mapping[int, InboxSummary] | None = None,
     client: LLMClient | None = None,
 ) -> None:
     """El loop de la zona gris: mensajes ordenados por #pares DESC (máxima amortización), tope
     `budget` llamadas; cada llamada juzga los pares PENDIENTES del mensaje (los ya confirmados en
-    esta corrida se saltan). Aplica la agregación al final — también si el presupuesto o la cuota
-    cortaron antes (lo pagado no se tira). Muta `stats` en el caller."""
+    esta corrida se saltan). `summaries` es el snapshot por inbox que cargó `_attach_evidence`
+    (la MISMA foto que firmó las `memo_sig`): el resumen entra al prompt como contexto auxiliar.
+    Aplica la agregación al final — también si el presupuesto o la cuota cortaron antes (lo
+    pagado no se tira). Muta `stats` en el caller."""
     by_msg: dict[int, list[ResolvePair]] = defaultdict(list)
     for p in pairs:
         for mid in sorted(p.inbox_ids):
@@ -324,8 +365,11 @@ async def resolve_gray_zone(
             with connection() as conn:
                 rendered = load_rendered(conn, user_id, mid)
             note = _BULK_NOTE if labeler.label(mid) == LABEL_BULK else ""
+            info = (summaries or {}).get(mid)
             try:
-                verdicts, result = await judge_message(llm, rendered, pend, vmap, note)
+                verdicts, result = await judge_message(
+                    llm, rendered, pend, vmap, note, _summary_block(info)
+                )
             except LLMQuotaError as e:
                 quota = e  # aplica lo ya pagado y después propaga
                 break
@@ -378,6 +422,7 @@ async def resolve_gray_zone(
                     "inbox_id": mid,
                     "pairs": len(pend),
                     "ungrounded": ungrounded_msg,
+                    "summary_id": info.summary_id if info is not None else None,
                 },
             )
             # Traza: el veredicto es per-mensaje pero no produce fila de dominio → cuelga su costo

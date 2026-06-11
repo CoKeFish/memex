@@ -18,9 +18,11 @@ Cascada con presupuesto (determinismo primero, patrón FrugalGPT/Snorkel):
 
 Historial (NELL candidate→promoted / Wikidata references): el veredicto es la transición monótona
 del MISMO edge (`resolve_edge`, evidencia original intacta) + una fila en
-`relation_edge_decisions` con el fundamento. `dejar` no transiciona: es memo por `evidence_sig`
-(no se re-gasta LLM mientras la evidencia del par no cambie). Idempotente: terminales salen del
-universo, `dejar` se salta por sig, presupuesto corto NO memoiza (queda pendiente real).
+`relation_edge_decisions` con el fundamento. `dejar` no transiciona: es memo por `memo_signature`
+(evidencia + resúmenes vigentes del summarizer — aparecer o cambiar un resumen reabre el memo UNA
+vez; sin cambio no se re-gasta LLM). Los terminales registran la sig PLANA (`evidence_signature`),
+que es la que compara el reporte de staleness. Idempotente: terminales salen del universo,
+`dejar` se salta por sig, presupuesto corto NO memoiza (queda pendiente real).
 
 STALENESS (reporte, no acción — capturar ≠ actuar): un edge ya decidido cuya evidencia CRECIÓ
 (la procedencia sigue acumulándose en `relation_edge_sources` aun sobre terminales) se cuenta y
@@ -53,6 +55,7 @@ from memex.relations.decisions import (
     edge_sources,
     evidence_signature,
     latest_decisions,
+    memo_signature,
     record_decision,
 )
 from memex.relations.deterministic import vertex_inbox_ids
@@ -69,6 +72,7 @@ from memex.relations.edges import (
     resolve_edge,
 )
 from memex.sources import kind_for_type
+from memex.summarizer.lookup import InboxSummary, summaries_for_inboxes
 
 _log = get_logger("memex.relations.resolve")
 
@@ -86,11 +90,13 @@ RULE_SIN_EVIDENCIA = "sin_evidencia"
 
 @dataclass(frozen=True)
 class ResolvePair:
-    """Una pista de co-ocurrencia con su evidencia: el edge + TODOS sus mensajes + la firma."""
+    """Una pista de co-ocurrencia con su evidencia: el edge + TODOS sus mensajes + las firmas
+    (`sig` plana para veredictos terminales/staleness; `memo_sig` con resúmenes para `dejar`)."""
 
     edge: RelationEdge
     inbox_ids: frozenset[int]
     sig: str
+    memo_sig: str
 
 
 @dataclass
@@ -135,20 +141,31 @@ def _load_universe(conn: Connection, user_id: int) -> list[RelationEdge]:
 
 def _attach_evidence(
     conn: Connection, user_id: int, universe: list[RelationEdge]
-) -> list[ResolvePair]:
+) -> tuple[list[ResolvePair], dict[int, InboxSummary]]:
     """Evidencia por par desde `relation_edge_sources`; fallback para pistas pre-backfill (sin
-    filas aún): la intersección de la provenance de ambos extremos (`vertex_inbox_ids`)."""
+    filas aún): la intersección de la provenance de ambos extremos (`vertex_inbox_ids`).
+
+    Devuelve también el SNAPSHOT de resúmenes de toda la evidencia (un solo fetch): la misma
+    foto alimenta la `memo_sig` de cada par Y el bloque de contexto del prompt — un resumen
+    creado a mitad de corrida no puede desfasarlos (entra recién en la próxima)."""
     srcs = edge_sources(conn, [e.id for e in universe])
     if any(not srcs.get(e.id) for e in universe):
         prov = vertex_inbox_ids(conn, user_id)
         for e in universe:
             if not srcs.get(e.id):
                 srcs[e.id] = prov.get(e.src, set()) & prov.get(e.dst, set())
+    summaries: dict[int, InboxSummary] = {}
+    if settings.resolve_summary_max_chars > 0:
+        all_ids = {m for ids in srcs.values() for m in ids}
+        summaries = summaries_for_inboxes(conn, user_id, all_ids)
+    sum_ids = {m: s.summary_id for m, s in summaries.items()}
     out: list[ResolvePair] = []
     for e in universe:
         ids = srcs.get(e.id, set())
-        out.append(ResolvePair(e, frozenset(ids), evidence_signature(ids)))
-    return out
+        out.append(
+            ResolvePair(e, frozenset(ids), evidence_signature(ids), memo_signature(ids, sum_ids))
+        )
+    return out, summaries
 
 
 # --- formación de grupos -------------------------------------------------------------- #
@@ -392,12 +409,12 @@ async def run_resolve(
 
     with connection() as conn:
         universe = _load_universe(conn, user_id)
-        pairs_all = _attach_evidence(conn, user_id, universe)
+        pairs_all, summaries = _attach_evidence(conn, user_id, universe)
         decisions = latest_decisions(conn, user_id, [p.edge.id for p in pairs_all])
         work: list[ResolvePair] = []
         for p in pairs_all:
             d = decisions.get(p.edge.id)
-            if d is not None and d.verdict == VERDICT_DEJAR and d.evidence_sig == p.sig:
+            if d is not None and d.verdict == VERDICT_DEJAR and d.evidence_sig == p.memo_sig:
                 stats.skipped_dejar += 1
                 continue
             work.append(p)
@@ -502,7 +519,7 @@ async def run_resolve(
                 verdict=VERDICT_DEJAR,
                 method=METHOD_REGLA,
                 rule=RULE_SIN_EVIDENCIA,
-                evidence_sig=p.sig,
+                evidence_sig=p.memo_sig,
                 run_id=run_id,
             )
             stats.sin_evidencia += 1
@@ -516,6 +533,7 @@ async def run_resolve(
             user_id,
             gray,
             labeler=labeler,
+            summaries=summaries,
             budget=budget,
             run_id=run_id,
             stats=stats,

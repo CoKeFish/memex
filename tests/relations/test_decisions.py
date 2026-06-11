@@ -17,6 +17,7 @@ from memex.relations.decisions import (
     edge_sources,
     evidence_signature,
     latest_decisions,
+    memo_signature,
     record_decision,
 )
 from memex.relations.edges import PRODUCER_INBOX, Ref, propose_edge
@@ -35,6 +36,24 @@ def test_evidence_signature_determinista_e_independiente_del_orden() -> None:
     assert evidence_signature([1, 1, 2]) == evidence_signature([2, 1])  # set, no multiset
     assert evidence_signature([1, 2]) != evidence_signature([1, 3])
     assert len(evidence_signature([])) == 64
+
+
+def test_memo_signature_degenera_a_la_plana_sin_resumenes() -> None:
+    # Bit-idéntica con mapa vacío: los memos previos de pares sin resumen siguen vigentes.
+    assert memo_signature([3, 1, 2], {}) == evidence_signature([1, 2, 3])
+    assert memo_signature([], {}) == evidence_signature([])
+    # Un resumen de un mensaje AJENO a la evidencia no cambia nada.
+    assert memo_signature([1, 2], {9: 50}) == evidence_signature([1, 2])
+    # Determinista e independiente del orden, semántica de set.
+    assert memo_signature([2, 1, 1], {1: 5}) == memo_signature([1, 2], {1: 5})
+
+
+def test_memo_signature_cambia_con_el_resumen() -> None:
+    plana = memo_signature([1, 2], {})
+    con_resumen = memo_signature([1, 2], {1: 5})
+    assert con_resumen != plana  # aparecer un resumen reabre el memo
+    assert memo_signature([1, 2], {1: 6}) != con_resumen  # re-resumir (force) también
+    assert memo_signature([1, 2], {1: 5, 2: 7}) != con_resumen
 
 
 def test_record_y_latest_trae_la_ultima() -> None:

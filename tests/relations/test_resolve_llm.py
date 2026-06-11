@@ -2,7 +2,8 @@
 confirm grounded → confirmed (quote+confianza al historial), confirm sin cita → dejar + ungrounded,
 baja confianza → dejar, todos-reject → rejected, mezcla → dejar, multi-mensaje (un confirm gana),
 presupuesto (par a medias queda pendiente real), `LLMQuotaError` aplica lo pagado y propaga, render
-con OCR.
+con OCR, y el RESUMEN PREVIO como contexto auxiliar (no citable: citarlo no groundea; el memo
+`dejar` se reabre cuando aparece/cambia el resumen y es idempotente si no cambia).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from memex.config import settings
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.llm.client import LLMQuotaError
-from memex.relations.decisions import add_edge_sources, latest_decisions
+from memex.relations.decisions import add_edge_sources, evidence_signature, latest_decisions
 from memex.relations.edges import (
     PRODUCER_INBOX,
     RELTYPE_COOCURRENCIA,
@@ -28,7 +29,7 @@ from memex.relations.edges import (
     propose_edge,
 )
 from memex.relations.resolve import ResolveStats, run_resolve
-from memex.relations.resolve_llm import load_rendered, parse_verdicts
+from memex.relations.resolve_llm import _BULK_NOTE, load_rendered, parse_verdicts
 
 
 def _result(content: str) -> LLMResult:
@@ -146,6 +147,22 @@ def _edge_status(eid: int) -> str:
 
 def _run(client: Any, **kw: Any) -> ResolveStats:
     return asyncio.run(run_resolve(1, client=client, **kw))
+
+
+def _summary(inbox_id: int, content: str, tier: str = "individual", n: int = 1) -> int:
+    with connection() as c:
+        sid = c.execute(
+            text(
+                "INSERT INTO summaries (user_id, tier, content, metadata) "
+                "VALUES (1, :t, :c, CAST(:m AS JSONB)) RETURNING id"
+            ),
+            {"t": tier, "c": content, "m": json.dumps({"n": n})},
+        ).scalar_one()
+        c.execute(
+            text("INSERT INTO summary_inbox_links (summary_id, inbox_id) VALUES (:s, :i)"),
+            {"s": int(sid), "i": inbox_id},
+        )
+    return int(sid)
 
 
 def _verdict(pair: int, verdict: str, quote: str = "", conf: float = 0.9) -> dict[str, Any]:
@@ -346,3 +363,155 @@ def test_load_rendered_incluye_ocr_y_trunca() -> None:
     assert "FACTURA N.123 por Celeste" in rendered
     assert len(rendered) <= settings.resolve_render_max_chars
     assert missing == ""
+
+
+# --- resumen previo como contexto auxiliar ------------------------------------------------ #
+
+_HEADER = "RESUMEN PREVIO"
+
+
+def test_quote_del_resumen_no_groundea_degrada_a_dejar() -> None:
+    src = _source("s1")
+    m = _inbox(src, "y1", _BODY)
+    a, b = _person("A"), _person("B")
+    eid = _pista(a, b, [m])
+    _summary(m, "Steam vendió el juego Atadura al usuario")
+    # El LLM cita el RESUMEN (texto que no está en el mensaje) → no groundea → dejar.
+    fake = FakeLLM(_resp(_verdict(1, "confirm", "vendió el juego Atadura", 0.95)))
+    stats = _run(fake)
+    assert stats.ungrounded == 1 and stats.llm_confirmed == 0 and stats.llm_dejar == 1
+    assert _edge_status(eid) == "pista"
+    assert _HEADER in fake.prompts[0]
+    assert "Steam vendió el juego Atadura" in fake.prompts[0]
+    with connection() as c:
+        assert latest_decisions(c, 1, [eid])[eid].verdict == "dejar"
+
+
+def test_quote_del_mensaje_confirma_y_terminal_guarda_sig_plana() -> None:
+    src = _source("s2")
+    m = _inbox(src, "y2", _BODY)
+    a, b = _person("A"), _person("B")
+    eid = _pista(a, b, [m])
+    _summary(m, "compra de un juego en la plataforma")
+    fake = FakeLLM(_resp(_verdict(1, "confirm", "compra de Celeste", 0.9)))
+    stats = _run(fake)
+    assert stats.llm_confirmed == 1 and _edge_status(eid) == "confirmed"
+    with connection() as c:
+        dec = latest_decisions(c, 1, [eid])[eid]
+    # El terminal registra la sig PLANA (sin resúmenes): el staleness no se contamina.
+    assert dec.evidence_sig == evidence_signature([m])
+    stats2 = _run(FakeLLM(_resp()))
+    assert stats2.stale_conflicts == 0
+
+
+def test_sin_resumen_el_prompt_no_trae_bloque() -> None:
+    src = _source("s3")
+    m = _inbox(src, "y3", _BODY)
+    a, b = _person("A"), _person("B")
+    _pista(a, b, [m])
+    fake = FakeLLM(_resp(_verdict(1, "dejar")))
+    _run(fake)
+    assert _HEADER not in fake.prompts[0]
+
+
+def test_resumen_batch_etiqueta_lote() -> None:
+    src = _source("s4")
+    m1 = _inbox(src, "y4a", _BODY)
+    m2 = _inbox(src, "y4b", _BODY)
+    a, b = _person("A"), _person("B")
+    c2, d2 = _person("C"), _person("D")
+    _pista(a, b, [m1])
+    _pista(c2, d2, [m2])
+    _summary(m1, "resumen de la ventana", tier="batch", n=3)
+    _summary(m2, "resumen propio", n=1)
+    fake = FakeLLM(_resp(_verdict(1, "dejar")))
+    _run(fake)
+    lote = next(p for p in fake.prompts if "resumen de la ventana" in p)
+    propio = next(p for p in fake.prompts if "resumen propio" in p)
+    assert "LOTE de 3 mensajes" in lote
+    assert "LOTE" not in propio
+
+
+def test_memo_dejar_se_reevalua_al_aparecer_resumen() -> None:
+    src = _source("s5")
+    m = _inbox(src, "y5", _BODY)
+    a, b = _person("A"), _person("B")
+    eid = _pista(a, b, [m])
+    # Corrida 1 SIN resumen → memo dejar con sig plana.
+    fake1 = FakeLLM(_resp(_verdict(1, "dejar")))
+    assert _run(fake1).llm_dejar == 1
+    # Aparece el resumen → la sig del memo cambia → se re-evalúa UNA vez, con bloque en el prompt.
+    _summary(m, "resumen tardío del mensaje")
+    fake2 = FakeLLM(_resp(_verdict(1, "dejar")))
+    stats2 = _run(fake2)
+    assert stats2.skipped_dejar == 0 and fake2.calls == 1
+    assert _HEADER in fake2.prompts[0]
+    # Corrida 3: mismo resumen → memo vigente → idempotente, sin LLM.
+    fake3 = FakeLLM(_resp())
+    stats3 = _run(fake3)
+    assert stats3.skipped_dejar == 1 and fake3.calls == 0
+    assert _edge_status(eid) == "pista"
+
+
+def test_memo_con_resumen_presente_es_idempotente() -> None:
+    src = _source("s6")
+    m = _inbox(src, "y6", _BODY)
+    a, b = _person("A"), _person("B")
+    _pista(a, b, [m])
+    sid = _summary(m, "resumen previo a todo")
+    fake1 = FakeLLM(_resp(_verdict(1, "dejar")))
+    assert _run(fake1).llm_dejar == 1
+    fake2 = FakeLLM(_resp())
+    stats2 = _run(fake2)
+    assert stats2.skipped_dejar == 1 and fake2.calls == 0
+    # Re-resumir (force → summary_id NUEVO) reabre el memo una sola vez.
+    _exec("DELETE FROM summaries WHERE id=:s", s=sid)
+    _summary(m, "resumen regenerado")
+    fake3 = FakeLLM(_resp(_verdict(1, "dejar")))
+    stats3 = _run(fake3)
+    assert stats3.skipped_dejar == 0 and fake3.calls == 1
+    assert "resumen regenerado" in fake3.prompts[0]
+
+
+def test_knob_cero_apaga_el_bloque_y_la_sig(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "resolve_summary_max_chars", 0)
+    src = _source("s7")
+    m = _inbox(src, "y7", _BODY)
+    a, b = _person("A"), _person("B")
+    eid = _pista(a, b, [m])
+    _summary(m, "resumen que no debe aparecer")
+    fake1 = FakeLLM(_resp(_verdict(1, "dejar")))
+    assert _run(fake1).llm_dejar == 1
+    assert _HEADER not in fake1.prompts[0]
+    with connection() as c:
+        # Con el knob apagado el memo queda con la sig PLANA, estable entre corridas.
+        assert latest_decisions(c, 1, [eid])[eid].evidence_sig == evidence_signature([m])
+    fake2 = FakeLLM(_resp())
+    stats2 = _run(fake2)
+    assert stats2.skipped_dejar == 1 and fake2.calls == 0
+
+
+def test_resumen_truncado_al_knob(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "resolve_summary_max_chars", 20)
+    src = _source("s8")
+    m = _inbox(src, "y8", _BODY)
+    a, b = _person("A"), _person("B")
+    _pista(a, b, [m])
+    _summary(m, "cabeza visible 12345 COLA-QUE-NO-ENTRA")
+    fake = FakeLLM(_resp(_verdict(1, "dejar")))
+    _run(fake)
+    assert "cabeza visible" in fake.prompts[0]
+    assert "COLA-QUE-NO-ENTRA" not in fake.prompts[0]
+
+
+def test_bulk_note_y_resumen_conviven_en_orden() -> None:
+    src = _source("s9")
+    m = _inbox(src, "y9", _BODY)
+    _exec("INSERT INTO classifications (user_id, inbox_id, tier) VALUES (1, :m, 'blacklist')", m=m)
+    a, b = _person("A"), _person("B")
+    _pista(a, b, [m])
+    _summary(m, "resumen de un correo masivo")
+    fake = FakeLLM(_resp(_verdict(1, "dejar")))
+    _run(fake)
+    prompt = fake.prompts[0]
+    assert prompt.index(_BULK_NOTE) < prompt.index(_HEADER) < prompt.index("MENSAJE:")
