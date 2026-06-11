@@ -26,6 +26,7 @@ from memex.api.schemas import (
 )
 from memex.db import connection
 from memex.logging import get_logger
+from memex.modules.contract import normalize
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
@@ -228,10 +229,22 @@ def _cons_lite(prefix: str, r: Any) -> dict[str, Any]:
     }
 
 
-def _series_key(series: str | None, cons_id: int) -> str:
-    """Identidad de serie de un lado del conflicto: `recurring_event_id` si es recurrente; si no,
-    el consolidado es su propia "serie" única (`c<id>`), así un no-recurrente nunca agrupa."""
-    return series if series else f"c{cons_id}"
+def _series_key(series: str | None, title: str, start_time: Any, cons_id: int) -> str:
+    """Identidad de serie de un lado del conflicto, en orden de confianza:
+
+    1. `recurring_event_id` de CUALQUIER miembro del consolidado (proveedor o serie local) — la
+       señal autoritativa.
+    2. Sin serie pero con título: (título normalizado, hora) — colapsa las instancias extraídas
+       de correos ("Clase de cálculo" cada jueves 7:00) que no traen id de serie. La misma
+       normalización del dedup (`normalize`).
+    3. Sin nada: el consolidado es su propia "serie" única (`c<id>`), nunca agrupa.
+    """
+    if series:
+        return series
+    title_norm = normalize(title)
+    if title_norm:
+        return f"t:{title_norm}|{start_time or ''}"
+    return f"c{cons_id}"
 
 
 @router.get("/conflicts", response_model=CalendarConflictList)
@@ -242,10 +255,11 @@ async def list_conflicts(
 ) -> dict[str, Any]:
     """Conflictos AGRUPADOS por par de series recurrentes.
 
-    Dos consolidados distintos de alta importancia que chocan en horario. Las instancias de un mismo
-    par de series (`recurring_event_id` de cada ganador) se colapsan en UN item: `a`/`b` son el
-    representante (la ocurrencia más próxima a hoy), `instance_count` cuántas veces se repite,
-    `first_on`/`last_on` el rango. Un evento no recurrente es su propia serie (no agrupa). No pagina
+    Dos consolidados distintos de alta importancia que chocan en horario. Las instancias de un
+    mismo par de series se colapsan en UN item: `a`/`b` son el representante (la ocurrencia más
+    próxima a hoy), `instance_count` cuántas veces se repite, `first_on`/`last_on` el rango. La
+    serie de cada lado sale de CUALQUIER miembro del consolidado (no solo del ganador, que puede
+    estar borrado o ser de extracción), con fallback por título+hora (`_series_key`). No pagina
     por cursor (los conflictos son pocos); `limit` es el tope de filas crudas a escanear.
     """
     where: list[str] = ["cf.user_id = :uid"]
@@ -259,11 +273,19 @@ async def list_conflicts(
                ca.id AS a_id, ca.title AS a_title, ca.starts_on AS a_starts_on,
                ca.ends_on AS a_ends_on, ca.start_time AS a_start_time, ca.end_time AS a_end_time,
                ca.location AS a_location, ea.priority_rank AS a_rank, ea.protected AS a_protected,
-               ea.recurring_event_id AS a_series,
+               (SELECT e2.recurring_event_id
+                  FROM mod_calendar_event_links l2
+                  JOIN mod_calendar_events e2 ON e2.id = l2.event_id
+                 WHERE l2.consolidated_id = ca.id AND e2.recurring_event_id IS NOT NULL
+                 ORDER BY e2.id LIMIT 1) AS a_series,
                cb.id AS b_id, cb.title AS b_title, cb.starts_on AS b_starts_on,
                cb.ends_on AS b_ends_on, cb.start_time AS b_start_time, cb.end_time AS b_end_time,
                cb.location AS b_location, eb.priority_rank AS b_rank, eb.protected AS b_protected,
-               eb.recurring_event_id AS b_series
+               (SELECT e2.recurring_event_id
+                  FROM mod_calendar_event_links l2
+                  JOIN mod_calendar_events e2 ON e2.id = l2.event_id
+                 WHERE l2.consolidated_id = cb.id AND e2.recurring_event_id IS NOT NULL
+                 ORDER BY e2.id LIMIT 1) AS b_series
         FROM mod_calendar_conflicts cf
         JOIN mod_calendar_consolidated ca ON ca.id = cf.consolidated_a_id
         JOIN mod_calendar_consolidated cb ON cb.id = cf.consolidated_b_id
@@ -280,8 +302,8 @@ async def list_conflicts(
     # conflicto es `a_starts_on` (== `b_starts_on`).
     groups: dict[tuple[tuple[str, str], str], list[Any]] = {}
     for r in rows:
-        a_key = _series_key(r["a_series"], int(r["a_id"]))
-        b_key = _series_key(r["b_series"], int(r["b_id"]))
+        a_key = _series_key(r["a_series"], str(r["a_title"]), r["a_start_time"], int(r["a_id"]))
+        b_key = _series_key(r["b_series"], str(r["b_title"]), r["b_start_time"], int(r["b_id"]))
         pair = (a_key, b_key) if a_key <= b_key else (b_key, a_key)
         groups.setdefault((pair, str(r["status"])), []).append(r)
 

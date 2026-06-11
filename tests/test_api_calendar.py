@@ -309,15 +309,16 @@ def _seed_conflict(a_cons: int, b_cons: int, *, status: str = "pending") -> None
 
 def test_list_conflicts_groups_recurring_series(client: Any) -> None:
     # Dos series recurrentes que chocan en 2 instancias → UN solo item con instance_count=2.
+    # Títulos DISTINTOS por instancia: lo que agrupa es la serie de los miembros, no el fallback.
     d1, d2 = date(2026, 7, 1), date(2026, 8, 1)
-    cons = []
     for d in (d1, d2):
         a = _seed_event(1, priority_rank=100, starts_on=d, recurring_event_id="serA")
         b = _seed_event(1, priority_rank=100, starts_on=d, recurring_event_id="serB")
-        ca = _seed_consolidated(1, winner_event_id=a, starts_on=d)
-        cb = _seed_consolidated(1, winner_event_id=b, starts_on=d)
+        ca = _seed_consolidated(1, winner_event_id=a, title=f"Clase {d}", starts_on=d)
+        cb = _seed_consolidated(1, winner_event_id=b, title=f"Turno {d}", starts_on=d)
+        _link(1, ca, a)
+        _link(1, cb, b)
         _seed_conflict(ca, cb)
-        cons.append((ca, cb))
 
     items = client.get("/calendar/conflicts").json()["items"]
     assert len(items) == 1
@@ -326,6 +327,58 @@ def test_list_conflicts_groups_recurring_series(client: Any) -> None:
     assert it["recurring"] is True
     assert it["first_on"] == "2026-07-01"
     assert it["last_on"] == "2026-08-01"
+
+
+def test_list_conflicts_series_from_any_member_winner_gone(client: Any) -> None:
+    # El ganador puede estar borrado (winner_event_id NULL, el caso del incidente): la serie
+    # sale de CUALQUIER miembro linkeado, no del ganador.
+    for d in (date(2026, 7, 1), date(2026, 8, 1)):
+        a = _seed_event(1, starts_on=d, recurring_event_id="serA")
+        b = _seed_event(1, starts_on=d, recurring_event_id="serB")
+        ca = _seed_consolidated(1, winner_event_id=None, title=f"Clase {d}", starts_on=d)
+        cb = _seed_consolidated(1, winner_event_id=None, title=f"Turno {d}", starts_on=d)
+        _link(1, ca, a)
+        _link(1, cb, b)
+        _seed_conflict(ca, cb)
+
+    items = client.get("/calendar/conflicts").json()["items"]
+    assert len(items) == 1
+    assert items[0]["instance_count"] == 2
+
+
+def test_list_conflicts_fallback_title_time_groups(client: Any) -> None:
+    # Sin serie en ningún miembro (extracciones de correo): agrupa por título normalizado + hora
+    # (el case/espaciado varía entre instancias y normalize los colapsa igual).
+    titles_a = ("Cortar  CABELLO", "cortar cabello")
+    titles_b = ("Electrón 4700", "ELECTRÓN  4700")
+    for i, d in enumerate((date(2026, 7, 2), date(2026, 8, 6))):
+        a = _seed_event(1, starts_on=d)
+        b = _seed_event(1, starts_on=d)
+        ca = _seed_consolidated(1, winner_event_id=a, title=titles_a[i], starts_on=d)
+        cb = _seed_consolidated(1, winner_event_id=b, title=titles_b[i], starts_on=d)
+        _link(1, ca, a)
+        _link(1, cb, b)
+        _seed_conflict(ca, cb)
+
+    items = client.get("/calendar/conflicts").json()["items"]
+    assert len(items) == 1
+    assert items[0]["instance_count"] == 2
+
+
+def test_list_conflicts_distinct_titles_not_grouped(client: Any) -> None:
+    # Mismo horario pero títulos distintos → cada choque es su propio item (no agrupa).
+    for i, d in enumerate((date(2026, 7, 2), date(2026, 8, 6))):
+        a = _seed_event(1, starts_on=d)
+        b = _seed_event(1, starts_on=d)
+        ca = _seed_consolidated(1, winner_event_id=a, title=f"Evento A{i}", starts_on=d)
+        cb = _seed_consolidated(1, winner_event_id=b, title=f"Evento B{i}", starts_on=d)
+        _link(1, ca, a)
+        _link(1, cb, b)
+        _seed_conflict(ca, cb)
+
+    items = client.get("/calendar/conflicts").json()["items"]
+    assert len(items) == 2
+    assert all(it["instance_count"] == 1 for it in items)
 
 
 def test_list_conflicts_oneoff_not_grouped(client: Any) -> None:
