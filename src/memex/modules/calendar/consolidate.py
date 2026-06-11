@@ -28,16 +28,12 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.db import connection
-from memex.geo import (
-    GeocodeResult,
-    GeoConfigError,
-    GeoError,
-    GeoNotFoundError,
-    build_provider_from_env,
-    geocode_address,
-)
+from memex.geo import GeoConfigError, GeoError, build_provider_from_env
+from memex.geo import places as geo_places
+from memex.geo.places import PlaceRecord
 from memex.logging import get_logger
 from memex.modules.calendar.conflicts import ConflictEvent, find_conflicts
+from memex.modules.contract import normalize
 
 _log = get_logger("memex.modules.calendar.consolidate")
 
@@ -410,9 +406,13 @@ def _tombstone_orphans(conn: Connection, user_id: int) -> int:
 
 
 # --- Geocoding del lugar (automático, gateado por MEMEX_CALENDAR_GEOCODE) ----------- #
-# El `location` del consolidado es texto libre; si el flag está prendido y hay key, se geocodifica a
-# lat/lng al final de cada consolidación. Idempotente (solo lo que falta o cambió de texto) y
-# best-effort (cualquier fallo de Maps NO rompe la consolidación, que ya está commiteada).
+# El `location` del consolidado es texto libre; si el flag está prendido y hay key, se RESUELVE
+# contra el catálogo de lugares (`geo_places`, single-writer memex.geo.places) al final de cada
+# consolidación: el evento queda con FK `place_id` + las coords denormalizadas. Idempotente (solo
+# lo que falta o cambió de texto; los ZERO_RESULTS quedan cacheados y no se reintentan) y
+# best-effort (cualquier fallo de Maps NO rompe la consolidación, que ya está commiteada). El
+# dedupe es doble: por texto normalizado EN la corrida (mismo texto = 1 resolución para N filas)
+# y por caché persistente en geo_place_resolutions.
 
 _GEOCODE_FLAG = "MEMEX_CALENDAR_GEOCODE"
 
@@ -424,14 +424,20 @@ def _is_geocodable(location: str) -> bool:
 
 
 def _pending_geocode(conn: Connection, user_id: int) -> list[tuple[int, str]]:
-    """(id, location) de consolidados con lugar geocodificable y coords faltantes o desactualizadas
-    (el `location` cambió desde el último geocode)."""
+    """(id, location) de consolidados con lugar geocodificable pendiente de resolver.
+
+    Pendiente = el texto es nuevo/cambió (`geo_geocoded_from IS DISTINCT FROM location` — también
+    cubre el nunca intentado), o quedó geocodificado por el código viejo SIN FK al catálogo
+    (backfill), o su lugar se borró del catálogo (FK en SET NULL → se re-teje). OJO: una fila
+    ZERO_RESULTS (geo_lat NULL + geo_geocoded_from = location) NO es pendiente — el predicado
+    anterior (`geo_lat IS NULL OR …`) la re-llamaba eternamente."""
     rows = conn.execute(
         text(
             """
             SELECT id, location FROM mod_calendar_consolidated
             WHERE user_id = :uid AND NOT deleted AND location <> ''
-              AND (geo_lat IS NULL OR geo_geocoded_from IS DISTINCT FROM location)
+              AND (geo_geocoded_from IS DISTINCT FROM location
+                   OR (place_id IS NULL AND geo_lat IS NOT NULL))
             """
         ),
         {"uid": user_id},
@@ -439,36 +445,29 @@ def _pending_geocode(conn: Connection, user_id: int) -> list[tuple[int, str]]:
     return [(int(i), str(loc)) for i, loc in rows if _is_geocodable(str(loc))]
 
 
-async def _geocode_pending(
-    rows: list[tuple[int, str]],
-) -> list[tuple[int, str, GeocodeResult | None]]:
-    """Construye el provider y geocodifica cada `(id, location)`. Devuelve `None` para una
-    dirección que no existe (ZERO_RESULTS) → se marca igual y no se reintenta. Un error de
-    proveedor (cuota / caído) se propaga y corta el lote (se reintenta en otra corrida)."""
-    provider = build_provider_from_env()
-    out: list[tuple[int, str, GeocodeResult | None]] = []
-    try:
-        for cons_id, location in rows:
-            try:
-                out.append((cons_id, location, await geocode_address(provider, location)))
-            except GeoNotFoundError:
-                out.append((cons_id, location, None))
-    finally:
-        await provider.aclose()
-    return out
+def _group_by_norm(rows: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    """Agrupa los pendientes por texto NORMALIZADO preservando orden: el primer texto crudo del
+    grupo es el representante (la query al proveedor y, si crea lugar, su `name`). Pura."""
+    groups: dict[str, list[tuple[int, str]]] = {}
+    for cons_id, location in rows:
+        groups.setdefault(normalize(location), []).append((cons_id, location))
+    return list(groups.values())
 
 
-def _write_geo_coords(
-    conn: Connection, results: list[tuple[int, str, GeocodeResult | None]]
+def _apply_resolution(
+    conn: Connection, group: list[tuple[int, str]], place: PlaceRecord | None
 ) -> int:
-    """Persiste coords por consolidado (o marca `geo_geocoded_from` sin coords si no hubo match,
-    para no reintentar el mismo texto). Devuelve cuántas filas quedaron con coords."""
-    written = 0
-    for cons_id, location, res in results:
+    """Estampa la resolución de UN texto en todas sus filas: FK `place_id` (BIGINT al catálogo —
+    no confundir con `geo_place_id` TEXT, el id del PROVEEDOR denormalizado) + coords DEL LUGAR.
+    `geo_geocoded_from` se escribe con el location PROPIO de cada fila (no la query del
+    representante): el guard de pendientes compara contra `location` y un texto ajeno la
+    re-marcaría eternamente. Devuelve cuántas filas quedaron con lugar."""
+    for cons_id, location in group:
         conn.execute(
             text(
                 """
                 UPDATE mod_calendar_consolidated SET
+                    place_id = :place_id,
                     geo_lat = :lat, geo_lng = :lng, geo_place_id = :pid,
                     geo_geocoded_from = :loc, geo_geocoded_at = NOW()
                 WHERE id = :id
@@ -477,14 +476,58 @@ def _write_geo_coords(
             {
                 "id": cons_id,
                 "loc": location,
-                "lat": res.point.lat if res is not None else None,
-                "lng": res.point.lng if res is not None else None,
-                "pid": res.provider_place_id if res is not None else None,
+                "place_id": place.id if place is not None else None,
+                "lat": place.lat if place is not None else None,
+                "lng": place.lng if place is not None else None,
+                "pid": place.provider_place_id if place is not None else None,
             },
         )
-        if res is not None:
-            written += 1
-    return written
+    return len(group) if place is not None else 0
+
+
+def _clear_stale_geo(conn: Connection, user_id: int) -> int:
+    """Limpia el geo de filas cuyo `location` quedó vacío (un merge/update lo puede vaciar): sin
+    esto el evento mostraría un lugar fantasma en UI/API. Barato y sin red."""
+    result = conn.execute(
+        text(
+            """
+            UPDATE mod_calendar_consolidated SET
+                place_id = NULL, geo_lat = NULL, geo_lng = NULL, geo_place_id = NULL,
+                geo_geocoded_from = NULL, geo_geocoded_at = NULL
+            WHERE user_id = :uid AND location = '' AND geo_geocoded_from IS NOT NULL
+            """
+        ),
+        {"uid": user_id},
+    )
+    return result.rowcount
+
+
+async def _resolve_pending(user_id: int, rows: list[tuple[int, str]]) -> tuple[int, int]:
+    """Resuelve los pendientes contra el catálogo, deduplicando por texto EN la corrida.
+
+    UNA conexión para el lote: salir limpio = COMMIT, así el progreso parcial SE CONSERVA si un
+    `GeoError` (cuota / caído) corta a mitad — lo ya resuelto queda cacheado y la próxima corrida
+    no lo re-paga. `GeoConfigError` (sin key) propaga al caller. Devuelve (textos únicos
+    resueltos, filas que quedaron con lugar)."""
+    provider = build_provider_from_env()
+    unique = 0
+    with_place = 0
+    try:
+        with connection() as conn:
+            for group in _group_by_norm(rows):
+                try:
+                    place_id = await geo_places.resolve_place(conn, user_id, group[0][1], provider)
+                except GeoError as e:  # cuota / proveedor caído: corta el lote, conserva lo hecho
+                    _log.warning("calendar.geocode.failed", user_id=user_id, error=str(e))
+                    break
+                place = (
+                    geo_places.get_place(conn, user_id, place_id) if place_id is not None else None
+                )
+                with_place += _apply_resolution(conn, group, place)
+                unique += 1
+    finally:
+        await provider.aclose()
+    return unique, with_place
 
 
 def _geocode_consolidated(user_id: int) -> None:
@@ -494,20 +537,24 @@ def _geocode_consolidated(user_id: int) -> None:
     if os.environ.get(_GEOCODE_FLAG) != "1":
         return
     with connection() as conn:
+        cleared = _clear_stale_geo(conn, user_id)
         pending = _pending_geocode(conn, user_id)
+    if cleared:
+        _log.info("calendar.geocode.cleared_stale", user_id=user_id, rows=cleared)
     if not pending:
         return
     try:
-        results = asyncio.run(_geocode_pending(pending))
+        unique, with_place = asyncio.run(_resolve_pending(user_id, pending))
     except GeoConfigError as e:
         _log.info("calendar.geocode.skip_no_key", error=str(e))
         return
-    except GeoError as e:
-        _log.warning("calendar.geocode.failed", user_id=user_id, error=str(e))
-        return
-    with connection() as conn:
-        written = _write_geo_coords(conn, results)
-    _log.info("calendar.geocode.done", user_id=user_id, pending=len(pending), geocoded=written)
+    _log.info(
+        "calendar.geocode.done",
+        user_id=user_id,
+        pending=len(pending),
+        unique=unique,
+        geocoded=with_place,
+    )
 
 
 def run_consolidation(user_id: int) -> ConsolidationStats:
