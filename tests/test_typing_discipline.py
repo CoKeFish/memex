@@ -17,6 +17,7 @@ Things checked here:
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -134,6 +135,30 @@ def test_runner_does_not_import_memexclient() -> None:
         "should only depend on memex.core.sink (Protocol)"
     )
     assert "memex.core.sink" in imports, "runner.py must import MemexSink from memex.core.sink"
+
+
+# ----- ADR-007: nada de .bind()/.new() encadenado sobre el lazy proxy ------- #
+
+_BIND_ON_PROXY = re.compile(r"get_logger\s*\([^)]*\)\s*\.\s*(?:bind|new)\s*\(")
+
+
+def test_no_bind_chained_on_get_logger() -> None:
+    """`.bind()` encadenado sobre `get_logger(...)` materializa el logger EN EL ACTO con la
+    config vigente (bug fc6f175: creado pre-`setup_logging()` pierde el persist_processor para
+    siempre, en silencio — sus eventos jamás llegan a log_events). El contexto fijo va como
+    initial values (`get_logger(name, k=v)`) y el contexto por scope en `bound_log_context`."""
+    files = [p for p in SRC.rglob("*.py") if "__pycache__" not in p.parts]
+    files += _local_client_py_files()
+    offenders = [
+        str(p.relative_to(REPO_ROOT))
+        for p in sorted(files)
+        if _BIND_ON_PROXY.search(p.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        f".bind()/.new() encadenado sobre get_logger(...) en: {offenders}. "
+        "Materializa el logger con la config vigente (bug fc6f175) — usá "
+        "get_logger(name, **initial_values) para contexto fijo o bound_log_context(...) por scope."
+    )
 
 
 # ----- Source config errors derive from generic base ------------------------ #

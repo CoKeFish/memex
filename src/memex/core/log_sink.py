@@ -80,14 +80,45 @@ class _SinkState:
 _state = _SinkState()
 
 
-def _coerce_int(value: Any) -> int | None:
-    """Coacciona a int para las columnas BIGINT de correlación; cualquier otra cosa → None."""
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
 def _coerce_str(value: Any) -> str | None:
-    """Coacciona a str para las columnas TEXT de correlación; cualquier otra cosa → None."""
+    """Coacciona a str (columna `logger`, siempre str vía `_promote_logger_name`); otro → None."""
     return value if isinstance(value, str) else None
+
+
+def _pop_text(ed: MutableMapping[str, Any], key: str) -> str | None:
+    """Extrae `key` hacia una columna TEXT de correlación (`request_id`, `run_id`).
+
+    Invariante: ningún id de correlación se pierde en silencio. str → columna; int (no bool) →
+    `str()` a columna (los run_id de `worker_runs` son ints y el viejo `_coerce_str` los tiraba:
+    todos los logs de procesamiento quedaban sin run_id); None → se consume; cualquier otro tipo
+    NO se consume — queda en `fields` JSONB, visible y buscable en vez de desaparecer."""
+    value = ed.get(key)
+    if value is None:
+        ed.pop(key, None)
+        return None
+    if isinstance(value, str):
+        ed.pop(key)
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        ed.pop(key)
+        return str(value)
+    return None
+
+
+def _pop_bigint(ed: MutableMapping[str, Any], key: str) -> int | None:
+    """Extrae `key` hacia una columna BIGINT de correlación (`user_id`, `source_id`, `inbox_id`).
+
+    Misma invariante que `_pop_text`: int (no bool) → columna; None → se consume; cualquier otro
+    tipo NO se consume — queda en `fields`. No se coacciona str→int a propósito (cero ambigüedad;
+    el valor igual queda visible en `fields`)."""
+    value = ed.get(key)
+    if value is None:
+        ed.pop(key, None)
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        ed.pop(key)
+        return value
+    return None
 
 
 def _format_exception(exc_info: Any, stack: Any) -> str | None:
@@ -141,11 +172,12 @@ def _to_record(event_dict: MutableMapping[str, Any]) -> dict[str, Any]:
 
     logger = _coerce_str(ed.pop("logger", None))
 
-    user_id = _coerce_int(ed.pop("user_id", None))
-    request_id = _coerce_str(ed.pop("request_id", None))
-    run_id = _coerce_str(ed.pop("run_id", None))
-    source_id = _coerce_int(ed.pop("source_id", None))
-    inbox_id = _coerce_int(ed.pop("inbox_id", None))
+    # Correlación pop-condicional: lo coercible va a su columna; lo no coercible QUEDA en fields.
+    user_id = _pop_bigint(ed, "user_id")
+    request_id = _pop_text(ed, "request_id")
+    run_id = _pop_text(ed, "run_id")
+    source_id = _pop_bigint(ed, "source_id")
+    inbox_id = _pop_bigint(ed, "inbox_id")
 
     # exc_info / stack se consumen acá (no van a `fields`): se vuelcan a la columna `exception`.
     exc_info = ed.pop("exc_info", None)

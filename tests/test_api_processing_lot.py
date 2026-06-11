@@ -181,6 +181,33 @@ def test_advance_window_then_rest(client: Any, seed_source: dict[str, Any]) -> N
     assert r.json() == {"run_id": None, "status": "done", "window": None}
 
 
+def test_advance_logs_carry_run_id_and_single_target_inbox(
+    client: Any, seed_source: dict[str, Any], sink_capture: Any
+) -> None:
+    """La corrida de lote bindea run_id por CONTEXTVARS: tanto los eventos propios de lots
+    (`processing.lot.window_done`) como los heredados río abajo (`reprocess.done`) llegan al sink
+    con la columna run_id = str(id de worker_runs) — antes el run_id int se tragaba entero. Con
+    ventana de 1 target, `reprocess` además bindea inbox_id."""
+    sid = seed_source["id"]
+    iid = _seed_inbox(sid, "L1", "2026-06-01T10:00:00Z")
+    _create_lot(client, window_size=1)
+
+    rid = _running_reprocess_row()
+    asyncio.run(lots.run_advance(1, rid, rest=False))
+
+    records: list[dict[str, Any]] = []
+    while not sink_capture.empty():
+        records.append(sink_capture.get_nowait())
+    by_event = {r["event"]: r for r in records}
+    assert by_event["processing.lot.window_done"]["run_id"] == str(rid)
+    assert by_event["reprocess.done"]["run_id"] == str(rid)
+    assert by_event["reprocess.done"]["inbox_id"] == iid
+    # Fuera del scope del lote no queda contexto colgado (bound_log_context restaura).
+    import structlog
+
+    assert "run_id" not in structlog.contextvars.get_contextvars()
+
+
 def test_advance_window_size_override_persists(client: Any, seed_source: dict[str, Any]) -> None:
     sid = seed_source["id"]
     for n, day in enumerate(("01", "02", "03"), start=1):

@@ -183,6 +183,30 @@ def _reset_tables() -> None:
 
 
 @pytest.fixture
+def sink_capture() -> Iterator[Any]:
+    """Captura lo que el log sink persistiría durante el test (cola en memoria, sin DB ni thread).
+
+    Activa un `_SinkState` falso (enabled, umbral info) y restaura el real al salir. Acá cae TODO
+    lo que `persist_processor` encolaría — los tests filtran por `event`/`logger`. Yieldea la
+    `queue.Queue` de records ya convertidos a fila (`_to_record`).
+    """
+    import queue
+
+    from memex.core import log_sink
+    from memex.core.log_sink import _SinkState
+    from memex.logging import setup_logging
+
+    setup_logging()  # idempotente; asegura que persist_processor esté en la cadena
+    original = log_sink._state
+    q: queue.Queue[dict[str, Any]] = queue.Queue()
+    log_sink._state = _SinkState(enabled=True, min_level_no=20, queue=q)
+    try:
+        yield q
+    finally:
+        log_sink._state = original
+
+
+@pytest.fixture
 def conn() -> Iterator[Any]:
     """A managed Connection in a fresh transaction (commits when the test ends).
 

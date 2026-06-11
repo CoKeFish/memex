@@ -24,7 +24,8 @@ class ImapClient(AbstractContextManager["ImapClient"]):
 
     def __init__(self, cfg: ImapConfig) -> None:
         self.cfg = cfg
-        self._log = get_logger("memex.ingestors.imap.client").bind(
+        self._log = get_logger(
+            "memex.ingestors.imap.client",
             server=cfg.server,
             username=cfg.username,
             auth_method=cfg.auth_method,

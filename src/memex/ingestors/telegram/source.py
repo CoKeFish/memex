@@ -56,7 +56,8 @@ class TelegramSource:
 
     def __init__(self, cfg: TelegramConfig) -> None:
         self.cfg = cfg
-        self._log = get_logger("memex.ingestors.telegram.source").bind(
+        self._log = get_logger(
+            "memex.ingestors.telegram.source",
             phone=cfg.phone_masked,
             session_name=cfg.session_name,
         )

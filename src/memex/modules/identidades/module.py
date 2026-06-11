@@ -18,6 +18,7 @@ el desempate LLM corre en una fase aparte. Declara `provide_domain`.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -113,18 +114,63 @@ class IdentidadesModule:
     async def dedup(self, ctx: ModuleContext, items: Sequence[ExtractionItem]) -> int:
         """Mecanismo propio (`()` en `identity_fields`): por cada mención resuelve contra el
         directorio (señales fuertes + difuso); auto-mergea, encola candidato o crea. Registra el
-        avistamiento como evidencia. Todo en `ctx.conn` (atómico con el cursor)."""
+        avistamiento como evidencia. Todo en `ctx.conn` (atómico con el cursor).
+
+        Emite `identidades.dedup.done` (agregado por unidad: breakdown por camino de resolución +
+        `merge_pending`, la cola que el desempate LLM —scheduler/CLI, NO el lote— resuelve después).
+        El detalle por mención vive en el tracer visual (`_trace_mention`), no en log_events."""
         mentions = [i for i in items if isinstance(i, IdentityItem)]
         if not mentions:
             return 0
+        t0 = time.monotonic()
+        counts = {"strong": 0, "auto_merge": 0, "gray": 0, "created": 0}
         index = load_known_index(ctx.conn, ctx.user_id)
         for m in mentions:
-            res = index.resolve(m)
-            hint: _MergeHint | None = None
-            if res.kind is None:
-                res, hint = _resolve_fuzzy_or_create(ctx.conn, ctx.user_id, m, index)
-            _insert_mention(ctx.conn, ctx.user_id, m, res)
+            try:
+                res = index.resolve(m)
+                hint: _MergeHint | None = None
+                if res.kind is None:
+                    res, hint = _resolve_fuzzy_or_create(ctx.conn, ctx.user_id, m, index)
+                _insert_mention(ctx.conn, ctx.user_id, m, res)
+            except Exception as e:
+                # Se RE-LANZA: la tx del módulo rollbackea y la ventana cae a
+                # extract.window.failed como siempre; acá solo queda el por-qué con la mención.
+                _log.error(
+                    "identidades.dedup.mention_failed",
+                    name=m.name,
+                    kind=m.kind,
+                    exc_type=type(e).__name__,
+                    exc_msg=str(e),
+                    exc_info=True,
+                )
+                raise
             self._trace_mention(ctx, m, res, hint)
+            # Mismo orden de ramas que _trace_mention: creada / auto-merge / zona gris / fuerte.
+            if res.method == "created":
+                counts["created"] += 1
+            elif hint is not None and hint.auto_merge:
+                counts["auto_merge"] += 1
+            elif hint is not None:
+                counts["gray"] += 1
+            else:
+                counts["strong"] += 1
+        merge_pending = int(
+            ctx.conn.execute(
+                text(
+                    "SELECT count(*) FROM mod_identidades_merge_candidates "
+                    "WHERE user_id = :uid AND status = 'candidate'"
+                ),
+                {"uid": ctx.user_id},
+            ).scalar_one()
+        )
+        _log.info(
+            "identidades.dedup.done",
+            n=len(mentions),
+            **counts,
+            merge_pending=merge_pending,
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            inbox_ids=list(ctx.inbox_ids),
+        )
         return len(mentions)
 
     def _trace_mention(

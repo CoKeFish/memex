@@ -92,7 +92,7 @@ class InstagramSource:
     def __init__(self, cfg: SocialConfig) -> None:
         self.cfg = cfg
         self._run_reports: list[ActorRunReport] = []
-        self._log = get_logger("memex.ingestors.social.source").bind(platform="instagram")
+        self._log = get_logger("memex.ingestors.social.source", platform="instagram")
 
     async def health_check(self) -> HealthResult:
         return await social_health_probe(self.cfg)
@@ -128,7 +128,7 @@ class FacebookSource:
     def __init__(self, cfg: SocialConfig) -> None:
         self.cfg = cfg
         self._run_reports: list[ActorRunReport] = []
-        self._log = get_logger("memex.ingestors.social.source").bind(platform="facebook")
+        self._log = get_logger("memex.ingestors.social.source", platform="facebook")
 
     async def health_check(self) -> HealthResult:
         return await social_health_probe(self.cfg)
@@ -164,7 +164,7 @@ class XSource:
     def __init__(self, cfg: SocialConfig) -> None:
         self.cfg = cfg
         self._run_reports: list[ActorRunReport] = []
-        self._log = get_logger("memex.ingestors.social.source").bind(platform="x")
+        self._log = get_logger("memex.ingestors.social.source", platform="x")
 
     async def health_check(self) -> HealthResult:
         return await social_health_probe(self.cfg)

@@ -31,7 +31,7 @@ from sqlalchemy import Connection, text
 
 from memex.core.source import SourceKind
 from memex.db import connection
-from memex.logging import get_logger
+from memex.logging import bound_log_context, get_logger
 from memex.reprocess import reprocess
 from memex.scheduler import runs
 
@@ -322,88 +322,91 @@ async def run_advance(
     history con costo) se persiste DESPUÉS de cada ventana, así "el resto" muestra progreso vivo
     y un corte a mitad retoma donde quedó. Una falla dura de etapa corta el loop SIN avanzar esa
     ventana y cierra la corrida en error. Cierra la fila `worker_runs` siempre (ok/error).
+
+    El run_id va por CONTEXTVARS (no `.bind()` local): cada `reprocess()` de ventana — y todo lo
+    que corre adentro — hereda la correlación, y `/logs?run_id=` reconstruye la corrida entera.
     """
-    log = _log.bind(run_id=run_id, user_id=user_id)
     totals = {"windows": 0, "targets": 0, "cost_usd": 0.0}
-    try:
-        while True:
-            with connection() as conn:
-                lot = get_lot(conn, user_id)
-            if lot is None:
-                runs.finish_run(run_id, status="error", error="el lote fue borrado a mitad")
-                log.warning("processing.lot.vanished")
-                return
-            remaining = len(lot.target_ids) - lot.frontier
-            if remaining <= 0:
-                break
-            size = window_size or lot.window_size
-            ids = lot.target_ids[lot.frontier : lot.frontier + size]
+    with bound_log_context(run_id=str(run_id), user_id=user_id):
+        try:
+            while True:
+                with connection() as conn:
+                    lot = get_lot(conn, user_id)
+                if lot is None:
+                    runs.finish_run(run_id, status="error", error="el lote fue borrado a mitad")
+                    _log.warning("processing.lot.vanished")
+                    return
+                remaining = len(lot.target_ids) - lot.frontier
+                if remaining <= 0:
+                    break
+                size = window_size or lot.window_size
+                ids = lot.target_ids[lot.frontier : lot.frontier + size]
 
-            t0 = time.monotonic()
-            result = await reprocess(
-                user_id,
-                stages=lot.stages,
-                targets=ids,
-                force=bool(lot.config.get("force", False)),
-            )
-            ms = int((time.monotonic() - t0) * 1000)
-            results = dict(result.get("results", {}))
-
-            failed_stage = _stage_hard_failure(results)
-            if failed_stage is not None:
-                detail = str(results[failed_stage].get("error", ""))[:500]
-                runs.finish_run(
-                    run_id,
-                    status="error",
-                    stats={**totals, "results": results},
-                    error=f"etapa {failed_stage!r} falló en la ventana {lot.frontier}"
-                    f"-{lot.frontier + len(ids)}: {detail}",
-                )
-                log.error(
-                    "processing.lot.window_failed",
-                    stage=failed_stage,
-                    start_idx=lot.frontier,
-                    n=len(ids),
-                )
-                return
-
-            entry: dict[str, Any] = {
-                "start_idx": lot.frontier,
-                "end_idx": lot.frontier + len(ids),
-                "n": len(ids),
-                "results": results,
-                "errors": sum(
-                    int(slot.get("errors", 0) or 0)
-                    for slot in results.values()
-                    if isinstance(slot, dict)
-                ),
-                "cost_usd": float(result.get("cost_usd", 0) or 0),
-                "ms_elapsed": ms,
-                "at": datetime.now(UTC).isoformat(),
-            }
-            with connection() as conn:
-                lot = _persist_advance(
-                    conn,
+                t0 = time.monotonic()
+                result = await reprocess(
                     user_id,
-                    new_frontier=lot.frontier + len(ids),
-                    window_size=size,
-                    entry=entry,
+                    stages=lot.stages,
+                    targets=ids,
+                    force=bool(lot.config.get("force", False)),
                 )
-            totals["windows"] += 1
-            totals["targets"] += len(ids)
-            totals["cost_usd"] = round(totals["cost_usd"] + entry["cost_usd"], 6)
-            log.info(
-                "processing.lot.window_done",
-                start_idx=entry["start_idx"],
-                n=entry["n"],
-                cost_usd=entry["cost_usd"],
-                status=lot.status,
-            )
-            if not rest or lot.status == "done":
-                break
+                ms = int((time.monotonic() - t0) * 1000)
+                results = dict(result.get("results", {}))
 
-        runs.finish_run(run_id, status="ok", stats=totals)
-        log.info("processing.lot.advance_done", **totals)
-    except Exception as e:  # best-effort: el error queda en la fila para el post-mortem
-        runs.finish_run(run_id, status="error", stats=totals, error=str(e))
-        log.error("processing.lot.advance_failed", error=str(e), exc_type=type(e).__name__)
+                failed_stage = _stage_hard_failure(results)
+                if failed_stage is not None:
+                    detail = str(results[failed_stage].get("error", ""))[:500]
+                    runs.finish_run(
+                        run_id,
+                        status="error",
+                        stats={**totals, "results": results},
+                        error=f"etapa {failed_stage!r} falló en la ventana {lot.frontier}"
+                        f"-{lot.frontier + len(ids)}: {detail}",
+                    )
+                    _log.error(
+                        "processing.lot.window_failed",
+                        stage=failed_stage,
+                        start_idx=lot.frontier,
+                        n=len(ids),
+                    )
+                    return
+
+                entry: dict[str, Any] = {
+                    "start_idx": lot.frontier,
+                    "end_idx": lot.frontier + len(ids),
+                    "n": len(ids),
+                    "results": results,
+                    "errors": sum(
+                        int(slot.get("errors", 0) or 0)
+                        for slot in results.values()
+                        if isinstance(slot, dict)
+                    ),
+                    "cost_usd": float(result.get("cost_usd", 0) or 0),
+                    "ms_elapsed": ms,
+                    "at": datetime.now(UTC).isoformat(),
+                }
+                with connection() as conn:
+                    lot = _persist_advance(
+                        conn,
+                        user_id,
+                        new_frontier=lot.frontier + len(ids),
+                        window_size=size,
+                        entry=entry,
+                    )
+                totals["windows"] += 1
+                totals["targets"] += len(ids)
+                totals["cost_usd"] = round(totals["cost_usd"] + entry["cost_usd"], 6)
+                _log.info(
+                    "processing.lot.window_done",
+                    start_idx=entry["start_idx"],
+                    n=entry["n"],
+                    cost_usd=entry["cost_usd"],
+                    status=lot.status,
+                )
+                if not rest or lot.status == "done":
+                    break
+
+            runs.finish_run(run_id, status="ok", stats=totals)
+            _log.info("processing.lot.advance_done", **totals)
+        except Exception as e:  # best-effort: el error queda en la fila para el post-mortem
+            runs.finish_run(run_id, status="error", stats=totals, error=str(e))
+            _log.error("processing.lot.advance_failed", error=str(e), exc_type=type(e).__name__)

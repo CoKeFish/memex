@@ -4,6 +4,7 @@ lo nuevo entra como no-interés (source='extraction'). Dedup determinista (sin L
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
@@ -158,6 +159,74 @@ async def test_fuzzy_gray_zone_creates_candidate(monkeypatch: pytest.MonkeyPatch
         )
     assert cand is not None and cand["status"] == "candidate"
     assert {cand["identity_a_id"], cand["identity_b_id"]} == {existing, new_org["id"]}
+
+
+@pytest.mark.asyncio
+async def test_dedup_emits_aggregated_log(
+    sink_capture: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El dedup inline emite `identidades.dedup.done` (breakdown por camino + merge_pending +
+    inbox_ids de la unidad) — antes el camino caliente no dejaba NI UNA fila en log_events."""
+    monkeypatch.setattr("memex.modules.identidades.module.HIGH_THRESHOLD", 0.999)
+    _seed_known()
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name, interest, source) "
+                "VALUES (1,'organizacion','Globex',TRUE,'manual')"
+            )
+        )
+    items = [
+        IdentityItem(source_inbox_ids=(5,), name="Ada L.", email="ada@x.com"),  # señal fuerte
+        IdentityItem(source_inbox_ids=(6,), name="Zentriva Pharma", kind="organizacion"),  # nueva
+        IdentityItem(source_inbox_ids=(6,), name="Globexx", kind="organizacion"),  # zona gris
+    ]
+    assert await _persist(items) == 3
+
+    records: list[dict[str, Any]] = []
+    while not sink_capture.empty():
+        records.append(sink_capture.get_nowait())
+    done = [r for r in records if r["event"] == "identidades.dedup.done"]
+    assert len(done) == 1, "un (1) evento agregado por unidad"
+    assert done[0]["logger"] == "memex.modules.identidades"
+    fields = json.loads(done[0]["fields"])
+    assert fields["n"] == 3
+    assert (fields["strong"], fields["auto_merge"], fields["gray"], fields["created"]) == (
+        1,
+        0,
+        1,
+        1,
+    )
+    assert fields["merge_pending"] == 1  # Globexx vs Globex, encolado para el desempate LLM
+    assert fields["inbox_ids"] == [5, 6]
+    assert fields["duration_ms"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_dedup_mention_failure_logs_and_reraises(
+    sink_capture: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Una mención que revienta queda en log_events con su por-qué (mención + traceback) y la
+    excepción SE RE-LANZA: la tx rollbackea y la ventana cae a extract.window.failed, como hoy."""
+
+    def _boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("insert reventado")
+
+    monkeypatch.setattr("memex.modules.identidades.module._insert_mention", _boom)
+    with pytest.raises(RuntimeError, match="insert reventado"):
+        await _persist([IdentityItem(source_inbox_ids=(5,), name="Quien Sea", kind="persona")])
+
+    records: list[dict[str, Any]] = []
+    while not sink_capture.empty():
+        records.append(sink_capture.get_nowait())
+    failed = [r for r in records if r["event"] == "identidades.dedup.mention_failed"]
+    assert len(failed) == 1
+    assert failed[0]["level"] == "error"
+    assert failed[0]["exception"] is not None
+    assert "insert reventado" in failed[0]["exception"]
+    fields = json.loads(failed[0]["fields"])
+    assert fields["name"] == "Quien Sea"
+    assert fields["exc_type"] == "RuntimeError"
 
 
 @pytest.mark.asyncio

@@ -73,7 +73,8 @@ class TelegramStreamingSource:
 
     def __init__(self, cfg: TelegramConfig) -> None:
         self.cfg = cfg
-        self._log = get_logger("memex.ingestors.telegram.streaming").bind(
+        self._log = get_logger(
+            "memex.ingestors.telegram.streaming",
             phone=cfg.phone_masked,
             session_name=cfg.session_name,
         )

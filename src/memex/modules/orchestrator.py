@@ -45,7 +45,7 @@ from memex.core.observability import (
 from memex.core.trace import create_root, open_module_tracer
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError, LLMResult
-from memex.logging import get_logger
+from memex.logging import bound_log_context, get_logger
 from memex.modules import known_modules, resolve
 from memex.modules.attribution import attributed_counts
 from memex.modules.contract import (
@@ -300,7 +300,13 @@ async def _route(
     ordered = resolve_order(chosen, active_by_slug)
     if ordered.dropped:
         _log.warning("route.dropped", dropped=list(ordered.dropped), source_id=window.source_id)
-    _log.info("route.decision", source_id=window.source_id, chosen=list(ordered.order))
+    _log.info(
+        "route.decision",
+        source_id=window.source_id,
+        chosen=list(ordered.order),
+        n=len(window.rows),
+        inbox_ids=[r.inbox_id for r in window.rows],
+    )
     return list(ordered.order)
 
 
@@ -533,7 +539,7 @@ async def _persist_unit(
         with connection() as conn:
             for module in unit.modules:
                 _insert_cursor(conn, user_id, module, inbox_ids)
-        _log.info("extract.unit.empty_input", slugs=slugs, n=n)
+        _log.info("extract.unit.empty_input", slugs=slugs, n=n, inbox_ids=inbox_ids)
         return
 
     if outcome.status == "error":
@@ -568,7 +574,9 @@ async def _persist_unit(
                     error_message=outcome.error_message,
                     response_text=result.content,
                 )
-        _log.warning("extract.unit.error", slugs=slugs, n=n, error=outcome.error_message)
+        _log.warning(
+            "extract.unit.error", slugs=slugs, n=n, inbox_ids=inbox_ids, error=outcome.error_message
+        )
         return  # sin cursor → reintentable
 
     result = outcome.result
@@ -640,7 +648,13 @@ async def _persist_unit(
             discarded=outcome.discarded_by_slug[slug],
             response_text=result.content,
         )
-    _log.info("extract.unit.done", slugs=slugs, n=n, items=sum(items_by_slug.values()))
+    _log.info(
+        "extract.unit.done",
+        slugs=slugs,
+        n=n,
+        inbox_ids=inbox_ids,
+        items=sum(items_by_slug.values()),
+    )
 
 
 async def _process_window(
@@ -707,9 +721,17 @@ async def _process_window(
     # para no dejar tareas huérfanas si una revienta. Como nada se persistió aún, la ventana queda
     # 100% reintentable: una excepción dura se re-lanza (best-effort por ventana en run_extraction;
     # quota TIENE PRIORIDAD y aborta la corrida).
-    results = await asyncio.gather(
-        *(_extract_unit(user_id, llm, u) for u in units), return_exceptions=True
-    )
+    async def _extract_unit_bound(u: _Unit) -> _UnitOutcome:
+        # Correlación por unidad: cada task de gather COPIA el contexto al crearse, así el bind
+        # vive solo en su copia (sin contaminación cruzada) y los logs internos (retries del LLM)
+        # salen atribuidos. inbox_id solo si la unidad es de 1 mensaje; la lista va en los eventos.
+        with bound_log_context(
+            source_id=u.rows[0].source_id,
+            inbox_id=u.rows[0].inbox_id if len(u.rows) == 1 else None,
+        ):
+            return await _extract_unit(user_id, llm, u)
+
+    results = await asyncio.gather(*(_extract_unit_bound(u) for u in units), return_exceptions=True)
     for res in results:
         if isinstance(res, LLMQuotaError):
             raise res
@@ -721,10 +743,16 @@ async def _process_window(
 
     # FASE 2 (persistir/dedup): SECUENCIAL y en el orden de las unidades (topo) — el dependiente ve
     # el dominio fresco de su dependencia, aunque ambos se extrajeron a la vez en la FASE 1.
+    # El bind por unidad cubre los logs de los MÓDULOS adentro (identidades.dedup.done, llm.call):
+    # heredan source_id — e inbox_id cuando la unidad es de 1 mensaje — sin tocar su firma.
     for unit, outcome in zip(units, outcomes, strict=True):
-        await _persist_unit(
-            user_id, llm, unit, outcome, stats, active_by_slug, trace_root_id=trace_root_id
-        )
+        with bound_log_context(
+            source_id=unit.rows[0].source_id,
+            inbox_id=unit.rows[0].inbox_id if len(unit.rows) == 1 else None,
+        ):
+            await _persist_unit(
+                user_id, llm, unit, outcome, stats, active_by_slug, trace_root_id=trace_root_id
+            )
 
     # Candidatos ruteados-fuera: marcar "considerado" para no re-rutearlos eternamente.
     for module in candidates:
@@ -838,6 +866,7 @@ async def run_extraction(
                     source_id=window.source_id,
                     tier=window.tier,
                     n=len(window.rows),
+                    inbox_ids=[r.inbox_id for r in window.rows],
                     exc_type=type(e).__name__,
                     exc_msg=str(e),
                 )

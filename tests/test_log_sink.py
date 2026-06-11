@@ -91,22 +91,55 @@ def test_to_record_extracts_columns_and_fields() -> None:
 
 
 def test_to_record_coerces_bad_correlation_and_defaults() -> None:
-    # Tipos malos en las columnas de correlación → None; bool NO cuenta como int.
+    # Tipos malos en las columnas de correlación → columna None pero el valor QUEDA en fields
+    # (invariante: nada se pierde en silencio); bool NO cuenta como int; int en columna TEXT → str.
     rec = _to_record(
         {
             "level": 123,  # no-str → fallback "info"
             "event": None,  # no-str → ""
-            "user_id": True,  # bool → None (no es un int válido de correlación)
-            "source_id": "x",  # no-int → None
-            "request_id": 99,  # no-str → None
+            "user_id": True,  # bool → columna None (no es un int válido de correlación)
+            "source_id": "x",  # str en columna BIGINT → columna None
+            "request_id": 99,  # int en columna TEXT → "99" (un id numérico no se tira)
         }
     )
     assert rec["level"] == "info"
     assert rec["event"] == ""
     assert rec["user_id"] is None
     assert rec["source_id"] is None
-    assert rec["request_id"] is None
+    assert rec["request_id"] == "99"
     assert rec["exception"] is None
+    fields = json.loads(rec["fields"])
+    assert fields["user_id"] is True  # no coercible → conservado en fields
+    assert fields["source_id"] == "x"
+    assert "request_id" not in fields  # coercionado → consumido hacia la columna
+
+
+def test_to_record_run_id_int_goes_to_column_as_str() -> None:
+    """REGRESIÓN: los run_id int (`worker_runs` de los lotes de procesamiento) se tragaban
+    enteros — ni columna ni fields; `/logs?run_id=` no encontraba ninguna corrida de
+    procesamiento. Ahora van a la columna TEXT como str."""
+    rec = _to_record({"level": "info", "event": "e", "run_id": 123})
+    assert rec["run_id"] == "123"
+    assert "run_id" not in json.loads(rec["fields"])
+
+
+def test_to_record_uncoercible_correlation_stays_in_fields() -> None:
+    rec = _to_record({"level": "info", "event": "e", "run_id": {"id": 1}, "inbox_id": "11"})
+    assert rec["run_id"] is None
+    assert rec["inbox_id"] is None
+    fields = json.loads(rec["fields"])
+    assert fields["run_id"] == {"id": 1}
+    assert fields["inbox_id"] == "11"
+
+
+def test_to_record_none_correlation_is_consumed() -> None:
+    # None explícito (bindeado río arriba) se consume: ni columna ni ruido "null" en fields.
+    rec = _to_record({"level": "info", "event": "e", "run_id": None, "inbox_id": None})
+    assert rec["run_id"] is None
+    assert rec["inbox_id"] is None
+    fields = json.loads(rec["fields"])
+    assert "run_id" not in fields
+    assert "inbox_id" not in fields
 
 
 def test_to_record_non_serializable_field_does_not_blow_up() -> None:
@@ -138,6 +171,20 @@ def test_persist_processor_enqueues_above_threshold_and_returns_same_dict() -> N
     enqueued = q.get_nowait()
     assert enqueued["event"] == "ok.event"
     assert json.loads(enqueued["fields"])["foo"] == "bar"
+
+
+def test_persist_processor_enqueues_run_id_int_as_text() -> None:
+    """End-to-end del fix: un evento con run_id int (como bindean los lotes) llega a la cola
+    con la columna run_id poblada como str."""
+    q: queue.Queue[dict[str, Any]] = queue.Queue()
+    log_sink._state.enabled = True
+    log_sink._state.min_level_no = 20
+    log_sink._state.queue = q
+
+    persist_processor(None, "info", {"level": "info", "event": "lote.done", "run_id": 7})
+    rec = q.get_nowait()
+    assert rec["run_id"] == "7"
+    assert "run_id" not in json.loads(rec["fields"])
 
 
 def test_persist_processor_skips_below_threshold() -> None:
