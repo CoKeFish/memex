@@ -249,7 +249,10 @@ async def _process_window(
     if not any(part.strip() for part in rendered):
         stats.skipped += 1
         _log.warning(
-            "summarizer.window.empty_input", source_id=window.source_id, n=len(window.rows)
+            "summarizer.window.empty_input",
+            source_id=window.source_id,
+            n=len(window.rows),
+            inbox_ids=[r.inbox_id for r in window.rows],
         )
         return  # sin payload útil → reintentable; no se persiste ni se gasta LLM
 
@@ -263,7 +266,10 @@ async def _process_window(
     if not content:
         stats.skipped += 1
         _log.warning(
-            "summarizer.window.empty_content", source_id=window.source_id, n=len(window.rows)
+            "summarizer.window.empty_content",
+            source_id=window.source_id,
+            n=len(window.rows),
+            inbox_ids=[r.inbox_id for r in window.rows],
         )
         _record_cost(
             user_id,
@@ -287,6 +293,7 @@ async def _process_window(
             finish_reason=result.finish_reason,
             source_id=window.source_id,
             n=len(window.rows),
+            inbox_ids=[r.inbox_id for r in window.rows],
         )
 
     # Persistir ANTES de registrar el costo: así nunca hay un costo 'ok' sin summary.
@@ -395,6 +402,7 @@ async def run_summarization(
                     tier=window.tier,
                     source_id=window.source_id,
                     n=len(window.rows),
+                    inbox_ids=[r.inbox_id for r in window.rows],
                     exc_type=type(e).__name__,
                     exc_msg=str(e),
                 )

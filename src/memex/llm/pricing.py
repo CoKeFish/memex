@@ -52,6 +52,13 @@ from datetime import UTC, datetime, time
 from decimal import Decimal
 
 from memex.llm.client import LLMError, LLMUsage
+from memex.logging import get_logger
+
+_log = get_logger("memex.llm.pricing")
+
+#: Modelos ya avisados como no-tabulados — un warning POR PROCESO por modelo, no por llamada
+#: (un modelo sin tabular puede usarse cientos de veces por corrida).
+_WARNED_UNKNOWN: set[str] = set()
 
 #: Nombre de la env var con overrides de pricing (JSON por modelo).
 _PRICING_ENV = "MEMEX_LLM_PRICING"
@@ -199,12 +206,16 @@ def compute_cost(
     no es None y cae en la ventana off-peak y el modelo tiene `off_peak_discount>0`, el
     costo se multiplica por `(1 - off_peak_discount)`.
 
-    Modelo no tabulado → `Decimal(0)`: no revienta el run (el cliente loguea el modelo
-    para que se detecte una tabla desactualizada).
+    Modelo no tabulado → `Decimal(0)` + warning `llm.pricing.unknown_model` (una vez por
+    proceso por modelo): no revienta el run, pero la tabla desactualizada deja rastro propio —
+    confiar en que alguien note costos en $0 ya falló (H-4: gpt-4o-mini estuvo meses en $0).
     """
     table = pricing if pricing is not None else MODEL_PRICING
     rate = table.get(model)
     if rate is None:
+        if model not in _WARNED_UNKNOWN:
+            _WARNED_UNKNOWN.add(model)
+            _log.warning("llm.pricing.unknown_model", model=model)
         return Decimal(0)
 
     cost = (

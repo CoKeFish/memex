@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -75,6 +76,25 @@ def test_v4_flash_preview_shares_flash_pricing() -> None:
 def test_unknown_model_returns_zero() -> None:
     u = _usage(prompt=1000, completion=1000, miss=1000)
     assert compute_cost("gpt-9000", u) == Decimal(0)
+
+
+def test_unknown_model_warns_once_per_model(sink_capture: Any, monkeypatch: Any) -> None:
+    """Modelo no tabulado → $0 con `llm.pricing.unknown_model` UNA vez por proceso por modelo
+    (H-4: confiar en que alguien note los $0 ya falló; el silencio no puede ser el mecanismo)."""
+    from memex.llm import pricing as pricing_mod
+
+    monkeypatch.setattr(pricing_mod, "_WARNED_UNKNOWN", set())  # aislar del resto de la suite
+    u = _usage(prompt=1000, completion=1000, miss=1000)
+    assert compute_cost("modelo-fantasma", u) == Decimal(0)
+    assert compute_cost("modelo-fantasma", u) == Decimal(0)  # 2ª llamada: no duplica el aviso
+
+    records = []
+    while not sink_capture.empty():
+        records.append(sink_capture.get_nowait())
+    warned = [r for r in records if r["event"] == "llm.pricing.unknown_model"]
+    assert len(warned) == 1
+    assert warned[0]["level"] == "warning"
+    assert json.loads(warned[0]["fields"])["model"] == "modelo-fantasma"
 
 
 def test_cost_quantized_to_six_decimals() -> None:
