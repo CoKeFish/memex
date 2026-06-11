@@ -28,6 +28,14 @@ recursión hacia este mismo sink), así que se emite una línea JSON a `sys.stde
 lote (no se re-encola: evitar retry infinito y una cola que nunca drena). Es deliberado y está
 documentado acá.
 
+Espacios de `run_id` (columna TEXT; cada espacio de corridas numera las suyas, el prefijo evita
+que se mezclen en `/logs?run_id=`):
+  - número pelado ("12")  → procesamiento (`worker_runs`)
+  - uuid                  → corridas de ingesta (`ingestion_runs`)
+  - "cli-<hex>"           → CLI memex-reprocess (sin fila propia)
+  - "cal:<id>"            → sync de calendario (`mod_calendar_sync_runs`, ingress y egress)
+  - "idsync:<id>"         → sync de contactos (`mod_identidades_sync_runs`)
+
 Este módulo NO importa `memex.logging` (es su consumidor): la dependencia es
 `logging.py -> log_sink`, nunca al revés, para evitar el import circular.
 """

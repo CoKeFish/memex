@@ -30,7 +30,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.db import connection
-from memex.logging import get_logger
+from memex.logging import bound_log_context, get_logger
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.providers import oauth, resolve
 from memex.modules.identidades.providers.base import (
@@ -450,23 +450,27 @@ async def run_sync(
     stats.pulled = len(contacts)
     with connection() as conn:
         run_id = _start_run(conn, user_id, account_id)
-        for contact in contacts:
-            if contact.deleted:
-                if _mark_deleted(conn, account, contact.resource_name):
-                    stats.deleted += 1
-                continue
-            action = _upsert_identity(conn, account, contact)
-            if action == "created":
-                stats.created += 1
-            elif action == "modified":
-                stats.modified += 1
-            else:
-                stats.unchanged += 1
-        _save_cursor(conn, account_id, new_sync_token)
-        _finish_run(conn, run_id, stats, status="ok")
+        # Espacio de run NAMESPACIADO en los logs: `idsync:<id>` (los ids de
+        # mod_identidades_sync_runs son enteros propios; el número pelado es de procesamiento).
+        with bound_log_context(run_id=f"idsync:{run_id}"):
+            for contact in contacts:
+                if contact.deleted:
+                    if _mark_deleted(conn, account, contact.resource_name):
+                        stats.deleted += 1
+                    continue
+                action = _upsert_identity(conn, account, contact)
+                if action == "created":
+                    stats.created += 1
+                elif action == "modified":
+                    stats.modified += 1
+                else:
+                    stats.unchanged += 1
+            _save_cursor(conn, account_id, new_sync_token)
+            _finish_run(conn, run_id, stats, status="ok")
 
     _log.info(
         "identidades.sync.end",
+        run_id=f"idsync:{run_id}",
         user_id=user_id,
         account_id=account_id,
         pulled=stats.pulled,

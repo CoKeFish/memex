@@ -173,6 +173,25 @@ async def test_pull_inserts_provider_events_and_records_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pull_logs_carry_namespaced_run_id(sink_capture: Any) -> None:
+    """Los logs de la corrida llevan run_id `cal:<id>` (espacio propio de
+    mod_calendar_sync_runs): sin el prefijo, su numeración entera colisionaba con la de
+    worker_runs (procesamiento, número pelado) en `/logs?run_id=`."""
+    aid = _seed_account()
+    fake = FakeProvider(ProviderPage(events=(_ev("a", "Dentista"),), next_sync_token="T1"))
+
+    await run_pull(1, aid, client=fake)
+
+    run_row_id = _sync_runs(aid)[0]["id"]
+    records = []
+    while not sink_capture.empty():
+        records.append(sink_capture.get_nowait())
+    end = [r for r in records if r["event"] == "calendar.sync.end"]
+    assert len(end) == 1
+    assert end[0]["run_id"] == f"cal:{run_row_id}"
+
+
+@pytest.mark.asyncio
 async def test_pull_is_idempotent_on_rerun() -> None:
     aid = _seed_account()
     fake = FakeProvider(

@@ -30,7 +30,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.db import connection
-from memex.logging import get_logger
+from memex.logging import bound_log_context, get_logger
 from memex.modules.calendar.dedup import DedupRow
 from memex.modules.calendar.module import _mark_dedup
 from memex.modules.calendar.providers import oauth, resolve
@@ -473,27 +473,32 @@ async def run_pull(
     new_rows: list[DedupRow] = []
     with connection() as conn:
         run_id = _start_run(conn, user_id, account_id)
-        for ev in events:
-            action, row = _upsert_event(conn, account, ev, run_id)
-            if action == "created":
-                stats.created += 1
-            elif action == "modified":
-                stats.modified += 1
-            else:
-                stats.unchanged += 1
-            if row is not None:
-                new_rows.append(row)
-        for provider_event_id in deleted_ids:
-            if _mark_cancelled(conn, account, provider_event_id, run_id):
-                stats.deleted += 1
-        if new_rows:
-            # La sync de proveedor no es per-mensaje (sin `ctx.trace`); solo cuenta los pares.
-            stats.dedup_pairs = len(_mark_dedup(conn, user_id, new_rows))
-        _save_cursor(conn, account_id, new_sync_token)
-        _finish_run(conn, run_id, stats, status="ok")
+        # Espacio de run NAMESPACIADO en los logs: `cal:<id>`. Los ids de mod_calendar_sync_runs
+        # son enteros propios y colisionarían con los de worker_runs (procesamiento, que usa el
+        # número pelado) en /logs?run_id=. El bind cubre los logs anidados (calendar.dedup.marked).
+        with bound_log_context(run_id=f"cal:{run_id}"):
+            for ev in events:
+                action, row = _upsert_event(conn, account, ev, run_id)
+                if action == "created":
+                    stats.created += 1
+                elif action == "modified":
+                    stats.modified += 1
+                else:
+                    stats.unchanged += 1
+                if row is not None:
+                    new_rows.append(row)
+            for provider_event_id in deleted_ids:
+                if _mark_cancelled(conn, account, provider_event_id, run_id):
+                    stats.deleted += 1
+            if new_rows:
+                # La sync de proveedor no es per-mensaje (sin `ctx.trace`); solo cuenta los pares.
+                stats.dedup_pairs = len(_mark_dedup(conn, user_id, new_rows))
+            _save_cursor(conn, account_id, new_sync_token)
+            _finish_run(conn, run_id, stats, status="ok")
 
     _log.info(
         "calendar.sync.end",
+        run_id=f"cal:{run_id}",
         user_id=user_id,
         account_id=account_id,
         pulled=stats.pulled,
@@ -713,7 +718,7 @@ async def run_push(
         run_id = _start_run(conn, user_id, account_id, direction="egress")
         cons = _load_consolidated(conn, user_id)
     if not write_back:
-        _log.info("calendar.push.not_write_back", account_id=account_id)
+        _log.info("calendar.push.not_write_back", account_id=account_id, run_id=f"cal:{run_id}")
         with connection() as conn:
             _finish_run(conn, run_id, SyncStats(), status="ok")
         return stats
@@ -729,48 +734,52 @@ async def run_push(
             CalendarSyncConfig.from_env(), access, account.calendar_id
         )
 
-    _log.info("calendar.push.start", user_id=user_id, account_id=account_id, n=len(cons))
-    try:
-        for cv in cons:
-            stats.consolidated += 1
-            try:
-                await _push_one(active, user_id, account_id, account.provider, run_id, cv, stats)
-            except CalendarProviderError as e:
-                stats.errors += 1
-                _log.error(
-                    "calendar.push.event_failed",
-                    cons_id=cv.cons_id,
-                    status=e.status_code,
-                    msg=str(e),
-                )
-    finally:
-        if owns_client and isinstance(active, GoogleCalendarClient):
-            await active.aclose()
+    # Mismo espacio namespaciado `cal:<id>` que el ingress; cubre start, fallos por evento y end.
+    with bound_log_context(run_id=f"cal:{run_id}"):
+        _log.info("calendar.push.start", user_id=user_id, account_id=account_id, n=len(cons))
+        try:
+            for cv in cons:
+                stats.consolidated += 1
+                try:
+                    await _push_one(
+                        active, user_id, account_id, account.provider, run_id, cv, stats
+                    )
+                except CalendarProviderError as e:
+                    stats.errors += 1
+                    _log.error(
+                        "calendar.push.event_failed",
+                        cons_id=cv.cons_id,
+                        status=e.status_code,
+                        msg=str(e),
+                    )
+        finally:
+            if owns_client and isinstance(active, GoogleCalendarClient):
+                await active.aclose()
 
-    with connection() as conn:
-        _finish_run(
-            conn,
-            run_id,
-            SyncStats(
-                pulled=stats.consolidated,
-                created=stats.created,
-                modified=stats.updated,
-                deleted=stats.deleted,
-                unchanged=stats.skipped,
-                errors=stats.errors,
-            ),
-            status="error" if stats.errors else "ok",
+        with connection() as conn:
+            _finish_run(
+                conn,
+                run_id,
+                SyncStats(
+                    pulled=stats.consolidated,
+                    created=stats.created,
+                    modified=stats.updated,
+                    deleted=stats.deleted,
+                    unchanged=stats.skipped,
+                    errors=stats.errors,
+                ),
+                status="error" if stats.errors else "ok",
+            )
+        _log.info(
+            "calendar.push.end",
+            user_id=user_id,
+            account_id=account_id,
+            created=stats.created,
+            updated=stats.updated,
+            deleted=stats.deleted,
+            skipped=stats.skipped,
+            errors=stats.errors,
         )
-    _log.info(
-        "calendar.push.end",
-        user_id=user_id,
-        account_id=account_id,
-        created=stats.created,
-        updated=stats.updated,
-        deleted=stats.deleted,
-        skipped=stats.skipped,
-        errors=stats.errors,
-    )
     return stats
 
 
