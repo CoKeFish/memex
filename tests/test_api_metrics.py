@@ -148,8 +148,13 @@ def test_rollup_by_module_mapping(client: Any) -> None:
         "extract_grouped": "grouped",
         "calendar_merge": "calendar",
         "calendar_dedup": "calendar",
+        "finance_dedup": "finance",  # fase interna → se pliega a su módulo
+        "identidades_dedup": "identidades",
+        "identidades_cooccurrence": "identidades",
+        "identidades_hierarchy": "identidades",
         "ocr": "ocr",
         "extract_health": "health",  # purpose futuro → cae al ELSE, nombrado por su slug
+        "graph_cluster_partition": "graph_cluster_partition",  # subsistema sin módulo → ELSE
     }
     for purpose in cases:
         _seed_llm_call(purpose=purpose, cost_usd="0.01")
@@ -158,6 +163,8 @@ def test_rollup_by_module_mapping(client: Any) -> None:
     assert set(by_module) == set(cases.values())
     assert by_module["summarize"]["calls"] == 2  # batch + individual
     assert by_module["calendar"]["calls"] == 2  # merge + dedup
+    assert by_module["finance"]["calls"] == 2  # extracción + dedup
+    assert by_module["identidades"]["calls"] == 3  # dedup + cooccurrence + hierarchy
     assert set(body["modules"]) == set(cases.values())
 
 

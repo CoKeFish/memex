@@ -6,10 +6,11 @@
 export const MODULES: { key: string; label: string; chart: string }[] = [
   { key: "routing", label: "Ruteo", chart: "var(--chart-1)" },
   { key: "summarize", label: "Resumen", chart: "var(--chart-2)" },
-  { key: "finance", label: "Extr. finanzas", chart: "var(--chart-3)" },
+  { key: "finance", label: "Finanzas", chart: "var(--chart-3)" },
   { key: "calendar", label: "Calendario", chart: "var(--chart-4)" },
   { key: "grouped", label: "Extr. agrupada", chart: "var(--chart-5)" },
   { key: "health", label: "Extr. salud", chart: "var(--chart-6)" },
+  { key: "identidades", label: "Identidades", chart: "var(--chart-7)" },
   { key: "ocr", label: "OCR", chart: "var(--origin-inbox)" },
 ]
 
