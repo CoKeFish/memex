@@ -291,3 +291,29 @@ def list_edges(
 def list_pistas(conn: Connection, user_id: int) -> list[RelationEdge]:
     """La cola de candidatos: las PISTAS del user (señales por validar / promover a reales)."""
     return list_edges(conn, user_id, status=STATUS_PISTA)
+
+
+def edges_touching(
+    conn: Connection, user_id: int, ref: Ref, *, status: str | None = None
+) -> list[RelationEdge]:
+    """Las aristas con `ref` en CUALQUIER extremo (src o dst), opcionalmente filtradas por `status`.
+    Para mostrar todas las relaciones de un vértice (p.ej. una identidad) sin importar la dirección.
+    `list_edges` filtra por status/producer pero no por vértice; esto completa ese eje."""
+    rows = (
+        conn.execute(
+            text(
+                """
+                SELECT * FROM relation_edges
+                WHERE user_id = :uid
+                  AND ((src_slug = :slug AND src_id = :id)
+                    OR (dst_slug = :slug AND dst_id = :id))
+                  AND (CAST(:status AS TEXT) IS NULL OR status = CAST(:status AS TEXT))
+                ORDER BY id
+                """
+            ),
+            {"uid": user_id, "slug": ref.slug, "id": ref.id, "status": status},
+        )
+        .mappings()
+        .all()
+    )
+    return [_row_to_edge(r) for r in rows]

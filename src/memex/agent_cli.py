@@ -46,18 +46,29 @@ _GROUPS: dict[str, Callable[[list[str]], int]] = {
 _BLOCKED: dict[str, frozenset[str]] = {"finance": frozenset({"dedup", "consolidate"})}
 
 #: Grupos donde el agente SOLO usa estos subcomandos (allowlist): el resto es mantenimiento.
-#: `identidad` expone registro (add), consulta (search/show/tree/candidates), jerarquía
-#: (set-parent), contexto (annotate) y resolución de duplicados (resolve); el mantenimiento
+#: `identidad` expone registro (add), consulta (list/search/show/relations/tree/candidates),
+#: jerarquía (set-parent/confirm-parent), edición (set-kind/add-id/affiliate/annotate),
+#: deduplicación (unify/resolve) y relaciones (relate/confirm-relation/unrelate); el mantenimiento
 #: (sync/merge/…) queda fuera. `calendario` ídem (pull/push/authorize/… son del operador).
 _ALLOWED: dict[str, frozenset[str]] = {
     "identidad": frozenset(
         {
             "add",
+            "list",
             "search",
             "show",
+            "relations",
             "tree",
             "set-parent",
+            "confirm-parent",
+            "set-kind",
+            "add-id",
+            "affiliate",
+            "unify",
             "annotate",
+            "relate",
+            "confirm-relation",
+            "unrelate",
             "candidates",
             "resolve",
             "help",
@@ -101,13 +112,23 @@ finance (gastos/ingresos):
   memex finance show           detalle de un pago consolidado (incluye el lugar resuelto)
   memex finance set-place      asocia un lugar del catálogo a un pago ("este pago fue en X")
 
-identidad (directorio de personas/organizaciones/productos):
+identidad (directorio de personas/organizaciones/productos + sus relaciones):
   memex identidad add          registra/resuelve una tarjeta de contacto (no duplica)
+  memex identidad list         enumera el directorio (--kind/--no-parent/--no-desc/--limit)
   memex identidad search       busca por nombre, alias o identificador (--q)
   memex identidad show         ficha completa: identificadores, jerarquía, afiliaciones (--id)
+  memex identidad relations    relaciones de una identidad y su estado (--id)
   memex identidad tree         jerarquía de pertenencia (quién pertenece a quién)
   memex identidad set-parent   cuelga una identidad de su padre, o --clear para quitarlo
-  memex identidad annotate     agrega alias/nota (contexto persistente para la resolución)
+  memex identidad confirm-parent  consolida el padre actual como confirmado
+  memex identidad set-kind     reclasifica (persona|organizacion|producto)
+  memex identidad add-id       agrega un identificador (email/handle/domain/…)
+  memex identidad affiliate    teje una persona con una organización
+  memex identidad unify        funde dos identidades del mismo kind (--into/--from)
+  memex identidad annotate     agrega alias/descripción (la ve el desempate LLM)
+  memex identidad relate       confirma una relación entre dos identidades (--from/--to/--type)
+  memex identidad confirm-relation  promueve una pista a relación confirmada (--edge)
+  memex identidad unrelate     descarta una arista (--edge)
   memex identidad candidates   pares dudosos pendientes (¿misma identidad real?)
   memex identidad resolve      decide un par: --same fusiona / --distinct coexisten
 

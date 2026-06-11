@@ -16,6 +16,7 @@ from memex.relations.edges import (
     PRODUCER_INBOX,
     PRODUCER_LLM,
     Ref,
+    edges_touching,
     get_edge,
     list_pistas,
     propose_edge,
@@ -113,3 +114,16 @@ def test_list_pistas_solo_trae_pistas() -> None:
         pistas = list_pistas(c, 1)
     assert len(pistas) == 1
     assert pistas[0].status == "pista"
+
+
+def test_edges_touching_ambos_extremos_y_status() -> None:
+    # A está como SRC en una arista y como DST en otra → edges_touching(A) trae ambas.
+    _propose(src=A, dst=B, producer=PRODUCER_INBOX)  # A es src (pista)
+    _propose(src=Ref("finance", 9), dst=A, producer=PRODUCER_LLM, status="confirmed")  # A es dst
+    _propose(src=Ref("finance", 9), dst=B, producer=PRODUCER_INBOX)  # no toca A
+    with connection() as c:
+        touching = edges_touching(c, 1, A)
+        confirmed = edges_touching(c, 1, A, status="confirmed")
+    assert len(touching) == 2  # ambas direcciones, ignora la que no toca A
+    assert {e.status for e in touching} == {"pista", "confirmed"}
+    assert len(confirmed) == 1 and confirmed[0].status == "confirmed"

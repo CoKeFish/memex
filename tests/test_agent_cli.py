@@ -83,13 +83,46 @@ def test_identidad_allowlist(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["identidad", "interest", "list"]) == 2
     assert main(["identidad", "help"]) == 0
     assert "add" in capsys.readouterr().out
-    # …pero consulta/jerarquía/resolución SÍ (forwardean al CLI de dominio).
+    # …pero consulta/jerarquía/resolución/relaciones SÍ (forwardean al CLI de dominio).
     assert main(["identidad", "search", "--q", "nadie"]) == 0
     assert "Sin resultados" in capsys.readouterr().out
     assert main(["identidad", "candidates"]) == 0
     assert "Sin candidatos" in capsys.readouterr().out
     assert main(["identidad", "tree"]) == 0
     assert "Sin jerarquía" in capsys.readouterr().out
+    assert main(["identidad", "list"]) == 0
+    assert "Sin identidades" in capsys.readouterr().out
+    # los verbos nuevos (relate/set-kind/add-id/unify/relations/…) están en el allowlist
+    assert main(["identidad", "relations", "--id", "99999"]) == 1  # llega al CLI (no es exit 2)
+    assert "No existe" in capsys.readouterr().err
+
+
+def test_identidad_agente_resuelve_relacion(capsys: pytest.CaptureFixture[str]) -> None:
+    # flujo del agente por la superficie `memex`: add dos → relate → relations
+    assert main(["identidad", "add", "--name", "TylerTemp", "--kind", "persona", "--json"]) == 0
+    tyler = _last_json(capsys.readouterr().out)["id"]
+    assert main(["identidad", "add", "--name", "Unity", "--kind", "organizacion", "--json"]) == 0
+    unity = _last_json(capsys.readouterr().out)["id"]
+    assert (
+        main(
+            [
+                "identidad",
+                "relate",
+                "--from",
+                str(tyler),
+                "--to",
+                str(unity),
+                "--type",
+                "mantiene_asset",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert main(["identidad", "relations", "--id", str(tyler), "--json"]) == 0
+    data = _last_json(capsys.readouterr().out)
+    assert data["edges"][0]["relation_type"] == "mantiene_asset"
+    assert data["edges"][0]["status"] == "confirmed"
 
 
 def test_identidad_agente_set_parent_y_show(capsys: pytest.CaptureFixture[str]) -> None:

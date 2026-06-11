@@ -3,13 +3,23 @@
 Subcomandos del AGENTE (expuestos vía `memex identidad <cmd>`):
   add          — resolve-or-create de una identidad desde una tarjeta de contacto: misma
                  resolución que la extracción, sin LLM.
+  list         — enumera el directorio con filtros (kind/no-parent/interest/no-desc): el camino
+                 para iterar todo sin un texto de búsqueda.
   search       — busca identidades por nombre, alias o identificador.
   show         — ficha completa: identificadores, jerarquía, afiliaciones, candidatos pendientes.
+  relations    — aristas que tocan una identidad (sus relaciones en el grafo) y su estado.
   tree         — jerarquía de pertenencia («sub»: programa→universidad, producto→empresa).
   set-parent   — cuelga una identidad de su padre (o lo quita con --clear); marca
                  `parent_source='agent'` para que el organizador LLM no lo pise.
-  annotate     — agrega alias y/o nota; las notas las VE el desempate LLM (contexto persistente
-                 para la resolución).
+  confirm-parent — consolida el padre actual como confirmado (parent_source=agent) sin re-tipearlo.
+  set-kind     — reclasifica el tipo (persona/organizacion/producto).
+  add-id       — agrega un identificador (email/phone/handle/domain/url).
+  affiliate    — teje una persona con una organización (afiliación).
+  unify        — funde dos identidades del mismo kind sin pasar por la cola de candidatos.
+  annotate     — agrega alias y/o descripción (nota); la VE el desempate LLM.
+  relate       — confirma una relación entre dos identidades (no reaparece como pista).
+  confirm-relation — promueve una pista existente a confirmada.
+  unrelate     — descarta una arista (la marca rechazada).
   candidates   — lista los candidatos de merge pendientes (zona gris del difuso).
   resolve      — decide un candidato: --same fusiona (id menor sobrevive), --distinct coexisten.
   help         — resumen de los comandos.
@@ -55,6 +65,16 @@ from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.providers import known_providers
 from memex.modules.identidades.providers.base import ContactsProviderError
 from memex.modules.identidades.sync import run_sync
+from memex.relations.edges import (
+    PRODUCER_HUMANO,
+    STATUS_CONFIRMED,
+    STATUS_REJECTED,
+    Ref,
+    edges_touching,
+    propose_edge,
+    resolve_edge,
+)
+from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 
 def _safe(text_: str) -> str:
@@ -78,11 +98,21 @@ determinista).
 
 Comandos del agente:
   add          registra/resuelve una tarjeta de contacto (resolve-or-create, no duplica)
+  list         enumera el directorio con filtros (--kind/--no-parent/--interest/--no-desc/--limit)
   search       busca por nombre, alias o identificador (--q, opcional --kind)
   show         ficha completa: identificadores, jerarquía, afiliaciones, candidatos (--id)
+  relations    aristas que tocan una identidad: qué relaciones tiene y su estado (--id)
   tree         jerarquía de pertenencia: quién pertenece a quién (opcional --id como raíz)
   set-parent   cuelga --id de --parent («pertenece a»), o quita el padre con --clear
-  annotate     agrega --alias y/o --note a --id (las notas las ve el desempate LLM)
+  confirm-parent  consolida el padre actual como confirmado (parent_source=agent)
+  set-kind     reclasifica --id a --kind (persona|organizacion|producto)
+  add-id       agrega un identificador (--kind email|phone|handle|domain|url --value)
+  affiliate    teje una persona (--person) con una organización (--org), opcional --role
+  unify        funde dos identidades del mismo kind: --into sobrevive, --from se absorbe
+  annotate     agrega --alias y/o --note a --id (la nota = descripción; la ve el desempate LLM)
+  relate       confirma una relación entre --from y --to (--type libre); no reaparece como pista
+  confirm-relation  promueve una pista existente a confirmada (--edge)
+  unrelate     descarta una arista (--edge): la marca rechazada
   candidates   pares dudosos pendientes de decisión (¿misma identidad real?)
   resolve      decide un candidato: --same fusiona / --distinct coexisten (--why auditoría)
   help         muestra esta ayuda
@@ -130,6 +160,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("help", help="Resumen de los comandos (para descubrir la CLI).")
+
+    list_p = sub.add_parser("list", help="Enumera el directorio con filtros.")
+    list_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    list_p.add_argument(
+        "--kind",
+        choices=["persona", "organizacion", "producto"],
+        help="Filtra por tipo de identidad.",
+    )
+    list_p.add_argument(
+        "--no-parent", action="store_true", help="Solo las que NO cuelgan de un padre (jerarquía)."
+    )
+    list_p.add_argument("--interest", action="store_true", help="Solo las marcadas como interés.")
+    list_p.add_argument(
+        "--no-desc", action="store_true", help="Solo las SIN descripción (notes vacío)."
+    )
+    list_p.add_argument("--limit", type=int, default=50, help="Máximo de resultados (default 50).")
+    list_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite los resultados como JSON."
+    )
 
     search_p = sub.add_parser("search", help="Busca identidades por nombre, alias o identificador.")
     search_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -182,9 +231,106 @@ def _build_parser() -> argparse.ArgumentParser:
     ann_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     ann_p.add_argument("--id", type=int, required=True, help="Id de la identidad.")
     ann_p.add_argument("--alias", action="append", default=[], help="Alias a agregar (repetible).")
-    ann_p.add_argument("--note", help="Nota a anexar (las notas las ve el desempate LLM).")
+    ann_p.add_argument(
+        "--note", help="Descripción/nota a anexar a la identidad (la ve el desempate LLM)."
+    )
     ann_p.add_argument(
         "--json", dest="as_json", action="store_true", help="Emite la fila como JSON."
+    )
+
+    rel_p = sub.add_parser("relations", help="Aristas que tocan una identidad (sus relaciones).")
+    rel_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    rel_p.add_argument("--id", type=int, required=True, help="Id de la identidad.")
+    rel_p.add_argument("--status", help="Filtra por estado (pista/confirmed/rejected).")
+    rel_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite las aristas como JSON."
+    )
+
+    cp_p = sub.add_parser(
+        "confirm-parent", help="Consolida el padre actual como confirmado (parent_source=agent)."
+    )
+    cp_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    cp_p.add_argument("--id", type=int, required=True, help="Identidad cuyo padre se confirma.")
+    cp_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite el resultado como JSON."
+    )
+
+    sk_p = sub.add_parser("set-kind", help="Reclasifica el tipo de una identidad.")
+    sk_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    sk_p.add_argument("--id", type=int, required=True, help="Id de la identidad.")
+    sk_p.add_argument(
+        "--kind",
+        required=True,
+        choices=["persona", "organizacion", "producto"],
+        help="Nuevo tipo.",
+    )
+    sk_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite la fila como JSON."
+    )
+
+    aid_p = sub.add_parser("add-id", help="Agrega un identificador a una identidad.")
+    aid_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    aid_p.add_argument("--id", type=int, required=True, help="Id de la identidad.")
+    aid_p.add_argument(
+        "--kind",
+        required=True,
+        choices=["email", "phone", "handle", "domain", "url"],
+        help="Tipo de identificador.",
+    )
+    aid_p.add_argument("--value", required=True, help="Valor del identificador.")
+    aid_p.add_argument(
+        "--platform", help="Plataforma (default: el kind; ej. 'instagram' para un handle)."
+    )
+    aid_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite la fila como JSON."
+    )
+
+    aff_p = sub.add_parser("affiliate", help="Teje una persona con una organización.")
+    aff_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    aff_p.add_argument("--person", type=int, required=True, help="Id de la persona.")
+    aff_p.add_argument("--org", type=int, required=True, help="Id de la organización.")
+    aff_p.add_argument("--role", help="Rol/cargo (opcional).")
+    aff_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite el resultado como JSON."
+    )
+
+    uni_p = sub.add_parser("unify", help="Funde dos identidades del mismo kind (sin candidato).")
+    uni_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    uni_p.add_argument("--into", type=int, required=True, help="Identidad que SOBREVIVE.")
+    uni_p.add_argument("--from", dest="from_id", type=int, required=True, help="La que se absorbe.")
+    uni_p.add_argument("--why", default="", help="Justificación (auditoría).")
+    uni_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite el resultado como JSON."
+    )
+
+    rlt_p = sub.add_parser("relate", help="Confirma una relación entre dos identidades.")
+    rlt_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    rlt_p.add_argument("--from", dest="from_id", type=int, required=True, help="Identidad origen.")
+    rlt_p.add_argument("--to", dest="to_id", type=int, required=True, help="Identidad destino.")
+    rlt_p.add_argument(
+        "--type", dest="rel_type", default="relacionado_con", help="Tipo de relación (libre)."
+    )
+    rlt_p.add_argument("--why", default="", help="Evidencia/justificación (auditoría).")
+    rlt_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite el resultado como JSON."
+    )
+
+    crl_p = sub.add_parser(
+        "confirm-relation", help="Promueve una pista existente a relación confirmada."
+    )
+    crl_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    crl_p.add_argument("--edge", type=int, required=True, help="Id de la arista (ver 'relations').")
+    crl_p.add_argument("--why", default="", help="Evidencia/justificación (auditoría).")
+    crl_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite el resultado como JSON."
+    )
+
+    url_p = sub.add_parser("unrelate", help="Descarta una arista (la marca rechazada).")
+    url_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    url_p.add_argument("--edge", type=int, required=True, help="Id de la arista (ver 'relations').")
+    url_p.add_argument("--why", default="", help="Justificación (auditoría).")
+    url_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite el resultado como JSON."
     )
 
     res_p = sub.add_parser(
@@ -317,6 +463,55 @@ def _fmt_brief(r: dict[str, Any]) -> str:
     idf = f" ids=[{', '.join(r['identifiers'])}]" if r.get("identifiers") else ""
     interest = " · interés" if r.get("interest") else ""
     return f"  [{r['id']}] ({r['kind']}) {r['display_name']}{alias}{parent}{idf}{interest}"
+
+
+def _cmd_list(args: argparse.Namespace) -> int:
+    """Enumera el directorio con filtros (el camino para iterar todo el directorio sin un texto de
+    búsqueda). Mismas columnas/formato que `search`."""
+    where = ["i.user_id = :uid"]
+    params: dict[str, Any] = {"uid": args.user, "limit": args.limit}
+    if args.kind:
+        where.append("i.kind = :kind")
+        params["kind"] = args.kind
+    if args.no_parent:
+        where.append("i.parent_identity_id IS NULL")
+    if args.interest:
+        where.append("i.interest")
+    if args.no_desc:
+        where.append("btrim(i.notes) = ''")
+    with connection() as conn:
+        rows = (
+            conn.execute(
+                text(
+                    f"""
+                    SELECT i.id, i.kind, i.display_name, i.aliases, i.interest,
+                           i.parent_identity_id AS parent_id, p.display_name AS parent_name,
+                           (SELECT array_agg(platform || ':' || value_norm)
+                              FROM mod_identidades_identifiers
+                             WHERE identity_id = i.id) AS identifiers
+                    FROM mod_identidades i
+                    LEFT JOIN mod_identidades p ON p.id = i.parent_identity_id
+                    WHERE {" AND ".join(where)}
+                    ORDER BY i.kind, i.display_name LIMIT :limit
+                    """
+                ),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+    items = [dict(r) for r in rows]
+    if args.as_json:
+        _emit_json({"count": len(items), "items": items})
+        return 0
+    if not items:
+        _say(f"\nSin identidades que cumplan el filtro (user {args.user}).\n")
+        return 0
+    _say(f"\n{len(items)} identidad(es) (user {args.user}):")
+    for r in items:
+        _say(_fmt_brief(r))
+    _say("")
+    return 0
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
@@ -702,6 +897,377 @@ def _cmd_annotate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _identity_ref(conn: Connection, user_id: int, identity_id: int) -> tuple[Ref, str] | None:
+    """`(Ref del vértice, display_name)` de una identidad, o None si no existe. El slug del vértice
+    sale del kind (`IDENTITY_SLUG_BY_KIND`)."""
+    row = conn.execute(
+        text("SELECT kind, display_name FROM mod_identidades WHERE id = :id AND user_id = :u"),
+        {"id": identity_id, "u": user_id},
+    ).first()
+    if row is None:
+        return None
+    return Ref(IDENTITY_SLUG_BY_KIND[str(row[0])], identity_id), str(row[1])
+
+
+def _cmd_relations(args: argparse.Namespace) -> int:
+    """Lista las aristas que tocan la identidad (en cualquier dirección), resolviendo el nombre del
+    otro extremo cuando es una identidad. La superficie para ver/auditar las relaciones de algo."""
+    with connection() as conn:
+        ref = _identity_ref(conn, args.user, args.id)
+        if ref is None:
+            _say(f"\nNo existe la identidad id={args.id} para el user {args.user}.\n", err=True)
+            return 1
+        self_ref, self_name = ref
+        edges = edges_touching(conn, args.user, self_ref, status=args.status)
+        # Resolver nombres de los extremos identidad (lookup batch).
+        ident_ids = {e.src.id for e in edges if e.src.slug.startswith("identidades:")} | {
+            e.dst.id for e in edges if e.dst.slug.startswith("identidades:")
+        }
+        names: dict[int, str] = {}
+        if ident_ids:
+            for r in conn.execute(
+                text("SELECT id, display_name FROM mod_identidades WHERE id = ANY(:ids)"),
+                {"ids": sorted(ident_ids)},
+            ).mappings():
+                names[int(r["id"])] = str(r["display_name"])
+
+    def _endpoint(r: Ref) -> str:
+        if r.slug.startswith("identidades:") and r.id in names:
+            return f"#{r.id} {names[r.id]!r}"
+        return f"{r.slug}:{r.id}"
+
+    items = []
+    for e in edges:
+        outgoing = (e.src.slug, e.src.id) == (self_ref.slug, self_ref.id)
+        other = e.dst if outgoing else e.src
+        items.append(
+            {
+                "edge_id": e.id,
+                "direction": "→" if outgoing else "←",
+                "relation_type": e.relation_type,
+                "producer": e.producer,
+                "status": e.status,
+                "other": _endpoint(other),
+            }
+        )
+    if args.as_json:
+        _emit_json({"identity": {"id": args.id, "display_name": self_name}, "edges": items})
+        return 0
+    if not items:
+        _say(f"\n#{args.id} {self_name!r} no tiene relaciones todavía.\n")
+        return 0
+    _say(f"\nRelaciones de #{args.id} {self_name!r}:")
+    for it in items:
+        _say(
+            f"  [{it['edge_id']}] {it['direction']} {it['other']} "
+            f"· {it['relation_type'] or '(sin tipo)'} ({it['producer']}/{it['status']})"
+        )
+    _say("")
+    return 0
+
+
+def _cmd_confirm_parent(args: argparse.Namespace) -> int:
+    """Re-asienta el padre ACTUAL marcándolo `parent_source='agent'`: consolida como confirmada una
+    jerarquía que puso el LLM (sin tener que tipear el id del padre). El organizador LLM ya no la
+    pisa. No-op con mensaje si la identidad no tiene padre."""
+    with connection() as conn:
+        row = conn.execute(
+            text(
+                "SELECT i.display_name, i.parent_identity_id, p.display_name AS parent_name "
+                "FROM mod_identidades i LEFT JOIN mod_identidades p ON p.id = i.parent_identity_id "
+                "WHERE i.id = :id AND i.user_id = :u"
+            ),
+            {"id": args.id, "u": args.user},
+        ).first()
+        if row is None:
+            _say(f"\nNo existe la identidad id={args.id} para el user {args.user}.\n", err=True)
+            return 1
+        if row[1] is None:
+            _say(
+                f"\n#{args.id} {row[0]!r} no tiene padre que confirmar "
+                f"(usá set-parent --parent).\n",
+                err=True,
+            )
+            return 1
+        conn.execute(
+            text(
+                "UPDATE mod_identidades SET metadata = jsonb_set(metadata, '{parent_source}', "
+                "to_jsonb(CAST('agent' AS TEXT))), updated_at = NOW() "
+                "WHERE id = :id AND user_id = :u"
+            ),
+            {"id": args.id, "u": args.user},
+        )
+    result = {
+        "id": args.id,
+        "display_name": row[0],
+        "parent_id": int(row[1]),
+        "parent_name": row[2],
+        "parent_source": "agent",
+    }
+    if args.as_json:
+        _emit_json(result)
+    else:
+        _say(f"\nConfirmada: #{args.id} {row[0]!r} pertenece a #{row[1]} {row[2]!r} (agent).\n")
+    return 0
+
+
+def _cmd_set_kind(args: argparse.Namespace) -> int:
+    """Reclasifica el `kind` de una identidad. Útil para alinear antes de `unify` (que exige mismo
+    kind) o para corregir una mala clasificación. El grafo se re-deriva en el próximo build (el
+    vértice pasa a proyectar con el slug nuevo; las aristas al slug viejo caen por orphan-prune)."""
+    with connection() as conn:
+        row = conn.execute(
+            text(
+                "UPDATE mod_identidades SET kind = :k, updated_at = NOW() "
+                "WHERE id = :id AND user_id = :u RETURNING display_name, kind"
+            ),
+            {"k": args.kind, "id": args.id, "u": args.user},
+        ).first()
+    if row is None:
+        _say(f"\nNo existe la identidad id={args.id} para el user {args.user}.\n", err=True)
+        return 1
+    result = {"id": args.id, "display_name": row[0], "kind": row[1]}
+    if args.as_json:
+        _emit_json(result)
+    else:
+        _say(f"\nReclasificada: #{args.id} {row[0]!r} ahora es {row[1]}.\n")
+    return 0
+
+
+def _cmd_add_id(args: argparse.Namespace) -> int:
+    """Agrega un identificador (email/phone/handle/domain/url) a una identidad. `platform` default =
+    el kind. Normaliza con `norm_identifier`; idempotente (ON CONFLICT). Espejo del endpoint
+    `/{id}/identifiers`."""
+    platform = args.platform or args.kind
+    with connection() as conn:
+        owns = conn.execute(
+            text("SELECT display_name FROM mod_identidades WHERE id = :id AND user_id = :u"),
+            {"id": args.id, "u": args.user},
+        ).scalar()
+        if owns is None:
+            _say(f"\nNo existe la identidad id={args.id} para el user {args.user}.\n", err=True)
+            return 1
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_identidades_identifiers
+                  (user_id, identity_id, platform, kind, value, value_norm, source)
+                VALUES (:u, :id, :pl, :k, :v, :vn, 'manual')
+                ON CONFLICT (identity_id, platform, kind, value_norm) DO NOTHING
+                """
+            ),
+            {
+                "u": args.user,
+                "id": args.id,
+                "pl": platform,
+                "k": args.kind,
+                "v": args.value,
+                "vn": norm_identifier(args.kind, args.value),
+            },
+        )
+    result = {
+        "id": args.id,
+        "display_name": owns,
+        "platform": platform,
+        "kind": args.kind,
+        "value": args.value,
+    }
+    if args.as_json:
+        _emit_json(result)
+    else:
+        _say(
+            f"\nIdentificador agregado a #{args.id} {owns!r}: "
+            f"{platform}/{args.kind}={args.value}.\n"
+        )
+    return 0
+
+
+def _cmd_affiliate(args: argparse.Namespace) -> int:
+    """Teje una persona con una organización (afiliación). Valida los kinds (persona↔organizacion),
+    igual que `/{id}/orgs`. Idempotente; materializa una arista `afiliado` en el próximo build."""
+    with connection() as conn:
+        rows = {
+            int(r["id"]): str(r["kind"])
+            for r in conn.execute(
+                text("SELECT id, kind FROM mod_identidades WHERE id = ANY(:ids) AND user_id = :u"),
+                {"ids": [args.person, args.org], "u": args.user},
+            ).mappings()
+        }
+        if args.person not in rows or args.org not in rows:
+            _say("\nLa persona y/o la organización no existen para este user.\n", err=True)
+            return 1
+        if rows[args.person] != "persona":
+            _say(f"\n#{args.person} no es una persona (es {rows[args.person]}).\n", err=True)
+            return 1
+        if rows[args.org] != "organizacion":
+            _say(f"\n#{args.org} no es una organización (es {rows[args.org]}).\n", err=True)
+            return 1
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_identidades_person_orgs AS po
+                  (user_id, person_id, org_id, role, source)
+                VALUES (:u, :p, :o, :r, 'manual')
+                ON CONFLICT (person_id, org_id)
+                  DO UPDATE SET role = COALESCE(EXCLUDED.role, po.role)
+                """
+            ),
+            {"u": args.user, "p": args.person, "o": args.org, "r": args.role},
+        )
+    result = {"person_id": args.person, "org_id": args.org, "role": args.role}
+    if args.as_json:
+        _emit_json(result)
+    else:
+        role = f" como {args.role!r}" if args.role else ""
+        _say(f"\nAfiliada: #{args.person} ↔ #{args.org}{role}.\n")
+    return 0
+
+
+def _cmd_unify(args: argparse.Namespace) -> int:
+    """Funde dos identidades del MISMO kind sin pasar por la cola de candidatos (cuando el agente/
+    dueño ya SABE que son la misma y el difuso no las encoló). `--into` sobrevive, `--from` se
+    absorbe. Reusa `merge_identities` (re-apunta aristas/menciones/finanzas/jerarquía/cúmulos)."""
+    log = get_logger("memex.modules.identidades.cli")
+    if args.into == args.from_id:
+        _say("\n--into y --from no pueden ser la misma identidad.\n", err=True)
+        return 1
+    with connection() as conn:
+        from_name = conn.execute(
+            text("SELECT display_name FROM mod_identidades WHERE id = :id AND user_id = :u"),
+            {"id": args.from_id, "u": args.user},
+        ).scalar()
+        if not merge_identities(conn, args.user, args.into, args.from_id):
+            _say(
+                f"\nNo se pudo fundir #{args.from_id} en #{args.into} "
+                f"(no existen, distinto kind, o mismo id).\n",
+                err=True,
+            )
+            return 1
+        surv_name = conn.execute(
+            text("SELECT display_name FROM mod_identidades WHERE id = :id"), {"id": args.into}
+        ).scalar()
+    log.info("identidades.unify.agent", into=args.into, absorbed=args.from_id, why=args.why.strip())
+    result = {"survivor": {"id": args.into, "display_name": surv_name}, "absorbed_id": args.from_id}
+    if args.as_json:
+        _emit_json(result)
+    else:
+        _say(
+            f"\nFundidas: #{args.from_id} {from_name!r} se absorbió en "
+            f"#{args.into} {surv_name!r}.\n"
+        )
+    return 0
+
+
+def _cmd_relate(args: argparse.Namespace) -> int:
+    """Crea una relación CONFIRMADA entre dos identidades (producer='humano'). Una vez confirmada,
+    no reaparece como pista (la supresión de `confirmed_pairs` la poda) ni la re-evalúa el partidor
+    de cúmulos. Idempotente (`propose_edge` no duplica). Ej.: TylerTemp→Unity 'mantiene_asset'."""
+    log = get_logger("memex.modules.identidades.cli")
+    if args.from_id == args.to_id:
+        _say("\n--from y --to no pueden ser la misma identidad.\n", err=True)
+        return 1
+    with connection() as conn:
+        a = _identity_ref(conn, args.user, args.from_id)
+        b = _identity_ref(conn, args.user, args.to_id)
+        if a is None or b is None:
+            _say("\nLa identidad origen y/o destino no existen para este user.\n", err=True)
+            return 1
+        (src_ref, a_name), (dst_ref, b_name) = a, b
+        edge_id = propose_edge(
+            conn,
+            args.user,
+            src_ref,
+            dst_ref,
+            producer=PRODUCER_HUMANO,
+            relation_type=args.rel_type,
+            status=STATUS_CONFIRMED,
+            evidence=args.why.strip(),
+        )
+    log.info(
+        "identidades.relate.agent",
+        edge_id=edge_id,
+        src=args.from_id,
+        dst=args.to_id,
+        rel_type=args.rel_type,
+    )
+    result = {
+        "edge_id": edge_id,
+        "from": {"id": args.from_id, "display_name": a_name},
+        "to": {"id": args.to_id, "display_name": b_name},
+        "relation_type": args.rel_type,
+        "status": "confirmed",
+    }
+    if args.as_json:
+        _emit_json(result)
+    else:
+        _say(
+            f"\nRelación confirmada: #{args.from_id} {a_name!r} → #{args.to_id} {b_name!r} "
+            f"({args.rel_type}).\n"
+        )
+    return 0
+
+
+def _cmd_confirm_relation(args: argparse.Namespace) -> int:
+    """Promueve una PISTA existente (p.ej. co-ocurrencia) a `confirmed`. Reusa `resolve_edge`
+    (monótono: solo toca pistas). La arista deja de ser candidata a re-análisis."""
+    with connection() as conn:
+        edge = conn.execute(
+            text(
+                "SELECT status, src_slug, src_id, dst_slug, dst_id, relation_type "
+                "FROM relation_edges WHERE id = :e AND user_id = :u"
+            ),
+            {"e": args.edge, "u": args.user},
+        ).first()
+        if edge is None:
+            _say(f"\nNo existe la arista id={args.edge} para el user {args.user}.\n", err=True)
+            return 1
+        if str(edge[0]) != "pista":
+            _say(
+                f"\nLa arista {args.edge} ya está {edge[0]} (solo se confirman pistas).\n", err=True
+            )
+            return 1
+        changed = resolve_edge(
+            conn, args.edge, status=STATUS_CONFIRMED, evidence=(args.why.strip() or None)
+        )
+    result = {"edge_id": args.edge, "status": "confirmed", "changed": changed}
+    if args.as_json:
+        _emit_json(result)
+    else:
+        _say(f"\nPista {args.edge} confirmada (relación {edge[5] or 'sin tipo'}).\n")
+    return 0
+
+
+def _cmd_unrelate(args: argparse.Namespace) -> int:
+    """Descarta una arista: la marca `rejected` (terminal). Funciona sobre pista O confirmed (UPDATE
+    directo acotado al user). Idempotente: una ya rechazada no cambia."""
+    with connection() as conn:
+        n = conn.execute(
+            text(
+                """
+                UPDATE relation_edges
+                SET status = :rej, decided_at = NOW(),
+                    evidence = COALESCE(NULLIF(:why, ''), evidence)
+                WHERE id = :e AND user_id = :u AND status <> :rej
+                """
+            ),
+            {"rej": STATUS_REJECTED, "why": args.why.strip(), "e": args.edge, "u": args.user},
+        ).rowcount
+        exists = conn.execute(
+            text("SELECT 1 FROM relation_edges WHERE id = :e AND user_id = :u"),
+            {"e": args.edge, "u": args.user},
+        ).first()
+    if exists is None:
+        _say(f"\nNo existe la arista id={args.edge} para el user {args.user}.\n", err=True)
+        return 1
+    result = {"edge_id": args.edge, "status": "rejected", "changed": n > 0}
+    if args.as_json:
+        _emit_json(result)
+    else:
+        msg = "rechazada" if n > 0 else "ya estaba rechazada"
+        _say(f"\nArista {args.edge} {msg}.\n")
+    return 0
+
+
 def _cmd_resolve(args: argparse.Namespace) -> int:
     """Decide un candidato de la zona gris SIN LLM (la decide el agente/dueño con su contexto).
     --distinct → `rejected` (decided_by='agent'); --same → `merge_identities` (la superviviente es
@@ -1068,16 +1634,36 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "add":
             return _cmd_add(args)
+        if args.cmd == "list":
+            return _cmd_list(args)
         if args.cmd == "search":
             return _cmd_search(args)
         if args.cmd == "show":
             return _cmd_show(args)
+        if args.cmd == "relations":
+            return _cmd_relations(args)
         if args.cmd == "tree":
             return _cmd_tree(args)
         if args.cmd == "set-parent":
             return _cmd_set_parent(args)
+        if args.cmd == "confirm-parent":
+            return _cmd_confirm_parent(args)
+        if args.cmd == "set-kind":
+            return _cmd_set_kind(args)
+        if args.cmd == "add-id":
+            return _cmd_add_id(args)
+        if args.cmd == "affiliate":
+            return _cmd_affiliate(args)
+        if args.cmd == "unify":
+            return _cmd_unify(args)
         if args.cmd == "annotate":
             return _cmd_annotate(args)
+        if args.cmd == "relate":
+            return _cmd_relate(args)
+        if args.cmd == "confirm-relation":
+            return _cmd_confirm_relation(args)
+        if args.cmd == "unrelate":
+            return _cmd_unrelate(args)
         if args.cmd == "resolve":
             return _cmd_resolve(args)
         if args.cmd == "sync":
