@@ -73,7 +73,11 @@ class LogPurgeStats:
 
 
 def run_log_purge(user_id: int) -> LogPurgeStats:
-    """Borra los `log_events` más viejos que la retención y reporta la salud del sink.
+    """Poda el RUIDO viejo de `log_events` y reporta la salud del sink.
+
+    Política: los logs NO se borran por default (`log_persist_retention_days=0` → no-op; son
+    archivo, no caché). Con retención configurada (>0) se borra SOLO debug/info más viejo que
+    N días — warnings/errores/critical se quedan PARA SIEMPRE (son el rastro que vale).
 
     Retención global (no por user): el sink persiste líneas de TODOS (incl. pre-auth/infra), así
     que el DELETE no filtra por `user_id` — el parámetro existe solo para cumplir la firma del Job.
@@ -82,13 +86,20 @@ def run_log_purge(user_id: int) -> LogPurgeStats:
     from memex.core.log_sink import sink_health
 
     retention_days = settings.log_persist_retention_days
+    health = sink_health()
+    if retention_days <= 0:  # retención apagada: nada que borrar, solo reportar salud
+        return LogPurgeStats(
+            deleted=0, sink_dropped=health["dropped"], sink_db_errors=health["db_errors"]
+        )
     with connection() as conn:
         res = conn.execute(
-            text("DELETE FROM log_events WHERE ts < NOW() - make_interval(days => :d)"),
+            text(
+                "DELETE FROM log_events WHERE level IN ('debug', 'info') "
+                "AND ts < NOW() - make_interval(days => :d)"
+            ),
             {"d": retention_days},
         )
     deleted = res.rowcount or 0
-    health = sink_health()
     _log.info(
         "log_purge.done",
         deleted=deleted,

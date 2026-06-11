@@ -23,7 +23,10 @@ class Settings(BaseSettings):
     log_persist_batch_size: int = 100
     log_persist_flush_ms: int = 1000
     log_persist_queue_max: int = 10000
-    log_persist_retention_days: int = 30
+    # Retención de log_events: 0 = NUNCA borrar (default — los logs son archivo, no caché).
+    # Con N > 0, el job `log_purge` poda SOLO el ruido (level debug/info) más viejo que N días;
+    # warnings/errores/critical se quedan para siempre.
+    log_persist_retention_days: int = 0
 
     # --- Grafo de relaciones: tope de fan-out de la co-ocurrencia (ver relations/deterministic) ---
     # Un correo con MÁS de `cooccurrence_cap` vértices se salta en el paso DETERMINISTA (ahí la
