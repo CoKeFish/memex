@@ -138,7 +138,9 @@ services:
       dockerfile: Dockerfile
     container_name: memex-scheduler
     profiles: ["scheduler"]
-    command: ["memex-scheduler", "daemon", "start"]
+    # `python -m`: la imagen instala deps con --no-install-project (sin console scripts del
+    # proyecto); el código entra por PYTHONPATH=/app/src.
+    command: ["python", "-m", "memex.scheduler.cli", "daemon", "start"]
     environment: *api_env
     volumes:
       - memex_telegram_sessions:/var/lib/memex/telegram
@@ -162,7 +164,8 @@ services:
       dockerfile: Dockerfile
     container_name: memex-ingest-scheduler
     profiles: ["ingest-scheduler"]
-    command: ["memex-ingest-scheduler", "daemon", "start"]
+    # mismo caso que `scheduler`: sin console scripts en la imagen → python -m.
+    command: ["python", "-m", "memex.ingest_scheduler.cli", "daemon", "start"]
     environment: *api_env
     volumes:
       - memex_telegram_sessions:/var/lib/memex/telegram
