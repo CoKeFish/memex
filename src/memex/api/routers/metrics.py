@@ -38,6 +38,9 @@ _BUCKET_TZ = "America/Bogota"
 
 #: Deriva el módulo/etapa desde `purpose`. El literal `extract_grouped` va ANTES del wildcard
 #: `extract_%`; un purpose futuro desconocido cae al ELSE y se ve nombrado (no se pierde el gasto).
+#: Las fases internas de un dominio (calendar_dedup/merge, finance_dedup, identidades_*) se pliegan
+#: a su módulo: el corte responde "¿cuánto cuesta el dominio?"; para aislar una fase está la
+#: auditoría (`q=` busca en purpose).
 _MODULE_CASE = """
     CASE
         WHEN purpose = 'module_route' THEN 'routing'
@@ -45,6 +48,8 @@ _MODULE_CASE = """
         WHEN purpose = 'extract_grouped' THEN 'grouped'
         WHEN purpose LIKE 'extract_%' THEN substring(purpose FROM 'extract_(.*)')
         WHEN purpose LIKE 'calendar%' THEN 'calendar'
+        WHEN purpose LIKE 'finance%' THEN 'finance'
+        WHEN purpose LIKE 'identidades%' THEN 'identidades'
         WHEN purpose = 'ocr' THEN 'ocr'
         ELSE purpose
     END

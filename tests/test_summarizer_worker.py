@@ -56,7 +56,13 @@ class FakeLLM:
         return LLMResult(
             content=self._content,
             model="fake",
-            usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            usage=LLMUsage(
+                prompt_tokens=10,
+                completion_tokens=1,
+                total_tokens=11,
+                cache_hit_tokens=4,
+                cache_miss_tokens=6,
+            ),
             cost_usd=Decimal("0"),
             latency_ms=1,
             finish_reason=self._finish,
@@ -136,6 +142,12 @@ def test_batch_window_one_summary(seed_source: dict[str, Any]) -> None:
     assert stats.messages == 3
     assert _count("summaries") == 1
     assert _count("summary_inbox_links") == 3
+    # El registro de costo del path OK conserva el desglose de caché del usage real.
+    with connection() as c:
+        hits = c.execute(
+            text("SELECT cache_hit_tokens FROM llm_calls WHERE status = 'ok'")
+        ).scalar()
+    assert hits == 4
 
 
 def test_individual_one_summary_each(seed_source: dict[str, Any]) -> None:

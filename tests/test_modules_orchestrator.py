@@ -115,7 +115,13 @@ class FakeExtractLLM:
         return LLMResult(
             content=content,
             model="fake",
-            usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            usage=LLMUsage(
+                prompt_tokens=10,
+                completion_tokens=1,
+                total_tokens=11,
+                cache_hit_tokens=4,
+                cache_miss_tokens=6,
+            ),
             cost_usd=Decimal("0"),
             latency_ms=1,
             finish_reason="length" if self._truncated else "stop",
@@ -489,6 +495,15 @@ def test_per_module_opt_in_splits_calls(seed_source: dict[str, Any]) -> None:
     assert _count_purpose("extract_finance") == 1
     assert _count_purpose("extract_calendar") == 1
     assert _count_purpose("extract_grouped") == 0
+    # El registro de costo del path OK per-módulo conserva el desglose de caché del usage real.
+    with connection() as c:
+        hits = c.execute(
+            text(
+                "SELECT DISTINCT cache_hit_tokens FROM llm_calls "
+                "WHERE purpose LIKE 'extract_%' AND status = 'ok'"
+            )
+        ).scalar_one()
+    assert hits == 4
 
 
 def test_all_policy_single_group(seed_source: dict[str, Any]) -> None:
