@@ -81,3 +81,56 @@ def test_trip_requires_origin_exit2(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GMAPS_API_KEY", "GKEY")
     rc = main(["trip", "--to=-34.8,-58.5"])
     assert rc == 2
+
+
+# ----- places (catálogo; solo DB, sin proveedor ni key) ---------------------------- #
+
+
+def _seed_catalog() -> int:
+    from sqlalchemy import text
+
+    from memex.db import connection
+
+    with connection() as c:
+        pid = int(
+            c.execute(
+                text(
+                    "INSERT INTO geo_places (user_id, name, formatted_address, lat, lng, "
+                    "provider, provider_place_id) "
+                    "VALUES (1, 'Aula 301', 'Cra 7 #40-62', 4.6286, -74.065, 'google', 'P1') "
+                    "RETURNING id"
+                )
+            ).scalar_one()
+        )
+        for i in range(2):
+            c.execute(
+                text(
+                    "INSERT INTO mod_calendar_consolidated (user_id, title, starts_on, place_id) "
+                    "VALUES (1, :t, DATE '2026-07-01', :p)"
+                ),
+                {"t": f"Clase {i}", "p": pid},
+            )
+    return pid
+
+
+def test_places_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    import json
+
+    monkeypatch.delenv("GMAPS_API_KEY", raising=False)  # places NO necesita key (solo DB)
+    pid = _seed_catalog()
+    rc = main(["places", "--json"])
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["count"] == 1
+    assert out["items"][0]["id"] == pid
+    assert out["items"][0]["name"] == "Aula 301"
+    assert out["items"][0]["event_count"] == 2
+
+
+def test_places_empty_ok(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("GMAPS_API_KEY", raising=False)
+    rc = main(["places"])
+    assert rc == 0
+    assert "Sin lugares" in capsys.readouterr().out

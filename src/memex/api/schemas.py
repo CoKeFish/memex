@@ -767,6 +767,8 @@ class CalendarConsolidatedRow(BaseModel):
 
     `protected`/`priority_rank` salen del miembro GANADOR (`winner_event_id`, donde vive la
     prioridad). `origins` son los orígenes distintos de los miembros (para los puntitos de color).
+    `place_name`/`place_address` = lugar canónico del catálogo geo (FK `place_id`); None si el
+    `location` no se resolvió todavía o es virtual (link de Meet, etc.).
     """
 
     id: int
@@ -777,6 +779,8 @@ class CalendarConsolidatedRow(BaseModel):
     end_time: time | None
     location: str
     description: str
+    place_name: str | None
+    place_address: str | None
     member_count: int
     origins: list[str]
     protected: bool

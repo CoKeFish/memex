@@ -485,6 +485,36 @@ def test_sync_now_pulls_and_consolidates(client: Any, monkeypatch: Any) -> None:
     assert "orphans" in data  # la consolidación corrió después del pull
 
 
+def test_list_events_exposes_resolved_place(client: Any) -> None:
+    e = _seed_event(1)
+    cid = _seed_consolidated(1, winner_event_id=e, title="Con lugar")
+    _link(1, cid, e)
+    with connection() as c:
+        pid = int(
+            c.execute(
+                text(
+                    "INSERT INTO geo_places (user_id, name, formatted_address, lat, lng) "
+                    "VALUES (1, 'Aula 301', 'Cra 7 #40-62', 4.6286, -74.065) RETURNING id"
+                )
+            ).scalar_one()
+        )
+        c.execute(
+            text("UPDATE mod_calendar_consolidated SET place_id = :p WHERE id = :i"),
+            {"p": pid, "i": cid},
+        )
+
+    item = client.get("/calendar/events").json()["items"][0]
+    assert item["place_name"] == "Aula 301"
+    assert item["place_address"] == "Cra 7 #40-62"
+
+    # sin FK → nullables
+    cid2 = _seed_consolidated(1, winner_event_id=None, title="Sin lugar")
+    _link(1, cid2, _seed_event(1))
+    items = client.get("/calendar/events").json()["items"]
+    sin = next(i for i in items if i["title"] == "Sin lugar")
+    assert sin["place_name"] is None and sin["place_address"] is None
+
+
 def test_calendar_settings_default_and_patch(client: Any) -> None:
     assert client.get("/calendar/settings").json() == {"llm_on_past_events": False}
     resp = client.patch("/calendar/settings", json={"llm_on_past_events": True})

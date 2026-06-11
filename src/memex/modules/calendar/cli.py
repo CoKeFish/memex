@@ -502,6 +502,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
     _say(f'\n[{detail["id"]}] "{detail["title"]}" — {_fmt_when(detail)}')
     if detail["location"]:
         _say(f"  lugar:       {detail['location']}")
+    if detail["place"]:
+        place = detail["place"]
+        _say(f"  lugar resuelto: {place['name']} — {place['formatted_address']}")
     if detail["description"]:
         _say(f"  descripción: {detail['description']}")
     if detail["series_id"]:

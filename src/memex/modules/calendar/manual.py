@@ -30,6 +30,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.db import connection
+from memex.geo import places as geo_places
 from memex.logging import get_logger
 from memex.modules.calendar.consolidate import run_consolidation
 from memex.modules.calendar.dedup import DedupRow
@@ -163,7 +164,7 @@ def _live_consolidated(conn: Connection, user_id: int, cons_id: int) -> dict[str
             text(
                 """
                 SELECT id, title, starts_on, ends_on, start_time, end_time, location,
-                       description, winner_event_id, deleted
+                       description, winner_event_id, deleted, place_id
                 FROM mod_calendar_consolidated WHERE id = :cid AND user_id = :uid
                 """
             ),
@@ -397,6 +398,11 @@ def show_event(user_id: int, cons_id: int) -> dict[str, Any]:
             .all()
         )
         serie = _series_of(conn, cons_id)
+        place = (
+            geo_places.get_place(conn, user_id, int(cons["place_id"]))
+            if cons["place_id"] is not None
+            else None
+        )
     return {
         "id": cons_id,
         "title": cons["title"],
@@ -407,6 +413,18 @@ def show_event(user_id: int, cons_id: int) -> dict[str, Any]:
         "location": cons["location"],
         "description": cons["description"],
         "series_id": serie,
+        # Lugar canónico del catálogo geo (FK place_id); None si no se resolvió (o virtual).
+        "place": (
+            {
+                "id": place.id,
+                "name": place.name,
+                "formatted_address": place.formatted_address,
+                "lat": place.lat,
+                "lng": place.lng,
+            }
+            if place is not None
+            else None
+        ),
         "members": [
             {
                 "event_id": int(m["id"]),

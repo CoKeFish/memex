@@ -274,6 +274,37 @@ def test_show_missing_event_fails(capsys: pytest.CaptureFixture[str]) -> None:
     assert "No existe" in capsys.readouterr().err
 
 
+def test_show_includes_resolved_place(capsys: pytest.CaptureFixture[str]) -> None:
+    cal_main(
+        ["add", "--title", "Cita", "--date", "2026-06-20", "--location", "Consultorio", "--json"]
+    )
+    cons_id = _last_json(capsys)["consolidated_ids"][0]
+
+    cal_main(["show", str(cons_id), "--json"])
+    assert _last_json(capsys)["place"] is None  # sin geocoding todavía
+
+    with connection() as c:  # simula la resolución del catálogo (el geocoding real es otro test)
+        pid = int(
+            c.execute(
+                text(
+                    "INSERT INTO geo_places (user_id, name, formatted_address, lat, lng) "
+                    "VALUES (1, 'Consultorio', 'Cra 7 #45-23, Bogotá', 4.6286, -74.065) "
+                    "RETURNING id"
+                )
+            ).scalar_one()
+        )
+        c.execute(
+            text("UPDATE mod_calendar_consolidated SET place_id = :p WHERE id = :i"),
+            {"p": pid, "i": cons_id},
+        )
+
+    cal_main(["show", str(cons_id), "--json"])
+    place = _last_json(capsys)["place"]
+    assert place["id"] == pid
+    assert place["name"] == "Consultorio"
+    assert place["formatted_address"] == "Cra 7 #45-23, Bogotá"
+
+
 # ----- update ------------------------------------------------------------------------- #
 
 

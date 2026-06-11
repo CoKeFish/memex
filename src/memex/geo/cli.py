@@ -5,9 +5,11 @@ Subcomandos:
   trip     — tiempo y distancia estimados de un viaje A→B, partiendo de un punto X
              explícito (`--from-point`, ejercita el seam `LocationSource`) o de una
              dirección de origen (`--from`), con `--depart` opcional para una hora futura.
+  places   — el CATÁLOGO de lugares del usuario (`geo_places`) con cuántos eventos de
+             calendario referencian cada uno. Solo DB: no necesita key de Maps.
 
-Server-side: habla con el proveedor vía httpx. La key sale de una env var (Doppler),
-seleccionada por proveedor; correr con `doppler run -- memex-geo ...`.
+Server-side: `geocode`/`trip`/`place` hablan con el proveedor vía httpx (key por env var,
+Doppler → correr con `doppler run -- memex-geo ...`); `places` habla con la DB de memex.
 
 Exit code 0 si OK; 1 si error del proveedor/config; 2 si argumentos inválidos.
 """
@@ -23,6 +25,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 
+from memex.db import connection
 from memex.geo import (
     GeocodeResult,
     GeoConfigError,
@@ -41,6 +44,7 @@ from memex.geo import (
     resolve_place,
     reverse_geocode,
 )
+from memex.geo.places import list_places
 from memex.logging import get_logger, setup_logging
 
 
@@ -145,6 +149,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=50.0,
         help="Radio en metros para buscar el POI más cercano (default 50).",
     )
+
+    places_p = sub.add_parser(
+        "places",
+        help="Catálogo de lugares del usuario (geo_places) + cuántos eventos los referencian.",
+    )
+    places_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    places_p.add_argument("--limit", type=int, default=50, help="Máximo de lugares (default 50).")
+    places_p.add_argument("--json", action="store_true", help="Salida JSON (última línea).")
     return parser
 
 
@@ -302,6 +314,27 @@ async def _cmd_place(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_places(args: argparse.Namespace) -> int:
+    """Inventario del catálogo (solo DB, sin proveedor)."""
+    with connection() as conn:
+        items = list_places(conn, args.user, limit=args.limit)
+    if args.json:
+        _say(json.dumps({"items": items, "count": len(items)}, default=str, ensure_ascii=False))
+        return 0
+    if not items:
+        _say(f"\nSin lugares en el catálogo del user {args.user} todavía.\n")
+        return 0
+    _say(f"\nLugares del user {args.user} ({len(items)}):")
+    for p in items:
+        addr = f" — {p['formatted_address']}" if p["formatted_address"] else ""
+        _say(
+            f"  [{p['id']}] {p['name']}{addr} ({p['lat']:.5f}, {p['lng']:.5f}) "
+            f"· {p['event_count']} eventos · {p['provider']}"
+        )
+    _say("")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -315,6 +348,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_cmd_trip(args))
         if args.cmd == "place":
             return asyncio.run(_cmd_place(args))
+        if args.cmd == "places":
+            return _cmd_places(args)
     except GeoNotFoundError as e:
         _say(f"Sin resultados para {e.query!r}.", err=True)
         return 1

@@ -62,18 +62,22 @@ async def list_events(
     (igual que `/finance/transactions`) y filtra por mes en el cliente. Excluye los tombstone
     (`deleted`).
     """
-    where: list[str] = ["user_id = :uid", "NOT deleted"]
+    where: list[str] = ["c.user_id = :uid", "NOT c.deleted"]
     params: dict[str, Any] = {"uid": user_id, "limit": limit}
     if cursor is not None:
-        where.append("id > :cur")
+        where.append("c.id > :cur")
         params["cur"] = cursor
 
+    # `p` = lugar canónico del catálogo geo (FK c.place_id, BIGINT — no confundir con el
+    # geo_place_id TEXT del proveedor); NULL si el lugar no se resolvió o es virtual.
     cons_sql = f"""
-        SELECT id, title, starts_on, ends_on, start_time, end_time, location, description,
-               winner_event_id
-        FROM mod_calendar_consolidated
+        SELECT c.id, c.title, c.starts_on, c.ends_on, c.start_time, c.end_time, c.location,
+               c.description, c.winner_event_id,
+               p.name AS place_name, p.formatted_address AS place_address
+        FROM mod_calendar_consolidated c
+        LEFT JOIN geo_places p ON p.id = c.place_id
         WHERE {" AND ".join(where)}
-        ORDER BY id
+        ORDER BY c.id
         LIMIT :limit
     """
     with connection() as conn:
@@ -126,6 +130,8 @@ async def list_events(
                 "end_time": r["end_time"],
                 "location": r["location"],
                 "description": r["description"],
+                "place_name": r["place_name"],
+                "place_address": r["place_address"],
                 "member_count": len(members),
                 "origins": origins,
                 "protected": protected,
