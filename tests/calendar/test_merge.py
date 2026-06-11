@@ -8,7 +8,7 @@ al texto del ganador si la respuesta no parsea.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import ClassVar
 
@@ -52,6 +52,12 @@ class FakeLLM:
         )
 
 
+#: Fecha FUTURA relativa: con `llm_on_past_events` apagado por default, un seed fijo pasado
+#: dejaría los consolidados fuera del merge (gate de pasados) y estos tests no ejercitarían el
+#: LLM. El gate en sí se cubre en test_settings.py.
+_FUTURE = date.today() + timedelta(days=20)
+
+
 def _seed_event(title: str, *, location: str = "", description: str = "") -> int:
     with connection() as c:
         return int(
@@ -61,12 +67,12 @@ def _seed_event(title: str, *, location: str = "", description: str = "") -> int
                     "(user_id, source_inbox_ids, title, starts_on, location, description) "
                     "VALUES (1, ARRAY[]::bigint[], :t, :d, :loc, :desc) RETURNING id"
                 ),
-                {"t": title, "d": date(2026, 6, 3), "loc": location, "desc": description},
+                {"t": title, "d": _FUTURE, "loc": location, "desc": description},
             ).scalar_one()
         )
 
 
-def _seed_cons(winner_id: int, title: str) -> int:
+def _seed_cons(winner_id: int, title: str, *, starts_on: date | None = None) -> int:
     with connection() as c:
         return int(
             c.execute(
@@ -75,7 +81,7 @@ def _seed_cons(winner_id: int, title: str) -> int:
                     "(user_id, title, starts_on, winner_event_id) "
                     "VALUES (1, :t, :d, :w) RETURNING id"
                 ),
-                {"t": title, "d": date(2026, 6, 3), "w": winner_id},
+                {"t": title, "d": starts_on or _FUTURE, "w": winner_id},
             ).scalar_one()
         )
 

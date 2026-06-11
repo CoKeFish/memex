@@ -51,6 +51,7 @@ from memex.modules.calendar.manual import (
 from memex.modules.calendar.merge_llm import run_merge
 from memex.modules.calendar.providers import known_providers, oauth
 from memex.modules.calendar.providers.base import CalendarProviderError
+from memex.modules.calendar.settings import llm_on_past_events, set_llm_on_past_events
 from memex.modules.calendar.sync import run_pull, run_push
 
 #: Env var (nombre) con el path al client_secret.json de Google (OAuth Desktop App).
@@ -264,6 +265,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ss_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     ss_p.add_argument("--json", action="store_true", dest="as_json", help="Salida JSON.")
+
+    slp_p = sub.add_parser(
+        "set-llm-past",
+        help="¿Gastar LLM (dedup F2 + merge) en eventos ya vencidos? Default: off (no gasta).",
+    )
+    slp_p.add_argument("mode", choices=("on", "off"), help="on = procesa pasados; off = no gasta.")
+    slp_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    slp_p.add_argument("--json", action="store_true", dest="as_json", help="Salida JSON.")
 
     return parser
 
@@ -585,13 +594,36 @@ def _age_str(hours: float | None) -> str:
     return f"hace {hours / 24:.0f} días"
 
 
+def _cmd_set_llm_past(args: argparse.Namespace) -> int:
+    value = args.mode == "on"
+    with connection() as conn:
+        set_llm_on_past_events(conn, args.user, value)
+    if value:
+        _say("LLM en eventos pasados: PRENDIDO — dedup F2 y merge también juzgan lo vencido.")
+        _say("Los pares/grupos que quedaron salteados se retoman en la próxima corrida.")
+    else:
+        _say("LLM en eventos pasados: APAGADO — dedup F2 y merge no gastan en lo vencido.")
+    if args.as_json:
+        _emit_json({"llm_on_past_events": value})
+    return 0
+
+
 def _cmd_sync_status(args: argparse.Namespace) -> int:
     with connection() as conn:
         data = sync_health(conn, args.user)
+        llm_past = llm_on_past_events(conn, args.user)
     if args.as_json:
         _emit_json(data)
         return 0
     _say(f"\nSincronización de calendario (user {args.user}):")
+    _say(
+        "  LLM en eventos pasados: "
+        + (
+            "PRENDIDO (también juzga lo vencido)."
+            if llm_past
+            else "APAGADO (no gasta en lo vencido)."
+        )
+    )
     ages = [
         a["last_pull_age_hours"]
         for a in data["accounts"]
@@ -761,6 +793,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_rm(args)
         if args.cmd == "sync-status":
             return _cmd_sync_status(args)
+        if args.cmd == "set-llm-past":
+            return _cmd_set_llm_past(args)
         log.error("calendar.cli.unknown_command", cmd=args.cmd)
         return 1
     except ManualEventError as e:

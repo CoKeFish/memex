@@ -847,6 +847,12 @@ export interface CalendarSyncHealth {
   accounts: CalendarAccountHealth[]
 }
 
+/** Perillas del módulo calendar (GET/PATCH /calendar/settings). */
+export interface CalendarSettings {
+  /** ¿Dedup F2 y merge (los pasos que GASTAN LLM) procesan eventos ya vencidos? Default false. */
+  llmOnPastEvents: boolean
+}
+
 /** Resultado de POST /calendar/accounts/{id}/sync (pull + consolidación, sin LLM ni push). */
 export interface CalendarSyncNowResult {
   pulled: number

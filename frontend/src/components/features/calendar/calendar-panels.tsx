@@ -4,6 +4,7 @@ import { ArrowUpRight, Bot, CalendarClock, Hand, Loader2, Lock, MapPin, RefreshC
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { StatusBadge } from "@/components/common/led"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
@@ -14,10 +15,12 @@ import { recentWindow, todayKey, upcoming } from "@/lib/calendar-window"
 import { ApiError } from "@/lib/api"
 import { originChart, originLabel, type Tone } from "@/lib/status"
 import {
+  fetchCalendarSettings,
   fetchCalendarSyncHealth,
   fetchCalendarConflicts,
   fetchCalendarSyncRuns,
   fetchDedupDecisions,
+  patchCalendarSettings,
   syncCalendarAccountNow,
 } from "@/data"
 import { useAsync } from "@/lib/use-async"
@@ -25,6 +28,7 @@ import type {
   CalendarAccountHealth,
   CalendarConflict,
   CalendarOrigin,
+  CalendarSettings,
   CalendarSyncHealth,
   CalendarSyncRun,
   ConsolidatedEvent,
@@ -448,10 +452,60 @@ function SyncNowButton({ accountId, onDone }: { accountId: number; onDone: () =>
   )
 }
 
+/** Toggle «gastar LLM en eventos pasados» (PATCH /calendar/settings). */
+function LlmPastToggle({
+  settings,
+  onChanged,
+}: {
+  settings: CalendarSettings
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  async function toggle(next: boolean) {
+    setBusy(true)
+    try {
+      await patchCalendarSettings(next)
+      toast.success(
+        next ? "LLM en eventos pasados: prendido" : "LLM en eventos pasados: apagado",
+        {
+          description: next
+            ? "El dedup y el merge con LLM también juzgarán lo vencido (retoman lo salteado)."
+            : "El dedup y el merge con LLM ya no gastan en eventos vencidos.",
+        },
+      )
+      onChanged()
+    } catch (e) {
+      toast.error("No se pudo guardar", {
+        description: e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e),
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-background/40 px-3 py-2">
+      <div className="min-w-0">
+        <div className="text-sm">Gastar LLM en eventos pasados</div>
+        <p className="text-xs text-muted-foreground">
+          Apagado: el dedup y el enriquecido con LLM ignoran eventos ya vencidos (no gastan
+          dinero). Lo salteado queda pendiente y se retoma si lo prendés.
+        </p>
+      </div>
+      <Switch
+        checked={settings.llmOnPastEvents}
+        disabled={busy}
+        onCheckedChange={toggle}
+        aria-label="Gastar LLM en eventos pasados"
+      />
+    </div>
+  )
+}
+
 export function SyncPanel({ onSynced }: { onSynced?: () => void }) {
   const [refresh, setRefresh] = useState(0)
   const healthState = useAsync<CalendarSyncHealth>(() => fetchCalendarSyncHealth(), [refresh])
   const runsState = useAsync<CalendarSyncRun[]>(() => fetchCalendarSyncRuns(), [refresh])
+  const settingsState = useAsync<CalendarSettings>(() => fetchCalendarSettings(), [refresh])
   const health = healthState.data
   const runs = runsState.data ?? []
   const loading = (healthState.loading && !health) || (runsState.loading && !runsState.data)
@@ -491,6 +545,12 @@ export function SyncPanel({ onSynced }: { onSynced?: () => void }) {
                 </div>
               )
             })()}
+            {settingsState.data && (
+              <LlmPastToggle
+                settings={settingsState.data}
+                onChanged={() => setRefresh((r) => r + 1)}
+              />
+            )}
             {health.accounts.length === 0 ? (
               <EmptyState title="Sin cuentas de proveedor" hint="Conectá una cuenta con memex-calendar-sync add-account." />
             ) : (

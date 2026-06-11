@@ -485,6 +485,14 @@ def test_sync_now_pulls_and_consolidates(client: Any, monkeypatch: Any) -> None:
     assert "orphans" in data  # la consolidación corrió después del pull
 
 
+def test_calendar_settings_default_and_patch(client: Any) -> None:
+    assert client.get("/calendar/settings").json() == {"llm_on_past_events": False}
+    resp = client.patch("/calendar/settings", json={"llm_on_past_events": True})
+    assert resp.status_code == 200
+    assert resp.json() == {"llm_on_past_events": True}
+    assert client.get("/calendar/settings").json() == {"llm_on_past_events": True}
+
+
 def test_sync_now_provider_error_is_502(client: Any, monkeypatch: Any) -> None:
     from memex.modules.calendar.providers.base import CalendarProviderError
 

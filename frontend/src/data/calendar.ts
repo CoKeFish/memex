@@ -2,7 +2,7 @@
 // funciones async + transforms snake_case → camelCase. La vista `/calendario` consume la capa
 // consolidada + dedup + conflictos + sync, todo de SOLO LECTURA (GET /calendar/*).
 
-import { apiGet, apiPost } from "@/lib/api"
+import { apiGet, apiPatch, apiPost } from "@/lib/api"
 import type {
   CalendarAccountHealth,
   CalendarConflict,
@@ -10,6 +10,7 @@ import type {
   CalendarOrigin,
   CalendarOutcome,
   CalendarRawMember,
+  CalendarSettings,
   CalendarSyncHealth,
   CalendarSyncNowResult,
   CalendarSyncRun,
@@ -366,6 +367,20 @@ export async function fetchCalendarSyncHealth(): Promise<CalendarSyncHealth> {
     lastCycleAt: r.last_cycle_at,
     accounts: r.accounts.map(toAccountHealth),
   }
+}
+
+/** Perillas del módulo (GET /calendar/settings). */
+export async function fetchCalendarSettings(): Promise<CalendarSettings> {
+  const r = await apiGet<{ llm_on_past_events: boolean }>("/calendar/settings")
+  return { llmOnPastEvents: r.llm_on_past_events }
+}
+
+/** Setea «gastar LLM en eventos pasados» (la leen dedup F2 y merge en cada corrida). */
+export async function patchCalendarSettings(llmOnPastEvents: boolean): Promise<CalendarSettings> {
+  const r = await apiPatch<{ llm_on_past_events: boolean }>("/calendar/settings", {
+    llm_on_past_events: llmOnPastEvents,
+  })
+  return { llmOnPastEvents: r.llm_on_past_events }
 }
 
 /** «Sincronizar ahora»: pull + consolidación in-process (sin LLM ni push). */
