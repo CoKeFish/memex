@@ -81,7 +81,7 @@ export function ClusterStoryPage() {
           hint="Este cúmulo no tiene miembros con fecha ni elenco."
         />
       ) : (
-        <ClusterTimeline events={events} actors={actors} />
+        <ClusterTimeline events={events} actors={actors} inboxKinds={data.inboxKinds} />
       )}
     </div>
   )

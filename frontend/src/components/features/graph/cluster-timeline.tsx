@@ -3,15 +3,28 @@
 // `journey-timeline` (rail + card por ítem); el marcador toma el color del TIPO de vértice.
 
 import { Link } from "react-router-dom"
-import { Mail } from "lucide-react"
 import type { TimelineActor, TimelineEvent } from "@/data/graph"
 import { formatDateOnly, formatDateTime, monthKey, monthLongLabel } from "@/lib/format"
 import { KIND_LABEL, kindColor } from "@/lib/graph-kind"
+import { INBOX_KIND_ICON, inboxRefLabel } from "@/lib/inbox-format"
 
 function fmtAt(e: TimelineEvent): string {
   if (e.precision === "datetime") return formatDateTime(e.at)
   const d = formatDateOnly(e.at) // `at` es "YYYY-MM-DD" cuando no es datetime
   return e.precision === "inferred" ? `≈ ${d}` : d
+}
+
+/** Link al mensaje de origen con etiqueta+icono por su MEDIO real (correo/chat/social). */
+function InboxRef({ id, kinds }: { id: number; kinds: Record<number, string> }) {
+  const Icon = INBOX_KIND_ICON[kinds[id] ?? "unknown"] ?? INBOX_KIND_ICON.unknown
+  return (
+    <Link
+      to={`/datos/${id}`}
+      className="inline-flex items-center gap-1 text-[11px] text-origin-inbox hover:underline"
+    >
+      <Icon className="size-3" /> {inboxRefLabel(id, kinds)}
+    </Link>
+  )
 }
 
 interface MonthGroup {
@@ -38,9 +51,12 @@ function groupByMonth(events: TimelineEvent[]): MonthGroup[] {
 export function ClusterTimeline({
   events,
   actors,
+  inboxKinds,
 }: {
   events: TimelineEvent[]
   actors: TimelineActor[]
+  /** Medio (email|chat|social) por id de inbox — etiqueta e icono del link al mensaje de origen. */
+  inboxKinds: Record<number, string>
 }) {
   const months = groupByMonth(events)
   return (
@@ -100,12 +116,7 @@ export function ClusterTimeline({
                             {KIND_LABEL[e.kind] ?? e.kind}
                           </span>
                           {e.sourceInboxIds.length > 0 && (
-                            <Link
-                              to={`/datos/${e.sourceInboxIds[0]}`}
-                              className="inline-flex items-center gap-1 text-[11px] text-origin-inbox hover:underline"
-                            >
-                              <Mail className="size-3" /> correo #{e.sourceInboxIds[0]}
-                            </Link>
+                            <InboxRef id={e.sourceInboxIds[0]} kinds={inboxKinds} />
                           )}
                         </div>
                       </div>

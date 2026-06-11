@@ -11,6 +11,7 @@ from sqlalchemy import text
 from memex.db import connection
 from memex.modules.bienestar.habits import add_habit
 from memex.modules.bienestar.module import register
+from memex.relations.clustering import cluster_signature
 from memex.relations.edges import (
     PRODUCER_IDENTIDADES,
     STATUS_CONFIRMED,
@@ -24,6 +25,29 @@ def _exec(sql: str, **p: Any) -> Any:
     with connection() as c:
         r = c.execute(text(sql), p)
         return r.scalar() if r.returns_rows else None
+
+
+def _source(stype: str, name: str) -> int:
+    """Una fuente del tipo dado; `name` único por test (UNIQUE sources_user_id_name_key)."""
+    return int(
+        _exec(
+            "INSERT INTO sources (user_id, name, type) VALUES (1, :n, :t) RETURNING id",
+            n=name,
+            t=stype,
+        )
+    )
+
+
+def _inbox(source_id: int, ext: str) -> int:
+    """Un mensaje real en `inbox` (para `inbox_kinds`); `received_at` tiene DEFAULT NOW()."""
+    return int(
+        _exec(
+            "INSERT INTO inbox (user_id, source_id, external_id, occurred_at, payload) "
+            "VALUES (1, :sid, :ext, NOW(), CAST('{}' AS JSONB)) RETURNING id",
+            sid=source_id,
+            ext=ext,
+        )
+    )
 
 
 def _finance(merchant: str, inbox_ids: list[int]) -> int:
@@ -94,7 +118,7 @@ def _habito(
 
 def test_graph_vacio(client: Any) -> None:
     body = client.get("/graph").json()
-    assert body == {"nodes": [], "edges": []}
+    assert body == {"nodes": [], "edges": [], "inbox_kinds": {}}
 
 
 def test_build_y_lectura(client: Any) -> None:
@@ -135,7 +159,37 @@ def test_source_inbox_id_enfoca_subgrafo(client: Any) -> None:
     assert all(5 in n["source_inbox_ids"] for n in focado["nodes"])
     assert len(focado["edges"]) == 1  # la co-ocurrencia entre ellos sí aparece
 
-    assert client.get("/graph?source_inbox_id=999").json() == {"nodes": [], "edges": []}
+    assert client.get("/graph?source_inbox_id=999").json() == {
+        "nodes": [],
+        "edges": [],
+        "inbox_kinds": {},
+    }
+
+
+def test_inbox_kinds_por_medio(client: Any) -> None:
+    """`inbox_kinds` mapea cada mensaje REFERENCIADO a su medio real (telegram→chat, imap→email);
+    tipos sin SourceKind y mensajes no referenciados por ningún vértice se omiten (JSON serializa
+    las llaves int como strings)."""
+    tg = _inbox(_source("telegram", "tg"), "t1")
+    im = _inbox(_source("imap", "mail"), "m1")
+    wh = _inbox(_source("webhook", "hook"), "w1")  # tipo sin SourceKind registrada → omitido
+    _inbox(_source("imap", "mail2"), "m2")  # no referenciado por ningún vértice → omitido
+    _finance("Rappi", [tg, im, wh])
+    _hack("HackBogota", [tg])
+    client.post("/graph/build")
+
+    body = client.get("/graph").json()
+    assert body["inbox_kinds"] == {str(tg): "chat", str(im): "email"}
+
+
+def test_inbox_kinds_en_foco(client: Any) -> None:
+    tg = _inbox(_source("telegram", "tg"), "t1")
+    _finance("Rappi", [tg])
+    _hack("Hack", [tg])
+    client.post("/graph/build")
+
+    body = client.get(f"/graph?source_inbox_id={tg}").json()
+    assert body["inbox_kinds"] == {str(tg): "chat"}
 
 
 def test_status_filtra_aristas(client: Any) -> None:
@@ -311,6 +365,42 @@ def test_clusters_filtra_por_status(client: Any) -> None:
     client.post("/graph/cluster")
     assert len(client.get("/graph/clusters?status=candidate").json()["clusters"]) == 1
     assert client.get("/graph/clusters?status=confirmed").json()["clusters"] == []
+
+
+def _confirmed_cluster(members: list[tuple[str, int]]) -> int:
+    """Cúmulo CONFIRMADO con sus miembros (mismo seed que tests/relations/test_timeline.py pero
+    vía `connection()` propia: el test llama al API y el fixture `conn` dejaría la txn abierta)."""
+    sig = cluster_signature([Ref(s, i) for s, i in members])
+    cid = int(
+        _exec(
+            "INSERT INTO relation_clusters (user_id, status, name, description, confidence, "
+            "member_count, signature, blob_signature, validated_signature) "
+            "VALUES (1, 'confirmed', 'Mi contexto', 'sinopsis', 0.9, :mc, :sig, :sig, :sig) "
+            "RETURNING id",
+            mc=len(members),
+            sig=sig,
+        )
+    )
+    for s, i in members:
+        _exec(
+            "INSERT INTO relation_cluster_members (user_id, cluster_id, member_slug, member_id) "
+            "VALUES (1, :c, :s, :i)",
+            c=cid,
+            s=s,
+            i=i,
+        )
+    return cid
+
+
+def test_timeline_inbox_kinds(client: Any) -> None:
+    """La cronología también trae `inbox_kinds` (acá por la rama del ELENCO: hackatón sin fecha)."""
+    tg = _inbox(_source("telegram", "tg"), "t1")
+    hk = _hack("HackX", [tg])
+    cid = _confirmed_cluster([("hackathones", hk)])
+
+    body = client.get(f"/graph/clusters/{cid}/timeline").json()
+    assert body["actors"][0]["source_inbox_ids"] == [tg]
+    assert body["inbox_kinds"] == {str(tg): "chat"}
 
 
 def test_validate_endpoint_mapea_stats(client: Any, monkeypatch: Any) -> None:
