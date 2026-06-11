@@ -2,6 +2,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
@@ -21,6 +22,7 @@ from memex.relations.edges import list_edges
 from memex.relations.reconcile import detect_and_reconcile
 from memex.relations.timeline import cluster_timeline
 from memex.relations.vertices import list_vertices
+from memex.sources import kind_for_type
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -29,43 +31,73 @@ UserID = Annotated[int, Depends(current_user_id)]
 _log = get_logger("memex.api.graph")
 
 
+def _inbox_kinds(conn: Connection, user_id: int, inbox_ids: set[int]) -> dict[int, str]:
+    """Medio (email|chat|social) de cada mensaje referenciado: inbox → sources.type → SourceKind.
+    Tipos sin SourceKind registrada se omiten (el front cae a «mensaje #N»)."""
+    if not inbox_ids:
+        return {}
+    rows = conn.execute(
+        text(
+            "SELECT i.id AS id, s.type AS type FROM inbox i "
+            "JOIN sources s ON s.id = i.source_id "
+            "WHERE i.user_id = :u AND i.id = ANY(:ids)"
+        ),
+        {"u": user_id, "ids": sorted(inbox_ids)},
+    ).mappings()
+    kinds: dict[int, str] = {}
+    for r in rows:
+        try:
+            kinds[int(r["id"])] = kind_for_type(str(r["type"])).value
+        except KeyError:  # tipo sin kind (p. ej. un push custom) → el front usa el fallback
+            continue
+    return kinds
+
+
 @router.get("", response_model=GraphResponse)
 async def get_graph(
     user_id: UserID,
     status: Annotated[str | None, Query(description="pista|confirmed|rejected")] = None,
     source_inbox_id: Annotated[
         int | None,
-        Query(description="enfoca: solo los vértices producidos por este correo + sus vecinos"),
+        Query(description="enfoca: solo los vértices producidos por este mensaje + sus vecinos"),
     ] = None,
 ) -> dict[str, Any]:
     """El grafo del user: vértices (proyectados de las tablas `mod_*`) + aristas (`relation_edges`).
 
     Un vértice se direcciona por `(slug, id)`; inbox NO es vértice (es procedencia, drill-down):
-    cada nodo lleva sus `source_inbox_ids` (los mensajes de los que salió) para abrir el correo
-    original desde el grafo. Las aristas llevan su `producer` y su `status` (`pista`/`confirmed`);
-    el front filtra por `status`. Con `source_inbox_id` el grafo se ENFOCA en lo que produjo ese
-    correo (sentido inverso del drill-down nodo→correo): sus vértices + los vecinos a un salto. Solo
-    LECTURA: no dispara el armado (POST /graph/build).
+    cada nodo lleva sus `source_inbox_ids` (los mensajes de los que salió) para abrir el mensaje
+    original desde el grafo, y `inbox_kinds` trae el medio (email|chat|social) de cada uno. Las
+    aristas llevan su `producer` y su `status` (`pista`/`confirmed`); el front filtra por `status`.
+    Con `source_inbox_id` el grafo se ENFOCA en lo que produjo ese mensaje (sentido inverso del
+    drill-down nodo→mensaje): sus vértices + los vecinos a un salto. Solo LECTURA: no dispara el
+    armado (POST /graph/build).
     """
     with connection() as conn:
         verts = list_vertices(conn, user_id)
         edges = list_edges(conn, user_id, status=status)
         prov = vertex_inbox_ids(conn, user_id)
-    if source_inbox_id is not None:
-        # Vértices producidos por ESE correo (semilla) + las aristas que los tocan; se conservan los
-        # vecinos al otro extremo para no dejar aristas colgando. Correo sin nada → grafo vacío.
-        seed = {ref for ref, ids in prov.items() if source_inbox_id in ids}
-        edges = [e for e in edges if e.src in seed or e.dst in seed]
-        keep = set(seed)
-        for e in edges:
-            keep.add(e.src)
-            keep.add(e.dst)
-        verts = [v for v in verts if v.ref in keep]
-    # Poda de aristas huérfanas: ambos extremos deben ser vértices PRESENTES (vivos en default,
-    # dentro del subgrafo en foco). Cruza-filtra contra el set final de `verts` → nunca se sirve
-    # una arista a un nodo ausente (consolidado tombstoneado / fila borrada / merge sin GC aún).
-    present = {v.ref for v in verts}
-    edges = [e for e in edges if e.src in present and e.dst in present]
+        if source_inbox_id is not None:
+            # Vértices producidos por ESE mensaje (semilla) + las aristas que los tocan; se
+            # conservan los vecinos al otro extremo para no dejar aristas colgando. Mensaje sin
+            # nada → grafo vacío.
+            seed = {ref for ref, ids in prov.items() if source_inbox_id in ids}
+            edges = [e for e in edges if e.src in seed or e.dst in seed]
+            keep = set(seed)
+            for e in edges:
+                keep.add(e.src)
+                keep.add(e.dst)
+            verts = [v for v in verts if v.ref in keep]
+        # Poda de aristas huérfanas: ambos extremos deben ser vértices PRESENTES (vivos en default,
+        # dentro del subgrafo en foco). Cruza-filtra contra el set final de `verts` → nunca se sirve
+        # una arista a un nodo ausente (consolidado tombstoneado / fila borrada / merge sin GC aún).
+        present = {v.ref for v in verts}
+        edges = [e for e in edges if e.src in present and e.dst in present]
+        # El medio de cada mensaje referenciado por el set FINAL de vértices (por eso se calcula acá
+        # adentro, después del foco/poda).
+        referenced: set[int] = set()
+        for v in verts:
+            referenced |= prov.get(v.ref, set())
+        inbox_kinds = _inbox_kinds(conn, user_id, referenced)
     nodes = [
         {
             "slug": v.slug,
@@ -91,8 +123,14 @@ async def get_graph(
         }
         for e in edges
     ]
-    _log.info("graph.read", user_id=user_id, nodes=len(nodes), edges=len(out_edges))
-    return {"nodes": nodes, "edges": out_edges}
+    _log.info(
+        "graph.read",
+        user_id=user_id,
+        nodes=len(nodes),
+        edges=len(out_edges),
+        inbox_kinds=len(inbox_kinds),
+    )
+    return {"nodes": nodes, "edges": out_edges, "inbox_kinds": inbox_kinds}
 
 
 @router.post("/build", response_model=GraphBuildResult)
@@ -222,6 +260,11 @@ async def cluster_timeline_view(cluster_id: int, user_id: UserID) -> dict[str, A
     real."""
     with connection() as conn:
         tl = cluster_timeline(conn, user_id, cluster_id)
+        inbox_kinds: dict[int, str] = {}
+        if tl is not None:
+            referenced = {i for e in tl.events for i in e.source_inbox_ids}
+            referenced |= {i for a in tl.actors for i in a.source_inbox_ids}
+            inbox_kinds = _inbox_kinds(conn, user_id, referenced)
     if tl is None:
         raise HTTPException(status_code=404, detail="cúmulo no encontrado o no confirmado")
     _log.info(
@@ -261,4 +304,5 @@ async def cluster_timeline_view(cluster_id: int, user_id: UserID) -> dict[str, A
             }
             for a in tl.actors
         ],
+        "inbox_kinds": inbox_kinds,
     }

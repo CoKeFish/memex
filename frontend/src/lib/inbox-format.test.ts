@@ -1,5 +1,6 @@
+import { AtSign, Mail, Send, Webhook } from "lucide-react"
 import { describe, expect, it } from "vitest"
-import { groupSourcesByKind, summarizeRow } from "./inbox-format"
+import { groupSourcesByKind, INBOX_KIND_ICON, inboxRefLabel, summarizeRow } from "./inbox-format"
 import type { InboxPayload, InboxRow, Source } from "../types/domain"
 
 function rowWith(payload: Record<string, unknown>): InboxRow {
@@ -102,5 +103,28 @@ describe("groupSourcesByKind · agrupado del selector de fuente", () => {
   it("conserva el orden de la API dentro de cada grupo", () => {
     const groups = groupSourcesByKind([srcWith(9, "email"), srcWith(3, "email"), srcWith(5, "email")])
     expect(groups[0].sources.map((s) => s.id)).toEqual([9, 3, 5])
+  })
+})
+
+describe("inboxRefLabel · etiqueta del mensaje de origen por medio", () => {
+  it("etiqueta por medio real", () => {
+    expect(inboxRefLabel(5, { 5: "email" })).toBe("correo #5")
+    expect(inboxRefLabel(5, { 5: "chat" })).toBe("chat #5")
+    expect(inboxRefLabel(5, { 5: "social" })).toBe("social #5")
+  })
+
+  it("id ausente o kind desconocido → «mensaje #N»", () => {
+    expect(inboxRefLabel(5, {})).toBe("mensaje #5")
+    expect(inboxRefLabel(5, { 5: "raro" })).toBe("mensaje #5")
+  })
+})
+
+describe("INBOX_KIND_ICON · icono por medio", () => {
+  it("mapea como baseSourceMeta con Webhook de fallback", () => {
+    expect(INBOX_KIND_ICON.email).toBe(Mail)
+    expect(INBOX_KIND_ICON.chat).toBe(Send)
+    expect(INBOX_KIND_ICON.social).toBe(AtSign)
+    expect(INBOX_KIND_ICON.unknown).toBe(Webhook)
+    expect(INBOX_KIND_ICON.raro).toBeUndefined() // el callsite cae a .unknown
   })
 })

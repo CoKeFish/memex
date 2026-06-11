@@ -90,6 +90,23 @@ export const KIND_LABELS: Record<string, string> = {
   social: "social",
 }
 
+/** Etiqueta de un mensaje de origen por su medio: «correo #12» / «chat #12» / «social #12»;
+ * «mensaje #12» si el medio no se conoce (fila borrada o tipo sin kind). */
+export function inboxRefLabel(id: number, kinds: Record<number, string>): string {
+  const k = kinds[id]
+  return `${(k && KIND_LABELS[k]) || "mensaje"} #${id}`
+}
+
+/** Icono por medio (mismo mapeo que `baseSourceMeta`), con `unknown` como fallback. Mapa y no
+ * función: el lint del React Compiler (static-components) trata el resultado de una llamada usado
+ * como JSX como «componente creado en render»; el acceso por propiedad pasa. */
+export const INBOX_KIND_ICON: Record<string, LucideIcon> = {
+  email: Mail,
+  chat: Send,
+  social: AtSign,
+  unknown: Webhook,
+}
+
 const KIND_ORDER = ["email", "chat", "social", "other"]
 
 export interface SourceKindGroup {

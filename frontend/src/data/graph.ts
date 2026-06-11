@@ -29,6 +29,9 @@ export interface GraphEdge {
 export interface GraphData {
   nodes: GraphNode[]
   edges: GraphEdge[]
+  /** Medio (email|chat|social) por id de inbox referenciado — para etiquetar «correo/chat/social
+   * #N» sin otra llamada; un id ausente cae a «mensaje #N». */
+  inboxKinds: Record<number, string>
 }
 
 export interface GraphBuildResult {
@@ -87,6 +90,7 @@ interface NodeApiRow {
 interface GraphApi {
   nodes: NodeApiRow[]
   edges: EdgeApiRow[]
+  inbox_kinds?: Record<number, string>
 }
 
 function toNode(n: NodeApiRow): GraphNode {
@@ -109,14 +113,14 @@ function toEdge(e: EdgeApiRow): GraphEdge {
 }
 
 /** El grafo del usuario (GET /graph). `status` filtra aristas (pista|confirmed|rejected);
- *  `sourceInboxId` ENFOCA el subgrafo en lo que produjo ese correo (sus vértices + vecinos). */
+ *  `sourceInboxId` ENFOCA el subgrafo en lo que produjo ese mensaje (sus vértices + vecinos). */
 export async function fetchGraph(status?: string, sourceInboxId?: number): Promise<GraphData> {
   const qs = new URLSearchParams()
   if (status) qs.set("status", status)
   if (sourceInboxId != null) qs.set("source_inbox_id", String(sourceInboxId))
   const suffix = qs.toString() ? `?${qs.toString()}` : ""
   const g = await apiGet<GraphApi>(`/graph${suffix}`)
-  return { nodes: g.nodes.map(toNode), edges: g.edges.map(toEdge) }
+  return { nodes: g.nodes.map(toNode), edges: g.edges.map(toEdge), inboxKinds: g.inbox_kinds ?? {} }
 }
 
 /** Corre el paso determinista (POST /graph/build): materializa pistas + reales sobre lo guardado. */
@@ -224,6 +228,8 @@ export interface ClusterTimelineData {
   }
   events: TimelineEvent[]
   actors: TimelineActor[]
+  /** Medio (email|chat|social) por id de inbox referenciado por sucesos/elenco. */
+  inboxKinds: Record<number, string>
 }
 
 interface TimelineEventApi {
@@ -246,6 +252,7 @@ interface ClusterTimelineApi {
   }
   events: TimelineEventApi[]
   actors: Omit<TimelineEventApi, "at" | "precision">[]
+  inbox_kinds?: Record<number, string>
 }
 
 /** Cronología de un cúmulo CONFIRMADO: sus sucesos fechados (ordenados) + el elenco (sin fecha). */
@@ -275,5 +282,6 @@ export async function fetchClusterTimeline(id: number): Promise<ClusterTimelineD
       label: a.label,
       sourceInboxIds: a.source_inbox_ids ?? [],
     })),
+    inboxKinds: r.inbox_kinds ?? {},
   }
 }

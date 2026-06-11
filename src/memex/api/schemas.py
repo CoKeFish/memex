@@ -2060,8 +2060,13 @@ class GraphEdge(BaseModel):
 
 
 class GraphResponse(BaseModel):
+    """GET /graph. `inbox_kinds`: medio (email|chat|social) por id de inbox REFERENCIADO por algún
+    nodo — el front etiqueta «correo/chat/social #N» sin otra llamada; un id sin entrada (fila
+    borrada o tipo sin SourceKind) cae a «mensaje #N»."""
+
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    inbox_kinds: dict[int, str] = {}
 
 
 class GraphBuildResult(BaseModel):
@@ -2153,8 +2158,10 @@ class GraphClusterTimelineMeta(BaseModel):
 
 
 class GraphClusterTimeline(BaseModel):
-    """GET /graph/clusters/{id}/timeline: cabecera + sucesos ordenados + elenco."""
+    """GET /graph/clusters/{id}/timeline: cabecera + sucesos ordenados + elenco. `inbox_kinds`
+    como en `GraphResponse`: medio por id de inbox referenciado por sucesos/elenco."""
 
     cluster: GraphClusterTimelineMeta
     events: list[GraphTimelineEvent]
     actors: list[GraphTimelineActor]
+    inbox_kinds: dict[int, str] = {}

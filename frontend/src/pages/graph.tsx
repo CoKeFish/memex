@@ -10,9 +10,10 @@ import { Switch } from "@/components/ui/switch"
 import { buildGraph, clusterGraph, fetchGraph, validateClusters } from "@/data"
 import type { GraphData, GraphEdge, GraphNode } from "@/data/graph"
 import { CUMULO_COLOR, KIND_LABEL, kindColor } from "@/lib/graph-kind"
+// El layout (d3-force por componente conexa + shelf packing) vive en graph-layout: funciones puras.
+import { baseRadius, layoutGraph, nodeKey, type Bounds } from "@/lib/graph-layout"
+import { inboxRefLabel } from "@/lib/inbox-format"
 import { useAsync } from "@/lib/use-async"
-
-const nodeKey = (slug: string, id: number): string => `${slug}#${id}`
 
 const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "todas", label: "Todas" },
@@ -20,26 +21,12 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "pista", label: "Pistas" },
 ]
 
+const EMPTY_GRAPH: GraphData = { nodes: [], edges: [], inboxKinds: {} }
+
 // Viewport interno del SVG (coordenadas fijas; el CSS lo escala responsivo).
 const VW = 1000
 const VH = 600
 const FIT_PAD = 50
-
-interface Sim {
-  key: string
-  node: GraphNode
-  x: number
-  y: number
-  vx: number
-  vy: number
-  deg: number
-}
-
-interface Layout {
-  sims: Sim[]
-  byKey: Map<string, Sim>
-  bounds: { minX: number; minY: number; maxX: number; maxY: number }
-}
 
 interface View {
   x: number
@@ -49,93 +36,7 @@ interface View {
 
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v))
 
-/** Layout determinista por simulación de fuerzas (repulsión + resortes + centrado). Sin librerías. */
-function layout(nodes: GraphNode[], edges: GraphEdge[]): Layout {
-  const sims: Sim[] = nodes.map((node, i) => {
-    const a = (2 * Math.PI * i) / Math.max(1, nodes.length)
-    const radius = 60 + nodes.length * 2
-    return { key: nodeKey(node.slug, node.id), node, x: Math.cos(a) * radius, y: Math.sin(a) * radius, vx: 0, vy: 0, deg: 0 }
-  })
-  const byKey = new Map(sims.map((s) => [s.key, s]))
-  const links: [Sim, Sim][] = []
-  for (const e of edges) {
-    const a = byKey.get(nodeKey(e.srcSlug, e.srcId))
-    const b = byKey.get(nodeKey(e.dstSlug, e.dstId))
-    if (a && b) {
-      links.push([a, b])
-      a.deg += 1
-      b.deg += 1
-    }
-  }
-
-  const REP = 14000
-  const SPRING = 0.025
-  const REST = 110
-  const CENTER = 0.005
-  const DAMP = 0.85
-  const DT = 0.85
-  const iters = sims.length > 250 ? 130 : 320
-  for (let iter = 0; iter < iters; iter++) {
-    for (let i = 0; i < sims.length; i++) {
-      for (let j = i + 1; j < sims.length; j++) {
-        const a = sims[i]
-        const b = sims[j]
-        let dx = a.x - b.x
-        let dy = a.y - b.y
-        let d2 = dx * dx + dy * dy
-        if (d2 < 0.01) {
-          d2 = 0.01
-          dx = 0.1
-          dy = 0.1
-        }
-        const d = Math.sqrt(d2)
-        const f = REP / d2
-        a.vx += (dx / d) * f
-        a.vy += (dy / d) * f
-        b.vx -= (dx / d) * f
-        b.vy -= (dy / d) * f
-      }
-    }
-    for (const [a, b] of links) {
-      const dx = b.x - a.x
-      const dy = b.y - a.y
-      const d = Math.sqrt(dx * dx + dy * dy) || 0.01
-      const f = (d - REST) * SPRING
-      a.vx += (dx / d) * f
-      a.vy += (dy / d) * f
-      b.vx -= (dx / d) * f
-      b.vy -= (dy / d) * f
-    }
-    for (const s of sims) {
-      s.vx -= s.x * CENTER
-      s.vy -= s.y * CENTER
-      s.x += s.vx * DT
-      s.y += s.vy * DT
-      s.vx *= DAMP
-      s.vy *= DAMP
-    }
-  }
-
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const s of sims) {
-    minX = Math.min(minX, s.x)
-    minY = Math.min(minY, s.y)
-    maxX = Math.max(maxX, s.x)
-    maxY = Math.max(maxY, s.y)
-  }
-  if (!sims.length) {
-    minX = -100
-    minY = -100
-    maxX = 100
-    maxY = 100
-  }
-  return { sims, byKey, bounds: { minX, minY, maxX, maxY } }
-}
-
-function fitView(b: Layout["bounds"]): View {
+function fitView(b: Bounds): View {
   const w = b.maxX - b.minX || 1
   const h = b.maxY - b.minY || 1
   const k = clamp(Math.min((VW - 2 * FIT_PAD) / w, (VH - 2 * FIT_PAD) / h), 0.15, 3)
@@ -162,7 +63,7 @@ function GraphCanvas({
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [hover, setHover] = useState<string | null>(null)
-  const lay = useMemo(() => layout(data.nodes, data.edges), [data.nodes, data.edges])
+  const lay = useMemo(() => layoutGraph(data.nodes, data.edges), [data.nodes, data.edges])
   const [view, setView] = useState<View>(() => fitView(lay.bounds))
   // Re-encuadra al cambiar el conjunto (filtro/armado), no en cada render. Ajuste de estado
   // DURANTE el render (patrón "derivar al cambiar la prop") en vez de un effect: evita el
@@ -274,8 +175,7 @@ function GraphCanvas({
         })}
         {lay.sims.map((s) => {
           const isCumulo = s.node.slug === "cumulo"
-          const r =
-            (isCumulo ? 11 + Math.min(s.deg, 16) * 0.7 : 6 + Math.min(s.deg, 10) * 0.6) / view.k
+          const r = baseRadius(s.node, s.deg) / view.k
           const isSel = selected === s.key
           const dim = focus && !incident.has(s.key) ? 0.18 : 1
           return (
@@ -327,7 +227,17 @@ function GraphCanvas({
   )
 }
 
-function DetailPanel({ node, edges, nodesByKey }: { node: GraphNode; edges: GraphEdge[]; nodesByKey: Map<string, GraphNode> }) {
+function DetailPanel({
+  node,
+  edges,
+  nodesByKey,
+  inboxKinds,
+}: {
+  node: GraphNode
+  edges: GraphEdge[]
+  nodesByKey: Map<string, GraphNode>
+  inboxKinds: Record<number, string>
+}) {
   const mine = edges.filter(
     (e) => nodeKey(e.srcSlug, e.srcId) === nodeKey(node.slug, node.id) || nodeKey(e.dstSlug, e.dstId) === nodeKey(node.slug, node.id),
   )
@@ -391,7 +301,7 @@ function DetailPanel({ node, edges, nodesByKey }: { node: GraphNode; edges: Grap
       {node.sourceInboxIds.length > 0 && (
         <div>
           <div className="mb-1 text-xs font-medium text-muted-foreground">
-            Correos de origen ({node.sourceInboxIds.length})
+            Mensajes de origen ({node.sourceInboxIds.length})
           </div>
           <ul className="flex flex-wrap gap-1.5">
             {node.sourceInboxIds.map((iid) => (
@@ -400,7 +310,7 @@ function DetailPanel({ node, edges, nodesByKey }: { node: GraphNode; edges: Grap
                   to={`/datos/${iid}`}
                   className="inline-block rounded border bg-muted/30 px-2 py-0.5 text-xs text-origin-inbox hover:underline"
                 >
-                  correo #{iid}
+                  {inboxRefLabel(iid, inboxKinds)}
                 </Link>
               </li>
             ))}
@@ -411,15 +321,37 @@ function DetailPanel({ node, edges, nodesByKey }: { node: GraphNode; edges: Grap
   )
 }
 
-function Legend() {
+/** Leyenda-FILTRO: cada tipo presente en el grafo es un toggle (click = ocultar/mostrar sus
+ * vértices); las entradas de aristas (Real/Pista/Miembro) son informativas. */
+function Legend({
+  kinds,
+  hidden,
+  onToggle,
+}: {
+  kinds: { kind: string; count: number }[]
+  hidden: ReadonlySet<string>
+  onToggle: (k: string) => void
+}) {
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
-      {Object.entries(KIND_LABEL).map(([k, label]) => (
-        <span key={k} className="inline-flex items-center gap-1.5">
-          <span className="inline-block size-2.5 rounded-full" style={{ background: kindColor(k) }} />
-          {label}
-        </span>
-      ))}
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-xs text-muted-foreground">
+      {kinds.map(({ kind, count }) => {
+        const off = hidden.has(kind)
+        return (
+          <button
+            key={kind}
+            type="button"
+            aria-pressed={!off}
+            onClick={() => onToggle(kind)}
+            title={off ? "Mostrar este tipo" : "Ocultar este tipo"}
+            className={`inline-flex items-center gap-1.5 rounded px-1 py-0.5 hover:bg-muted/60 ${
+              off ? "line-through opacity-40" : ""
+            }`}
+          >
+            <span className="inline-block size-2.5 rounded-full" style={{ background: kindColor(kind) }} />
+            {KIND_LABEL[kind] ?? kind} <span className="num">({count})</span>
+          </button>
+        )
+      })}
       <span className="ml-1 inline-flex items-center gap-1.5">
         <svg width="20" height="6">
           <line x1="0" y1="3" x2="20" y2="3" stroke="#22c55e" strokeWidth="2" />
@@ -443,12 +375,13 @@ function Legend() {
 }
 
 export function GraphPage() {
-  // `?inbox_id=` enfoca el grafo en lo que produjo ese correo (botón "ver en grafo" desde /datos/:id).
+  // `?inbox_id=` enfoca el grafo en lo que produjo ese mensaje (botón "ver en grafo" desde /datos/:id).
   const [searchParams] = useSearchParams()
   const inboxParam = searchParams.get("inbox_id")
   const inboxId = inboxParam ? Number(inboxParam) : undefined
   const [status, setStatus] = useState<string>("todas")
   const [onlyConnected, setOnlyConnected] = useState(true)
+  const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(() => new Set())
   const [selected, setSelected] = useState<string | null>(null)
   const [building, setBuilding] = useState(false)
   const [clustering, setClustering] = useState(false)
@@ -457,18 +390,31 @@ export function GraphPage() {
     () => fetchGraph(status === "todas" ? undefined : status, inboxId),
     [status, inboxId],
   )
-  const full = data ?? { nodes: [], edges: [] }
+  const full = data ?? EMPTY_GRAPH
 
-  // Filtro "solo conectados": esconde los vértices sin ninguna arista (ruido para una vista de relaciones).
+  // Filtros del front en 3 etapas: (1) tipos ocultos por la leyenda, (2) aristas con algún extremo
+  // oculto, (3) "solo conectados" sobre las aristas RESTANTES (esconde aislados, ruido para una
+  // vista de relaciones).
   const shown = useMemo<GraphData>(() => {
-    if (!onlyConnected) return full
+    const nodes = hiddenKinds.size
+      ? full.nodes.filter((n) => !hiddenKinds.has(n.kind))
+      : full.nodes
+    const present = new Set(nodes.map((n) => nodeKey(n.slug, n.id)))
+    const edges = full.edges.filter(
+      (e) => present.has(nodeKey(e.srcSlug, e.srcId)) && present.has(nodeKey(e.dstSlug, e.dstId)),
+    )
+    if (!onlyConnected) return { nodes, edges, inboxKinds: full.inboxKinds }
     const connected = new Set<string>()
-    for (const e of full.edges) {
+    for (const e of edges) {
       connected.add(nodeKey(e.srcSlug, e.srcId))
       connected.add(nodeKey(e.dstSlug, e.dstId))
     }
-    return { nodes: full.nodes.filter((n) => connected.has(nodeKey(n.slug, n.id))), edges: full.edges }
-  }, [full, onlyConnected])
+    return {
+      nodes: nodes.filter((n) => connected.has(nodeKey(n.slug, n.id))),
+      edges,
+      inboxKinds: full.inboxKinds,
+    }
+  }, [full, onlyConnected, hiddenKinds])
 
   const nodesByKey = useMemo(
     () => new Map(full.nodes.map((n) => [nodeKey(n.slug, n.id), n])),
@@ -476,6 +422,26 @@ export function GraphPage() {
   )
   const selectedNode = selected ? nodesByKey.get(selected) ?? null : null
   const hiddenCount = full.nodes.length - shown.nodes.length
+
+  // Tipos presentes en el grafo (orden de la leyenda; los desconocidos al final) con su conteo.
+  const legendKinds = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const n of full.nodes) counts.set(n.kind, (counts.get(n.kind) ?? 0) + 1)
+    const known = Object.keys(KIND_LABEL).filter((k) => counts.has(k))
+    const unknown = [...counts.keys()].filter((k) => !(k in KIND_LABEL)).sort()
+    return [...known, ...unknown].map((k) => ({ kind: k, count: counts.get(k) ?? 0 }))
+  }, [full.nodes])
+
+  function toggleKind(k: string) {
+    // si el nodo elegido queda oculto, soltarlo (el panel mostraría algo invisible)
+    if (!hiddenKinds.has(k) && selectedNode?.kind === k) setSelected(null)
+    setHiddenKinds((prev) => {
+      const next = new Set(prev)
+      if (next.has(k)) next.delete(k)
+      else next.add(k)
+      return next
+    })
+  }
 
   async function onBuild() {
     setBuilding(true)
@@ -540,7 +506,7 @@ export function GraphPage() {
                 className="num inline-flex items-center gap-1 rounded-full border border-brand/40 bg-brand/10 px-2 py-0.5 text-[11px] text-brand hover:bg-brand/20"
                 title="Quitar el filtro y ver el grafo completo"
               >
-                correo #{inboxId} · quitar filtro ✕
+                {inboxRefLabel(inboxId, full.inboxKinds)} · quitar filtro ✕
               </Link>
             )}
             <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -590,14 +556,18 @@ export function GraphPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-xs text-muted-foreground">
               {shown.nodes.length} vértices · {shown.edges.length} aristas
-              {hiddenCount > 0 && ` · ${hiddenCount} aislados ocultos`}
+              {hiddenCount > 0 && ` · ${hiddenCount} ocultos`}
             </div>
-            <Legend />
+            <Legend kinds={legendKinds} hidden={hiddenKinds} onToggle={toggleKind} />
           </div>
-          {onlyConnected && shown.edges.length === 0 ? (
+          {shown.nodes.length === 0 || (onlyConnected && shown.edges.length === 0) ? (
             <EmptyState
-              title="Sin relaciones todavía"
-              hint="No hay aristas deterministas. Tocá «Armar grafo», o apagá «Solo conectados» para ver los vértices sueltos."
+              title={hiddenKinds.size > 0 ? "Sin vértices visibles" : "Sin relaciones todavía"}
+              hint={
+                hiddenKinds.size > 0
+                  ? "Todos los vértices quedaron filtrados: reactivá tipos en la leyenda o apagá «Solo conectados»."
+                  : "No hay aristas deterministas. Tocá «Armar grafo», o apagá «Solo conectados» para ver los vértices sueltos."
+              }
             />
           ) : (
             <div className="flex flex-col gap-3 md:flex-row">
@@ -608,7 +578,12 @@ export function GraphPage() {
                 </div>
               </div>
               {selectedNode && (
-                <DetailPanel node={selectedNode} edges={full.edges} nodesByKey={nodesByKey} />
+                <DetailPanel
+                  node={selectedNode}
+                  edges={full.edges}
+                  nodesByKey={nodesByKey}
+                  inboxKinds={full.inboxKinds}
+                />
               )}
             </div>
           )}
