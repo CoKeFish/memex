@@ -93,25 +93,36 @@ def forget_inbox_rows(
     if not ids:
         return 0
     # 1) Sacar los ids reprocesados de source_inbox_ids (queda [] si era su único mensaje).
-    conn.execute(
-        text(
-            f"""
-            UPDATE {table}
-            SET source_inbox_ids = ARRAY(
-                SELECT x FROM unnest(source_inbox_ids) AS x
-                WHERE NOT (x = ANY(CAST(:ids AS BIGINT[])))
-            )
-            WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
-            """
-        ),
-        {"uid": user_id, "ids": ids},
+    emptied = (
+        conn.execute(
+            text(
+                f"""
+                UPDATE {table}
+                SET source_inbox_ids = ARRAY(
+                    SELECT x FROM unnest(source_inbox_ids) AS x
+                    WHERE NOT (x = ANY(CAST(:ids AS BIGINT[])))
+                )
+                WHERE user_id = :uid AND CAST(:ids AS BIGINT[]) && source_inbox_ids
+                RETURNING id
+                """
+            ),
+            {"uid": user_id, "ids": ids},
+        )
+        .scalars()
+        .all()
     )
-    # 2) Borrar las filas que quedaron huérfanas (sin mensaje de origen). Una fila nunca queda
-    #    legítimamente en [] fuera de este paso, así que `cardinality = 0` apunta solo a lo recién
-    #    vaciado.
+    if not emptied:
+        return 0
+    # 2) Borrar las huérfanas SOLO entre las filas que el paso 1 acaba de tocar: hay filas que
+    #    viven legítimamente con [] (eventos de proveedor/módulo/manual de calendar, identidades
+    #    de proveedor) y un DELETE por cardinality a secas se las llevaría (así se perdieron los
+    #    eventos sincronizados de Google, 2026-06).
     result = conn.execute(
-        text(f"DELETE FROM {table} WHERE user_id = :uid AND cardinality(source_inbox_ids) = 0"),
-        {"uid": user_id},
+        text(
+            f"DELETE FROM {table} WHERE user_id = :uid "
+            "AND id = ANY(CAST(:eids AS BIGINT[])) AND cardinality(source_inbox_ids) = 0"
+        ),
+        {"uid": user_id, "eids": [int(e) for e in emptied]},
     )
     return result.rowcount
 
