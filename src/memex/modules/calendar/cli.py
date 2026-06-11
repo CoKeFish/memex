@@ -219,7 +219,8 @@ def _cmd_consolidate(args: argparse.Namespace) -> int:
     stats = run_consolidation(args.user)
     _say(
         f"\ncalendar consolidate: grupos={stats.groups} consolidados={stats.consolidated} "
-        f"merges={stats.merges} ecos={stats.echoes} conflictos={stats.conflicts}\n"
+        f"merges={stats.merges} ecos={stats.echoes} huerfanos={stats.orphans} "
+        f"conflictos={stats.conflicts}\n"
     )
     return 0
 

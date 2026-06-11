@@ -131,8 +131,8 @@ def test_cumulo_proyecta_solo_confirmed() -> None:
 
 def test_calendar_excluye_borrados() -> None:
     _exec(
-        "INSERT INTO mod_calendar_consolidated (user_id, title, starts_on, deleted) "
-        "VALUES (1, 'Borrado', DATE '2026-07-02', TRUE)"
+        "INSERT INTO mod_calendar_consolidated (user_id, title, starts_on, deleted, "
+        "deleted_source) VALUES (1, 'Borrado', DATE '2026-07-02', TRUE, 'user')"
     )
     with connection() as c:
         verts = list_vertices(c, 1, slugs=("calendar",))

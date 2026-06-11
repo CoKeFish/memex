@@ -162,8 +162,8 @@ def _consolidated() -> list[dict[str, Any]]:
             dict(r)
             for r in c.execute(
                 text(
-                    "SELECT id, winner_event_id, deleted FROM mod_calendar_consolidated "
-                    "WHERE user_id = 1 ORDER BY id"
+                    "SELECT id, winner_event_id, deleted, deleted_source "
+                    "FROM mod_calendar_consolidated WHERE user_id = 1 ORDER BY id"
                 )
             )
             .mappings()
@@ -292,3 +292,116 @@ def test_consolidation_echo_links_to_existing_consolidated() -> None:
     assert _outcome(echo) == "echo"
     # No se creó un consolidado NUEVO para el eco.
     assert len(_consolidated()) == 1
+
+
+# ----- DB: tombstones (huérfanos / fusión / borrado del usuario, 0059) ------------ #
+
+
+def _set_cancelled(event_id: int, *, cancelled: bool = True) -> None:
+    with connection() as c:
+        c.execute(
+            text("UPDATE mod_calendar_events SET provider_status = :s WHERE id = :i"),
+            {"s": "cancelled" if cancelled else "confirmed", "i": event_id},
+        )
+
+
+def _conflict_pendings() -> int:
+    with connection() as c:
+        return int(
+            c.execute(
+                text(
+                    "SELECT count(*) FROM mod_calendar_conflicts "
+                    "WHERE user_id = 1 AND status = 'pending'"
+                )
+            ).scalar_one()
+        )
+
+
+def test_orphan_tombstone_when_members_deleted() -> None:
+    # El caso del incidente: los crudos se borraron (links en cascada) y el consolidado quedaba
+    # vivo para siempre.
+    a = _seed("Clase (Google)", start_time=time(8, 0))
+    run_consolidation(1)
+    cons_id = _link_of(a)
+    with connection() as c:
+        c.execute(text("DELETE FROM mod_calendar_events WHERE id = :i"), {"i": a})
+
+    stats = run_consolidation(1)
+
+    assert stats.orphans == 1
+    row = next(r for r in _consolidated() if r["id"] == cons_id)
+    assert row["deleted"] is True
+    assert row["deleted_source"] == "orphaned"
+
+
+def test_orphan_tombstone_purges_pending_conflicts() -> None:
+    # Dos protegidos que chocan → conflicto pending; al quedar huérfanos ambos, la reconciliación
+    # de la MISMA corrida purga el conflicto.
+    a = _seed("Clase A", start_time=time(10, 0), protected=True)
+    b = _seed("Turno B", start_time=time(10, 30), protected=True)
+    run_consolidation(1)
+    assert _conflict_pendings() == 1
+
+    with connection() as c:
+        c.execute(text("DELETE FROM mod_calendar_events WHERE id = ANY(:ids)"), {"ids": [a, b]})
+    stats = run_consolidation(1)
+
+    assert stats.orphans == 2
+    assert _conflict_pendings() == 0
+
+
+def test_orphan_tombstone_when_all_members_cancelled_and_revives() -> None:
+    a = _seed("Reunión cancelable", start_time=time(11, 0))
+    run_consolidation(1)
+    cons_id = _link_of(a)
+
+    _set_cancelled(a)
+    run_consolidation(1)
+    row = next(r for r in _consolidated() if r["id"] == cons_id)
+    assert (row["deleted"], row["deleted_source"]) == (True, "orphaned")
+
+    # El proveedor lo restaura → el MISMO consolidado revive (membresía idéntica: el guard de
+    # estabilidad no alcanza, lo cubre el camino de revival de tombstones automáticos).
+    _set_cancelled(a, cancelled=False)
+    run_consolidation(1)
+    row = next(r for r in _consolidated() if r["id"] == cons_id)
+    assert (row["deleted"], row["deleted_source"]) == (False, None)
+
+
+def test_merge_tombstone_marks_source_merge() -> None:
+    a = _seed("Dentista", start_time=time(10, 0))
+    b = _seed("Cita Dentalink", start_time=time(10, 0))
+    run_consolidation(1)
+    _pair(a, b, status="confirmed")
+    run_consolidation(1)
+
+    tombstoned = [c for c in _consolidated() if c["deleted"]]
+    assert len(tombstoned) == 1
+    assert tombstoned[0]["deleted_source"] == "merge"
+
+
+def test_user_tombstone_never_resurrected() -> None:
+    a = _seed("Dentista", start_time=time(10, 0))
+    run_consolidation(1)
+    cons_id = _link_of(a)
+    assert cons_id is not None
+    with connection() as c:
+        c.execute(
+            text(
+                "UPDATE mod_calendar_consolidated SET deleted = TRUE, deleted_source = 'user' "
+                "WHERE id = :i"
+            ),
+            {"i": cons_id},
+        )
+
+    # Reconsolidación sin cambios de membresía: sigue muerto.
+    run_consolidation(1)
+    row = next(r for r in _consolidated() if r["id"] == cons_id)
+    assert (row["deleted"], row["deleted_source"]) == (True, "user")
+
+    # Cambia la membresía (par confirmado suma un miembro) → se reescribe, pero NO revive.
+    b = _seed("Cita Dentalink", start_time=time(10, 0))
+    _pair(a, b, status="confirmed")
+    run_consolidation(1)
+    row = next(r for r in _consolidated() if r["id"] == cons_id)
+    assert (row["deleted"], row["deleted_source"]) == (True, "user")

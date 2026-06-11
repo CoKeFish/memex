@@ -1,8 +1,9 @@
-"""Schema check para las tablas de calendar (migración 0010).
+"""Schema check para las tablas de calendar (migraciones 0010/0011/0059).
 
 Verifica que el DDL impone lo diseñado: array de atribución de `mod_calendar_events`, cascadas
-a users, y en `mod_calendar_dedup_candidates` el par canónico (CHECK a<b), el UNIQUE del par,
-el CHECK de status y las cascadas (al borrar evento y al borrar user).
+a users, en `mod_calendar_dedup_candidates` el par canónico (CHECK a<b), el UNIQUE del par,
+el CHECK de status y las cascadas (al borrar evento y al borrar user); y de 0059 el origin
+`'manual'` + la coherencia `deleted`↔`deleted_source` del consolidado.
 """
 
 from __future__ import annotations
@@ -62,6 +63,63 @@ def test_calendar_event_cascade_on_user_delete(seed_user2: int) -> None:
             text("SELECT count(*) FROM mod_calendar_events WHERE user_id = :u"), {"u": seed_user2}
         ).scalar()
     assert remaining == 0
+
+
+def test_calendar_event_accepts_manual_origin() -> None:
+    with connection() as c:
+        origin = c.execute(
+            text(
+                "INSERT INTO mod_calendar_events (user_id, source_inbox_ids, title, starts_on, "
+                "origin, manual) VALUES (1, ARRAY[]::bigint[], 'Cita', DATE '2026-06-20', "
+                "'manual', TRUE) RETURNING origin"
+            )
+        ).scalar_one()
+    assert origin == "manual"
+
+
+def test_calendar_event_rejects_unknown_origin() -> None:
+    with pytest.raises(IntegrityError), connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_calendar_events (user_id, source_inbox_ids, title, starts_on, "
+                "origin) VALUES (1, ARRAY[]::bigint[], 'X', DATE '2026-06-20', 'nonsense')"
+            )
+        )
+
+
+# ----- mod_calendar_consolidated: coherencia deleted ↔ deleted_source (0059) ------ #
+
+
+def _insert_consolidated(*, deleted: bool, deleted_source: str | None) -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_calendar_consolidated (user_id, title, starts_on, deleted, "
+                "deleted_source) VALUES (1, 'X', DATE '2026-06-20', :d, :src)"
+            ),
+            {"d": deleted, "src": deleted_source},
+        )
+
+
+def test_consolidated_tombstone_requires_source() -> None:
+    with pytest.raises(IntegrityError):
+        _insert_consolidated(deleted=True, deleted_source=None)
+
+
+def test_consolidated_alive_rejects_source() -> None:
+    with pytest.raises(IntegrityError):
+        _insert_consolidated(deleted=False, deleted_source="user")
+
+
+def test_consolidated_rejects_unknown_source() -> None:
+    with pytest.raises(IntegrityError):
+        _insert_consolidated(deleted=True, deleted_source="nonsense")
+
+
+def test_consolidated_coherent_pairs_accepted() -> None:
+    _insert_consolidated(deleted=False, deleted_source=None)
+    for src in ("merge", "orphaned", "user"):
+        _insert_consolidated(deleted=True, deleted_source=src)
 
 
 # ----- mod_calendar_dedup_candidates --------------------------------------------- #

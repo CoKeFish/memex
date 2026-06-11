@@ -157,6 +157,7 @@ class ConsolidationStats:
     consolidated: int = 0  # filas de mod_calendar_consolidated insertadas o actualizadas
     merges: int = 0  # consolidados fusionados (tombstoneados) al unirse dos grupos
     echoes: int = 0  # eventos eco linkeados a su consolidado (no forman uno nuevo)
+    orphans: int = 0  # consolidados tombstoneados por quedarse sin ningún miembro vivo
     conflicts: int = 0  # pares de eventos consolidados de alta importancia que chocan (a revisar)
 
 
@@ -269,13 +270,18 @@ def _write_consolidated(
                 params,
             ).scalar_one()
         )
+    # Resucita tombstones automáticos ('merge'/'orphaned': el grupo volvió a tener miembros) pero
+    # NUNCA un borrado por el usuario ('user'): un `memex calendario rm` es definitivo aunque la
+    # membresía del grupo cambie después.
     conn.execute(
         text(
             """
             UPDATE mod_calendar_consolidated SET
               title = :title, starts_on = :starts_on, ends_on = :ends_on,
               start_time = :start_time, end_time = :end_time, location = :location,
-              description = :description, winner_event_id = :winner, deleted = FALSE,
+              description = :description, winner_event_id = :winner,
+              deleted = (deleted AND deleted_source = 'user'),
+              deleted_source = CASE WHEN deleted AND deleted_source = 'user' THEN 'user' END,
               updated_at = NOW()
             WHERE id = :id
             """
@@ -376,6 +382,31 @@ def _set_outcomes(conn: Connection, outcome_to_ids: dict[str, list[int]]) -> Non
                 text("UPDATE mod_calendar_events SET processing_outcome = :o WHERE id = ANY(:ids)"),
                 {"o": outcome, "ids": ids},
             )
+
+
+def _tombstone_orphans(conn: Connection, user_id: int) -> int:
+    """Tombstonea (`deleted_source='orphaned'`) los consolidados que se quedaron SIN ningún miembro
+    vivo: sus eventos crudos se borraron (los links se van en cascada) o quedaron todos `cancelled`
+    en el proveedor. Sin esto son fantasmas eternos: pintan el calendario y hasta se pushearían al
+    proveedor. Corre ANTES de `_detect_conflicts` para que la reconciliación de pendings purgue sus
+    conflictos en la misma corrida. Si el grupo vuelve a tener miembros, `_write_consolidated` lo
+    resucita (a diferencia del tombstone 'user')."""
+    result = conn.execute(
+        text(
+            """
+            UPDATE mod_calendar_consolidated c
+            SET deleted = TRUE, deleted_source = 'orphaned', updated_at = NOW()
+            WHERE c.user_id = :uid AND NOT c.deleted
+              AND NOT EXISTS (
+                  SELECT 1 FROM mod_calendar_event_links l
+                  JOIN mod_calendar_events e ON e.id = l.event_id
+                  WHERE l.consolidated_id = c.id
+                    AND e.provider_status IS DISTINCT FROM 'cancelled')
+            """
+        ),
+        {"uid": user_id},
+    )
+    return result.rowcount
 
 
 # --- Geocoding del lugar (automático, gateado por MEMEX_CALENDAR_GEOCODE) ----------- #
@@ -538,7 +569,8 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
                     conn.execute(
                         text(
                             "UPDATE mod_calendar_consolidated "
-                            "SET deleted = TRUE, updated_at = NOW() WHERE id = ANY(:others)"
+                            "SET deleted = TRUE, deleted_source = COALESCE(deleted_source, "
+                            "'merge'), updated_at = NOW() WHERE id = ANY(:others)"
                         ),
                         {"others": others},
                     )
@@ -546,7 +578,10 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
                 else:
                     # ¿cambió la membresía del consolidado? Si NO, dejamos sus campos tal cual
                     # (estable): no pisamos el enriquecimiento del LLM (paso `merge`) ni churnéamos
-                    # la firma del write-back en cada corrida.
+                    # la firma del write-back en cada corrida. Excepción: un tombstone AUTOMÁTICO
+                    # ('orphaned'/'merge') cuyo grupo volvió a tener miembros vivos (ej. el evento
+                    # se des-canceló en el proveedor) sí se reescribe — es el camino de revival,
+                    # y con membresía idéntica el guard de estabilidad lo dejaría muerto.
                     current = {
                         int(r[0])
                         for r in conn.execute(
@@ -557,7 +592,15 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
                             {"cid": cons_id},
                         ).all()
                     }
-                    changed = set(group_ids) != current
+                    tomb = conn.execute(
+                        text(
+                            "SELECT deleted, deleted_source FROM mod_calendar_consolidated "
+                            "WHERE id = :cid"
+                        ),
+                        {"cid": cons_id},
+                    ).first()
+                    auto_tombstoned = bool(tomb is not None and tomb[0] and tomb[1] != "user")
+                    changed = set(group_ids) != current or auto_tombstoned
                 if changed:
                     _write_consolidated(conn, user_id, cons_id, fields)
                     stats.consolidated += 1
@@ -580,6 +623,7 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
             stats.echoes += 1
 
         _set_outcomes(conn, outcomes)
+        stats.orphans = _tombstone_orphans(conn, user_id)
         stats.conflicts = _detect_conflicts(conn, user_id)
 
     _log.info(
@@ -589,6 +633,7 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
         consolidated=stats.consolidated,
         merges=stats.merges,
         echoes=stats.echoes,
+        orphans=stats.orphans,
         conflicts=stats.conflicts,
     )
     # Geocoding del lugar → coords (automático si MEMEX_CALENDAR_GEOCODE=1; best-effort, fuera de la

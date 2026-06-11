@@ -81,8 +81,10 @@ def _seed_consolidated(
                 text(
                     """
                     INSERT INTO mod_calendar_consolidated
-                      (user_id, title, starts_on, start_time, location, winner_event_id, deleted)
-                    VALUES (:uid, :title, :starts_on, :start_time, :location, :winner, :deleted)
+                      (user_id, title, starts_on, start_time, location, winner_event_id, deleted,
+                       deleted_source)
+                    VALUES (:uid, :title, :starts_on, :start_time, :location, :winner, :deleted,
+                            CASE WHEN :deleted THEN 'user' END)
                     RETURNING id
                     """
                 ),

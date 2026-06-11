@@ -204,7 +204,11 @@ async def test_push_deletes_tombstoned_consolidated() -> None:
 
     with connection() as c:
         c.execute(
-            text("UPDATE mod_calendar_consolidated SET deleted = TRUE WHERE id = :id"), {"id": cons}
+            text(
+                "UPDATE mod_calendar_consolidated SET deleted = TRUE, deleted_source = 'user' "
+                "WHERE id = :id"
+            ),
+            {"id": cons},
         )
     stats = await run_push(1, aid, client=fake)
 
