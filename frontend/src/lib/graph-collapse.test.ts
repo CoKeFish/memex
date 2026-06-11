@@ -19,6 +19,7 @@ function edge(id: number, a: GraphNode, b: GraphNode, over: Partial<GraphEdge> =
     status: "pista",
     confidence: null,
     evidence: "",
+    sourceInboxIds: [],
     ...over,
   }
 }

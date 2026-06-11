@@ -142,6 +142,18 @@ def test_build_y_lectura(client: Any) -> None:
     assert e["relation_type"] == "co-ocurrencia"
 
 
+def test_edges_traen_source_inbox_ids(client: Any) -> None:
+    """Cada arista de co-ocurrencia lleva TODOS los mensajes que la generaron (procedencia
+    acumulada en `relation_edge_sources`), no solo el primero del `evidence` — el drill-down de
+    aristas, espejo del de nodos."""
+    _finance("Steam", [5, 7])
+    _hack("HackSteam", [5, 7])
+    client.post("/graph/build")
+    body = client.get("/graph").json()
+    assert len(body["edges"]) == 1
+    assert body["edges"][0]["source_inbox_ids"] == [5, 7]
+
+
 def test_build_idempotente(client: Any) -> None:
     _finance("Rappi", [5])
     _hack("Hack", [5])

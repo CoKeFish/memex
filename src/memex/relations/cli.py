@@ -5,12 +5,13 @@ Subcomandos:
   cluster   — detecta los cúmulos (Louvain) y los reconcilia contra lo persistido (sin LLM).
   validate  — valida con el LLM los cúmulos pendientes (confirma/nombra/describe/poda).
   cycle     — build → cluster → validate, de corrido.
+  resolve   — veredicto PAR-POR-PAR del long-tail de pistas (prefiltro determinista + LLM gris).
   list      — lista los cúmulos del user (opcional `--status`).
   help      — resumen de los comandos.
 
-Todo on-demand; el job `graph` del scheduler NO se enciende por esto. `validate`/`cycle` usan el LLM
-(DEEPSEEK_API_KEY vía doppler). Server-side: habla con la DB vía `connection()` (igual que
-`memex-identidades`). Exit 0 si OK; 1 si error fatal.
+Todo on-demand; los jobs del scheduler NO se encienden por esto. `validate`/`cycle`/`resolve` usan
+el LLM (DEEPSEEK_API_KEY vía doppler; `resolve --dry-run/--no-llm` no). Server-side: habla con la
+DB vía `connection()` (igual que `memex-identidades`). Exit 0 si OK; 1 si error fatal.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ _HELP = """memex-graph — grafo de relaciones (armado determinista + cúmulos).
   cluster             detecta cúmulos (Louvain) y reconcilia contra lo persistido (sin LLM)
   validate            valida con el LLM los cúmulos pendientes (confirma/nombra/poda)
   cycle               build → cluster → validate, de corrido
+  resolve             veredicto par-por-par del long-tail de pistas (recibo/bulk + LLM gris)
   list [--status S]   lista los cúmulos del user
   help                muestra esta ayuda
 
@@ -83,6 +85,41 @@ def _build_parser() -> argparse.ArgumentParser:
         "(default: settings.cooccurrence_cap).",
     )
 
+    rs = sub.add_parser("resolve", help="Veredicto par-por-par del long-tail de pistas.")
+    rs.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    rs.add_argument(
+        "--cluster", type=int, default=None, help="Solo las pistas internas a este cúmulo."
+    )
+    rs.add_argument(
+        "--vertex",
+        default=None,
+        help="Solo la componente de pistas que contiene a este vértice (slug:id).",
+    )
+    rs.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Máximo de grupos (componentes) por corrida en modo auto "
+        "(default: settings.resolve_group_limit).",
+    )
+    rs.add_argument(
+        "--max-llm-calls",
+        type=int,
+        default=None,
+        help="Presupuesto de llamadas LLM (1 llamada = 1 mensaje; "
+        "default: settings.resolve_max_llm_calls).",
+    )
+    rs.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Clasifica sin escribir NADA y estima las llamadas LLM.",
+    )
+    rs.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Aplica solo el prefiltro determinista; la zona gris queda pendiente.",
+    )
+
     li = sub.add_parser("list", help="Lista los cúmulos del user.")
     li.add_argument("--user", type=int, default=1, help="User id (default 1).")
     li.add_argument(
@@ -112,7 +149,8 @@ def _cmd_build(args: argparse.Namespace) -> int:
         f"mismo_evento={stats.same_event_reales} cumple={stats.cumple_reales} "
         f"participa={stats.participa_reales} canales={stats.canales} "
         f"remitentes_chat={stats.chat_senders} "
-        f"saltados={stats.high_fanout_skipped} huerfanas_podadas={stats.orphans_pruned}\n"
+        f"saltados={stats.high_fanout_skipped} huerfanas_podadas={stats.orphans_pruned} "
+        f"redundantes_confirmadas={stats.redundant_resolved}\n"
     )
     return 0
 
@@ -151,6 +189,47 @@ def _cmd_cycle(args: argparse.Namespace) -> int:
         f"promovidas={v.promoted} ruido={v.rejected} errores={v.errors}\n"
     )
     return 1 if v.errors else 0
+
+
+def _cmd_resolve(args: argparse.Namespace) -> int:
+    from memex.relations.resolve import _parse_vertex, run_resolve
+
+    vertex = _parse_vertex(args.vertex) if args.vertex else None
+    stats = asyncio.run(
+        run_resolve(
+            args.user,
+            cluster_id=args.cluster,
+            vertex=vertex,
+            limit=args.limit,
+            max_llm_calls=args.max_llm_calls,
+            dry_run=args.dry_run,
+            no_llm=args.no_llm,
+        )
+    )
+    mode = " (dry-run: proyección, nada se escribió)" if args.dry_run else ""
+    _say(
+        f"\ngraph resolve{mode}: grupos={stats.groups} pares={stats.pairs} "
+        f"saltados_memo={stats.skipped_dejar} | regla: recibo={stats.confirmed_recibo} "
+        f"bulk={stats.rejected_bulk} sin_evidencia={stats.sin_evidencia} | "
+        f"gris: pares={stats.gray_pairs} mensajes={stats.gray_messages} "
+        + (
+            f"llamadas_estimadas={stats.estimated_calls}"
+            if args.dry_run
+            else f"confirmadas={stats.llm_confirmed} rechazadas={stats.llm_rejected} "
+            f"dejar={stats.llm_dejar} sin_cita={stats.ungrounded} "
+            f"presupuesto_agotado={stats.budget_exhausted} "
+            f"llm_calls={stats.cost.calls} costo_usd={stats.cost.cost_usd}"
+        )
+        + f" | errores={stats.errors}\n"
+    )
+    if stats.stale_recibo_conflicts:
+        _say(
+            f"AVISO: {stats.stale_recibo_conflicts} pista(s) RECHAZADAS ganaron evidencia de "
+            "RECIBO después del veredicto (ver logs relation.resolve.stale_recibo_conflict); "
+            "la monotonía no las reabre — revisalas a mano.",
+            err=True,
+        )
+    return 1 if stats.errors else 0
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
@@ -198,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_validate(args)
         if args.cmd == "cycle":
             return _cmd_cycle(args)
+        if args.cmd == "resolve":
+            return _cmd_resolve(args)
         if args.cmd == "list":
             return _cmd_list(args)
         log.error("graph.cli.unknown_command", cmd=args.cmd)

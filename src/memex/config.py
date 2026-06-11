@@ -63,6 +63,21 @@ class Settings(BaseSettings):
     # (los chats del usuario son contextos concretos; el partidor maneja el off-topic).
     cluster_exclude_canal: bool = False
 
+    # --- Resolver par-por-par del long-tail de co-ocurrencias (relations/resolve) ---
+    # Veredicto por ARISTA con grounding en el mensaje de origen, para las pistas que el partidor
+    # de cúmulos nunca decide (barrios chicos o rechazados). Determinista primero (recibo de
+    # finanzas → confirm), LLM solo en la zona gris (una llamada POR MENSAJE amortiza todos sus
+    # pares), presupuesto explícito. On-demand (CLI) + job apagado por default.
+    resolve_group_limit: int = 50  # componentes (grupos) por corrida en modo auto
+    resolve_max_llm_calls: int = 20  # presupuesto de llamadas por corrida (1 llamada = 1 mensaje)
+    resolve_min_confidence: float = 0.7  # confirm/reject del LLM exigen confianza >= esto
+    resolve_max_pairs_per_call: int = 40  # tope defensivo de pares serializados por llamada
+    resolve_render_max_chars: int = 6000  # truncado del mensaje renderizado (prompt y grounding)
+    # Las señales de correo masivo (list_unsubscribe/precedence/...) son PRIOR y contexto, no
+    # veredicto (un recibo legítimo puede traerlas): por default la zona bulk va al LLM igual.
+    # On: un par cuya evidencia es TODA bulk se rechaza determinista (rule='bulk'), costo cero.
+    resolve_reject_bulk: bool = False
+
     # --- Sistema de calidad: detección automática de remitentes no relevantes ("por métricas") ---
     # El job `relevance` (apagado por default) marca como CANDIDATO a un remitente email con volumen
     # >= quality_min_messages y % de relevancia <= quality_max_relevance_pct. Sin auto-aplicar: la

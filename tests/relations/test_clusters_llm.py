@@ -21,6 +21,7 @@ from memex.llm.client import LLMQuotaError
 from memex.relations.cluster_store import create_child, insert_candidate
 from memex.relations.clustering import CandidateCluster, cluster_signature
 from memex.relations.clusters_llm import parse_partition, run_cluster_partition
+from memex.relations.decisions import latest_decisions
 from memex.relations.edges import (
     PRODUCER_IDENTIDADES,
     PRODUCER_INBOX,
@@ -205,6 +206,14 @@ async def test_particion_crea_hijo_y_promueve_pistas() -> None:
     assert len(rows) == 1 and rows[0]["name"] == "Ctx" and rows[0]["member_count"] == 3
     edges = _edges_by_id()
     assert edges[e01].status == "confirmed" and edges[e12].status == "confirmed"
+    # HISTORIAL: la promoción NO pisa la procedencia original y deja decisión del partidor
+    assert edges[e01].evidence == "inbox:99"
+    with connection() as c:
+        decs = latest_decisions(c, 1, [e01, e12])
+    cid = rows[0]["id"]
+    for eid in (e01, e12):
+        assert decs[eid].verdict == "confirm" and decs[eid].method == "partidor"
+        assert decs[eid].rule == f"cluster:{cid}"
 
 
 @pytest.mark.asyncio
@@ -331,7 +340,9 @@ async def test_rejected_edges_rechaza_la_pista_y_promueve_el_resto() -> None:
         decided = c.execute(
             text("SELECT decided_at FROM relation_edges WHERE id = :e"), {"e": e01}
         ).scalar_one()
+        decs = latest_decisions(c, 1, [e01])
     assert decided is not None  # veredicto terminal estampado en la arista misma
+    assert decs[e01].verdict == "reject" and decs[e01].method == "partidor"
 
 
 @pytest.mark.asyncio

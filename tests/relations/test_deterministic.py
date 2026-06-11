@@ -1,6 +1,6 @@
 """Paso de relaciones deterministas (Fase 2): pistas de co-ocurrencia (mismo correo, directo y
-transitivo) + afiliación real persona↔org; idempotencia; tope de fan-out; supresión/poda de
-pistas redundantes con una confirmada del mismo par.
+transitivo) + afiliación real persona↔org; idempotencia; tope de fan-out; supresión de pares ya
+vouchados + confirmación (con historial) de pistas redundantes; procedencia acumulada por pista.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import text
 
 from memex.db import connection
+from memex.relations.decisions import edge_sources, latest_decisions
 from memex.relations.deterministic import build_relations
 from memex.relations.edges import list_edges, resolve_edge
 from memex.relations.vertices import list_vertices
@@ -473,16 +474,17 @@ def test_cooccurrence_suprimida_por_confirmada_del_par() -> None:
         pistas = list_edges(c, 1, producer="inbox")
     assert stats.contraparte_reales == 1
     assert stats.cooccurrence_pistas == 2
-    assert stats.redundant_pruned == 0
+    assert stats.redundant_resolved == 0
     pares = [_pair(e) for e in pistas]
     assert {("finance", fin), ("identidades:org", org)} not in pares
     assert {("finance", fin), ("hackathones", hack)} in pares
     assert {("identidades:org", org), ("hackathones", hack)} in pares
 
 
-def test_poda_pista_redundante_preexistente() -> None:
+def test_pista_redundante_preexistente_se_confirma() -> None:
     # primer build: tx sin identidad → pista tx↔org normal; luego la contraparte se resuelve →
-    # el segundo build confirma la real Y poda la pista redundante del par; el tercero es no-op.
+    # el segundo build confirma la real Y CONFIRMA la pista redundante del par (historial, no
+    # DELETE) con decisión regla/'redundante' y evidencia original intacta; el tercero es no-op.
     org = _org("Uber")
     fin = _finance("Uber", [16])
     _mention(org, [16], kind="organizacion")
@@ -498,16 +500,22 @@ def test_poda_pista_redundante_preexistente() -> None:
         stats2 = build_relations(c, 1)
         edges = list_edges(c, 1)
     assert stats2.contraparte_reales == 1
-    assert stats2.redundant_pruned == 1
-    assert len(edges) == 1  # queda SOLO la contraparte confirmada
-    assert edges[0].relation_type == "contraparte"
-    assert edges[0].status == "confirmed"
+    assert stats2.redundant_resolved == 1
+    assert len(edges) == 2  # la contraparte confirmada Y la pista (ahora confirmada)
+    by_type = {e.relation_type: e for e in edges}
+    assert by_type["contraparte"].status == "confirmed"
+    cooc = by_type["co-ocurrencia"]
+    assert cooc.status == "confirmed"
+    assert cooc.evidence == "inbox:16"  # la procedencia original NO se pisa
+    with connection() as c:
+        dec = latest_decisions(c, 1, [cooc.id])[cooc.id]
+    assert dec.verdict == "confirm" and dec.method == "regla" and dec.rule == "redundante"
     with connection() as c:
         stats3 = build_relations(c, 1)
         n = len(list_edges(c, 1))
-    assert stats3.redundant_pruned == 0
+    assert stats3.redundant_resolved == 0
     assert stats3.cooccurrence_pistas == 0
-    assert n == 1
+    assert n == 2
 
 
 def test_orientacion_inversa_tambien_suprime() -> None:
@@ -523,14 +531,14 @@ def test_orientacion_inversa_tambien_suprime() -> None:
         stats = build_relations(c, 1)
         edges = list_edges(c, 1)
     assert stats.cooccurrence_pistas == 0
-    assert stats.redundant_pruned == 0
+    assert stats.redundant_resolved == 0
     assert len(edges) == 1
     assert edges[0].relation_type == "afiliado"
 
 
-def test_cooc_promovida_a_confirmed_no_se_poda() -> None:
-    # una pista promovida a confirmed (cascada del partidor) NO se poda (el filtro status=pista
-    # la excluye) y su par tampoco se re-emite (ya está vouchado).
+def test_cooc_promovida_a_confirmed_no_se_toca() -> None:
+    # una pista promovida a confirmed (cascada del partidor) NO se re-resuelve (el filtro
+    # status=pista la excluye) y su par tampoco se re-emite (ya está vouchado).
     _finance("Rappi", [18])
     _hack("HackX", [18])
     with connection() as c:
@@ -540,7 +548,7 @@ def test_cooc_promovida_a_confirmed_no_se_poda() -> None:
     with connection() as c:
         stats = build_relations(c, 1)
         edges = list_edges(c, 1)
-    assert stats.redundant_pruned == 0
+    assert stats.redundant_resolved == 0
     assert stats.cooccurrence_pistas == 0
     assert len(edges) == 1
     assert edges[0].status == "confirmed"
@@ -582,3 +590,60 @@ def test_build_poda_huerfana_por_fila_borrada() -> None:
         edges = list_edges(c, 1)
     assert stats.orphans_pruned == 1
     assert edges == []
+
+
+def test_sources_acumuladas_en_multiples_mensajes() -> None:
+    # el MISMO par co-ocurre en dos mensajes: una sola arista (idempotente), `evidence` conserva
+    # el primero, pero la PROCEDENCIA acumula AMBOS inbox ids en relation_edge_sources.
+    _finance("Steam", [21, 22])
+    _hack("HackSteam", [21, 22])
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="inbox")
+    assert stats.cooccurrence_pistas == 1
+    assert len(edges) == 1
+    assert edges[0].evidence in {"inbox:21", "inbox:22"}
+    with connection() as c:
+        srcs = edge_sources(c, [edges[0].id])
+    assert srcs == {edges[0].id: {21, 22}}
+    # re-build: no duplica ni la arista ni la procedencia
+    with connection() as c:
+        build_relations(c, 1)
+        srcs2 = edge_sources(c, [edges[0].id])
+    assert srcs2 == {edges[0].id: {21, 22}}
+
+
+def test_sources_siguen_creciendo_sobre_terminal() -> None:
+    # la pista se resuelve (terminal) y DESPUÉS el par co-ocurre en un mensaje nuevo: no nace
+    # arista nueva (terminal + confirmed_pairs) pero el inbox nuevo SÍ queda ligado (requisito:
+    # todos los mensajes que generaron la pista quedan indicados).
+    fin = _finance("Steam", [23])
+    hack = _hack("HackCeleste", [23])
+    with connection() as c:
+        build_relations(c, 1)
+        eid = list_edges(c, 1, producer="inbox")[0].id
+        resolve_edge(c, eid, status="confirmed")
+    # el mismo par aparece en el mensaje 24 (nuevo crudo del consolidado + el hack lo referencia)
+    _exec(
+        "INSERT INTO mod_finance_transactions "
+        "(user_id, source_inbox_ids, direction, amount, currency, occurred_at, counterparty) "
+        "VALUES (1, ARRAY[24]::bigint[], 'egreso', 50, 'COP', NOW(), 'Steam')"
+    )
+    _exec(
+        "INSERT INTO mod_finance_transaction_links (user_id, transaction_id, consolidated_id) "
+        "SELECT 1, t.id, :c FROM mod_finance_transactions t "
+        "WHERE t.user_id = 1 AND t.source_inbox_ids = ARRAY[24]::bigint[]",
+        c=fin,
+    )
+    _exec(
+        "UPDATE mod_hackathones_events SET source_inbox_ids = ARRAY[23, 24]::bigint[] "
+        "WHERE id = :h",
+        h=hack,
+    )
+    with connection() as c:
+        stats = build_relations(c, 1)
+        edges = list_edges(c, 1, producer="inbox")
+        srcs = edge_sources(c, [eid])
+    assert stats.cooccurrence_pistas == 0  # par ya vouchado: no se re-emite ni cuenta
+    assert len(edges) == 1 and edges[0].status == "confirmed"
+    assert srcs == {eid: {23, 24}}

@@ -97,6 +97,7 @@ export function collapseClusters(
         status: v.confirmed ? "confirmed" : "pista",
         confidence: null,
         evidence: "",
+        sourceInboxIds: [],
         aggregateCount: v.count,
       }
     })

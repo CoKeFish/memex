@@ -17,6 +17,7 @@ from memex.config import settings
 from memex.db import connection
 from memex.logging import get_logger
 from memex.relations.clusters_llm import run_cluster_partition
+from memex.relations.decisions import edge_sources
 from memex.relations.deterministic import build_relations, vertex_inbox_ids
 from memex.relations.edges import list_edges
 from memex.relations.reconcile import detect_and_reconcile
@@ -92,11 +93,16 @@ async def get_graph(
         # una arista a un nodo ausente (consolidado tombstoneado / fila borrada / merge sin GC aún).
         present = {v.ref for v in verts}
         edges = [e for e in edges if e.src in present and e.dst in present]
-        # El medio de cada mensaje referenciado por el set FINAL de vértices (por eso se calcula acá
-        # adentro, después del foco/poda).
+        # Procedencia por ARISTA (relation_edge_sources): todos los mensajes que generaron cada
+        # pista de co-ocurrencia — el drill-down de aristas, espejo del de nodos.
+        edge_srcs = edge_sources(conn, [e.id for e in edges])
+        # El medio de cada mensaje referenciado por el set FINAL de vértices Y aristas (por eso se
+        # calcula acá adentro, después del foco/poda).
         referenced: set[int] = set()
         for v in verts:
             referenced |= prov.get(v.ref, set())
+        for ids in edge_srcs.values():
+            referenced |= ids
         inbox_kinds = _inbox_kinds(conn, user_id, referenced)
     nodes = [
         {
@@ -120,6 +126,7 @@ async def get_graph(
             "status": e.status,
             "confidence": float(e.confidence) if e.confidence is not None else None,
             "evidence": e.evidence,
+            "source_inbox_ids": sorted(edge_srcs.get(e.id, set())),
         }
         for e in edges
     ]

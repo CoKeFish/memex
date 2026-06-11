@@ -174,3 +174,19 @@ def test_signature_independiente_del_orden() -> None:
     a = cluster_signature([Ref("finance", 2), Ref("identidades:person", 1)])
     b = cluster_signature([Ref("identidades:person", 1), Ref("finance", 2)])
     assert a == b
+
+
+def test_cooc_no_pesa_en_par_con_real_confirmada(conn: Connection) -> None:
+    # par (a,b): afiliado confirmado (1.0) + cooc (pista 0.3 Y confirmada-llm 0.6) → la cooc se
+    # SALTA (la conectividad la da la real; las redundantes ahora se confirman en vez de borrarse)
+    # y el peso queda 1.0. El par (b,c) solo-cooc conserva su peso de pista.
+    a, b, c = _person(conn, "A"), _person(conn, "B"), _person(conn, "C")
+    _edge(conn, a, b)  # real confirmada (afiliado, 1.0)
+    _edge(conn, a, b, status=STATUS_PISTA, rt=RELTYPE_COOCURRENCIA, producer=PRODUCER_INBOX)
+    _edge(conn, a, b, status=STATUS_CONFIRMED, rt=RELTYPE_COOCURRENCIA, producer=PRODUCER_LLM)
+    _edge(conn, b, c, status=STATUS_PISTA, rt=RELTYPE_COOCURRENCIA, producer=PRODUCER_INBOX)
+    g = build_cluster_graph(conn, 1)
+    ka, kb, kc = (a.slug, a.id), (b.slug, b.id), (c.slug, c.id)
+    assert g.edges[ka, kb]["weight"] == 1.0  # sin la cooc (sería 1.9)
+    assert g.edges[ka, kb]["real"] is True
+    assert g.edges[kb, kc]["weight"] == settings.cluster_w_pista  # solo-cooc: intacto

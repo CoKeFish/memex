@@ -18,6 +18,7 @@ function edge(id: number, a: GraphNode, b: GraphNode): GraphEdge {
     status: "pista",
     confidence: null,
     evidence: "",
+    sourceInboxIds: [],
   }
 }
 

@@ -24,6 +24,9 @@ export interface GraphEdge {
   status: string
   confidence: number | null
   evidence: string
+  /** TODOS los mensajes que generaron la pista de co-ocurrencia (no solo el primero del
+   * `evidence`); vacío para aristas de otros productores. Mismo drill-down que los nodos. */
+  sourceInboxIds: number[]
 }
 
 export interface GraphData {
@@ -80,6 +83,7 @@ interface EdgeApiRow {
   status: string
   confidence: number | null
   evidence: string
+  source_inbox_ids?: number[]
 }
 
 interface NodeApiRow {
@@ -112,6 +116,7 @@ function toEdge(e: EdgeApiRow): GraphEdge {
     status: e.status,
     confidence: e.confidence,
     evidence: e.evidence,
+    sourceInboxIds: e.source_inbox_ids ?? [],
   }
 }
 

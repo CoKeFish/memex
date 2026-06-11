@@ -37,6 +37,7 @@ from memex.quality.candidates import run_relevance_detection
 from memex.relations.clusters_llm import run_cluster_partition
 from memex.relations.deterministic import build_relations
 from memex.relations.reconcile import detect_and_reconcile
+from memex.relations.resolve import ResolveStats, run_resolve
 from memex.summarizer.worker import run_summarization
 
 _log = get_logger("memex.scheduler.jobs")
@@ -406,6 +407,18 @@ async def run_graph_cycle(user_id: int) -> GraphCycleStats:
     return cycle
 
 
+async def run_graph_resolve(user_id: int) -> ResolveStats:
+    """Resolver PAR-POR-PAR del long-tail de pistas (modo auto: componentes chicas primero, con
+    los presupuestos de settings). `LLMQuotaError` se captura acá: los veredictos ya pagados se
+    aplicaron adentro ANTES de propagar; el resto de la zona gris queda pendiente para la próxima
+    corrida. Arranca APAGADO (no está en `enabled_jobs`)."""
+    try:
+        return await run_resolve(user_id)
+    except LLMQuotaError:
+        _log.error("scheduler.graph_resolve.aborted_no_quota")
+        return ResolveStats(errors=1)
+
+
 # Registry de jobs. NOTA OCR: su claim de `media_assets` NO usa FOR UPDATE SKIP LOCKED → es seguro
 # solo porque el scheduler corre los jobs EN SERIE. Si algún día se corren en paralelo, agregar
 # SKIP LOCKED al worker de OCR antes de habilitar esa concurrencia.
@@ -419,6 +432,7 @@ _REGISTRY: dict[str, Job] = {
     "identidades": Job("identidades", "PT1H", run_identidades_cycle),
     "relevance": Job("relevance", "P1D", _sync(run_relevance_detection)),
     "graph": Job("graph", "P1D", run_graph_cycle),
+    "graph_resolve": Job("graph_resolve", "P1D", run_graph_resolve),
     "log_purge": Job("log_purge", "P1D", _sync(run_log_purge)),
 }
 

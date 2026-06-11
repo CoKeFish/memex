@@ -38,6 +38,7 @@ class SchedulerSettings(BaseSettings):
     interval_graph: str = (
         "P1D"  # cúmulos: build + detección/reconciliación + validación LLM, diario
     )
+    interval_graph_resolve: str = "P1D"  # long-tail de pistas par-por-par (prefiltro + LLM gris)
     interval_log_purge: str = "P1D"  # retención de log_events, diario
 
     def interval_for(self, job_name: str) -> str | None:

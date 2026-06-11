@@ -332,6 +332,26 @@ function DetailPanel({
                     </span>
                   </div>
                   <div className="mt-0.5 truncate font-medium">{other?.label ?? otherKey}</div>
+                  {/* procedencia de la ARISTA: TODOS los mensajes que la generaron (no solo el
+                      primero del evidence) — mismo drill-down que «Mensajes de origen» del nodo */}
+                  {e.sourceInboxIds.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {e.sourceInboxIds.slice(0, 6).map((iid) => (
+                        <Link
+                          key={iid}
+                          to={`/datos/${iid}`}
+                          className="rounded border bg-muted/30 px-1.5 py-0.5 text-[11px] text-origin-inbox hover:underline"
+                        >
+                          {inboxRefLabel(iid, inboxKinds)}
+                        </Link>
+                      ))}
+                      {e.sourceInboxIds.length > 6 && (
+                        <span className="px-1 py-0.5 text-[11px] text-muted-foreground">
+                          +{e.sourceInboxIds.length - 6} más
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </li>
               )
             })}

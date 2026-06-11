@@ -2117,8 +2117,9 @@ class GraphNode(BaseModel):
 
 class GraphEdge(BaseModel):
     """Una arista del grafo: referencia `src`→`dst` con su productor y nivel. `confidence` cruza
-    como `float` (la DB es NUMERIC) por convención del repo; hoy SIEMPRE NULL (ningún productor la
-    setea — la poblaría el decisor LLM de Fase 4)."""
+    como `float` (la DB es NUMERIC); la estampan los decisores LLM (partidor de cúmulos y resolver
+    par-por-par). `source_inbox_ids`: TODOS los mensajes que generaron la pista de co-ocurrencia
+    (`relation_edge_sources`, no solo el primero del `evidence`); vacío para otros productores."""
 
     id: int
     src_slug: str
@@ -2130,6 +2131,7 @@ class GraphEdge(BaseModel):
     status: str
     confidence: float | None
     evidence: str
+    source_inbox_ids: list[int] = []
 
 
 class GraphResponse(BaseModel):

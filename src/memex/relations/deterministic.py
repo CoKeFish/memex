@@ -7,8 +7,11 @@ Produce las clases de arista (ver `memex.relations.edges`):
   Señal barata de "quizás se relacionan" — NO asegura relación (el LLM la valida después). Se acota
   el fan-out: un mensaje con demasiados vértices (digest) se SALTA y se loguea. Un par que YA tiene
   arista confirmada (cualquier producer/relation_type/orientación) se suprime — y la pista
-  redundante pre-existente se poda — porque no aporta sobre la relación vouchada y, promovida,
-  doble-contaría el peso del par en la clusterización.
+  redundante pre-existente se CONFIRMA con decisión `regla/'redundante'` (historial, no DELETE) —
+  porque no aporta sobre la relación vouchada; el grafo de clusterización salta la co-ocurrencia
+  de esos pares para no doble-contar el peso. La PROCEDENCIA de cada pista se acumula en
+  `relation_edge_sources` (TODOS los mensajes donde el par co-ocurrió, no solo el primero del
+  `evidence`), incluso cuando la arista ya es terminal.
 - REALES de afiliación/pertenencia (`producer='identidades'`, `status='confirmed'`): persona↔org y
   sub→padre que el directorio enlaza explícitamente (dato, no adivinanza).
 - REALES de contraparte (`producer='finance'`, `status='confirmed'`): cobro/pago CONSOLIDADO →
@@ -37,6 +40,14 @@ from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
 from memex.relations.canales import sync_canales
+from memex.relations.decisions import (
+    METHOD_REGLA,
+    VERDICT_CONFIRM,
+    add_edge_sources,
+    edge_sources,
+    evidence_signature,
+    record_decision,
+)
 from memex.relations.edges import (
     CANAL_SLUG,
     PRODUCER_BIENESTAR,
@@ -52,6 +63,7 @@ from memex.relations.edges import (
     Ref,
     list_edges,
     propose_edge,
+    resolve_edge,
 )
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND, list_vertices
 
@@ -83,7 +95,7 @@ class RelationStats:
     same_event_reales: int = 0
     cumple_reales: int = 0
     orphans_pruned: int = 0
-    redundant_pruned: int = 0  # pistas cooc podadas: ya hay confirmada entre los mismos vértices
+    redundant_resolved: int = 0  # pistas cooc confirmadas por regla: ya hay real del mismo par
     stale_pruned: int = 0  # reales reconciliadas: su enlace de origen ya no existe en el directorio
     cluster_edges: int = 0  # aristas miembro_de vivas tras materializar los cúmulos confirmados
     chat_senders: int = 0  # identidades creadas para remitentes de chat desconocidos
@@ -221,17 +233,29 @@ def _materialize_cooccurrence(
     aporta sobre una relación vouchada y, promovida por la cascada, doble-contaría el peso del par
     en la clusterización. El CANAL no cuenta para el cap (es estructural y fijo en todo mensaje de
     chat; contarlo acercaría injustamente los chats al tope — el remitente SÍ cuenta, es contenido
-    real); los pares de un mensaje no saltado se emiten canal incluido. DIFERIDO: un mensaje
-    saltado pierde también sus pares cross-type — el relevo LLM (`relations_llm`) solo cubre
-    identidad↔identidad; un relevo mixto queda pendiente. Devuelve (pistas, saltados)."""
+    real); los pares de un mensaje no saltado se emiten canal incluido. PROCEDENCIA: cada
+    par-mensaje se acumula en `relation_edge_sources` (también para aristas ya terminales — el
+    `evidence='inbox:N'` conserva solo el primero por idempotencia, esta tabla los conserva
+    TODOS). DIFERIDO: un mensaje saltado pierde también sus pares cross-type — el relevo LLM
+    (`relations_llm`) solo cubre identidad↔identidad; un relevo mixto queda pendiente. Devuelve
+    (pistas, saltados)."""
     by_msg: dict[int, set[Ref]] = defaultdict(set)
     for ref, ids in prov.items():
         for mid in ids:
             by_msg[mid].add(ref)
 
+    # Aristas cooc ya materializadas (cualquier status): la procedencia sigue creciendo sobre
+    # ellas sin re-proponer. El par canónico (slug, id) coincide con cómo se crearon.
+    existing: dict[tuple[Ref, Ref], int] = {
+        (e.src, e.dst): e.id
+        for e in list_edges(conn, user_id, producer=PRODUCER_INBOX)
+        if e.relation_type == RELTYPE_COOCURRENCIA
+    }
+
     pistas = 0
     skipped = 0
-    seen: set[tuple[Ref, Ref]] = set()
+    counted: set[tuple[Ref, Ref]] = set()
+    sources_by_edge: dict[int, set[int]] = defaultdict(set)
     for mid, refs in by_msg.items():
         uniq = sorted(refs, key=lambda r: (r.slug, r.id))
         if len(uniq) < 2:
@@ -244,21 +268,30 @@ def _materialize_cooccurrence(
         for i in range(len(uniq)):
             for j in range(i + 1, len(uniq)):
                 pair = (uniq[i], uniq[j])
-                if pair in seen:
-                    continue
-                seen.add(pair)
+                eid = existing.get(pair)
                 if frozenset(pair) in confirmed_pairs:
+                    # Par ya vouchado: no se propone ni cuenta; si la cooc quedó materializada
+                    # (confirmada por redundancia/partidor, o aún pista) su procedencia crece.
+                    if eid is not None:
+                        sources_by_edge[eid].add(mid)
                     continue
-                propose_edge(
-                    conn,
-                    user_id,
-                    uniq[i],
-                    uniq[j],
-                    producer=PRODUCER_INBOX,
-                    relation_type=RELTYPE_COOCURRENCIA,
-                    evidence=f"inbox:{mid}",
-                )
-                pistas += 1
+                if eid is None:
+                    eid = propose_edge(
+                        conn,
+                        user_id,
+                        uniq[i],
+                        uniq[j],
+                        producer=PRODUCER_INBOX,
+                        relation_type=RELTYPE_COOCURRENCIA,
+                        evidence=f"inbox:{mid}",
+                    )
+                    existing[pair] = eid
+                if pair not in counted:
+                    counted.add(pair)
+                    pistas += 1
+                sources_by_edge[eid].add(mid)
+    for eid, mids in sources_by_edge.items():
+        add_edge_sources(conn, eid, mids)
     return pistas, skipped
 
 
@@ -571,24 +604,38 @@ def _materialize_participa_en(conn: Connection, user_id: int) -> int:
     return n
 
 
-def _prune_redundant_cooccurrence(
+def _resolve_redundant_cooccurrence(
     conn: Connection, user_id: int, confirmed_pairs: set[frozenset[Ref]]
 ) -> int:
-    """Borra las pistas de co-ocurrencia que quedaron REDUNDANTES: ya existe una arista confirmada
-    entre los mismos dos vértices (cualquier producer/relation_type/orientación). Mismo
-    triple-filtro (pista + inbox + co-ocurrencia) que la cascada del partidor: las ya promovidas a
-    `confirmed` NO se tocan. Devuelve cuántas borró."""
+    """CONFIRMA (sin borrar: historial) las pistas de co-ocurrencia que quedaron REDUNDANTES: ya
+    existe una arista confirmada entre los mismos dos vértices (cualquier producer/relation_type/
+    orientación) — el dato real vouchó la relación y la pista hereda el veredicto, con decisión
+    `regla/'redundante'` y su procedencia intacta. El peso del par no se doble-cuenta: el grafo de
+    clusterización salta la co-ocurrencia de pares con real confirmada (`build_cluster_graph`).
+    Mismo triple-filtro (pista + inbox + co-ocurrencia) que la cascada del partidor: las ya
+    terminales NO se tocan. Devuelve cuántas confirmó."""
     redundant = [
         e.id
         for e in list_edges(conn, user_id, status=STATUS_PISTA, producer=PRODUCER_INBOX)
         if e.relation_type == RELTYPE_COOCURRENCIA and frozenset((e.src, e.dst)) in confirmed_pairs
     ]
-    if redundant:
-        conn.execute(
-            text("DELETE FROM relation_edges WHERE user_id = :u AND id = ANY(:ids)"),
-            {"u": user_id, "ids": redundant},
-        )
-    return len(redundant)
+    if not redundant:
+        return 0
+    sources = edge_sources(conn, redundant)
+    n = 0
+    for eid in redundant:
+        if resolve_edge(conn, eid, status=STATUS_CONFIRMED):
+            record_decision(
+                conn,
+                user_id,
+                eid,
+                verdict=VERDICT_CONFIRM,
+                method=METHOD_REGLA,
+                rule="redundante",
+                evidence_sig=evidence_signature(sources.get(eid, set())),
+            )
+            n += 1
+    return n
 
 
 def prune_orphan_edges(conn: Connection, user_id: int) -> int:
@@ -657,7 +704,7 @@ def build_relations(
     pistas, skipped = _materialize_cooccurrence(
         conn, user_id, prov, cooccurrence_cap, confirmed_pairs
     )
-    redundant = _prune_redundant_cooccurrence(conn, user_id, confirmed_pairs)
+    redundant = _resolve_redundant_cooccurrence(conn, user_id, confirmed_pairs)
     # Re-deriva las aristas `miembro_de` de los cúmulos confirmados (idempotente + GC de podados o
     # movidos) ANTES del prune. Import local: no acopla networkx al import de este módulo.
     from memex.relations.cluster_store import materialize_cluster_edges
@@ -675,7 +722,7 @@ def build_relations(
         same_event_reales=same_event,
         cumple_reales=cumple,
         orphans_pruned=pruned,
-        redundant_pruned=redundant,
+        redundant_resolved=redundant,
         stale_pruned=stale,
         cluster_edges=cluster_edges,
         chat_senders=chat_senders,
@@ -694,7 +741,7 @@ def build_relations(
         participa_reales=participa,
         high_fanout_skipped=skipped,
         orphans_pruned=pruned,
-        redundant_pruned=redundant,
+        redundant_resolved=redundant,
         stale_pruned=stale,
         cluster_edges=cluster_edges,
         chat_senders=chat_senders,

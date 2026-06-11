@@ -1,9 +1,16 @@
-"""Prompt del PARTIDOR LLM de cúmulos (`clusters_llm`).
+"""Prompts LLM del grafo: el PARTIDOR de cúmulos (`clusters_llm`) y el RESOLVER par-por-par
+(`resolve_llm`).
 
-El LLM recibe DOS bloques de UN blob detectado: los VÉRTICES miembros y las ARISTAS entre ellos
-(tipo, productor, nivel, evidencia). Devuelve una PARTICIÓN: los N contextos coherentes que el blob
-contenga (0, 1 o varios), cada uno nombrado/descrito por lo que realmente hay. El SENTIDO EMERGE de
-las entidades y conexiones — NO se siembran categorías ni ejemplos con nombres reales que sesguen.
+Partidor: el LLM recibe DOS bloques de UN blob detectado: los VÉRTICES miembros y las ARISTAS entre
+ellos (tipo, productor, nivel, evidencia). Devuelve una PARTICIÓN: los N contextos coherentes que el
+blob contenga (0, 1 o varios), cada uno nombrado/descrito por lo que realmente hay. El SENTIDO
+EMERGE de las entidades y conexiones — NO se siembran categorías ni ejemplos con nombres reales que
+sesguen.
+
+Resolver: el LLM recibe UN mensaje real + los pares de entidades que co-ocurrieron en él, y decide
+por PAR si el mensaje evidencia una relación real (con cita textual OBLIGATORIA, verificada
+determinista por el grounder) o una co-aparición casual. Las señales deterministas (encabezados de
+correo masivo) van como contexto NEUTRO, nunca como veredicto sembrado.
 """
 
 from __future__ import annotations
@@ -47,4 +54,26 @@ GRAPH_CLUSTER_PARTITION_SYSTEM_PROMPT = (
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
     '{"groups": [{"members": [<id>, ...], "name": "<nombre>", "description": "<desc>", '
     '"confidence": <0..1>}, ...], "rejected_edges": ["<a>-<b>", ...]}'
+)
+
+# --- RESOLVER par-por-par (zona gris): un mensaje + sus pares de co-ocurrencia ---------- #
+GRAPH_RESOLVE_SYSTEM_PROMPT = (
+    "Sos un analista de un grafo de conocimiento personal. Te paso UN mensaje real (correo, chat "
+    "o post) y una lista numerada de PARES de entidades que aparecieron juntas en ese mensaje. "
+    "Para CADA par, decidí si ESTE mensaje evidencia una relación REAL entre las dos entidades o "
+    "solo una co-aparición casual.\n\n"
+    "Veredictos posibles:\n"
+    "- confirm: el mensaje evidencia un vínculo real (una compra/factura de ese producto o "
+    "servicio, personas coordinando algo juntas, una entidad que es parte de la otra...). "
+    "OBLIGATORIO acompañarlo de `quote`: el fragmento TEXTUAL del mensaje, copiado tal cual, que "
+    "lo demuestra. Un confirm sin cita textual verificable se descarta.\n"
+    "- reject: el mensaje muestra que es co-aparición sin vínculo (un listado promocional, un "
+    "digest de noticias, menciones inconexas en el mismo texto).\n"
+    "- dejar: este mensaje no alcanza para decidir. Ante la duda, dejar.\n\n"
+    "Juzgá SOLO lo que este mensaje muestra: no uses conocimiento externo sobre las entidades. "
+    "Si el mensaje trae una nota de señales deterministas (p.ej. encabezados de correo masivo), "
+    "es CONTEXTO, no un veredicto: un correo masivo igual puede contener una relación real.\n\n"
+    "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
+    '{"verdicts": [{"pair": <id del par>, "verdict": "confirm|reject|dejar", '
+    '"quote": "<fragmento textual o vacío>", "confidence": <0..1>}, ...]}'
 )

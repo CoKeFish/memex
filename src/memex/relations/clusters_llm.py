@@ -40,6 +40,14 @@ from memex.relations.cluster_store import (
     reject_cluster,
     sync_child,
 )
+from memex.relations.decisions import (
+    METHOD_PARTIDOR,
+    VERDICT_CONFIRM,
+    VERDICT_REJECT,
+    edge_sources,
+    evidence_signature,
+    record_decision,
+)
 from memex.relations.edges import (
     PRODUCER_INBOX,
     RELTYPE_COOCURRENCIA,
@@ -308,6 +316,7 @@ class _Applied:
 
 def _cascade_edges(
     conn: Connection,
+    user_id: int,
     cluster_id: int,
     internal: list[RelationEdge],
     *,
@@ -325,33 +334,57 @@ def _cascade_edges(
       es una NO-relación → `rejected` (terminal en la arista misma: status + decided_at). Es la
       única poda a nivel arista; va ANTES del juicio por membresía.
     - `survivors` set (cúmulo confirmado): pista entre dos sobrevivientes → `confirmed` (estampa la
-      confianza del cúmulo + `evidence='cluster:{id}'`); pista que toca un PODADO → se DEJA `pista`
-      (el LLM dijo "no pertenece a ESTE cúmulo", no "no es relación"; queda para otro contexto).
+      confianza del cúmulo); pista que toca un PODADO → se DEJA `pista` (el LLM dijo "no pertenece
+      a ESTE cúmulo", no "no es relación"; queda para otro contexto).
     - `survivors=None` (cúmulo rechazado): toda pista interna → `rejected` (el caller ya consultó
       `cluster_reject_pistas`; el rechazo terminal es opt-in, solo para ruido explícito).
 
-    `resolve_edge` es monótono (no re-evalúa terminales) e idempotente: con varios grupos del mismo
-    blob, el par rechazado se cuenta UNA vez. Devuelve (promovidas, rechazadas)."""
+    HISTORIAL: el `evidence` original (`inbox:N`) NO se pisa (antes se reescribía con
+    `cluster:{id}` y destruía la procedencia); el veredicto del partidor queda como fila en
+    `relation_edge_decisions` (`method='partidor'`, `rule='cluster:{id}'`) con la sig de la
+    evidencia del par al decidir. `resolve_edge` es monótono (no re-evalúa terminales) e
+    idempotente: con varios grupos del mismo blob, el par rechazado se cuenta UNA vez (la decisión
+    se inserta solo cuando la transición ocurrió). Devuelve (promovidas, rechazadas)."""
     conf = Decimal(str(round(confidence, 3)))
-    ev = f"cluster:{cluster_id}"
+    rule = f"cluster:{cluster_id}"
+    pistas = [
+        e
+        for e in internal
+        if e.status == STATUS_PISTA
+        and e.producer == PRODUCER_INBOX
+        and e.relation_type == RELTYPE_COOCURRENCIA
+    ]
+    sources = edge_sources(conn, [e.id for e in pistas])
+
+    def _decide(edge_id: int, verdict: str) -> None:
+        record_decision(
+            conn,
+            user_id,
+            edge_id,
+            verdict=verdict,
+            method=METHOD_PARTIDOR,
+            rule=rule,
+            confidence=conf,
+            evidence_sig=evidence_signature(sources.get(edge_id, set())),
+        )
+
     promoted = rejected = 0
-    for e in internal:
-        if not (
-            e.status == STATUS_PISTA
-            and e.producer == PRODUCER_INBOX
-            and e.relation_type == RELTYPE_COOCURRENCIA
-        ):
-            continue
+    for e in pistas:
         if frozenset((e.src, e.dst)) in rejected_pairs:  # absorbe la orientación src/dst
-            rejected += int(resolve_edge(conn, e.id, status=STATUS_REJECTED))
+            if resolve_edge(conn, e.id, status=STATUS_REJECTED):
+                _decide(e.id, VERDICT_REJECT)
+                rejected += 1
             continue
         if survivors is None:  # cúmulo rechazado (caller gateó cluster_reject_pistas)
-            rejected += int(resolve_edge(conn, e.id, status=STATUS_REJECTED))
+            if resolve_edge(conn, e.id, status=STATUS_REJECTED):
+                _decide(e.id, VERDICT_REJECT)
+                rejected += 1
         elif (
             e.src in survivors
             and e.dst in survivors
-            and resolve_edge(conn, e.id, status=STATUS_CONFIRMED, confidence=conf, evidence=ev)
+            and resolve_edge(conn, e.id, status=STATUS_CONFIRMED, confidence=conf)
         ):
+            _decide(e.id, VERDICT_CONFIRM)
             promoted += 1
         # pista que toca un miembro PODADO: se DEJA como pista (no se mata)
     return promoted, rejected
@@ -454,7 +487,13 @@ def _apply_partition(
             )
             created += 1
         p, r = _cascade_edges(
-            conn, cid, internal, survivors=gmembers, confidence=g.confidence, rejected_pairs=rej
+            conn,
+            user_id,
+            cid,
+            internal,
+            survivors=gmembers,
+            confidence=g.confidence,
+            rejected_pairs=rej,
         )
         promoted += p
         rejected_edges += r

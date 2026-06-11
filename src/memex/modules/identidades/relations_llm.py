@@ -37,6 +37,7 @@ from memex.core.trace import attach_to_root
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
 from memex.llm.client import LLMQuotaError
+from memex.llm.grounding import DEFAULT_MIN_QUOTE_NORM_LEN, grounded
 from memex.logging import get_logger
 from memex.modules.identidades.prompt import IDENTIDADES_COOCCURRENCE_SYSTEM_PROMPT
 from memex.relations.deterministic import DEFAULT_COOCCURRENCE_CAP
@@ -53,11 +54,9 @@ _EVIDENCE_MAX = 200
 _MAX_IDENTITIES = 80
 #: La salida es una lista de pares; cota holgada para un correo denso.
 _MAX_TOKENS = 4096
-#: Largo mínimo del `quote` NORMALIZADO para aceptar un par: mata citas trivialmente contenidas
-#: ("y", "de", un nombre suelto) sin exigir frases largas (p50 del largo de evidencia real ≈ 36).
-#: Es la perilla de calibración del grounder: si `ungrounded` sale alto en corridas reales, se
-#: revisa ANTES de relajar la normalización.
-_MIN_QUOTE_NORM_LEN = 10
+#: Largo mínimo del `quote` NORMALIZADO para aceptar un par (p50 del largo de evidencia real ≈ 36).
+#: La perilla y su doctrina viven en `memex.llm.grounding` (grounder compartido).
+_MIN_QUOTE_NORM_LEN = DEFAULT_MIN_QUOTE_NORM_LEN
 
 
 @dataclass(frozen=True)
@@ -150,20 +149,10 @@ def _load_email_identities(conn: Connection, user_id: int, mid: int) -> list[Men
 # --- parseo de la respuesta del LLM ------------------------------------------------ #
 
 
-def _norm_grounding(s: str) -> str:
-    """Normalización del check de contención: lower + colapso de TODO whitespace. Deliberadamente
-    SIN unaccent ni strip de puntuación — la estrictez es el sesgo a precisión; calibrar con
-    `ungrounded` antes de relajar."""
-    return " ".join(s.lower().split())
-
-
 def _grounded(quote: str, ev_a: str, ev_b: str) -> bool:
-    """¿La cita está realmente en la evidencia que el LLM vio (la de a o la de b)? Determinista:
-    largo mínimo normalizado + substring sobre las MISMAS strings truncadas del prompt."""
-    q = _norm_grounding(quote)
-    if len(q) < _MIN_QUOTE_NORM_LEN:
-        return False
-    return q in _norm_grounding(ev_a) or q in _norm_grounding(ev_b)
+    """¿La cita está realmente en la evidencia que el LLM vio (la de a o la de b)? Delega en el
+    grounder compartido (`memex.llm.grounding`), extraído de acá sin cambio de comportamiento."""
+    return grounded(quote, ev_a, ev_b, min_len=_MIN_QUOTE_NORM_LEN)
 
 
 def _parse_pairs(content: str, valid_ids: set[int]) -> list[tuple[int, int, str]]:

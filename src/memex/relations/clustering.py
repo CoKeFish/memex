@@ -38,6 +38,7 @@ from memex.relations.edges import (
     STATUS_CONFIRMED,
     STATUS_PISTA,
     Ref,
+    RelationEdge,
     list_edges,
 )
 from memex.relations.vertices import list_vertices
@@ -71,6 +72,13 @@ def cluster_signature(members: Iterable[Ref]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _pair_key(e: RelationEdge) -> tuple[Node, Node]:
+    """Clave canónica del PAR de una arista (extremos ordenados; absorbe orientación)."""
+    a: Node = (e.src.slug, e.src.id)
+    b: Node = (e.dst.slug, e.dst.id)
+    return (a, b) if a <= b else (b, a)
+
+
 def _edge_weight(status: str, relation_type: str, cfg: Settings) -> float:
     """Peso de una arista para la clusterización, por `(status, relation_type)`. Pista → `w_pista`
     (0 por default = excluida); confirmed co-ocurrencia → `w_cooc_confirmed`; confirmed real →
@@ -88,8 +96,11 @@ def build_cluster_graph(conn: Connection, user_id: int, cfg: Settings | None = N
     """Arma el grafo networkx ponderado a clusterizar: vértices vivos (excluye `cumulo`; `canal`
     SOLO si `cluster_exclude_canal`, el escape anti-hub) como nodos + aristas con peso `> 0`
     (excluye `miembro_de`, extremos excluidos, extremo no-vivo, peso ≤ 0). Multi-aristas del mismo
-    par se suman con tope `pair_weight_max`. Quita nodos aislados (no clusterizan). Cada arista
-    lleva `real` (¿es confirmed-real?) para el `has_confirmed_edge`."""
+    par se suman con tope `pair_weight_max`. La co-ocurrencia (cualquier status) de un par que YA
+    tiene arista REAL confirmada NO pesa: la conectividad la da la real y sumarla doble-contaría el
+    par (las pistas redundantes se confirman en vez de borrarse — ver
+    `deterministic._resolve_redundant_cooccurrence`). Quita nodos aislados (no clusterizan). Cada
+    arista lleva `real` (¿es confirmed-real?) para el `has_confirmed_edge`."""
     cfg = cfg or settings
     excluded = {CUMULO_SLUG} | ({CANAL_SLUG} if cfg.cluster_exclude_canal else set())
     verts = [v for v in list_vertices(conn, user_id) if v.slug not in excluded]
@@ -99,13 +110,22 @@ def build_cluster_graph(conn: Connection, user_id: int, cfg: Settings | None = N
         g.add_node((v.slug, v.id))
     live: set[Node] = set(g.nodes)
 
+    all_edges = [
+        e
+        for e in list_edges(conn, user_id)
+        if e.relation_type != RELTYPE_MIEMBRO_DE
+        and e.src.slug != CUMULO_SLUG
+        and e.dst.slug != CUMULO_SLUG
+    ]
+    real_pairs: set[tuple[Node, Node]] = {
+        _pair_key(e)
+        for e in all_edges
+        if e.status == STATUS_CONFIRMED and e.relation_type != RELTYPE_COOCURRENCIA
+    }
+
     weights: dict[tuple[Node, Node], float] = defaultdict(float)
     real: dict[tuple[Node, Node], bool] = defaultdict(bool)
-    for e in list_edges(conn, user_id):
-        if e.relation_type == RELTYPE_MIEMBRO_DE:
-            continue
-        if e.src.slug == CUMULO_SLUG or e.dst.slug == CUMULO_SLUG:
-            continue
+    for e in all_edges:
         w = _edge_weight(e.status, e.relation_type, cfg)
         if w <= 0:
             continue
@@ -114,6 +134,8 @@ def build_cluster_graph(conn: Connection, user_id: int, cfg: Settings | None = N
         if a not in live or b not in live:
             continue
         key = (a, b) if a <= b else (b, a)
+        if e.relation_type == RELTYPE_COOCURRENCIA and key in real_pairs:
+            continue
         weights[key] += w
         real[key] = real[key] or (
             e.status == STATUS_CONFIRMED and e.relation_type != RELTYPE_COOCURRENCIA
