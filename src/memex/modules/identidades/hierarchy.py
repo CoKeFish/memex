@@ -5,8 +5,10 @@ Sistema genérico de jerarquía: una organización o un producto puede colgar de
 diferencia del dedup (par-por-par, `dedup_llm.py`), esto es HOLÍSTICO: una sola llamada con la
 lista COMPLETA de orgs + productos del user (los productos van marcados `[producto]`); el LLM
 devuelve la jerarquía en JSON y se aplica DIRECTO, sin cola de confirmación manual (el dueño puede
-corregir un padre a mano por la UI). Los padres creados por nombre son SIEMPRE organizaciones (el
-padre inferido de un producto es su empresa). Mold: `calendar/merge_llm.py`.
+corregir un padre a mano por la UI). Los hijos con padre decidido a mano (`parent_source` 'manual'
+por la UI o 'agent' por `memex identidad set-parent`) están PINEADOS: el organizador los salta, así
+una corrida periódica no pisa esas correcciones. Los padres creados por nombre son SIEMPRE
+organizaciones (el padre inferido de un producto es su empresa). Mold: `calendar/merge_llm.py`.
 
 Salida del LLM = `{"links": [{"child_id", "parent_id"|"parent_name", "cleaned_name"?}]}`:
 - `child_id` siempre es un id existente; el padre por `parent_id` (id existente) XOR `parent_name`
@@ -284,6 +286,20 @@ def _apply_cleanup_name(conn: Connection, user_id: int, child_id: int, cleaned_n
     return True
 
 
+def _pinned_children(conn: Connection, user_id: int) -> set[int]:
+    """Ids cuyo padre lo decidió el dueño (UI, `parent_source='manual'`) o el agente
+    (`'agent'`): el organizador LLM NO los pisa, ni para cambiar el padre ni para re-linkear
+    uno quitado a mano."""
+    rows = conn.execute(
+        text(
+            "SELECT id FROM mod_identidades "
+            "WHERE user_id = :u AND metadata->>'parent_source' IN ('manual','agent')"
+        ),
+        {"u": user_id},
+    ).all()
+    return {int(r[0]) for r in rows}
+
+
 def _apply_links(
     conn: Connection,
     user_id: int,
@@ -292,9 +308,16 @@ def _apply_links(
     apply_cleanup: bool,
 ) -> tuple[int, int, int, int]:
     """Aplica los links sobre `conn` (atómico con la tx). Devuelve `(linked, created, cleaned,
-    skipped)`. Cada link: resuelve/crea el padre, salta self-parent y ciclos, setea el padre."""
+    skipped)`. Cada link: salta los hijos pineados (padre manual/agent), resuelve/crea el padre,
+    salta self-parent y ciclos, setea el padre."""
     linked = created = cleaned = skipped = 0
+    pinned = _pinned_children(conn, user_id)
     for link in links:
+        # ANTES de resolver el padre: un hijo pineado no debe ni crear el padre-por-nombre.
+        if link.child_id in pinned:
+            skipped += 1
+            _log.info("identidades.hierarchy.skip_pinned", child_id=link.child_id)
+            continue
         if link.parent_id is not None:
             parent_id = link.parent_id
         elif link.parent_name is not None:

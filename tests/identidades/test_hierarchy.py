@@ -278,6 +278,46 @@ def test_apply_links_cleanup_off_then_on(conn: Any) -> None:
     assert "Ingeniería Mecánica - Universidad del Norte" in row[1]
 
 
+def _pin(conn: Any, child: int, parent: int | None, source: str) -> None:
+    conn.execute(
+        text(
+            "UPDATE mod_identidades SET parent_identity_id = :p, "
+            "metadata = jsonb_set(metadata, '{parent_source}', to_jsonb(CAST(:s AS TEXT))) "
+            "WHERE id = :c"
+        ),
+        {"p": parent, "s": source, "c": child},
+    )
+
+
+def test_apply_links_skips_pinned_children(conn: Any) -> None:
+    # el padre decidido por el agente NO se pisa con la opinión del LLM
+    child = _mk_org(conn, "Programa X")
+    agent_parent = _mk_org(conn, "Universidad Y")
+    llm_parent = _mk_org(conn, "Otra Org")
+    _pin(conn, child, agent_parent, "agent")
+    linked, _, _, skipped = _apply_links(
+        conn, 1, [HierarchyLink(child, llm_parent, None, None)], apply_cleanup=False
+    )
+    assert (linked, skipped) == (0, 1)
+    assert _parent_of(conn, child) == agent_parent
+
+
+def test_apply_links_pinned_clear_no_relink_ni_padre_nuevo(conn: Any) -> None:
+    # un padre QUITADO a mano (parent NULL + parent_source manual) tampoco se re-linkea,
+    # y el padre-por-nombre del link saltado NO se crea (sin orgs huérfanas)
+    child = _mk_org(conn, "Suelta")
+    _pin(conn, child, None, "manual")
+    linked, created, _, skipped = _apply_links(
+        conn, 1, [HierarchyLink(child, None, "Nueva Matriz", None)], apply_cleanup=False
+    )
+    assert (linked, created, skipped) == (0, 0, 1)
+    assert _parent_of(conn, child) is None
+    total = conn.execute(
+        text("SELECT count(*) FROM mod_identidades WHERE user_id = 1")
+    ).scalar_one()
+    assert total == 1  # no apareció 'Nueva Matriz'
+
+
 # ----- run_organize (worker, LLM falso) ------------------------------------------ #
 
 

@@ -44,14 +44,20 @@ class MergeDecision:
     rationale: str
 
 
+#: Tope de notas en el prompt: contexto útil sin inflar tokens (las notas largas se truncan).
+_NOTES_MAX_CHARS = 300
+
+
 @dataclass(frozen=True)
 class IdentityView:
-    """Vista mínima de una identidad para mostrarle al LLM (sin ids internos)."""
+    """Vista mínima de una identidad para mostrarle al LLM (sin ids internos). Las `notes`
+    incluyen el contexto que el agente/dueño dejó con `annotate` para guiar la resolución."""
 
     kind: str
     display_name: str
     aliases: Sequence[str]
     identifiers: Sequence[str]
+    notes: str = ""
 
 
 @dataclass
@@ -68,7 +74,11 @@ class MergePhase2Stats:
 def _fmt_identity(label: str, v: IdentityView) -> str:
     alias = ", ".join(v.aliases) if v.aliases else "(sin alias)"
     idf = ", ".join(v.identifiers) if v.identifiers else "(sin identificadores)"
-    return f"{label}: tipo={v.kind}, nombre={v.display_name!r}, alias=[{alias}], ids=[{idf}]"
+    line = f"{label}: tipo={v.kind}, nombre={v.display_name!r}, alias=[{alias}], ids=[{idf}]"
+    notes = " ".join(v.notes.split())  # colapsa saltos de línea (una nota por anotación)
+    if notes:
+        line += f", notas={notes[:_NOTES_MAX_CHARS]!r}"
+    return line
 
 
 def _parse_decision(content: str) -> MergeDecision:
@@ -129,9 +139,9 @@ def _load_candidates(conn: Connection, user_id: int, limit: int) -> list[_Candid
                 """
                 SELECT c.id AS pair_id,
                        a.id AS a_id, a.kind AS a_kind, a.display_name AS a_name,
-                       a.aliases AS a_aliases,
+                       a.aliases AS a_aliases, a.notes AS a_notes,
                        b.id AS b_id, b.kind AS b_kind, b.display_name AS b_name,
-                       b.aliases AS b_aliases,
+                       b.aliases AS b_aliases, b.notes AS b_notes,
                        (SELECT array_agg(platform || ':' || kind || ':' || value_norm)
                           FROM mod_identidades_identifiers WHERE identity_id = a.id) AS a_idf,
                        (SELECT array_agg(platform || ':' || kind || ':' || value_norm)
@@ -161,12 +171,14 @@ def _load_candidates(conn: Connection, user_id: int, limit: int) -> list[_Candid
                     display_name=str(r["a_name"]),
                     aliases=tuple(r["a_aliases"] or ()),
                     identifiers=tuple(r["a_idf"] or ()),
+                    notes=str(r["a_notes"] or ""),
                 ),
                 b=IdentityView(
                     kind=str(r["b_kind"]),
                     display_name=str(r["b_name"]),
                     aliases=tuple(r["b_aliases"] or ()),
                     identifiers=tuple(r["b_idf"] or ()),
+                    notes=str(r["b_notes"] or ""),
                 ),
             )
         )

@@ -468,7 +468,13 @@ async def update_identity(
         if set_parent:
             pval = body.parent_id
             if pval is None:
+                # Quitar el padre también es decisión del dueño: se marca para que el
+                # organizador LLM (run_organize) no re-linkee lo que se quitó a mano.
                 sets.append("parent_identity_id = NULL")
+                sets.append(
+                    "metadata = jsonb_set(metadata, '{parent_source}', "
+                    "to_jsonb(CAST('manual' AS TEXT)))"
+                )
             else:
                 if pval == identity_id:
                     raise HTTPException(422, detail="una identidad no puede ser su propio padre")

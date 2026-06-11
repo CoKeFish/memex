@@ -46,10 +46,23 @@ _GROUPS: dict[str, Callable[[list[str]], int]] = {
 _BLOCKED: dict[str, frozenset[str]] = {"finance": frozenset({"dedup", "consolidate"})}
 
 #: Grupos donde el agente SOLO usa estos subcomandos (allowlist): el resto es mantenimiento.
-#: `identidad` tiene mucho mantenimiento (sync/merge/…) y un único verbo del agente; `calendario`
-#: ídem (pull/push/authorize/… son del operador, no del agente).
+#: `identidad` expone registro (add), consulta (search/show/tree/candidates), jerarquía
+#: (set-parent), contexto (annotate) y resolución de duplicados (resolve); el mantenimiento
+#: (sync/merge/…) queda fuera. `calendario` ídem (pull/push/authorize/… son del operador).
 _ALLOWED: dict[str, frozenset[str]] = {
-    "identidad": frozenset({"add", "help"}),
+    "identidad": frozenset(
+        {
+            "add",
+            "search",
+            "show",
+            "tree",
+            "set-parent",
+            "annotate",
+            "candidates",
+            "resolve",
+            "help",
+        }
+    ),
     "calendario": frozenset(
         {"add", "list", "show", "update", "rm", "conflicts", "sync-status", "help"}
     ),
@@ -90,6 +103,13 @@ finance (gastos/ingresos):
 
 identidad (directorio de personas/organizaciones/productos):
   memex identidad add          registra/resuelve una tarjeta de contacto (no duplica)
+  memex identidad search       busca por nombre, alias o identificador (--q)
+  memex identidad show         ficha completa: identificadores, jerarquía, afiliaciones (--id)
+  memex identidad tree         jerarquía de pertenencia (quién pertenece a quién)
+  memex identidad set-parent   cuelga una identidad de su padre, o --clear para quitarlo
+  memex identidad annotate     agrega alias/nota (contexto persistente para la resolución)
+  memex identidad candidates   pares dudosos pendientes (¿misma identidad real?)
+  memex identidad resolve      decide un par: --same fusiona / --distinct coexisten
 
 calendario (eventos y agenda):
   memex calendario add         crea un evento (o una serie con --every/--until)

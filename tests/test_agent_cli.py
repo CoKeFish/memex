@@ -76,14 +76,38 @@ def test_blocks_finance_maintenance() -> None:
     assert main(["finance", "dedup"]) == 2
 
 
-def test_identidad_exposes_only_add(capsys: pytest.CaptureFixture[str]) -> None:
-    # Solo `add` (+`help`); el mantenimiento de identidades NO se expone al agente.
+def test_identidad_allowlist(capsys: pytest.CaptureFixture[str]) -> None:
+    # El mantenimiento de identidades NO se expone al agente…
     assert main(["identidad", "sync", "--account", "1"]) == 2
     assert main(["identidad", "merge"]) == 2
     assert main(["identidad", "interest", "list"]) == 2
-    assert main(["identidad", "candidates"]) == 2
     assert main(["identidad", "help"]) == 0
     assert "add" in capsys.readouterr().out
+    # …pero consulta/jerarquía/resolución SÍ (forwardean al CLI de dominio).
+    assert main(["identidad", "search", "--q", "nadie"]) == 0
+    assert "Sin resultados" in capsys.readouterr().out
+    assert main(["identidad", "candidates"]) == 0
+    assert "Sin candidatos" in capsys.readouterr().out
+    assert main(["identidad", "tree"]) == 0
+    assert "Sin jerarquía" in capsys.readouterr().out
+
+
+def test_identidad_agente_set_parent_y_show(capsys: pytest.CaptureFixture[str]) -> None:
+    # flujo del agente end-to-end por la superficie `memex`: add → set-parent → show
+    assert (
+        main(["identidad", "add", "--name", "Programa Z", "--kind", "organizacion", "--json"]) == 0
+    )
+    prog = _last_json(capsys.readouterr().out)["id"]
+    assert (
+        main(["identidad", "add", "--name", "Universidad Y", "--kind", "organizacion", "--json"])
+        == 0
+    )
+    uni = _last_json(capsys.readouterr().out)["id"]
+    assert main(["identidad", "set-parent", "--id", str(prog), "--parent", str(uni)]) == 0
+    capsys.readouterr()
+    assert main(["identidad", "show", "--id", str(prog), "--json"]) == 0
+    ficha = _last_json(capsys.readouterr().out)
+    assert ficha["parent_id"] == uni and ficha["parent_source"] == "agent"
 
 
 def test_dispatch_calendario_add_and_list(capsys: pytest.CaptureFixture[str]) -> None:

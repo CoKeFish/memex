@@ -14,7 +14,12 @@ from sqlalchemy import text
 
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
-from memex.modules.identidades.dedup_llm import _parse_decision, run_merge_phase2
+from memex.modules.identidades.dedup_llm import (
+    IdentityView,
+    _fmt_identity,
+    _parse_decision,
+    run_merge_phase2,
+)
 
 
 class FakeLLM:
@@ -100,6 +105,26 @@ def _candidate_status(a_id: int, b_id: int) -> str | None:
     return str(row[0]) if row is not None else None
 
 
+# ----- _fmt_identity (puro) ------------------------------------------------------ #
+
+
+def test_fmt_identity_incluye_notas_truncadas() -> None:
+    v = IdentityView(
+        kind="persona", display_name="Ada", aliases=(), identifiers=(), notes="es mi tutora\nUni X"
+    )
+    line = _fmt_identity("A", v)
+    assert "notas='es mi tutora Uni X'" in line  # saltos de línea colapsados
+    largo = IdentityView(
+        kind="persona", display_name="Ada", aliases=(), identifiers=(), notes="x" * 1000
+    )
+    assert len(_fmt_identity("A", largo)) < 500  # truncado al tope
+
+
+def test_fmt_identity_sin_notas_no_las_menciona() -> None:
+    v = IdentityView(kind="persona", display_name="Ada", aliases=(), identifiers=())
+    assert "notas" not in _fmt_identity("A", v)
+
+
 # ----- _parse_decision (puro) ---------------------------------------------------- #
 
 
@@ -159,6 +184,43 @@ async def test_unparseable_response_rejects() -> None:
     assert stats.rejected == 1
     assert _exists(a) and _exists(b)
     assert _candidate_status(a, b) == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_notes_llegan_al_prompt() -> None:
+    # el contexto dejado con `annotate` (columna notes) entra a la vista que ve el LLM
+    a = _mk_identity("Roy M")
+    b = _mk_identity("Roy Monroy")
+    with connection() as c:
+        c.execute(
+            text(
+                "UPDATE mod_identidades SET notes = 'es la misma persona que Roy Monroy' "
+                "WHERE id = :i"
+            ),
+            {"i": a},
+        )
+    _seed_candidate(a, b)
+
+    class CapturingLLM(FakeLLM):
+        def __init__(self, content: str) -> None:
+            super().__init__(content)
+            self.last_user = ""
+
+        async def complete(
+            self,
+            messages: Sequence[ChatMessage],
+            *,
+            model: str | None = None,
+            response_format: ResponseFormat = "text",
+            temperature: float | None = None,
+            max_tokens: int | None = None,
+        ) -> LLMResult:
+            self.last_user = messages[-1].content
+            return await super().complete(messages)
+
+    fake = CapturingLLM('{"same": false, "confidence": 0.5, "rationale": "x"}')
+    await run_merge_phase2(1, client=fake)
+    assert "es la misma persona que Roy Monroy" in fake.last_user
 
 
 @pytest.mark.asyncio
