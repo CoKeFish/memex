@@ -40,7 +40,7 @@ from memex.relevance.interests import (
 )
 from memex.relevance.mining import run_rule_mining
 from memex.relevance.rules import create_rule, dry_run_rule, list_rules, set_rule_status
-from memex.relevance.settings import get_settings, upsert_settings
+from memex.relevance.settings import GateSettings, get_settings, upsert_settings
 from memex.relevance.verdicts import list_review_queue, resolve_insufficient
 
 router = APIRouter(prefix="/relevance", tags=["relevance"])
@@ -53,11 +53,20 @@ _log = get_logger("memex.api.relevance")
 # --- Settings ---------------------------------------------------------------------- #
 
 
+def _settings_payload(s: GateSettings) -> dict[str, Any]:
+    return {
+        "enabled": s.enabled,
+        "mode": s.mode,
+        "model": s.model,
+        "mining_min_messages": s.mining_min_messages,
+    }
+
+
 @router.get("/settings", response_model=RelevanceGateSettings)
 async def get_gate_settings(user_id: UserID) -> dict[str, Any]:
     with connection() as conn:
         s = get_settings(conn, user_id)
-    return {"enabled": s.enabled, "mode": s.mode, "model": s.model}
+    return _settings_payload(s)
 
 
 @router.patch("/settings", response_model=RelevanceGateSettings)
@@ -67,7 +76,7 @@ async def patch_gate_settings(user_id: UserID, body: RelevanceGateSettingsPatch)
     with connection() as conn:
         s = upsert_settings(conn, user_id, **fields)
     _log.info("relevance.settings.patch", user_id=user_id, **fields)
-    return {"enabled": s.enabled, "mode": s.mode, "model": s.model}
+    return _settings_payload(s)
 
 
 # --- Intereses --------------------------------------------------------------------- #

@@ -388,6 +388,8 @@ def test_mining_activates_good_rejects_bad_skips_dup() -> None:
         {"kind": "sender_domain", "pattern": "bank.com", "rationale": "promos"},
         {"kind": "sender_domain", "pattern": "spam.io", "rationale": "duplicada"},
     ]
+    with connection() as conn:
+        upsert_settings(conn, 1, mining_min_messages=2)  # spam.io (2) llega; bank.com (1) no
     llm = FakeGateLLM(rules=proposals)
     stats = asyncio.run(run_rule_mining(1, client=llm))
     assert llm.mining_calls == 1
@@ -420,6 +422,33 @@ def test_mining_noop_when_disabled_or_empty() -> None:
     _enable()
     stats = asyncio.run(run_rule_mining(1, client=llm))
     assert llm.calls == 0 and stats.senders == 0  # sin no-relevantes
+
+
+def test_mining_accumulation_threshold_and_rule_method_excluded() -> None:
+    """Un solo correo malo NO dispara nada: el umbral exige N+ no-relevantes acumulados por
+    remitente, y los ya cubiertos por regla (`method='rule'`) no cuentan (clase resuelta)."""
+    _enable()
+    sid = _seed_source()
+    a = _seed_msg(sid, "m1", sender="a@spam.io", minute=0)
+    b = _seed_msg(sid, "m2", sender="b@spam.io", minute=1)
+    with connection() as conn:
+        insert_verdicts(
+            conn,
+            1,
+            [
+                VerdictItem(a, "not_relevant", "llm"),
+                VerdictItem(b, "not_relevant", "rule"),  # ya cubierto: no alimenta la minería
+            ],
+        )
+        upsert_settings(conn, 1, mining_min_messages=2)
+    llm = FakeGateLLM(rules=[{"kind": "sender_domain", "pattern": "spam.io", "rationale": "x"}])
+    stats = asyncio.run(run_rule_mining(1, client=llm))
+    assert llm.calls == 0  # solo 1 'llm' acumulado < umbral 2 → ni se llama al LLM
+    assert stats.senders == 0 and stats.proposed == 0
+    # Override del umbral por corrida (CLI --min-count / experimentación)
+    stats = asyncio.run(run_rule_mining(1, min_messages=1, client=llm))
+    assert llm.mining_calls == 1
+    assert stats.senders == 1 and stats.activated == 1
 
 
 # ---------------------------------------------------------------- etapa de reproceso

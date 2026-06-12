@@ -99,8 +99,8 @@ def parse_gate_verdicts(content: str, expected_ids: set[int]) -> dict[int, tuple
 RULES_SYSTEM_PROMPT = (
     "Sos el analista de patrones de un gate de relevancia de correos. Te paso un AGREGADO de "
     "los correos que el gate marcó como NO relevantes (publicidad/ruido), agrupados por "
-    "remitente, con conteos y asuntos de ejemplo. Proponé reglas DETERMINISTAS para que esa "
-    "clase de correos no vuelva a pasar por el LLM.\n"
+    "dominio del remitente, con conteos, remitentes y asuntos de ejemplo. Proponé reglas "
+    "DETERMINISTAS para que esa clase de correos no vuelva a pasar por el LLM.\n"
     "Tipos de regla permitidos (`kind`):\n"
     "- `sender_email`: igualdad exacta del remitente (ej. promos@tienda.com)\n"
     "- `sender_domain`: igualdad exacta del dominio (ej. mailing.tienda.com) — preferilo solo "

@@ -112,6 +112,31 @@ export function RelevanceGateManager() {
                 </SelectContent>
               </Select>
             </div>
+            <div
+              className="flex items-center gap-2 text-sm"
+              title="la minería solo propone reglas para remitentes con N+ correos no-relevantes acumulados"
+            >
+              <span className="text-muted-foreground">Umbral minería</span>
+              <Input
+                type="number"
+                min={1}
+                defaultValue={s.mining_min_messages}
+                disabled={busy}
+                className="h-8 w-20"
+                onBlur={(e) => {
+                  const n = Number(e.target.value)
+                  if (Number.isInteger(n) && n >= 1 && n !== s.mining_min_messages) {
+                    void mutate(
+                      async () => {
+                        await patchGateSettings({ mining_min_messages: n })
+                      },
+                      `Umbral de minería → ${n} correos por remitente`,
+                      settings.reload,
+                    )
+                  }
+                }}
+              />
+            </div>
             <span className="num text-[11px] text-muted-foreground" title="modelo del gate">
               {s.model}
             </span>

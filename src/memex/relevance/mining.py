@@ -6,8 +6,9 @@ un DRY RUN contra el histórico — si atraparía algún correo relevante, la re
 (queda `rejected` con su reporte). Si pasa, se AUTO-ACTIVA (auditada y reversible).
 
 Una sola llamada LLM por corrida (`purpose="relevance_rules"`): recibe el AGREGADO de los
-no-relevantes por remitente (conteos + asuntos de ejemplo + list_id), no los correos crudos.
-La garantía de seguridad NO es el LLM: es el dry run determinista de `rules.dry_run_rule`.
+no-relevantes por DOMINIO del remitente (conteos + remitentes y asuntos de ejemplo +
+list_id), no los correos crudos. La garantía de seguridad NO es el LLM: es el dry run
+determinista de `rules.dry_run_rule`.
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ _MAX_TOKENS = 2048
 
 @dataclass
 class MiningStats:
-    """Resultado de una corrida de minería."""
+    """Resultado de una corrida de minería. `senders` = clases (dominios) sobre el umbral."""
 
     senders: int = 0
     proposed: int = 0
@@ -52,11 +53,18 @@ class MiningStats:
     cost: CostBySource = field(default_factory=CostBySource)
 
 
-def _aggregate_not_relevant(conn: Connection, user_id: int, limit: int) -> list[dict[str, Any]]:
-    """Agrega los no-relevantes del gate por remitente: conteo + asuntos de ejemplo + list_id.
+def _aggregate_not_relevant(
+    conn: Connection, user_id: int, limit: int, min_messages: int
+) -> list[dict[str, Any]]:
+    """Agrega los no-relevantes del gate por DOMINIO del remitente (la «clase» que acumula):
+    conteo + remitentes y asuntos de ejemplo + list_id.
 
-    Solo veredictos del LLM o de reglas (los `manual` son juicio del dueño sobre casos
-    puntuales, no patrón de ruido). Toma los `limit` más recientes para acotar el prompt.
+    Umbral de acumulación a nivel dominio: solo clases con `min_messages`+ no-relevantes
+    entran al agregado — un solo correo malo nunca propone nada, y remitentes que varían el
+    local-part (a@spam.io, b@spam.io) cuentan juntos. Solo veredictos del LLM
+    (`method='llm'`): los `manual` son juicio del dueño sobre casos puntuales y los `rule` ya
+    están cubiertos por una regla — esa clase está resuelta, no se vuelve a analizar. Toma los
+    `limit` más recientes para acotar el prompt.
     """
     rows = (
         conn.execute(
@@ -69,32 +77,47 @@ def _aggregate_not_relevant(conn: Connection, user_id: int, limit: int) -> list[
                     JOIN sources s ON s.id = i.source_id
                     WHERE rv.user_id = :uid
                       AND rv.verdict = 'not_relevant'
-                      AND rv.method IN ('llm', 'rule')
+                      AND rv.method = 'llm'
                       AND s.type = ANY(:email_types)
                     ORDER BY rv.created_at DESC
                     LIMIT :limit
+                ),
+                per_mail AS (
+                    SELECT lower(COALESCE(payload->'from'->>'email', '')) AS sender_email,
+                           split_part(
+                               lower(COALESCE(payload->'from'->>'email', '')), '@', 2
+                           ) AS sender_domain,
+                           COALESCE(payload->>'subject', '') AS subject,
+                           lower(payload->>'list_id') AS list_id
+                    FROM recent
                 )
-                SELECT lower(COALESCE(payload->'from'->>'email', '')) AS sender_email,
+                SELECT sender_domain,
                        COUNT(*) AS messages,
-                       (ARRAY_AGG(DISTINCT COALESCE(payload->>'subject', '')))[1:{_SUBJECT_SAMPLES}]
-                           AS subject_samples,
-                       (ARRAY_AGG(DISTINCT lower(payload->>'list_id'))
-                           FILTER (WHERE payload->>'list_id' IS NOT NULL))[1:3] AS list_ids
-                FROM recent
+                       (ARRAY_AGG(DISTINCT sender_email))[1:{_SUBJECT_SAMPLES}] AS sender_emails,
+                       (ARRAY_AGG(DISTINCT subject))[1:{_SUBJECT_SAMPLES}] AS subject_samples,
+                       (ARRAY_AGG(DISTINCT list_id)
+                           FILTER (WHERE list_id IS NOT NULL))[1:3] AS list_ids
+                FROM per_mail
                 GROUP BY 1
+                HAVING COUNT(*) >= :min_messages
                 ORDER BY COUNT(*) DESC, 1
                 """
             ),
-            {"uid": user_id, "email_types": EMAIL_TYPES, "limit": limit},
+            {
+                "uid": user_id,
+                "email_types": EMAIL_TYPES,
+                "limit": limit,
+                "min_messages": min_messages,
+            },
         )
         .mappings()
         .all()
     )
     return [
         {
-            "sender_email": r["sender_email"],
-            "sender_domain": r["sender_email"].split("@", 1)[1] if "@" in r["sender_email"] else "",
+            "sender_domain": r["sender_domain"],
             "messages": int(r["messages"]),
+            "sender_emails": list(r["sender_emails"] or []),
             "subject_samples": list(r["subject_samples"] or []),
             "list_ids": list(r["list_ids"] or []),
         }
@@ -106,13 +129,16 @@ async def run_rule_mining(
     user_id: int,
     *,
     limit: int = _DEFAULT_LIMIT,
+    min_messages: int | None = None,
     client: LLMClient | None = None,
 ) -> MiningStats:
-    """Propone reglas a partir del acumulado de no-relevantes y las valida con dry run.
+    """Propone reglas a partir del ACUMULADO de no-relevantes y las valida con dry run.
 
-    Gate apagado → no-op (la minería es parte del gate). Sin no-relevantes → no-op sin LLM.
-    Cada propuesta: duplicada → skip; dry run falla → `rejected` persistida con reporte;
-    pasa → `active` (auto-activación auditada: proposed_by='llm', rationale, modelo, reporte).
+    Gate apagado → no-op (la minería es parte del gate). Umbral de acumulación: solo
+    remitentes con `min_messages`+ no-relevantes (default: el setting del gate) entran al
+    análisis; si ninguno llega, no-op SIN llamada LLM — un solo correo malo nunca dispara
+    nada. Cada propuesta: duplicada → skip; dry run falla → `rejected` persistida con
+    reporte; pasa → `active` (auto-activación auditada).
     """
     stats = MiningStats()
     with connection() as conn:
@@ -120,9 +146,10 @@ async def run_rule_mining(
         if not settings.enabled:
             _log.info("relevance.mining.disabled", user_id=user_id)
             return stats
-        aggregates = _aggregate_not_relevant(conn, user_id, limit)
+        threshold = min_messages if min_messages is not None else settings.mining_min_messages
+        aggregates = _aggregate_not_relevant(conn, user_id, limit, threshold)
     if not aggregates:
-        _log.info("relevance.mining.empty", user_id=user_id)
+        _log.info("relevance.mining.below_threshold", user_id=user_id, min_messages=threshold)
         return stats
     stats.senders = len(aggregates)
 

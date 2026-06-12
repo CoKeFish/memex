@@ -40,14 +40,22 @@ def _seed_email(seed_source: dict[str, Any], ext: str, *, sender: str, subject: 
 def test_settings_default_and_patch(client: Any) -> None:
     r = client.get("/relevance/settings")
     assert r.status_code == 200
-    assert r.json() == {"enabled": False, "mode": "per_window", "model": "claude-opus-4-8"}
+    assert r.json() == {
+        "enabled": False,
+        "mode": "per_window",
+        "model": "claude-opus-4-8",
+        "mining_min_messages": 5,
+    }
 
     p = client.patch("/relevance/settings", json={"enabled": True})
     assert p.status_code == 200 and p.json()["enabled"] is True
     p = client.patch("/relevance/settings", json={"mode": "per_message"})
     body = p.json()
     assert body["enabled"] is True and body["mode"] == "per_message"  # patch parcial
+    p = client.patch("/relevance/settings", json={"mining_min_messages": 3})
+    assert p.json()["mining_min_messages"] == 3 and p.json()["mode"] == "per_message"
     assert client.patch("/relevance/settings", json={"mode": "nope"}).status_code == 422
+    assert client.patch("/relevance/settings", json={"mining_min_messages": 0}).status_code == 422
 
 
 def test_interests_crud(client: Any) -> None:

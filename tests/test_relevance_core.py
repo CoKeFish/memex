@@ -108,12 +108,16 @@ def test_settings_default_off_and_partial_upsert() -> None:
     with connection() as c:
         s = get_settings(c, 1)
         assert (s.enabled, s.mode, s.model) == (False, "per_window", "claude-opus-4-8")
+        assert s.mining_min_messages == 5
         upsert_settings(c, 1, enabled=True)
         upsert_settings(c, 1, mode="per_message")  # parcial: no toca enabled
+        upsert_settings(c, 1, mining_min_messages=3)  # parcial: no toca mode
         s = get_settings(c, 1)
-        assert (s.enabled, s.mode) == (True, "per_message")
+        assert (s.enabled, s.mode, s.mining_min_messages) == (True, "per_message", 3)
         with pytest.raises(ValueError):
             upsert_settings(c, 1, mode="invalido")
+        with pytest.raises(ValueError):
+            upsert_settings(c, 1, mining_min_messages=0)
 
 
 def test_interests_crud_and_duplicate() -> None:

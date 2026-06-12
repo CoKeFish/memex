@@ -44,7 +44,7 @@ from memex.relevance.rules import (
     list_rules,
     set_rule_status,
 )
-from memex.relevance.settings import GATE_MODES, get_settings, upsert_settings
+from memex.relevance.settings import GATE_MODES, GateSettings, get_settings, upsert_settings
 from memex.relevance.verdicts import list_review_queue, resolve_insufficient
 
 
@@ -84,7 +84,9 @@ def cmd_mine(args: argparse.Namespace) -> int:
     from memex.relevance.mining import run_rule_mining
 
     try:
-        stats = asyncio.run(run_rule_mining(args.user_id, limit=args.limit))
+        stats = asyncio.run(
+            run_rule_mining(args.user_id, limit=args.limit, min_messages=args.min_count)
+        )
     except LLMQuotaError as e:
         print(_quota_msg(e), file=sys.stderr)
         return 1
@@ -96,23 +98,35 @@ def cmd_mine(args: argparse.Namespace) -> int:
         f"rechazadas={stats.rejected} duplicadas={stats.skipped} "
         f"costo=${stats.cost.total.cost_usd}"
     )
+    if stats.senders == 0:
+        print("(ningún remitente llegó al umbral de acumulación — sin llamada LLM)")
     return 0
+
+
+def _print_settings(s: GateSettings) -> None:
+    estado = "ENCENDIDO" if s.enabled else "apagado"
+    print(f"gate: {estado} — modo={s.mode} modelo={s.model} umbral-minería={s.mining_min_messages}")
 
 
 def cmd_settings_show(args: argparse.Namespace) -> int:
     with connection() as conn:
         s = get_settings(conn, args.user_id)
-    estado = "ENCENDIDO" if s.enabled else "apagado"
-    print(f"gate: {estado} — modo={s.mode} modelo={s.model}")
+    _print_settings(s)
     return 0
 
 
 def cmd_settings_set(args: argparse.Namespace) -> int:
     enabled = None if args.enabled is None else args.enabled == "true"
     with connection() as conn:
-        s = upsert_settings(conn, args.user_id, enabled=enabled, mode=args.mode, model=args.model)
-    estado = "ENCENDIDO" if s.enabled else "apagado"
-    print(f"gate: {estado} — modo={s.mode} modelo={s.model}")
+        s = upsert_settings(
+            conn,
+            args.user_id,
+            enabled=enabled,
+            mode=args.mode,
+            model=args.model,
+            mining_min_messages=args.mining_min,
+        )
+    _print_settings(s)
     return 0
 
 
@@ -252,6 +266,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_mine = sub.add_parser("mine", help="minería de reglas sobre los no-relevantes (LLM, paga)")
     p_mine.add_argument("--user-id", type=int, default=1)
     p_mine.add_argument("--limit", type=int, default=500)
+    p_mine.add_argument(
+        "--min-count",
+        type=int,
+        default=None,
+        help="umbral de acumulación por remitente (default: el setting del gate)",
+    )
     p_mine.set_defaults(func=cmd_mine)
 
     p_set = sub.add_parser("settings", help="settings del gate")
@@ -264,6 +284,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_setset.add_argument("--enabled", choices=["true", "false"], default=None)
     p_setset.add_argument("--mode", choices=list(GATE_MODES), default=None)
     p_setset.add_argument("--model", default=None)
+    p_setset.add_argument(
+        "--mining-min",
+        type=int,
+        default=None,
+        help="umbral de acumulación de la minería (correos no-relevantes por remitente)",
+    )
     p_setset.set_defaults(func=cmd_settings_set)
 
     p_int = sub.add_parser("interests", help="CRUD de intereses personales")

@@ -48,6 +48,13 @@ y seguro: toda regla propuesta —por el LLM o a mano— pasa un **dry run deter
 el histórico**; si atraparía un solo correo de relevancia efectiva TRUE, queda `rejected` con su
 reporte persistido. Si pasa, se auto-activa, auditada y reversible.
 
+La minería trabaja sobre el **acumulado**, no reacciona a correos sueltos: solo los remitentes
+con `mining_min_messages`+ no-relevantes (setting del gate, default 5) entran al análisis — si
+ninguno llega al umbral, la corrida es no-op **sin llamada LLM**. Los correos ya cubiertos por
+una regla (`method='rule'`) no cuentan: esa clase está resuelta y no se vuelve a chequear con
+LLM (el gate solo les estampa el veredicto con una comparación de strings, la auditoría de qué
+regla los filtró).
+
 ## Decisiones de diseño (y por qué)
 
 - **Rompe «advisory nunca acciona» a propósito.** El sistema de calidad existente (juez LLM,

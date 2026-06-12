@@ -12,6 +12,8 @@ export interface GateSettings {
   enabled: boolean
   mode: GateMode
   model: string
+  /** Umbral de acumulación de la minería: no-relevantes por remitente para entrar al análisis. */
+  mining_min_messages: number
 }
 
 /** Settings del gate — GET /relevance/settings (sin fila → defaults apagados). */

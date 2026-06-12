@@ -2253,11 +2253,16 @@ GateRuleStatus = Literal["active", "disabled", "rejected"]
 
 
 class RelevanceGateSettings(BaseModel):
-    """Settings del gate (una fila por usuario; sin fila → defaults apagados)."""
+    """Settings del gate (una fila por usuario; sin fila → defaults apagados).
+
+    `mining_min_messages`: umbral de acumulación de la minería (no-relevantes por remitente
+    para que esa clase entre al análisis; un solo correo malo nunca propone nada).
+    """
 
     enabled: bool
     mode: GateMode
     model: str
+    mining_min_messages: int
 
 
 class RelevanceGateSettingsPatch(BaseModel):
@@ -2266,6 +2271,7 @@ class RelevanceGateSettingsPatch(BaseModel):
     enabled: bool | None = None
     mode: GateMode | None = None
     model: str | None = None
+    mining_min_messages: int | None = Field(default=None, ge=1)
 
 
 class InterestInfo(BaseModel):
