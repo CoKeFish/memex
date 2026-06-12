@@ -24,6 +24,7 @@ Diseño futuro (DOCUMENTADO, no implementado acá):
   provee el primitivo agnóstico sobre el que se construirá.
 """
 
+from memex.llm.anthropic import AnthropicClient, AnthropicError, anthropic_config
 from memex.llm.client import (
     ChatMessage,
     LLMClient,
@@ -47,6 +48,8 @@ from memex.llm.pricing import (
 
 __all__ = [
     "MODEL_PRICING",
+    "AnthropicClient",
+    "AnthropicError",
     "ChatMessage",
     "DeepSeekClient",
     "DeepSeekError",
@@ -61,6 +64,7 @@ __all__ = [
     "PricingConfigError",
     "ResponseFormat",
     "Role",
+    "anthropic_config",
     "compute_cost",
     "is_off_peak",
     "load_pricing",

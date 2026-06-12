@@ -109,6 +109,12 @@ _V32 = ModelPricing(
 _FLASH = ModelPricing(Decimal("0.0028"), Decimal("0.14"), Decimal("0.28"))
 _PRO = ModelPricing(Decimal("0.003625"), Decimal("0.435"), Decimal("0.87"))
 
+# Anthropic (verificado 2026-06-12): Opus 4.8 = $5 input / $25 output / $0.50 cache-read por 1M.
+# La ESCRITURA de cache (cache_creation, premium 1.25x) se cobra acá a tarifa miss — subestima
+# ~25% solo esos tokens; los callers actuales no usan cache_control, así que en la práctica son
+# 0. Off-peak no aplica (es un descuento de DeepSeek): off_peak_discount=0 default.
+_OPUS_4_8 = ModelPricing(Decimal("0.50"), Decimal("5.00"), Decimal("25.00"))
+
 #: Tabla de precios pública por default (fallback si no hay overrides de entorno).
 MODEL_PRICING: dict[str, ModelPricing] = {
     "deepseek-chat": _FLASH,
@@ -116,6 +122,7 @@ MODEL_PRICING: dict[str, ModelPricing] = {
     "deepseek-v4-flash": _FLASH,
     "deepseek-v4-flash-preview": _FLASH,
     "deepseek-v4-pro": _PRO,
+    "claude-opus-4-8": _OPUS_4_8,
 }
 
 
