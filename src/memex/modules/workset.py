@@ -24,6 +24,7 @@ from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
 from memex.logging import get_logger
 from memex.modules.contract import InterestModule
 from memex.processing.windows import WorkRow
+from memex.relevance.verdicts import workset_gate_clause
 from memex.sources import kind_for_type, kind_types
 
 _log = get_logger("memex.modules.workset")
@@ -94,6 +95,11 @@ def load_module_workset(
         inbox_filter = "AND i.id = ANY(:iids)"
         params["iids"] = inbox_ids
 
+    # Gate de relevancia (correos): encendido, un correo sin relevancia efectiva (mark manual
+    # o veredicto `relevant`) no entra al workset; apagado → cláusula vacía.
+    gate_clause, gate_params = workset_gate_clause(conn, user_id)
+    params.update(gate_params)
+
     pending_or = " OR ".join(clauses)
     rows = (
         conn.execute(
@@ -117,6 +123,7 @@ def load_module_workset(
                       WHERE m.inbox_id = i.id AND {MEDIA_NOT_TERMINAL_SQL}
                   )
                   AND {not_in_review_sql("i.id")}
+                  {gate_clause}
                   {source_filter}
                   {inbox_filter}
                   AND ({pending_or})

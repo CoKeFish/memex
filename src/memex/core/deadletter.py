@@ -23,9 +23,10 @@ from memex.logging import get_logger
 
 _log = get_logger("memex.core.deadletter")
 
-#: Etapas que usan dead-letter (deben coincidir con el CHECK de la migración 0012).
+#: Etapas que usan dead-letter (deben coincidir con el CHECK de la 0012, ampliado en la 0065).
 STAGE_SUMMARIZE = "summarize"
 STAGE_EXTRACT = "extract"
+STAGE_RELEVANCE = "relevance"
 
 #: Fallos (sin éxito intermedio que cursoree el mensaje fuera del work-set) antes de mandarlo a
 #: 'pendiente de revisión'. Espeja MAX_OCR_ATTEMPTS. Llegar a este nº = veneno (falla determinista).

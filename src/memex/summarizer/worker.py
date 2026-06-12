@@ -41,6 +41,7 @@ from memex.core.observability import (
 from memex.db import connection
 from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
 from memex.logging import get_logger
+from memex.relevance.verdicts import workset_gate_clause
 from memex.summarizer.prompt import SYSTEM_PROMPT, build_user_content
 from memex.summarizer.render import render_payload
 from memex.summarizer.windows import (
@@ -126,6 +127,10 @@ def _load_workset(
         params["iids"] = inbox_ids
 
     with connection() as conn:
+        # Gate de relevancia (correos): encendido, un correo sin relevancia efectiva (mark
+        # manual o veredicto `relevant`) no entra al workset; apagado → cláusula vacía.
+        gate_clause, gate_params = workset_gate_clause(conn, user_id)
+        params.update(gate_params)
         rows = (
             conn.execute(
                 text(
@@ -133,7 +138,8 @@ def _load_workset(
                     SELECT i.id, i.source_id, i.occurred_at, i.payload, c.tier,
                            COALESCE(ma.ocr_text, '') AS ocr_text
                     FROM classifications c
-                    JOIN inbox i ON i.id = c.inbox_id
+                    JOIN inbox i   ON i.id = c.inbox_id
+                    JOIN sources s ON s.id = i.source_id
                     LEFT JOIN summary_inbox_links sl ON sl.inbox_id = i.id
                     LEFT JOIN (
                         SELECT inbox_id, string_agg(ocr_text, E'\n' ORDER BY id) AS ocr_text
@@ -149,6 +155,7 @@ def _load_workset(
                           WHERE m.inbox_id = i.id AND {MEDIA_NOT_TERMINAL_SQL}
                       )
                       AND {not_in_review_sql("i.id")}
+                      {gate_clause}
                       {filters}
                     ORDER BY i.source_id, i.occurred_at
                     LIMIT :limit
@@ -568,6 +575,9 @@ async def summarize_inbox(
 
     Idempotente: si ya está resumido y no es `force`, devuelve el existente. `force` lo borra
     (cascade a sus links) y re-corre. Lanza `LookupError` / `InboxNotClassifiedError`.
+
+    NO aplica el gate de relevancia: el click explícito por-mensaje es un bypass deliberado
+    (paridad con blacklist, que este camino también resume a pedido).
     """
     row = _load_one_workrow(user_id, inbox_id)
 

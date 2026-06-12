@@ -1019,7 +1019,11 @@ async def extract_inbox(
     client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Extrae (módulos) sobre UN mensaje o su ventana. Reusa `_process_window` (que saltea lo ya
-    hecho por módulo). `force` borra cursor + filas previas. Lanza Lookup/NotClassified."""
+    hecho por módulo). `force` borra cursor + filas previas. Lanza Lookup/NotClassified.
+
+    NO aplica el gate de relevancia: el click explícito por-mensaje es un bypass deliberado
+    (paridad con `summarize_inbox`, que tampoco filtra en este camino).
+    """
     with connection() as conn:
         active = _active_modules(conn, user_id)
     if not active:
