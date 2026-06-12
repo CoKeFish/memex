@@ -54,7 +54,9 @@ const JOB_LABELS: Record<string, string> = {
   calendar: "Calendario",
   finance: "Finanzas",
   identidades: "Identidades",
-  relevance: "Relevancia",
+  relevance: "Relevancia (candidatos)",
+  relevance_gate: "Gate de relevancia",
+  relevance_rules: "Minería de reglas",
   graph: "Grafo",
   log_purge: "Purga de logs",
 }

@@ -15,6 +15,9 @@ export * from "./feedback"
 // fetchSenderRelevance: remitentes rankeados por relevancia (ruido primero) para /relevancia.
 export * from "./quality-senders"
 
+// Gate de relevancia por intereses personales (correos): /relevance.
+export * from "./relevance"
+
 // ---- Media / OCR (datos reales: router /media) --------------------------------
 // fetchMediaList (lista de adjuntos con estado OCR + contexto del mensaje) para /ocr.
 export * from "./media"

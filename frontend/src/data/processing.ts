@@ -14,6 +14,7 @@ export const PROCESSING_STAGES: { key: ProcessingStage; label: string; llm: bool
   { key: "media", label: "Adjuntos (re-bajar)", llm: false },
   { key: "ocr", label: "OCR", llm: true },
   { key: "classify", label: "Clasificar", llm: false },
+  { key: "relevance", label: "Relevancia (gate)", llm: true },
   { key: "summarize", label: "Resumir", llm: true },
   { key: "extract", label: "Extraer", llm: true },
 ]
@@ -28,7 +29,7 @@ export const PROCESSING_ONLY: { key: ProcessingOnly; label: string; hint: string
   { key: "errored", label: "Solo con error", hint: "falló el pipeline o el OCR" },
 ]
 
-export type ProcessingStage = "media" | "ocr" | "classify" | "summarize" | "extract"
+export type ProcessingStage = "media" | "ocr" | "classify" | "relevance" | "summarize" | "extract"
 export type ProcessingOnly = "unstored-attachments" | "errored"
 export type BatchingPolicy = "per_module" | "grouped" | "all"
 
