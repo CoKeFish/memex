@@ -22,8 +22,8 @@ import pytest
 from sqlalchemy import text
 
 from memex.api.object_store import set_object_store
+from memex.backfill.media import backfill_inbox_media
 from memex.db import connection
-from memex.media_backfill import backfill_inbox_media
 
 INTERNALDATE = datetime(2026, 5, 23, 10, 0, tzinfo=UTC)
 
@@ -119,8 +119,8 @@ def fake_store() -> Iterator[FakeStore]:
 
 @pytest.fixture
 def patched_imap(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("memex.media_backfill.ImapConfig", _StubImapConfig)
-    monkeypatch.setattr("memex.media_backfill.ImapClient", _FakeClient)
+    monkeypatch.setattr("memex.backfill.media.ImapConfig", _StubImapConfig)
+    monkeypatch.setattr("memex.backfill.media.ImapClient", _FakeClient)
 
 
 def _new_imap_source(name: str) -> int:

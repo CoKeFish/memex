@@ -21,10 +21,10 @@ from typing import Any, Literal
 
 from sqlalchemy import text
 
+from memex.backfill.media import backfill_inbox_media
 from memex.classifier.rules import classify
 from memex.db import connection
 from memex.logging import bound_log_context, get_logger
-from memex.media_backfill import backfill_inbox_media
 from memex.modules.orchestrator import extract_inbox, run_extraction
 from memex.ocr.worker import run_ocr
 from memex.relevance.gate import run_relevance_gate

@@ -1,8 +1,12 @@
-"""Entry point: `python -m memex.ingestors.imap.cli run [--source-id N]`.
+"""Entry point: `memex-imap run [--source-id N]` (also `python -m memex.ingestors.imap.cli`).
 
 Subcommands:
 - `run`: lists enabled IMAP sources from memex and drives each through the
-  generic runner. Default for ongoing ingestion.
+  generic runner, pushing records to memex over HTTP. A MANUAL, out-of-process
+  pass — handy to ingest from outside the server or to debug a single source.
+  Ongoing/unattended ingestion is NOT this CLI: it's the `memex-ingest-scheduler`
+  daemon (incremental, per `fetch_schedule`) or `POST /sources/{id}/fetch`
+  (on demand), both in-process and colocated with the DB.
 - `authorize`: one-time OAuth2 setup for a source with auth='oauth2'. Opens
   the browser, captures consent, persists tokens to disk.
 
