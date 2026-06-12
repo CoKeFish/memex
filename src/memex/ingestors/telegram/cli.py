@@ -6,7 +6,7 @@ Subcomandos:
               Bloquea pidiendo el código por stdin. Run-once por VPS.
   run       — ejecuta UNA pasada de polling para los sources tipo `telegram`
               registrados en memex (filtrable por --source-id). Mismo patrón
-              que `python -m memex.ingestors.imap.cli run`.
+              que `memex-imap run`.
   discover  — lista los dialogs (chats) accesibles desde la session
               actual, imprimiendo `chat_id` + nombre + tipo. Útil para
               poblar `allowed_chats` en `sources.config`. NO persiste nada.

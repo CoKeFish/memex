@@ -5,7 +5,8 @@ Por qué hace falta: `persist_media` solo corre en el INSERT de un inbox nuevo (
 y re-traer un correo existente es idempotente (duplicado → no crea media). Acá re-bajamos por UID
 (del `external_id`) con `extract_media` FORZADO, sin tocar el inbox ni sus filas derivadas
 (resumen/extracción). Server-side (no es un ingestor-plugin): orquesta primitivas IMAP + el
-`persist_media` del borde de ingest (`api`), por eso vive a nivel `memex`, no bajo `ingestors/`.
+`persist_media` del borde de ingest (`api`); por eso vive en `backfill/` (que SÍ puede importar
+`memex.api`/`memex.db`) y no bajo `ingestors/`, que tiene ese import prohibido (ADR-001).
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from memex.ingestors.imap.config import ImapConfig, ImapConfigError
 from memex.ingestors.imap.parser import parse_email_message
 from memex.logging import get_logger
 
-_log = get_logger("memex.media_backfill")
+_log = get_logger("memex.backfill.media")
 
 
 @dataclass
