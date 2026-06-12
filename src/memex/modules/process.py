@@ -17,6 +17,7 @@ from memex.llm import DeepSeekClient, LLMClient, LLMConfig
 from memex.logging import get_logger
 from memex.modules.orchestrator import _GROUP_SIZE_DEFAULT, ExtractStats, run_extraction
 from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
+from memex.relevance.gate import GateStats, run_relevance_gate
 from memex.summarizer.worker import SummarizeStats, run_summarization
 
 _log = get_logger("memex.modules.process")
@@ -28,6 +29,8 @@ class CombinedStats:
 
     summarize: SummarizeStats
     extract: ExtractStats
+    #: Stats del gate de relevancia (corre ANTES de resumir; apagado → stats vacíos).
+    gate: GateStats | None = None
 
 
 async def run_combined(
@@ -41,16 +44,27 @@ async def run_combined(
     batching_policy: str = "grouped",  # mirror de run_extraction: una llamada para todos
     group_size: int = _GROUP_SIZE_DEFAULT,
     client: LLMClient | None = None,
+    gate_client: LLMClient | None = None,
 ) -> CombinedStats:
-    """Corre resumen y luego extracción sobre los mismos mensajes, compartiendo cliente LLM.
+    """Corre el gate de relevancia, luego resumen y extracción sobre los mismos mensajes.
 
-    Las perillas de ventaneo van a AMBOS pasos; las de ruteo/batching (`route_chunk_size`,
-    `batching_policy`, `group_size`) solo aplican a la extracción.
+    Las perillas de ventaneo van a los TRES pasos; las de ruteo/batching (`route_chunk_size`,
+    `batching_policy`, `group_size`) solo aplican a la extracción. El gate usa su PROPIO
+    cliente LLM (Anthropic/Opus por default, NO el DeepSeek compartido del resto);
+    `gate_client` es inyectable para tests. Gate apagado → no-op (worksets sin filtro).
     """
     owns_client = client is None
     llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
     _log.info("process.combined.start", user_id=user_id, source_id=source_id)
     try:
+        gate = await run_relevance_gate(
+            user_id,
+            source_id=source_id,
+            limit=limit,
+            max_window_size=max_window_size,
+            max_gap_seconds=max_gap_seconds,
+            client=gate_client,
+        )
         summarize = await run_summarization(
             user_id,
             source_id=source_id,
@@ -76,7 +90,8 @@ async def run_combined(
     _log.info(
         "process.combined.end",
         user_id=user_id,
+        gated=gate.messages,
         summaries=summarize.summaries,
         items=extract.items,
     )
-    return CombinedStats(summarize=summarize, extract=extract)
+    return CombinedStats(summarize=summarize, extract=extract, gate=gate)

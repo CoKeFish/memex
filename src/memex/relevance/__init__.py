@@ -20,12 +20,14 @@ acciona (bloquea procesamiento, crea reglas), siempre auditado y reversible. La 
 acá como módulo PREVIO al pipeline — excepción acotada a la exclusión de ADR-015.
 """
 
+from memex.relevance.gate import GateStats, run_relevance_gate
 from memex.relevance.interests import (
     create_interest,
     delete_interest,
     list_interests,
     update_interest,
 )
+from memex.relevance.mining import MiningStats, run_rule_mining
 from memex.relevance.rules import (
     DryRunReport,
     apply_active_rules,
@@ -51,6 +53,8 @@ __all__ = [
     "EMAIL_TYPES",
     "DryRunReport",
     "GateSettings",
+    "GateStats",
+    "MiningStats",
     "VerdictItem",
     "apply_active_rules",
     "clear_verdicts",
@@ -66,6 +70,8 @@ __all__ = [
     "load_gate_workset",
     "match_rule",
     "resolve_insufficient",
+    "run_relevance_gate",
+    "run_rule_mining",
     "set_rule_status",
     "update_interest",
     "upsert_settings",

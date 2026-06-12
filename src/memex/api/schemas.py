@@ -1835,7 +1835,7 @@ class ModuleList(BaseModel):
 
 
 # --- Procesamiento: corridas por lote (reprocess on-demand) ---
-ProcessingStage = Literal["media", "ocr", "classify", "summarize", "extract"]
+ProcessingStage = Literal["media", "ocr", "classify", "relevance", "summarize", "extract"]
 ProcessingOnly = Literal["unstored-attachments", "errored"]
 
 

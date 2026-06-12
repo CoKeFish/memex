@@ -27,12 +27,15 @@ from memex.logging import bound_log_context, get_logger
 from memex.media_backfill import backfill_inbox_media
 from memex.modules.orchestrator import extract_inbox, run_extraction
 from memex.ocr.worker import run_ocr
+from memex.relevance.gate import run_relevance_gate
 from memex.summarizer.worker import run_summarization, summarize_inbox
 
 _log = get_logger("memex.reprocess")
 
 #: Orden de dependencia de las etapas. Se corren SIEMPRE en este orden, sea cual sea el set elegido.
-STAGE_ORDER: tuple[str, ...] = ("media", "ocr", "classify", "summarize", "extract")
+#: `relevance` (gate de intereses, solo correos) corre tras classify y ANTES de cualquier LLM:
+#: con el gate encendido, summarize/extract excluyen lo no-relevante (apagado → no-op).
+STAGE_ORDER: tuple[str, ...] = ("media", "ocr", "classify", "relevance", "summarize", "extract")
 VALID_STAGES = frozenset(STAGE_ORDER)
 #: Predicados de selección acotados (no especulativos): adjuntos declarados sin media / con error.
 ONLY_FILTERS = frozenset({"unstored-attachments", "errored"})
@@ -138,6 +141,26 @@ def _classify_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[s
     return {"classified": classified, "already": already, "missing": missing, "by_tier": by_tier}
 
 
+async def _relevance_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[str, Any]:
+    """Corre el gate de relevancia sobre los targets (apagado → no-op con stats en cero).
+
+    `force` borra primero los veredictos NO manuales de esos ids (re-juzga). A diferencia de
+    summarize/extract no hay vía per-mensaje especial: el gate ventanea igual con 1 que con N.
+    """
+    stats = await run_relevance_gate(user_id, inbox_ids=inbox_ids, force=force)
+    return {
+        "ok": stats.messages,
+        "messages": stats.messages,
+        "relevant": stats.relevant,
+        "not_relevant": stats.not_relevant,
+        "insufficient": stats.insufficient,
+        "by_rule": stats.by_rule,
+        "skipped": stats.skipped,
+        "errors": stats.errors,
+        "cost_usd": float(stats.cost.total.cost_usd),
+    }
+
+
 async def _summarize_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[str, Any]:
     """Resume respetando los tiers, igual que el daemon (salta blacklist, ventanea batch).
 
@@ -241,6 +264,8 @@ async def _run_stages(
                 per_stage["classify"] = await asyncio.to_thread(
                     _classify_targets, user_id, targets, force
                 )
+            elif stage == "relevance":
+                per_stage["relevance"] = await _relevance_targets(user_id, targets, force)
             elif stage == "summarize":
                 per_stage["summarize"] = await _summarize_targets(user_id, targets, force)
             elif stage == "extract":

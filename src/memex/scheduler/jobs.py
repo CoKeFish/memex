@@ -38,6 +38,8 @@ from memex.relations.clusters_llm import run_cluster_partition
 from memex.relations.deterministic import build_relations
 from memex.relations.reconcile import detect_and_reconcile
 from memex.relations.resolve import ResolveStats, run_resolve
+from memex.relevance.gate import run_relevance_gate
+from memex.relevance.mining import run_rule_mining
 from memex.summarizer.worker import run_summarization
 
 _log = get_logger("memex.scheduler.jobs")
@@ -431,6 +433,10 @@ _REGISTRY: dict[str, Job] = {
     "finance": Job("finance", "PT1H", run_finance_cycle),
     "identidades": Job("identidades", "PT1H", run_identidades_cycle),
     "relevance": Job("relevance", "P1D", _sync(run_relevance_detection)),
+    # Gate de relevancia (correos) + mineria de reglas: apagados por default (fuera de
+    # enabled_jobs); el gate igualmente corre dentro de las corridas de procesamiento.
+    "relevance_gate": Job("relevance_gate", "PT1H", run_relevance_gate),
+    "relevance_rules": Job("relevance_rules", "P1D", run_rule_mining),
     "graph": Job("graph", "P1D", run_graph_cycle),
     "graph_resolve": Job("graph_resolve", "P1D", run_graph_resolve),
     "log_purge": Job("log_purge", "P1D", _sync(run_log_purge)),
