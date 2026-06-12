@@ -28,7 +28,7 @@ import sys
 from sqlalchemy.exc import IntegrityError
 
 from memex.db import connection
-from memex.llm import LLMError, LLMQuotaError
+from memex.llm import CodexClient, LLMClient, LLMError, LLMQuotaError
 from memex.logging import setup_logging
 from memex.relevance.gate import run_relevance_gate
 from memex.relevance.interests import (
@@ -52,6 +52,15 @@ def _quota_msg(e: LLMQuotaError) -> str:
     return f"saldo del proveedor LLM agotado ({e}); recargar antes de reintentar"
 
 
+def _build_client(args: argparse.Namespace) -> LLMClient | None:
+    """None = el default del worker (Anthropic). `codex` = experimental via suscripcion:
+    sin metricas de tokens (llm_calls a costo 0) y solo host-side (requiere `codex login`)."""
+    if args.provider == "codex":
+        print("(proveedor experimental codex: costo no medido, consume tu suscripcion)")
+        return CodexClient(model=args.codex_model)
+    return None
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     try:
         stats = asyncio.run(
@@ -61,6 +70,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 limit=args.limit,
                 inbox_ids=args.inbox_ids,
                 force=args.force,
+                client=_build_client(args),
             )
         )
     except LLMQuotaError as e:
@@ -85,7 +95,12 @@ def cmd_mine(args: argparse.Namespace) -> int:
 
     try:
         stats = asyncio.run(
-            run_rule_mining(args.user_id, limit=args.limit, min_messages=args.min_count)
+            run_rule_mining(
+                args.user_id,
+                limit=args.limit,
+                min_messages=args.min_count,
+                client=_build_client(args),
+            )
         )
     except LLMQuotaError as e:
         print(_quota_msg(e), file=sys.stderr)
@@ -249,6 +264,20 @@ def cmd_review(args: argparse.Namespace) -> int:
         return 0
 
 
+def _add_provider_flags(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--provider",
+        choices=["anthropic", "codex"],
+        default="anthropic",
+        help="codex = EXPERIMENTAL via `codex exec` (suscripcion; sin metricas de costo)",
+    )
+    p.add_argument(
+        "--codex-model",
+        default=None,
+        help="modelo para --provider codex (default: el del CLI de codex)",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="memex-relevance")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -261,6 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--force", action="store_true", help="re-juzga (borra veredictos no manuales)"
     )
+    _add_provider_flags(p_run)
     p_run.set_defaults(func=cmd_run)
 
     p_mine = sub.add_parser("mine", help="minería de reglas sobre los no-relevantes (LLM, paga)")
@@ -272,6 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="umbral de acumulación por remitente (default: el setting del gate)",
     )
+    _add_provider_flags(p_mine)
     p_mine.set_defaults(func=cmd_mine)
 
     p_set = sub.add_parser("settings", help="settings del gate")

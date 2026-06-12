@@ -35,6 +35,7 @@ from memex.llm.client import (
     ResponseFormat,
     Role,
 )
+from memex.llm.codex import CodexClient, CodexError
 from memex.llm.config import LLMConfig, LLMConfigError
 from memex.llm.deepseek import DeepSeekClient, DeepSeekError
 from memex.llm.pricing import (
@@ -51,6 +52,8 @@ __all__ = [
     "AnthropicClient",
     "AnthropicError",
     "ChatMessage",
+    "CodexClient",
+    "CodexError",
     "DeepSeekClient",
     "DeepSeekError",
     "LLMClient",

@@ -101,7 +101,10 @@ dead-letter a los 3 intentos, como summarize/extract.
   `POST /inbox/{id}/reprocess`. También al inicio de `run_combined` (`memex-process`).
 - **Jobs del scheduler**: `relevance_gate` (PT1H) y `relevance_rules` (P1D), fuera de
   `enabled_jobs` por default.
-- **CLI**: `memex-relevance run|mine|settings|interests|rules|review`.
+- **CLI**: `memex-relevance run|mine|settings|interests|rules|review`. `--provider codex`
+  (EXPERIMENTAL, solo pruebas host-side): juzga vía `codex exec` con la suscripción del
+  dueño — sin métricas de tokens (llm_calls a costo 0), requiere `codex login`, los
+  veredictos quedan con `model='codex/<m>'` para comparar proveedores.
 - **API**: `/relevance/*` (settings, interests, rules + mine, review). La corrida del gate no se
   dispara por API propia: va por las corridas de procesamiento.
 - **UI**: /filtros → «Intereses personales» (toggle + modo + CRUD) y «Reglas automáticas y
