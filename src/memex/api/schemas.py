@@ -2248,6 +2248,7 @@ class GraphClusterTimeline(BaseModel):
 
 # --- Gate de relevancia (intereses personales, correos) ---
 GateMode = Literal["per_window", "per_message"]
+GateProvider = Literal["anthropic", "codex"]
 GateRuleKind = Literal["sender_email", "sender_domain", "subject_contains", "list_id"]
 GateRuleStatus = Literal["active", "disabled", "rejected"]
 
@@ -2263,6 +2264,10 @@ class RelevanceGateSettings(BaseModel):
     mode: GateMode
     model: str
     mining_min_messages: int
+    #: 'codex' usa la suscripción del dueño vía `codex exec`: SOLO host-side (las corridas
+    #: dentro del contenedor fallan) y sin métricas de tokens (llm_calls a costo 0).
+    provider: GateProvider
+    codex_model: str | None
 
 
 class RelevanceGateSettingsPatch(BaseModel):
@@ -2272,6 +2277,8 @@ class RelevanceGateSettingsPatch(BaseModel):
     mode: GateMode | None = None
     model: str | None = None
     mining_min_messages: int | None = Field(default=None, ge=1)
+    provider: GateProvider | None = None
+    codex_model: str | None = None  # "" limpia el override (default del CLI de codex)
 
 
 class InterestInfo(BaseModel):

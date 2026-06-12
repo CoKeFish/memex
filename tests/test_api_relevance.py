@@ -45,6 +45,8 @@ def test_settings_default_and_patch(client: Any) -> None:
         "mode": "per_window",
         "model": "claude-opus-4-8",
         "mining_min_messages": 5,
+        "provider": "anthropic",
+        "codex_model": None,
     }
 
     p = client.patch("/relevance/settings", json={"enabled": True})
@@ -54,6 +56,11 @@ def test_settings_default_and_patch(client: Any) -> None:
     assert body["enabled"] is True and body["mode"] == "per_message"  # patch parcial
     p = client.patch("/relevance/settings", json={"mining_min_messages": 3})
     assert p.json()["mining_min_messages"] == 3 and p.json()["mode"] == "per_message"
+    p = client.patch("/relevance/settings", json={"provider": "codex", "codex_model": "gpt-5.1"})
+    assert p.json()["provider"] == "codex" and p.json()["codex_model"] == "gpt-5.1"
+    p = client.patch("/relevance/settings", json={"codex_model": ""})
+    assert p.json()["codex_model"] is None and p.json()["provider"] == "codex"  # "" limpia
+    assert client.patch("/relevance/settings", json={"provider": "openai"}).status_code == 422
     assert client.patch("/relevance/settings", json={"mode": "nope"}).status_code == 422
     assert client.patch("/relevance/settings", json={"mining_min_messages": 0}).status_code == 422
 

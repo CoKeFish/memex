@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from sqlalchemy import Connection, text
 
 GATE_MODES = ("per_window", "per_message")
+GATE_PROVIDERS = ("anthropic", "codex")
 _DEFAULT_MODEL = "claude-opus-4-8"
 
 
@@ -24,12 +25,17 @@ class GateSettings:
 
     `mining_min_messages`: umbral de acumulación de la minería — solo se proponen reglas para
     clases (remitentes) con N+ correos no-relevantes; un solo correo malo nunca dispara nada.
+    `provider`: quién juzga — 'anthropic' (API, default) o 'codex' (`codex exec` con la
+    suscripción del dueño; SOLO host-side, sin métricas de tokens). `model` pertenece al path
+    Anthropic; `codex_model` al de codex (None = el default del CLI).
     """
 
     enabled: bool = False
     mode: str = "per_window"
     model: str = _DEFAULT_MODEL
     mining_min_messages: int = 5
+    provider: str = "anthropic"
+    codex_model: str | None = None
 
 
 def get_settings(conn: Connection, user_id: int) -> GateSettings:
@@ -37,7 +43,7 @@ def get_settings(conn: Connection, user_id: int) -> GateSettings:
     row = (
         conn.execute(
             text(
-                "SELECT enabled, mode, model, mining_min_messages "
+                "SELECT enabled, mode, model, mining_min_messages, provider, codex_model "
                 "FROM relevance_gate_settings WHERE user_id = :uid"
             ),
             {"uid": user_id},
@@ -52,6 +58,8 @@ def get_settings(conn: Connection, user_id: int) -> GateSettings:
         mode=str(row["mode"]),
         model=str(row["model"]),
         mining_min_messages=int(row["mining_min_messages"]),
+        provider=str(row["provider"]),
+        codex_model=str(row["codex_model"]) if row["codex_model"] is not None else None,
     )
 
 
@@ -63,17 +71,25 @@ def upsert_settings(
     mode: str | None = None,
     model: str | None = None,
     mining_min_messages: int | None = None,
+    provider: str | None = None,
+    codex_model: str | None = None,
 ) -> GateSettings:
     """Upsert PARCIAL (solo los campos pasados); devuelve los settings resultantes.
 
-    `mode`/`mining_min_messages` inválidos → ValueError (el CHECK de la DB también los
-    rechazaría, pero el error de capa de aplicación es accionable para API/CLI).
+    `mode`/`mining_min_messages`/`provider` inválidos → ValueError (el CHECK de la DB también
+    los rechazaría, pero el error de capa de aplicación es accionable para API/CLI).
+    `codex_model=""` limpia el override (vuelve al default del CLI de codex).
     """
     if mode is not None and mode not in GATE_MODES:
         raise ValueError(f"mode inválido: {mode!r}; válidos: {GATE_MODES}")
     if mining_min_messages is not None and mining_min_messages < 1:
         raise ValueError(f"mining_min_messages inválido: {mining_min_messages} (mínimo 1)")
+    if provider is not None and provider not in GATE_PROVIDERS:
+        raise ValueError(f"provider inválido: {provider!r}; válidos: {GATE_PROVIDERS}")
     current = get_settings(conn, user_id)
+    resolved_codex_model = current.codex_model
+    if codex_model is not None:
+        resolved_codex_model = codex_model.strip() or None
     resolved = GateSettings(
         enabled=current.enabled if enabled is None else enabled,
         mode=current.mode if mode is None else mode,
@@ -81,16 +97,20 @@ def upsert_settings(
         mining_min_messages=(
             current.mining_min_messages if mining_min_messages is None else mining_min_messages
         ),
+        provider=current.provider if provider is None else provider,
+        codex_model=resolved_codex_model,
     )
     conn.execute(
         text(
             """
             INSERT INTO relevance_gate_settings (user_id, enabled, mode, model,
-                                                 mining_min_messages)
-            VALUES (:uid, :enabled, :mode, :model, :mining_min)
+                                                 mining_min_messages, provider, codex_model)
+            VALUES (:uid, :enabled, :mode, :model, :mining_min, :provider, :codex_model)
             ON CONFLICT (user_id) DO UPDATE
                 SET enabled = EXCLUDED.enabled, mode = EXCLUDED.mode, model = EXCLUDED.model,
-                    mining_min_messages = EXCLUDED.mining_min_messages, updated_at = NOW()
+                    mining_min_messages = EXCLUDED.mining_min_messages,
+                    provider = EXCLUDED.provider, codex_model = EXCLUDED.codex_model,
+                    updated_at = NOW()
             """
         ),
         {
@@ -99,6 +119,8 @@ def upsert_settings(
             "mode": resolved.mode,
             "model": resolved.model,
             "mining_min": resolved.mining_min_messages,
+            "provider": resolved.provider,
+            "codex_model": resolved.codex_model,
         },
     )
     return resolved

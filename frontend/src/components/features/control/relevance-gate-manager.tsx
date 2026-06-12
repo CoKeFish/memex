@@ -19,13 +19,18 @@ import {
   patchGateSettings,
   patchInterest,
 } from "@/data"
-import type { GateMode, GateSettings, PersonalInterest } from "@/data"
+import type { GateMode, GateProvider, GateSettings, PersonalInterest } from "@/data"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
 
 const MODE_OPTIONS: { value: GateMode; label: string; hint: string }[] = [
   { value: "per_window", label: "Por ventana", hint: "1 llamada por ventana (más barato)" },
   { value: "per_message", label: "Por correo", hint: "1 llamada por correo (experimento)" },
+]
+
+const PROVIDER_OPTIONS: { value: GateProvider; label: string; hint: string }[] = [
+  { value: "anthropic", label: "Anthropic", hint: "API por token, métricas completas" },
+  { value: "codex", label: "Codex", hint: "suscripción; solo host-side, costo no medido" },
 ]
 
 function errMsg(e: unknown): string {
@@ -137,8 +142,36 @@ export function RelevanceGateManager() {
                 }}
               />
             </div>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-muted-foreground">Proveedor</span>
+              <Select
+                value={s.provider}
+                onValueChange={(v) =>
+                  void mutate(
+                    async () => {
+                      await patchGateSettings({ provider: v as GateProvider })
+                    },
+                    v === "codex"
+                      ? "Proveedor → Codex (suscripción; solo corridas host-side)"
+                      : "Proveedor → Anthropic",
+                    settings.reload,
+                  )
+                }
+              >
+                <SelectTrigger className="h-8 w-52" disabled={busy}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PROVIDER_OPTIONS.map((p) => (
+                    <SelectItem key={p.value} value={p.value}>
+                      {p.label} — {p.hint}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <span className="num text-[11px] text-muted-foreground" title="modelo del gate">
-              {s.model}
+              {s.provider === "codex" ? `codex/${s.codex_model ?? "default"}` : s.model}
             </span>
           </div>
         )}

@@ -53,11 +53,15 @@ def _quota_msg(e: LLMQuotaError) -> str:
 
 
 def _build_client(args: argparse.Namespace) -> LLMClient | None:
-    """None = el default del worker (Anthropic). `codex` = experimental via suscripcion:
-    sin metricas de tokens (llm_calls a costo 0) y solo host-side (requiere `codex login`)."""
+    """None = lo decide `settings.provider` en el worker. El flag --provider es un OVERRIDE
+    por corrida. codex: sin metricas de tokens (llm_calls a costo 0) y solo host-side."""
     if args.provider == "codex":
-        print("(proveedor experimental codex: costo no medido, consume tu suscripcion)")
+        print("(proveedor codex: costo no medido en llm_calls, consume tu suscripcion)")
         return CodexClient(model=args.codex_model)
+    if args.provider == "anthropic":
+        from memex.llm import AnthropicClient, anthropic_config
+
+        return AnthropicClient(anthropic_config())
     return None
 
 
@@ -120,7 +124,11 @@ def cmd_mine(args: argparse.Namespace) -> int:
 
 def _print_settings(s: GateSettings) -> None:
     estado = "ENCENDIDO" if s.enabled else "apagado"
-    print(f"gate: {estado} — modo={s.mode} modelo={s.model} umbral-minería={s.mining_min_messages}")
+    modelo = s.model if s.provider == "anthropic" else f"codex/{s.codex_model or 'default'}"
+    print(
+        f"gate: {estado} — proveedor={s.provider} modo={s.mode} modelo={modelo} "
+        f"umbral-minería={s.mining_min_messages}"
+    )
 
 
 def cmd_settings_show(args: argparse.Namespace) -> int:
@@ -140,6 +148,8 @@ def cmd_settings_set(args: argparse.Namespace) -> int:
             mode=args.mode,
             model=args.model,
             mining_min_messages=args.mining_min,
+            provider=args.provider,
+            codex_model=args.codex_model,
         )
     _print_settings(s)
     return 0
@@ -268,8 +278,8 @@ def _add_provider_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--provider",
         choices=["anthropic", "codex"],
-        default="anthropic",
-        help="codex = EXPERIMENTAL via `codex exec` (suscripcion; sin metricas de costo)",
+        default=None,
+        help="override por corrida (default: el provider de los settings del gate)",
     )
     p.add_argument(
         "--codex-model",
@@ -320,6 +330,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="umbral de acumulación de la minería (correos no-relevantes por remitente)",
+    )
+    p_setset.add_argument(
+        "--provider",
+        choices=["anthropic", "codex"],
+        default=None,
+        help="proveedor del gate (codex: suscripcion, solo host-side, sin metricas de costo)",
+    )
+    p_setset.add_argument(
+        "--codex-model",
+        default=None,
+        help="modelo de codex ('' = volver al default del CLI)",
     )
     p_setset.set_defaults(func=cmd_settings_set)
 

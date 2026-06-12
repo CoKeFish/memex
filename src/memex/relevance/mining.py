@@ -21,13 +21,14 @@ from sqlalchemy import Connection, text
 
 from memex.core.observability import CostBySource, record_llm_call
 from memex.db import connection
-from memex.llm import AnthropicClient, ChatMessage, LLMClient, anthropic_config
+from memex.llm import AnthropicClient, ChatMessage, LLMClient
 from memex.logging import get_logger
 from memex.relevance.prompts import (
     RULES_SYSTEM_PROMPT,
     build_rules_user_content,
     parse_rule_proposals,
 )
+from memex.relevance.providers import build_gate_client
 from memex.relevance.rules import create_rule, dry_run_rule
 from memex.relevance.settings import get_settings
 from memex.relevance.verdicts import EMAIL_TYPES
@@ -158,7 +159,7 @@ async def run_rule_mining(
         ChatMessage("user", build_rules_user_content(json.dumps(aggregates, ensure_ascii=False))),
     ]
     owns_client = client is None
-    active: LLMClient = client if client is not None else AnthropicClient(anthropic_config())
+    active: LLMClient = client if client is not None else build_gate_client(settings)
     try:
         result = await active.complete(
             messages,

@@ -73,3 +73,15 @@ def test_codex_client_satisfies_llmclient_protocol() -> None:
 
 def test_codex_error_subclasses_llm_error() -> None:
     assert issubclass(CodexError, LLMError)
+
+
+def test_build_gate_client_selects_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """El builder del gate respeta settings.provider (codex resuelve el binario del PATH)."""
+    import shutil
+
+    from memex.relevance.providers import build_gate_client
+    from memex.relevance.settings import GateSettings
+
+    monkeypatch.setattr(shutil, "which", lambda _: "C:/fake/codex.cmd")
+    client = build_gate_client(GateSettings(provider="codex", codex_model="gpt-5.1"))
+    assert isinstance(client, CodexClient)

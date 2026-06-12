@@ -26,7 +26,7 @@ from decimal import Decimal
 from memex.core.deadletter import STAGE_RELEVANCE, record_failures
 from memex.core.observability import CostBySource, record_llm_call
 from memex.db import connection
-from memex.llm import AnthropicClient, ChatMessage, LLMClient, LLMQuotaError, anthropic_config
+from memex.llm import AnthropicClient, ChatMessage, LLMClient, LLMQuotaError
 from memex.logging import bound_log_context, get_logger
 from memex.processing.windows import (
     MAX_GAP_SECONDS,
@@ -42,6 +42,7 @@ from memex.relevance.prompts import (
     build_messages_json,
     parse_gate_verdicts,
 )
+from memex.relevance.providers import build_gate_client
 from memex.relevance.rules import apply_active_rules
 from memex.relevance.settings import GateSettings, get_settings
 from memex.relevance.verdicts import VerdictItem, clear_verdicts, insert_verdicts, load_gate_workset
@@ -293,8 +294,9 @@ async def run_relevance_gate(
 
     `inbox_ids` acota a un set explícito (etapa `relevance` del reproceso); `force` borra
     primero los veredictos NO manuales de esos targets (el juicio del dueño no se pisa).
-    `client` inyectable (tests con fake); por default crea el cliente Anthropic (Opus).
-    Best-effort por ventana; `LLMQuotaError` aborta la corrida (saldo agotado).
+    `client` inyectable (tests con fake / override del CLI); por default lo decide
+    `settings.provider` (Anthropic u, host-side, codex). Best-effort por ventana;
+    `LLMQuotaError` aborta la corrida (saldo agotado).
     """
     with connection() as conn:
         settings = get_settings(conn, user_id)
@@ -318,7 +320,7 @@ async def run_relevance_gate(
         return stats
 
     owns_client = client is None
-    active: LLMClient = client if client is not None else AnthropicClient(anthropic_config())
+    active: LLMClient = client if client is not None else build_gate_client(settings)
     try:
         for window in windows:
             stats.windows += 1

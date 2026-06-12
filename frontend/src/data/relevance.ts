@@ -7,6 +7,7 @@ import { apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api"
 // ---- Settings ----------------------------------------------------------------------------------
 
 export type GateMode = "per_window" | "per_message"
+export type GateProvider = "anthropic" | "codex"
 
 export interface GateSettings {
   enabled: boolean
@@ -14,6 +15,9 @@ export interface GateSettings {
   model: string
   /** Umbral de acumulación de la minería: no-relevantes por remitente para entrar al análisis. */
   mining_min_messages: number
+  /** codex = suscripción vía `codex exec`: solo host-side y sin métricas de costo. */
+  provider: GateProvider
+  codex_model: string | null
 }
 
 /** Settings del gate — GET /relevance/settings (sin fila → defaults apagados). */

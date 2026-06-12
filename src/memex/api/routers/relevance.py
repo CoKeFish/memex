@@ -59,6 +59,8 @@ def _settings_payload(s: GateSettings) -> dict[str, Any]:
         "mode": s.mode,
         "model": s.model,
         "mining_min_messages": s.mining_min_messages,
+        "provider": s.provider,
+        "codex_model": s.codex_model,
     }
 
 
