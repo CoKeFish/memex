@@ -2244,3 +2244,117 @@ class GraphClusterTimeline(BaseModel):
     events: list[GraphTimelineEvent]
     actors: list[GraphTimelineActor]
     inbox_kinds: dict[int, str] = {}
+
+
+# --- Gate de relevancia (intereses personales, correos) ---
+GateMode = Literal["per_window", "per_message"]
+GateRuleKind = Literal["sender_email", "sender_domain", "subject_contains", "list_id"]
+GateRuleStatus = Literal["active", "disabled", "rejected"]
+
+
+class RelevanceGateSettings(BaseModel):
+    """Settings del gate (una fila por usuario; sin fila → defaults apagados)."""
+
+    enabled: bool
+    mode: GateMode
+    model: str
+
+
+class RelevanceGateSettingsPatch(BaseModel):
+    """PATCH parcial de los settings del gate (solo los campos presentes)."""
+
+    enabled: bool | None = None
+    mode: GateMode | None = None
+    model: str | None = None
+
+
+class InterestInfo(BaseModel):
+    id: int
+    text: str
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class InterestList(BaseModel):
+    items: list[InterestInfo]
+
+
+class InterestCreateRequest(BaseModel):
+    text: str
+
+
+class InterestPatch(BaseModel):
+    """PATCH parcial de un interés (texto y/o enabled)."""
+
+    text: str | None = None
+    enabled: bool | None = None
+
+
+class GateRuleInfo(BaseModel):
+    """Una regla determinista del gate, con su reporte de dry run (auditoría)."""
+
+    id: int
+    kind: GateRuleKind
+    pattern: str
+    status: GateRuleStatus
+    proposed_by: Literal["llm", "manual"]
+    rationale: str
+    dry_run_report: dict[str, Any]
+    model: str | None
+    activated_at: datetime | None
+    deactivated_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class GateRuleList(BaseModel):
+    items: list[GateRuleInfo]
+
+
+class GateRuleCreateRequest(BaseModel):
+    """Alta manual de una regla: corre el dry run; si no pasa → 422 con el reporte."""
+
+    kind: GateRuleKind
+    pattern: str
+    rationale: str = ""
+
+
+class GateRulePatch(BaseModel):
+    """Toggle reversible de una regla (las `rejected` no se pueden activar)."""
+
+    status: Literal["active", "disabled"]
+
+
+class MineRulesResponse(BaseModel):
+    """Resultado de una corrida de minería de reglas (LLM + dry run por propuesta)."""
+
+    senders: int
+    proposed: int
+    activated: int
+    rejected: int
+    skipped: int
+    cost_usd: float
+
+
+class RelevanceReviewItem(BaseModel):
+    """Un correo en la cola de revisión manual (veredicto `insufficient`)."""
+
+    inbox_id: int
+    occurred_at: datetime
+    from_email: str | None
+    subject: str | None
+    snippet: str
+    reason: str
+    created_at: datetime
+
+
+class RelevanceReviewList(BaseModel):
+    items: list[RelevanceReviewItem]
+
+
+class RelevanceReviewResolveRequest(BaseModel):
+    """Resolución humana de un `insufficient`: escribe la mark + el veredicto (manual)."""
+
+    is_relevant: bool
+    reason: str | None = None
