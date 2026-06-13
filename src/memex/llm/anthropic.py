@@ -10,9 +10,10 @@ Diferencias de vendor encapsuladas acá (los callers no se enteran):
 - `max_tokens` es OBLIGATORIO en el body → si el caller no lo pasa se usa un default.
 - Los turnos `system` no van en `messages`: se concatenan al campo top-level `system`.
 - En Opus 4.8 los sampling params (`temperature`/`top_p`/`top_k`) y `thinking` configurado
-  devuelven 400 → NUNCA se envían. `temperature` y `response_format` del Protocol se aceptan
-  y se IGNORAN: el JSON se pide por prompt y el parse del caller es tolerante (precedente
-  `parse_routing`).
+  devuelven 400 → NUNCA se envían. `temperature` se acepta y se IGNORA. El JSON se pide por
+  prompt (sin modo nativo): `response_format="json_object"` no viaja en el body pero activa
+  el saneo de la salida (`normalize_json_output`: extrae el JSON de fences/prosa solo si
+  parsea; si no, pasa crudo y el parser del caller degrada seguro).
 - `stop_reason` se normaliza a la convención del repo (`end_turn`→"stop", `max_tokens`→
   "length") para que el `_OK_FINISH = {"stop"}` de los workers funcione sin cambios;
   `refusal` (clasificadores de seguridad) pasa crudo → los workers lo tratan como no-ok.
@@ -37,6 +38,7 @@ from typing import Any
 
 import httpx
 
+from memex.llm._json import normalize_json_output
 from memex.llm.client import (
     ChatMessage,
     LLMError,
@@ -156,6 +158,19 @@ class AnthropicClient:
         content, finish_reason = _parse_message(data)
         usage = _parse_usage(data.get("usage") if isinstance(data, dict) else None)
         cost = compute_cost(model_name, usage, pricing=self._pricing, at=datetime.now(UTC))
+
+        # JSON por prompt (sin modo nativo): si el caller pidió JSON, se extrae de eventuales
+        # fences/prosa — solo si el candidato parsea; si no, pasa crudo (el parser del caller
+        # degrada seguro). Mismo saneo que CodexClient; DeepSeek no lo necesita (modo nativo).
+        if response_format == "json_object":
+            normalized = normalize_json_output(content)
+            if normalized != content:
+                self._log.info(
+                    "llm.anthropic.json_normalized",
+                    raw_chars=len(content),
+                    normalized_chars=len(normalized),
+                )
+                content = normalized
 
         self._log.info(
             "llm.anthropic.complete",

@@ -1,15 +1,16 @@
 """Tolerancia de los parsers a salida estilo codex (JSON entre fences ```json``` / prosa).
 
-VERIFICACIÓN del experimento de codex (NO corre LLM): codex devuelve JSON solo por prompt y a
-veces lo envuelve en fences. Solo el gate de relevancia strip-ea fences (por eso codex corre
-30/30 ahí); los demás consumidores JSON (routing, dedup, ...) hacen `json.loads` directo → ante
-fences DEGRADAN a un fallback seguro (no crashean), no parsean. El summarizer es texto plano →
-tolerante total. Estos tests lockean ese comportamiento por-consumidor; ver
-docs/experimento-codex-apartados.md para el veredicto y la recomendación.
+VERIFICACIÓN del experimento de codex (NO corre LLM): codex/anthropic devuelven JSON solo por
+prompt y a veces lo envuelven en fences/prosa. El saneo vive EN EL CLIENTE
+(`normalize_json_output`, activado por `response_format="json_object"` en CodexClient y
+AnthropicClient): los parsers de los workers reciben JSON limpio. Los parsers en sí siguen
+haciendo `json.loads` directo y ante fences DEGRADAN a su fallback seguro — segunda línea de
+defensa, lockeada acá. Ver docs/experimento-codex-apartados.md.
 """
 
 from __future__ import annotations
 
+from memex.llm._json import normalize_json_output
 from memex.modules.identidades.dedup_llm import _parse_decision
 from memex.modules.routing import parse_routing
 from memex.relevance.prompts import _strip_fences
@@ -39,7 +40,15 @@ def test_dedup_degrades_safely_on_fences() -> None:
 
 
 def test_gate_is_the_one_that_strips_fences() -> None:
-    # Contraste: el helper del gate SÍ tolera fences — el patrón a replicar si se quiere
-    # robustez (no solo degradación) en los demás consumidores con codex.
+    # El helper propio del gate (anterior al saneo en el cliente) sigue funcionando como
+    # defensa redundante e inofensiva sobre JSON ya limpio.
     assert _strip_fences('```json\n{"a": 1}\n```') == '{"a": 1}'
     assert _strip_fences('{"a": 1}') == '{"a": 1}'
+
+
+def test_client_normalization_closes_the_gap_end_to_end() -> None:
+    # El flujo real: el cliente sanea (response_format=json_object) → el parser del worker
+    # recibe JSON limpio y SÍ parsea, en vez de degradar.
+    assert parse_routing(normalize_json_output(_FENCED)) == ["finance", "calendar"]
+    d = _parse_decision(normalize_json_output('```json\n{"same": true, "confidence": 0.9}\n```'))
+    assert d.same is True and d.confidence == 0.9

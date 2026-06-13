@@ -96,3 +96,37 @@ def test_sandbox_from_env_and_validation(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("MEMEX_CODEX_SANDBOX", "invalido")
     with pytest.raises(CodexError):
         _client(tmp_path)
+
+
+#: Stub que devuelve el JSON envuelto en fences + prosa (codex hace esto a veces).
+_FENCED_STUB = textwrap.dedent(
+    """
+    import sys
+
+    args = sys.argv[1:]
+    out_path = args[args.index("-o") + 1]
+    sys.stdin.read()
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write('Claro, aca va:\\n```json\\n{"modules": ["finance"]}\\n```\\n')
+    """
+)
+
+
+def _fenced_client(tmp_path: Path) -> CodexClient:
+    stub = tmp_path / "codex_fenced_stub.py"
+    stub.write_text(_FENCED_STUB, encoding="utf-8")
+    return CodexClient(binary=(sys.executable, str(stub)))
+
+
+def test_json_object_normalizes_fenced_output(tmp_path: Path) -> None:
+    """JSON por prompt: con response_format=json_object, los fences/prosa se extraen."""
+    c = _fenced_client(tmp_path)
+    r = asyncio.run(c.complete([ChatMessage("user", "x")], response_format="json_object"))
+    assert r.content == '{"modules": ["finance"]}'
+
+
+def test_text_format_passes_fences_through(tmp_path: Path) -> None:
+    """Sin json_object NO se sanea: el summarizer consume texto tal cual."""
+    c = _fenced_client(tmp_path)
+    r = asyncio.run(c.complete([ChatMessage("user", "x")]))
+    assert r.content.startswith("Claro") and "```json" in r.content

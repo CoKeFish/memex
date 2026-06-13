@@ -237,6 +237,28 @@ async def test_unexpected_shape_raises() -> None:
                 await c.complete([ChatMessage("user", "x")])
 
 
+@pytest.mark.asyncio
+async def test_json_object_normalizes_fenced_output() -> None:
+    """JSON por prompt: con response_format=json_object, los fences/prosa se extraen."""
+    fenced = 'Claro, acá va:\n```json\n{"same": true}\n```'
+    with respx.mock(base_url=BASE_URL) as router:
+        router.post(MESSAGES).respond(json=_ok(fenced))
+        async with _client() as c:
+            r = await c.complete([ChatMessage("user", "x")], response_format="json_object")
+        assert r.content == '{"same": true}'
+
+
+@pytest.mark.asyncio
+async def test_text_format_passes_fences_through() -> None:
+    """Sin json_object NO se sanea: el summarizer consume texto tal cual."""
+    fenced = '```json\n{"same": true}\n```'
+    with respx.mock(base_url=BASE_URL) as router:
+        router.post(MESSAGES).respond(json=_ok(fenced))
+        async with _client() as c:
+            r = await c.complete([ChatMessage("user", "x")])
+        assert r.content == fenced
+
+
 def test_anthropic_client_satisfies_llmclient_protocol() -> None:
     assert issubclass(AnthropicClient, LLMClient)
 

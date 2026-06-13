@@ -12,8 +12,10 @@ API real):
   propio. En el contenedor: el binario viene en la imagen (Dockerfile) y `CODEX_HOME` apunta
   a `/secrets/codex` (compose) — copiar ahí el `auth.json` del host; si la sesión muere, las
   corridas fallan con `CodexError` (re-copiar/re-login).
-- **Sin JSON forzado ni retries**: `response_format` se ignora (el JSON se pide por prompt,
-  como con Anthropic); un fallo del CLI es un error reintentable de la ventana, sin backoff
+- **Sin JSON forzado ni retries**: el JSON se pide por prompt (como con Anthropic);
+  `response_format="json_object"` activa el saneo de la salida (`normalize_json_output`:
+  extrae el JSON de fences/prosa SOLO si parsea; si no, pasa crudo y el parser del caller
+  degrada seguro). Un fallo del CLI es un error reintentable de la ventana, sin backoff
   propio.
 - **`model` por llamada se IGNORA**: el `settings.model` del gate pertenece al proveedor
   Anthropic; acá el modelo se fija al construir el cliente (`codex_model` de settings o
@@ -41,6 +43,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
 
+from memex.llm._json import normalize_json_output
 from memex.llm.client import ChatMessage, LLMError, LLMResult, LLMUsage, ResponseFormat
 from memex.logging import get_logger
 
@@ -155,6 +158,20 @@ class CodexClient:
 
         if not content:
             raise CodexError(0, "codex exec terminó sin mensaje final (salida vacía)")
+
+        # JSON por prompt: el modelo a veces lo envuelve en fences/prosa. Si el caller pidió
+        # JSON, se extrae acá (solo si el candidato parsea; si no, pasa crudo y el parser del
+        # caller degrada seguro). Los parsers de los workers NO toleran fences — este es el
+        # único punto donde se cierra ese hueco sin tocarlos.
+        if response_format == "json_object":
+            normalized = normalize_json_output(content)
+            if normalized != content:
+                self._log.info(
+                    "llm.codex.json_normalized",
+                    raw_chars=len(content),
+                    normalized_chars=len(normalized),
+                )
+                content = normalized
 
         self._log.info(
             "llm.codex.complete",

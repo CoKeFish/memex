@@ -46,29 +46,22 @@ memex-llm settings show
 - **Costo**: codex = $0 en `llm_calls` (la suscripción no factura por token) → /métricas queda
   ciego para esas llamadas. El proveedor que sirvió queda en `llm_calls.model` (`codex/...`).
 
-## Veredicto por apartado (tolerancia de parsers — verificado en código)
+## Tolerancia a fences/prosa: RESUELTA en el cliente
 
-codex devuelve **JSON solo por prompt** y a veces lo envuelve en fences ` ```json `. Hallazgo
-(tests en `tests/test_codex_parser_tolerance.py`):
+codex (y anthropic) devuelven **JSON solo por prompt** y a veces lo envuelven en fences
+` ```json ` o prosa. El saneo vive en el **cliente del proveedor** (donde se encapsulan las
+rarezas de cada vendor): cuando el caller pide `response_format="json_object"`, `CodexClient` y
+`AnthropicClient` pasan la salida por `memex.llm._json.normalize_json_output`, que extrae el
+JSON **solo si el candidato parsea** — si nada parsea, el contenido pasa crudo y el parser del
+worker degrada a su fallback seguro, como siempre. DeepSeek no lo necesita (modo JSON nativo).
+Cada normalización queda auditada (`llm.codex.json_normalized` / `llm.anthropic.json_normalized`
+→ /logs).
 
-| Apartado | Parser | Ante fences de codex |
+Estado por apartado (tests en `tests/test_codex_parser_tolerance.py` + `tests/llm/`):
+
+| Apartado | Parser | Con codex |
 |---|---|---|
-| **summarizer** | texto plano (sin `json.loads`) | **tolerante total** — toma el texto tal cual |
-| **orchestrator** (ruteo) | `routing.parse_routing` → `json.loads` directo | degrada SEGURO → `None` → "todos los candidatos" (sobre-rutea, no crashea) |
-| **orchestrator** (extracción) | `grouping`/`contract` → `json.loads` directo | degrada SEGURO → ventana sin items (no crashea) |
-| **juez identidades/calendar/finance** | `_parse_decision` → `json.loads` directo | degrada SEGURO → `same=False` (no fusiona; sesgo a coexistir) |
-| **gate de relevancia** | `parse_gate_verdicts` con `_strip_fences` | **tolerante real** — parsea con o sin fences |
-
-Conclusión: ningún parser CRASHEA con codex, pero **solo el gate strip-ea fences**. Si en la
-corrida real codex emite fences (los modelos a veces lo hacen), los consumidores JSON degradan a
-su fallback seguro — lo que se vería como "codex no sirve acá" cuando en realidad es un hueco del
-parser, no del modelo. El summarizer (texto plano) no tiene ese riesgo.
-
-## Recomendación (follow-up, no incluido en esta campaña)
-
-Si el dueño confirma que codex emite fences en estos prompts y quiere robustez (no solo
-degradación), promover el helper `memex.relevance.prompts._strip_fences` a un util compartido de
-`memex.llm` y aplicarlo en los parsers JSON (`parse_routing`, `grouping`/`contract`,
-`_parse_decision`×3, `clusters`, `resolve`, `hierarchy`). Es backward-compatible: sobre el JSON
-desnudo de DeepSeek (`response_format=json_object`) es un no-op. Decisión del dueño — no se tocó
-acá para respetar el alcance "solo cableo".
+| **summarizer** | texto plano (sin `json.loads`, sin saneo) | tolerante total — toma el texto tal cual |
+| **orchestrator** (ruteo y extracción) | `json.loads` directo | recibe JSON ya saneado por el cliente; si aun así no parsea, degrada seguro (ruteo→todos, ventana sin items) |
+| **jueces identidades/calendar/finance** | `json.loads` directo | ídem; degradación segura = no fusionar (sesgo a coexistir) |
+| **gate de relevancia** | `parse_gate_verdicts` con `_strip_fences` propio | doble defensa (su strip quedó redundante e inofensivo) |
