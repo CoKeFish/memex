@@ -35,7 +35,7 @@ from sqlalchemy.engine import Connection
 from memex.core.observability import CostAccum, record_llm_call
 from memex.core.trace import attach_to_root
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
+from memex.llm import ChatMessage, LLMClient, LLMResult, aclose_llm, build_llm_client
 from memex.llm.client import LLMQuotaError
 from memex.llm.grounding import DEFAULT_MIN_QUOTE_NORM_LEN, grounded
 from memex.logging import get_logger
@@ -239,7 +239,7 @@ async def run_cooccurrence_llm(
         return stats
 
     owns_client = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("identidades_cooccurrence", user_id=user_id)
     _log.info("identidades.cooccurrence.start", user_id=user_id, emails=len(mids))
     try:
         for mid in mids:
@@ -341,8 +341,8 @@ async def run_cooccurrence_llm(
             stats.cost.completion_tokens += result.usage.completion_tokens
             stats.cost.cost_usd += result.cost_usd
     finally:
-        if owns_client and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns_client:
+            await aclose_llm(llm)
 
     _log.info(
         "identidades.cooccurrence.end",

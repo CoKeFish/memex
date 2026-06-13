@@ -17,7 +17,7 @@ from sqlalchemy import text
 
 from memex.core.observability import record_llm_call
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig
+from memex.llm import ChatMessage, LLMClient, aclose_llm, build_llm_client
 from memex.logging import get_logger
 from memex.processing.render import render_payload
 
@@ -113,7 +113,7 @@ async def judge_sender(
         return None
 
     owns = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("quality_judge", user_id=user_id)
     try:
         result = await llm.complete(
             [ChatMessage("system", _SYSTEM_PROMPT), ChatMessage("user", sample)],
@@ -122,8 +122,8 @@ async def judge_sender(
             max_tokens=_MAX_TOKENS,
         )
     finally:
-        if owns and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns:
+            await aclose_llm(llm)
 
     verdict = _parse(result.content)
     record_llm_call(

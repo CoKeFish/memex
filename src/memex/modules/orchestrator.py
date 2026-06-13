@@ -44,7 +44,7 @@ from memex.core.observability import (
 )
 from memex.core.trace import create_root, open_module_tracer
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError, LLMResult
+from memex.llm import ChatMessage, LLMClient, LLMQuotaError, LLMResult, aclose_llm, build_llm_client
 from memex.logging import bound_log_context, get_logger
 from memex.modules import known_modules, resolve
 from memex.modules.attribution import attributed_counts
@@ -834,7 +834,7 @@ async def run_extraction(
         return stats
 
     owns_client = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("orchestrator", user_id=user_id)
     _log.info(
         "extract.run.start",
         user_id=user_id,
@@ -889,8 +889,8 @@ async def run_extraction(
                 record_failures(user_id, STAGE_EXTRACT, [r.inbox_id for r in window.rows], str(e))
             stats.windows += 1
     finally:
-        if owns_client and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns_client:
+            await aclose_llm(llm)
 
     _log.info(
         "extract.run.end",
@@ -1044,7 +1044,7 @@ async def extract_inbox(
 
     # Construir el cliente (valida DEEPSEEK_API_KEY) ANTES de borrar nada en `force`.
     owns_client = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("orchestrator", user_id=user_id)
     stats = ExtractStats()
     try:
         if force:
@@ -1085,8 +1085,8 @@ async def extract_inbox(
             user_id, llm, window, active, active_by_slug, stats, trace_root_id=trace_root_id
         )
     finally:
-        if owns_client and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns_client:
+            await aclose_llm(llm)
 
     return {
         "status": "ok",

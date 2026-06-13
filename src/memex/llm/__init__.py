@@ -12,16 +12,16 @@ Uso típico (async):
     result = await client.complete([ChatMessage("user", "hola")])
     # result.content, result.cost_usd, result.usage, result.latency_ms
 
-Diseño futuro (DOCUMENTADO, no implementado acá):
+Construcción pluggable (`registry.py`):
 
 - **Modelo por llamada**: ya soportado — `complete(..., model="deepseek-v4-pro")`.
-- **Proveedor swappable**: implementar otra clase contra el Protocol `LLMClient`
-  (p. ej. `OpenAIClient`) sin tocar a los callers.
-- **Selección por categoría de ingestor o por mensaje concreto**: un futuro
-  registry/factory podría elegir proveedor+modelo según el tier del classifier
-  (ADR-002) — p. ej. `blacklist`→sin LLM, `batch`→flash, `individual`→pro — o
-  incluso por mensaje. Esa lógica de selección NO vive acá; este paquete solo
-  provee el primitivo agnóstico sobre el que se construirá.
+- **Proveedor swappable**: cada proveedor es una clase contra el Protocol `LLMClient`
+  (`DeepSeekClient`, `AnthropicClient`, `CodexClient`) — los callers no se enteran.
+- **Punto único por consumidor**: `build_llm_client(consumer)` resuelve provider+model de
+  `llm_consumer_settings` (config en runtime, sin tocar código). `aclose_llm(client)` cierra
+  el cliente sin conocer su tipo concreto.
+- **Cadena de fallback**: `FallbackClient` envuelve varios proveedores tras el mismo Protocol
+  y salta de uno a otro ante cuota/red/timeout.
 """
 
 from memex.llm.anthropic import AnthropicClient, AnthropicError, anthropic_config
@@ -38,6 +38,7 @@ from memex.llm.client import (
 from memex.llm.codex import CodexClient, CodexError
 from memex.llm.config import LLMConfig, LLMConfigError
 from memex.llm.deepseek import DeepSeekClient, DeepSeekError
+from memex.llm.fallback import FallbackClient
 from memex.llm.pricing import (
     MODEL_PRICING,
     ModelPricing,
@@ -46,6 +47,7 @@ from memex.llm.pricing import (
     is_off_peak,
     load_pricing,
 )
+from memex.llm.registry import aclose_llm, build_llm_client
 
 __all__ = [
     "MODEL_PRICING",
@@ -56,6 +58,7 @@ __all__ = [
     "CodexError",
     "DeepSeekClient",
     "DeepSeekError",
+    "FallbackClient",
     "LLMClient",
     "LLMConfig",
     "LLMConfigError",
@@ -67,7 +70,9 @@ __all__ = [
     "PricingConfigError",
     "ResponseFormat",
     "Role",
+    "aclose_llm",
     "anthropic_config",
+    "build_llm_client",
     "compute_cost",
     "is_off_peak",
     "load_pricing",

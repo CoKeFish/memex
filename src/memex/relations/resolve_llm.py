@@ -40,7 +40,7 @@ from memex.config import settings
 from memex.core.observability import record_llm_call
 from memex.core.trace import attach_to_root
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
+from memex.llm import ChatMessage, LLMClient, LLMResult, aclose_llm, build_llm_client
 from memex.llm.client import LLMQuotaError
 from memex.llm.grounding import grounded
 from memex.logging import get_logger
@@ -344,7 +344,7 @@ async def resolve_gray_zone(
     quota: LLMQuotaError | None = None
 
     owns_client = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("relations_resolve", user_id=user_id)
     _log.info(
         "relation.resolve.gray.start",
         user_id=user_id,
@@ -441,8 +441,8 @@ async def resolve_gray_zone(
             stats.cost.completion_tokens += result.usage.completion_tokens
             stats.cost.cost_usd += result.cost_usd
     finally:
-        if owns_client and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns_client:
+            await aclose_llm(llm)
 
     _apply_gray_verdicts(user_id, pairs, votes, evaluated, run_id=run_id, stats=stats)
     _log.info(

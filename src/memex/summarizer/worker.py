@@ -39,7 +39,7 @@ from memex.core.observability import (
     cost_fields as _cost_fields,
 )
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMQuotaError
+from memex.llm import ChatMessage, LLMClient, LLMQuotaError, aclose_llm, build_llm_client
 from memex.logging import get_logger
 from memex.relevance.verdicts import workset_gate_clause
 from memex.summarizer.prompt import SYSTEM_PROMPT, build_user_content
@@ -393,7 +393,7 @@ async def run_summarization(
         return stats
 
     owns_client = client is None
-    active: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    active: LLMClient = client or build_llm_client("summarizer", user_id=user_id)
     try:
         for window in windows:
             try:
@@ -429,8 +429,8 @@ async def run_summarization(
                 # Dead-letter: suma fallo a cada mensaje; al 3er fallo → 'pendiente de revisión'.
                 record_failures(user_id, STAGE_SUMMARIZE, [r.inbox_id for r in window.rows], str(e))
     finally:
-        if owns_client and isinstance(active, DeepSeekClient):
-            await active.aclose()
+        if owns_client:
+            await aclose_llm(active)
 
     _log.info(
         "summarizer.run.end",
@@ -589,7 +589,7 @@ async def summarize_inbox(
     # Construir el cliente (valida DEEPSEEK_API_KEY) ANTES de borrar nada: si falta la key, `force`
     # no debe destruir el resumen previo sin poder recrearlo.
     owns_client = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("summarizer", user_id=user_id)
     stats = SummarizeStats()
     messages = 0
     try:
@@ -612,8 +612,8 @@ async def summarize_inbox(
         messages = len(window.rows)
         await _process_window(user_id, llm, window, stats)
     finally:
-        if owns_client and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns_client:
+            await aclose_llm(llm)
 
     out = _existing_summary(user_id, inbox_id)
     return {

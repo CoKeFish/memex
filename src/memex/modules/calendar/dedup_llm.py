@@ -22,7 +22,7 @@ from sqlalchemy.engine import Connection
 from memex.core.observability import CostAccum, record_llm_call
 from memex.core.trace import attach_to_entity
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
+from memex.llm import ChatMessage, LLMClient, LLMResult, aclose_llm, build_llm_client
 from memex.logging import get_logger
 from memex.modules.calendar.prompt import CALENDAR_DEDUP_SYSTEM_PROMPT
 from memex.modules.calendar.settings import llm_on_past_events
@@ -281,7 +281,7 @@ async def run_dedup_phase2(
         return stats
 
     owns_client = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("calendar_dedup", user_id=user_id)
     _log.info("calendar.dedup2.start", user_id=user_id, pairs=len(candidates))
     try:
         for cand in candidates:
@@ -330,8 +330,8 @@ async def run_dedup_phase2(
             else:
                 stats.rejected += 1
     finally:
-        if owns_client and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns_client:
+            await aclose_llm(llm)
 
     _log.info(
         "calendar.dedup2.end",

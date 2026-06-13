@@ -35,7 +35,7 @@ from sqlalchemy.engine import Connection
 
 from memex.core.observability import CostAccum, record_llm_call
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
+from memex.llm import ChatMessage, LLMClient, LLMResult, aclose_llm, build_llm_client
 from memex.logging import get_logger
 from memex.modules.identidades.normalize import org_core
 from memex.modules.identidades.prompt import IDENTIDADES_HIERARCHY_SYSTEM_PROMPT
@@ -367,7 +367,7 @@ async def run_organize(
         return stats
 
     owns_client = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("identidades_hierarchy", user_id=user_id)
     _log.info("identidades.hierarchy.start", user_id=user_id, orgs=len(orgs))
     try:
         links, result = await organize(llm, orgs)
@@ -398,8 +398,8 @@ async def run_organize(
         stats.cost.completion_tokens += result.usage.completion_tokens
         stats.cost.cost_usd += result.cost_usd
     finally:
-        if owns_client and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns_client:
+            await aclose_llm(llm)
 
     _log.info(
         "identidades.hierarchy.end",

@@ -241,7 +241,9 @@ def test_summarize_endpoint_422_without_llm_key(
     def _boom(*_a: Any, **_k: Any) -> Any:
         raise LLMConfigError("DEEPSEEK_API_KEY not set")
 
-    monkeypatch.setattr("memex.summarizer.worker.LLMConfig.from_env", _boom)
+    # La construcción del cliente se movió al registry (build_llm_client → _build_one →
+    # DeepSeekClient(LLMConfig.from_env())); pinchamos from_env en su módulo fuente.
+    monkeypatch.setattr("memex.llm.config.LLMConfig.from_env", _boom)
     iid = _seed_classified(seed_source["id"], "nokey")
     r = client.post(f"/inbox/{iid}/summarize")
     assert r.status_code == 422

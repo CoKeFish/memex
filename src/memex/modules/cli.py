@@ -19,6 +19,7 @@ import sys
 from dotenv import load_dotenv
 from sqlalchemy import text
 
+from memex.cli.provider_flags import add_provider_flags, client_from_flags
 from memex.core.deadletter import STAGE_EXTRACT, list_review, requeue
 from memex.db import connection
 from memex.llm import LLMError, LLMQuotaError
@@ -89,6 +90,7 @@ def _add_run_tuning_args(parser: argparse.ArgumentParser) -> None:
         default=_GROUP_SIZE_DEFAULT,
         help=f"Módulos por llamada con --batching-policy grouped (default {_GROUP_SIZE_DEFAULT}).",
     )
+    add_provider_flags(parser)
 
 
 # --- memex-extract ----------------------------------------------------------------- #
@@ -131,6 +133,7 @@ def _cmd_extract_run(args: argparse.Namespace) -> int:
             route_chunk_size=args.route_chunk_size,
             batching_policy=args.batching_policy,
             group_size=args.group_size,
+            client=client_from_flags(args),
         )
     )
     mods = ", ".join(f"{slug}={n}" for slug, n in sorted(stats.by_module.items())) or "—"
@@ -257,6 +260,7 @@ def _cmd_process_run(args: argparse.Namespace) -> int:
             route_chunk_size=args.route_chunk_size,
             batching_policy=args.batching_policy,
             group_size=args.group_size,
+            client=client_from_flags(args),
         )
     )
     print(

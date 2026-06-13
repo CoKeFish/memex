@@ -22,6 +22,7 @@ from memex.api.routers import (
     inbox,
     ingest,
     ingest_scheduler,
+    llm,
     logs,
     media,
     metrics,
@@ -90,6 +91,7 @@ app.include_router(hackathones.router)
 app.include_router(identidades.router)
 app.include_router(graph.router)
 app.include_router(metrics.router)
+app.include_router(llm.router)
 app.include_router(logs.router)
 app.include_router(stats.router)
 app.include_router(modules.router)

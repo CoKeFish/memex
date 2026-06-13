@@ -27,7 +27,7 @@ from sqlalchemy.engine import Connection
 from memex.config import settings
 from memex.core.observability import CostAccum, record_llm_call
 from memex.db import connection
-from memex.llm import ChatMessage, DeepSeekClient, LLMClient, LLMConfig, LLMResult
+from memex.llm import ChatMessage, LLMClient, LLMResult, aclose_llm, build_llm_client
 from memex.llm.client import LLMQuotaError
 from memex.logging import get_logger
 from memex.relations.cluster_store import (
@@ -528,7 +528,7 @@ async def run_cluster_partition(
         return stats
 
     owns_client = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("relations_clusters", user_id=user_id)
     _log.info("relation.cluster.partition.start", user_id=user_id, pending=len(pending))
     try:
         for pc in pending:
@@ -588,8 +588,8 @@ async def run_cluster_partition(
             stats.cost.completion_tokens += result.usage.completion_tokens
             stats.cost.cost_usd += result.cost_usd
     finally:
-        if owns_client and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns_client:
+            await aclose_llm(llm)
 
     with connection() as conn:
         materialize_cluster_edges(conn, user_id)

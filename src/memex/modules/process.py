@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from memex.llm import DeepSeekClient, LLMClient, LLMConfig
+from memex.llm import LLMClient, aclose_llm, build_llm_client
 from memex.logging import get_logger
 from memex.modules.orchestrator import _GROUP_SIZE_DEFAULT, ExtractStats, run_extraction
 from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
@@ -50,11 +50,11 @@ async def run_combined(
 
     Las perillas de ventaneo van a los TRES pasos; las de ruteo/batching (`route_chunk_size`,
     `batching_policy`, `group_size`) solo aplican a la extracción. El gate usa su PROPIO
-    cliente LLM (Anthropic/Opus por default, NO el DeepSeek compartido del resto);
+    cliente LLM (Anthropic/Opus por default, NO el del resto —configurable por consumidor);
     `gate_client` es inyectable para tests. Gate apagado → no-op (worksets sin filtro).
     """
     owns_client = client is None
-    llm: LLMClient = client if client is not None else DeepSeekClient(LLMConfig.from_env())
+    llm: LLMClient = client or build_llm_client("process", user_id=user_id)
     _log.info("process.combined.start", user_id=user_id, source_id=source_id)
     try:
         gate = await run_relevance_gate(
@@ -85,8 +85,8 @@ async def run_combined(
             client=llm,
         )
     finally:
-        if owns_client and isinstance(llm, DeepSeekClient):
-            await llm.aclose()
+        if owns_client:
+            await aclose_llm(llm)
     _log.info(
         "process.combined.end",
         user_id=user_id,

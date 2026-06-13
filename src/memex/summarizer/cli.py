@@ -16,6 +16,7 @@ import sys
 
 from dotenv import load_dotenv
 
+from memex.cli.provider_flags import add_provider_flags, client_from_flags
 from memex.core.deadletter import STAGE_SUMMARIZE, list_review, requeue
 from memex.llm import LLMError, LLMQuotaError
 from memex.logging import get_logger, setup_logging
@@ -62,6 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=MAX_GAP_SECONDS / 3600,
         help=f"Gap horario que parte una ventana batch (default {MAX_GAP_SECONDS / 3600:g}).",
     )
+    add_provider_flags(run_p)
 
     rev_p = sub.add_parser("review", help="Lista mensajes en revisión (dead-letter).")
     rev_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -81,6 +83,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             limit=args.limit,
             max_window_size=args.max_window_size,
             max_gap_seconds=round(args.max_gap_hours * 3600),
+            client=client_from_flags(args),
         )
     )
     tiers = ", ".join(f"{tier}={count}" for tier, count in sorted(stats.by_tier.items())) or "—"

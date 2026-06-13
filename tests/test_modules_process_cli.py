@@ -185,6 +185,7 @@ def test_extract_cli_threads_tuning(monkeypatch: Any) -> None:
         "route_chunk_size": 3,
         "batching_policy": "grouped",
         "group_size": 4,
+        "client": None,  # sin --provider → sin override de cliente
     }
 
 

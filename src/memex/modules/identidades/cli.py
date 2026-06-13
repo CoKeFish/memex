@@ -54,6 +54,7 @@ from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from memex.cli.provider_flags import add_provider_flags, client_from_flags
 from memex.db import connection
 from memex.logging import get_logger, setup_logging
 from memex.modules.identidades.backfill import apply_reclassification, find_product_candidates
@@ -397,6 +398,7 @@ def _build_parser() -> argparse.ArgumentParser:
     merge_p = sub.add_parser("merge", help="Desempate LLM de los candidatos de merge (FASE 2).")
     merge_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     merge_p.add_argument("--limit", type=int, default=200, help="Máximo de pares a resolver.")
+    add_provider_flags(merge_p)
 
     cand_p = sub.add_parser("candidates", help="Lista los candidatos de merge pendientes.")
     cand_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -1550,7 +1552,9 @@ def _cmd_interest_remove(args: argparse.Namespace) -> int:
 
 
 def _cmd_merge(args: argparse.Namespace) -> int:
-    stats = asyncio.run(run_merge_phase2(args.user, limit=args.limit))
+    stats = asyncio.run(
+        run_merge_phase2(args.user, limit=args.limit, client=client_from_flags(args))
+    )
     _say(
         f"\nidentidades merge: pares={stats.pairs} fusionados={stats.merged} "
         f"rechazados={stats.rejected} errores={stats.errors}\n"
