@@ -68,6 +68,35 @@ calidad factual a la par del baseline, costo $0 (suscripción). El precio es la 
 (~8-10x): apto para lotes desatendidos (scheduler nocturno), no para el camino interactivo
 del dashboard. El boilerplate extra es el único desvío de calidad observado.
 
+## Resultados: apartados JSON (corrida 2026-06-12)
+
+dedup (juez identidades), ruteo y extracción agrupada, mismos prompts/parsers del worker, sobre
+datos reales, baseline = lo que DeepSeek ya persistió (script `experiments/codex_json/`).
+
+- **Juez dedup (9 pares de zona gris que DeepSeek rechazó)**: codex 9/9 de acuerdo, JSON
+  parseado 9/9, con `confidence`+`rationale`. Aplica las reglas del system prompt igual que
+  DeepSeek (p. ej. «Unity (org) vs Unity AI (producto) → tipos distintos, nunca la misma»).
+- **Ruteo (`{"modules":[...]}`, 12 inboxes: identidades + finance + calendar)**: 12/12 parseados
+  y 12/12 incluyeron el módulo correcto. En correos de un solo dominio (chat→identidades) eligió
+  solo ese; en correos mixtos es recall-first (suele incluir varios módulos — un módulo de más
+  solo gasta una extracción que da 0). Latencia ~15-29s.
+- **Extracción agrupada (JSON multi-clave, prompt ~13k chars; identidades + finance + calendar)**:
+  parseó en todos. El **módulo objetivo se extrae correcto y con evidence textual exacta**
+  (cargo OpenAI $10 USD egreso; evento «Llamadita semanal» con fecha). **codex es más
+  exhaustivo en identidades**: de un correo de Uber/OpenAI saca también el conductor / la org /
+  el producto como identidades, donde DeepSeek se enfocó solo en el módulo objetivo. La mayoría
+  son entidades REALES (cobertura extra, no basura), con algún marginal del boilerplate
+  (`x.com` de un link, `beehiiv` del dominio) — el grounder/dedup aguas abajo ya filtran eso.
+- **0 fences en ~52 llamadas**: con `response_format="json_object"`, codex devolvió JSON desnudo
+  siempre. El saneo (`normalize_json_output`) es la red de seguridad — no se activó en esta
+  muestra, pero sigue siendo la defensa correcta para cuando pase.
+
+**Veredicto JSON**: codex parsea y razona el JSON estructurado a la par de DeepSeek, aplicando
+las reglas del system prompt. Sirve tal cual para **dedup** y **ruteo** (decisiones acotadas,
+acuerdo alto). En **extracción** el dato objetivo es correcto; su mayor exhaustividad en
+identidades es más cobertura que ruido, acotada por el grounder/dedup. Latencia ~8-10x como en
+el summarizer. Costo $0 (suscripción).
+
 ## Tolerancia a fences/prosa: RESUELTA en el cliente
 
 codex (y anthropic) devuelven **JSON solo por prompt** y a veces lo envuelven en fences
