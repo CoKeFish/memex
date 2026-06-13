@@ -93,6 +93,14 @@ services:
       # LLM (memex.llm) — sin prefijo MEMEX_; inyectada por Doppler. El consumidor
       # (classifier/summarizer) aún no existe, pero queda disponible desde ya.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Anthropic (gate de relevancia, provider 'anthropic'). Inyectada por Doppler.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Codex CLI (gate de relevancia, provider 'codex'): la sesión de la suscripción vive en
+      # ./secrets/codex (auth.json copiado tras `codex login` en el host; re-copiar si la
+      # sesión muere). El sandbox propio de codex (landlock) no funciona dentro de docker:
+      # el contenedor ES el sandbox → danger-full-access solo acá.
+      CODEX_HOME: /secrets/codex
+      MEMEX_CODEX_SANDBOX: danger-full-access
       # Apify (memex.ingestors.social) — token para scrapear redes (instagram/facebook/x).
       # La config social lo busca como MEMEX_APIFY_TOKEN; en Doppler el secreto canónico
       # (sin prefijo MEMEX_, como DEEPSEEK/OPENAI) se llama APIFY → lo mapeamos acá.

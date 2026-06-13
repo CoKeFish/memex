@@ -85,3 +85,14 @@ def test_build_gate_client_selects_provider(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(shutil, "which", lambda _: "C:/fake/codex.cmd")
     client = build_gate_client(GateSettings(provider="codex", codex_model="gpt-5.1"))
     assert isinstance(client, CodexClient)
+
+
+def test_sandbox_from_env_and_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """El compose fija MEMEX_CODEX_SANDBOX=danger-full-access (el contenedor ES el sandbox)."""
+    monkeypatch.setenv("MEMEX_CODEX_SANDBOX", "danger-full-access")
+    c = _client(tmp_path)
+    r = asyncio.run(c.complete([ChatMessage("user", "x")]))
+    assert "danger-full-access" in r.content
+    monkeypatch.setenv("MEMEX_CODEX_SANDBOX", "invalido")
+    with pytest.raises(CodexError):
+        _client(tmp_path)

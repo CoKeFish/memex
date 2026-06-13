@@ -1,32 +1,39 @@
-"""CodexClient — proveedor EXPERIMENTAL vía `codex exec` (suscripción ChatGPT, sin API key).
+"""CodexClient — proveedor vía `codex exec` (suscripción ChatGPT del dueño, sin API key).
 
-Existe para PRUEBAS del dueño: comparar veredictos del gate de relevancia usando su
-suscripción de Codex en vez de pagar tokens de API. NO es para producción, y las
-limitaciones son estructurales (documentadas acá, no arreglables sin API real):
+Proveedor de primera clase del gate de relevancia (`settings.provider='codex'`). Comparación
+real contra Opus (mismos 30 correos): acuerdo 30/30; latencia ~8x mayor (codex es un agente,
+no una completion). Sus limitaciones son estructurales (documentadas acá, no arreglables sin
+API real):
 
 - **Sin contabilidad**: el CLI no reporta tokens → `LLMUsage` queda en cero y `cost_usd=0`.
   Las filas de `llm_calls` de una corrida con codex muestran costo 0 aunque consuma los
   límites de la suscripción. /métricas queda ciego para estas llamadas.
-- **Auth de sesión**: requiere `codex login` hecho en ESTA máquina; si el token venció, la
-  corrida falla. No funciona dentro del contenedor del API (el binario y la sesión viven en
-  el host) → solo CLI host-side (`memex-relevance run --provider codex`).
+- **Auth de sesión**: requiere una sesión de `codex login` accesible. En el host: el login
+  propio. En el contenedor: el binario viene en la imagen (Dockerfile) y `CODEX_HOME` apunta
+  a `/secrets/codex` (compose) — copiar ahí el `auth.json` del host; si la sesión muere, las
+  corridas fallan con `CodexError` (re-copiar/re-login).
 - **Sin JSON forzado ni retries**: `response_format` se ignora (el JSON se pide por prompt,
   como con Anthropic); un fallo del CLI es un error reintentable de la ventana, sin backoff
   propio.
 - **`model` por llamada se IGNORA**: el `settings.model` del gate pertenece al proveedor
-  default (Anthropic); acá el modelo se fija al construir el cliente (`--codex-model`) o se
-  deja el default del CLI. `result.model` reporta `codex/<modelo|default>` para que los
-  veredictos del experimento distingan proveedor.
+  Anthropic; acá el modelo se fija al construir el cliente (`codex_model` de settings o
+  `--codex-model`) o se deja el default del CLI. `result.model` reporta `codex/<m|default>`
+  para que los veredictos distingan proveedor.
 
 Mecánica: un subproceso `codex exec` por completion — prompt por stdin (evita el límite de
 longitud de argv en Windows), mensaje final capturado con `-o <archivo>` (sin parsear el
-ruido de stdout), `--ephemeral` (sin archivos de sesión), sandbox read-only y cwd en un
+ruido de stdout), `--ephemeral` (sin archivos de sesión), sandbox configurable y cwd en un
 directorio temporal (el agente no debe mirar ningún repo).
+
+Sandbox (`MEMEX_CODEX_SANDBOX`, default `read-only`): el sandbox propio de codex (landlock)
+NO funciona dentro de docker → el compose lo fija en `danger-full-access` para el contenedor
+(que ya ES el sandbox). En el host queda el default conservador.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import tempfile
 import time
@@ -40,6 +47,10 @@ from memex.logging import get_logger
 _STDERR_PREVIEW_MAX = 500
 #: codex puede tardar (es un agente, no una completion): budget generoso por llamada.
 _DEFAULT_TIMEOUT_S = 300.0
+#: Sandbox del CLI (ver docstring del módulo). Env para que el compose lo fije sin código.
+_SANDBOX_ENV = "MEMEX_CODEX_SANDBOX"
+_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
+_DEFAULT_SANDBOX = "read-only"
 
 
 class CodexError(LLMError):
@@ -59,10 +70,19 @@ class CodexClient:
         model: str | None = None,
         binary: Sequence[str] | None = None,
         timeout_s: float = _DEFAULT_TIMEOUT_S,
+        sandbox: str | None = None,
     ) -> None:
         self._model = model
         self._timeout_s = timeout_s
         self._log = get_logger("memex.llm.codex")
+        resolved_sandbox = (
+            sandbox if sandbox is not None else os.environ.get(_SANDBOX_ENV, _DEFAULT_SANDBOX)
+        )
+        if resolved_sandbox not in _SANDBOX_MODES:
+            raise CodexError(
+                0, f"sandbox inválido: {resolved_sandbox!r}; válidos: {_SANDBOX_MODES}"
+            )
+        self._sandbox = resolved_sandbox
         if binary is not None:
             self._binary = list(binary)
         else:
@@ -97,7 +117,7 @@ class CodexClient:
                 "--color",
                 "never",
                 "-s",
-                "read-only",
+                self._sandbox,
                 "-C",
                 tmp,
                 "-o",
