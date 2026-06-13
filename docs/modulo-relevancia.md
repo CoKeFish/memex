@@ -101,10 +101,15 @@ dead-letter a los 3 intentos, como summarize/extract.
   `POST /inbox/{id}/reprocess`. También al inicio de `run_combined` (`memex-process`).
 - **Jobs del scheduler**: `relevance_gate` (PT1H) y `relevance_rules` (P1D), fuera de
   `enabled_jobs` por default.
-- **CLI**: `memex-relevance run|mine|settings|interests|rules|review`. `--provider codex`
-  (EXPERIMENTAL, solo pruebas host-side): juzga vía `codex exec` con la suscripción del
-  dueño — sin métricas de tokens (llm_calls a costo 0), requiere `codex login`, los
-  veredictos quedan con `model='codex/<m>'` para comparar proveedores.
+- **CLI**: `memex-relevance run|mine|settings|interests|rules|review`; `--provider` =
+  override por corrida (el proveedor vive en settings).
+- **Proveedor codex** (`settings.provider='codex'`): juzga vía `codex exec` con la
+  suscripción del dueño — sin métricas de tokens (llm_calls a costo 0); acuerdo 30/30 con
+  Opus en la comparación real, ~8x más lento. Funciona en el host (`codex login`) Y en el
+  contenedor: el binario viene en la imagen (Dockerfile, `CODEX_VERSION`) y la sesión se
+  monta en `/secrets/codex` (auth.json + config.toml copiados del host; re-copiar si la
+  sesión muere). `MEMEX_CODEX_SANDBOX=danger-full-access` solo en el contenedor (landlock
+  no funciona en docker; el contenedor ES el sandbox).
 - **API**: `/relevance/*` (settings, interests, rules + mine, review). La corrida del gate no se
   dispara por API propia: va por las corridas de procesamiento.
 - **UI**: /filtros → «Intereses personales» (toggle + modo + CRUD) y «Reglas automáticas y
