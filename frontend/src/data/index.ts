@@ -46,6 +46,11 @@ export * from "./pipeline"
 // background + polling). Reemplaza los getters mock getSources/getModuleSettings/getScheduler*/dryRunRun.
 export * from "./processing"
 
+// ---- Selección de proveedor+modelo LLM por consumidor (datos reales: router /llm) -------------
+// fetchLlmConsumers/patchLlmConsumer + catálogo de operaciones (LLM_OPERATIONS) y modelos por
+// proveedor para el panel de modelos de /procesamiento. Espejo de ./relevance (gate).
+export * from "./llm"
+
 // ---- Ingesta agendada (datos reales: router /ingest, 0025) --------------------
 // Control del daemon de ingesta server-side (cada cuánto se trae cada fuente) + historial de
 // corridas con su origen (manual/daemon/backfill/agent) para linkear a /logs?run_id=.

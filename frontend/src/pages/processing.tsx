@@ -5,6 +5,7 @@ import {
   ModulesTogglePanel,
   SchedulerPanel,
 } from "@/components/features/control/processing-controls"
+import { LlmModelsPanel } from "@/components/features/control/llm-models"
 
 export function ProcessingPage() {
   return (
@@ -20,6 +21,7 @@ export function ProcessingPage() {
       </div>
       <ProcessingCoveragePanel />
       <ModulesTogglePanel />
+      <LlmModelsPanel />
     </div>
   )
 }

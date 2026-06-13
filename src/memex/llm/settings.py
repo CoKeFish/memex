@@ -40,7 +40,7 @@ LLM_CONSUMERS = (
     "identidades_dedup",
     "identidades_cooccurrence",
     "identidades_hierarchy",
-    "relations_resolve",
+    "relations_confirm",
     "relations_clusters",
     "quality_judge",
 )

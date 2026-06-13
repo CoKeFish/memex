@@ -58,6 +58,7 @@ const JOB_LABELS: Record<string, string> = {
   relevance_gate: "Gate de relevancia",
   relevance_rules: "Minería de reglas",
   graph: "Grafo",
+  graph_confirm: "Grafo · confirmar",
   log_purge: "Purga de logs",
 }
 
