@@ -46,6 +46,28 @@ memex-llm settings show
 - **Costo**: codex = $0 en `llm_calls` (la suscripción no factura por token) → /métricas queda
   ciego para esas llamadas. El proveedor que sirvió queda en `llm_calls.model` (`codex/...`).
 
+## Resultados: summarizer (corrida 2026-06-12, muestra chica)
+
+8 ventanas reales ya resumidas por DeepSeek (6 individuales + 2 batch de 3 mensajes), mismo
+prompt del worker, codex modelo default vía suscripción, **sin tocar la DB** (script en
+`experiments/codex_summarizer/`, gitignored; salidas crudas en `results.json`).
+
+- **Completitud**: 8/8 OK, cero fallos de sesión/CLI.
+- **Acuerdo factual**: sin contradicciones con el baseline en ningún caso (montos, fechas,
+  conductores, juegos, descuentos, números de pedido coinciden). codex agrega detalle extra
+  fiel al original (desgloses de tarifa, créditos, número de factura).
+- **Estilo**: codex es más verboso — en los individuales cortos ~2-4x más largo, sobre todo
+  por boilerplate de plantilla («correo automático, no responder», «disponible PDF, dejar
+  propina») que DeepSeek omite. Mitigable con una línea de prompt si se adopta (los prompts
+  no se tocaron en esta campaña).
+- **Latencia**: min 17.2s / mediana 22.8s / max 27.2s por ventana (DeepSeek típico 2-5s).
+  Un lote de 50 ventanas ≈ 19 min vs ~3 min.
+
+**Veredicto**: codex SIRVE en el summarizer — salida texto plano (sin riesgo de parseo),
+calidad factual a la par del baseline, costo $0 (suscripción). El precio es la latencia
+(~8-10x): apto para lotes desatendidos (scheduler nocturno), no para el camino interactivo
+del dashboard. El boilerplate extra es el único desvío de calidad observado.
+
 ## Tolerancia a fences/prosa: RESUELTA en el cliente
 
 codex (y anthropic) devuelven **JSON solo por prompt** y a veces lo envuelven en fences
