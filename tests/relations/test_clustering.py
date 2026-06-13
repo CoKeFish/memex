@@ -12,10 +12,12 @@ from memex.relations.edges import (
     PRODUCER_IDENTIDADES,
     PRODUCER_INBOX,
     PRODUCER_LLM,
+    PROVENANCE_EXTRACTED,
+    PROVENANCE_INFERRED,
     RELTYPE_COOCURRENCIA,
     RELTYPE_MIEMBRO_DE,
-    STATUS_CONFIRMED,
-    STATUS_PISTA,
+    VERDICT_AMBIGUOUS,
+    VERDICT_CONFIRMED,
     Ref,
     propose_edge,
 )
@@ -37,11 +39,14 @@ def _edge(
     a: Ref,
     b: Ref,
     *,
-    status: str = STATUS_CONFIRMED,
+    verdict: str = VERDICT_CONFIRMED,
+    provenance: str = PROVENANCE_EXTRACTED,
     rt: str = "afiliado",
     producer: str = PRODUCER_IDENTIDADES,
 ) -> None:
-    propose_edge(conn, 1, a, b, producer=producer, relation_type=rt, status=status)
+    propose_edge(
+        conn, 1, a, b, producer=producer, relation_type=rt, verdict=verdict, provenance=provenance
+    )
 
 
 def _sigs(conn: Connection) -> list[str]:
@@ -85,7 +90,7 @@ def test_pistas_participan_por_default(conn: Connection) -> None:
             conn,
             p[i],
             p[(i + 1) % 3],
-            status=STATUS_PISTA,
+            verdict=VERDICT_AMBIGUOUS,
             rt=RELTYPE_COOCURRENCIA,
             producer=PRODUCER_INBOX,
         )
@@ -104,7 +109,7 @@ def test_pistas_excluidas_con_w_pista_cero(conn: Connection) -> None:
             conn,
             p[i],
             p[(i + 1) % 3],
-            status=STATUS_PISTA,
+            verdict=VERDICT_AMBIGUOUS,
             rt=RELTYPE_COOCURRENCIA,
             producer=PRODUCER_INBOX,
         )
@@ -121,7 +126,7 @@ def test_cooccurrencia_confirmada_si_participa(conn: Connection) -> None:
             conn,
             p[i],
             p[(i + 1) % 3],
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
             rt=RELTYPE_COOCURRENCIA,
             producer=PRODUCER_LLM,
         )
@@ -143,9 +148,9 @@ def test_excluye_miembro_de(conn: Connection) -> None:
 def test_has_confirmed_edge(conn: Connection) -> None:
     # un triángulo con al menos una arista confirmed-real → has_confirmed_edge True.
     p = [_person(conn, f"P{i}") for i in range(3)]
-    _edge(conn, p[0], p[1], status=STATUS_CONFIRMED, rt="afiliado")
-    _edge(conn, p[1], p[2], status=STATUS_CONFIRMED, rt="afiliado")
-    _edge(conn, p[0], p[2], status=STATUS_CONFIRMED, rt="afiliado")
+    _edge(conn, p[0], p[1], verdict=VERDICT_CONFIRMED, rt="afiliado")
+    _edge(conn, p[1], p[2], verdict=VERDICT_CONFIRMED, rt="afiliado")
+    _edge(conn, p[0], p[2], verdict=VERDICT_CONFIRMED, rt="afiliado")
     g = build_cluster_graph(conn, 1)
     clusters = detect_clusters(g)
     assert len(clusters) == 1
@@ -182,9 +187,17 @@ def test_cooc_no_pesa_en_par_con_real_confirmada(conn: Connection) -> None:
     # y el peso queda 1.0. El par (b,c) solo-cooc conserva su peso de pista.
     a, b, c = _person(conn, "A"), _person(conn, "B"), _person(conn, "C")
     _edge(conn, a, b)  # real confirmada (afiliado, 1.0)
-    _edge(conn, a, b, status=STATUS_PISTA, rt=RELTYPE_COOCURRENCIA, producer=PRODUCER_INBOX)
-    _edge(conn, a, b, status=STATUS_CONFIRMED, rt=RELTYPE_COOCURRENCIA, producer=PRODUCER_LLM)
-    _edge(conn, b, c, status=STATUS_PISTA, rt=RELTYPE_COOCURRENCIA, producer=PRODUCER_INBOX)
+    _edge(conn, a, b, verdict=VERDICT_AMBIGUOUS, rt=RELTYPE_COOCURRENCIA, producer=PRODUCER_INBOX)
+    _edge(
+        conn,
+        a,
+        b,
+        verdict=VERDICT_CONFIRMED,
+        provenance=PROVENANCE_INFERRED,
+        rt=RELTYPE_COOCURRENCIA,
+        producer=PRODUCER_LLM,
+    )
+    _edge(conn, b, c, verdict=VERDICT_AMBIGUOUS, rt=RELTYPE_COOCURRENCIA, producer=PRODUCER_INBOX)
     g = build_cluster_graph(conn, 1)
     ka, kb, kc = (a.slug, a.id), (b.slug, b.id), (c.slug, c.id)
     assert g.edges[ka, kb]["weight"] == 1.0  # sin la cooc (sería 1.9)

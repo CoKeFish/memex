@@ -2,25 +2,26 @@
 datos ya guardados. Es un paso más del pipeline (on-demand, apagado por default, encadenable por el
 daemon): CONSUME lo disponible, no dispara pasos previos. Idempotente.
 
-Produce las clases de arista (ver `memex.relations.edges`):
-- PISTAS de co-ocurrencia (`producer='inbox'`, `status='pista'`): dos vértices del MISMO mensaje.
-  Señal barata de "quizás se relacionan" — NO asegura relación (el LLM la valida después). Se acota
-  el fan-out: un mensaje con demasiados vértices (digest) se SALTA y se loguea. Un par que YA tiene
-  arista confirmada (cualquier producer/relation_type/orientación) se suprime — y la pista
+Produce las clases de arista (ver `memex.relations.edges`); las deterministas nacen
+`extracted+confirmed` (hecho leído de la fuente), la co-ocurrencia nace `extracted+ambiguous`:
+- PISTAS de co-ocurrencia (`producer='inbox'`, `extracted+ambiguous`): dos vértices del MISMO
+  mensaje. Señal barata de "quizás se relacionan" — NO asegura relación (el LLM la valida después).
+  Se acota el fan-out: un mensaje con demasiados vértices (digest) se SALTA y se loguea. Un par que
+  YA tiene arista confirmada (cualquier producer/relation_type/orientación) se suprime — y la pista
   redundante pre-existente se CONFIRMA con decisión `regla/'redundante'` (historial, no DELETE) —
   porque no aporta sobre la relación vouchada; el grafo de clusterización salta la co-ocurrencia
   de esos pares para no doble-contar el peso. La PROCEDENCIA de cada pista se acumula en
   `relation_edge_sources` (TODOS los mensajes donde el par co-ocurrió, no solo el primero del
   `evidence`), incluso cuando la arista ya es terminal.
-- REALES de afiliación/pertenencia (`producer='identidades'`, `status='confirmed'`): persona↔org y
+- REALES de afiliación/pertenencia (`producer='identidades'`, `extracted+confirmed`): persona↔org y
   sub→padre que el directorio enlaza explícitamente (dato, no adivinanza).
-- REALES de contraparte (`producer='finance'`, `status='confirmed'`): cobro/pago CONSOLIDADO →
+- REALES de contraparte (`producer='finance'`, `extracted+confirmed`): cobro/pago CONSOLIDADO →
   identidad del cobrador/pagador (su `counterparty_identity_id` resuelto). El enlace por identidad
   entre finanzas y el directorio — determinista, el conector más valioso del grafo.
-- REALES de cumplimiento (`producer='bienestar'`, `status='confirmed'`): registro de bienestar →
+- REALES de cumplimiento (`producer='bienestar'`, `extracted+confirmed`): registro de bienestar →
   hábito que cumple, por match determinista de `activity` (normalizada) o `category` — la misma
   lógica que la adherencia (`habits._period_counts`).
-- REALES de participación (`producer='canal'`, `status='confirmed'`): persona → canal de chat en
+- REALES de participación (`producer='canal'`, `extracted+confirmed`): persona → canal de chat en
   el que escribió (remitente resuelto por su identifier `platform_id`). La estructura del medio,
   independiente del cap de co-ocurrencia.
 
@@ -31,13 +32,15 @@ DERIVA del payload: remitente y canal).
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from memex.config import settings
+from memex.core.source import SourceKind
 from memex.logging import get_logger
 from memex.relations.canales import sync_canales
 from memex.relations.decisions import (
@@ -56,16 +59,19 @@ from memex.relations.edges import (
     PRODUCER_FINANCE,
     PRODUCER_IDENTIDADES,
     PRODUCER_INBOX,
+    PROVENANCE_EXTRACTED,
     RELTYPE_COOCURRENCIA,
     RELTYPE_PARTICIPA_EN,
-    STATUS_CONFIRMED,
-    STATUS_PISTA,
+    VERDICT_AMBIGUOUS,
+    VERDICT_CONFIRMED,
     Ref,
     list_edges,
+    mark_vertices_dirty,
     propose_edge,
     resolve_edge,
 )
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND, list_vertices
+from memex.sources import kind_for_type
 
 _log = get_logger("memex.relations.deterministic")
 
@@ -244,6 +250,11 @@ def _materialize_cooccurrence(
         for mid in ids:
             by_msg[mid].add(ref)
 
+    # Reglas para chats: generan muchas co-ocurrencias y suelen aportar menos → cap más bajo (el
+    # MÍNIMO entre el cap general y `chat_cooccurrence_cap`), así nacen menos pares de un chat.
+    chat_ids = _chat_message_ids(conn, user_id, by_msg.keys())
+    chat_cap = min(cap, settings.chat_cooccurrence_cap)
+
     # Aristas cooc ya materializadas (cualquier status): la procedencia sigue creciendo sobre
     # ellas sin re-proponer. El par canónico (slug, id) coincide con cómo se crearon.
     existing: dict[tuple[Ref, Ref], int] = {
@@ -255,15 +266,23 @@ def _materialize_cooccurrence(
     pistas = 0
     skipped = 0
     counted: set[tuple[Ref, Ref]] = set()
+    new_refs: set[Ref] = set()  # vértices de pares NUEVOS → dirty (groundwork incremental ADR-021)
     sources_by_edge: dict[int, set[int]] = defaultdict(set)
     for mid, refs in by_msg.items():
         uniq = sorted(refs, key=lambda r: (r.slug, r.id))
         if len(uniq) < 2:
             continue
         content = sum(1 for r in uniq if r.slug != CANAL_SLUG)
-        if content > cap:
+        eff_cap = chat_cap if mid in chat_ids else cap  # chat_cap = min(cap, chat_cooccurrence_cap)
+        if content > eff_cap:
             skipped += 1
-            _log.info("relation.cooccurrence.skip_high_fanout", inbox_id=mid, vertices=content)
+            _log.info(
+                "relation.cooccurrence.skip_high_fanout",
+                inbox_id=mid,
+                vertices=content,
+                cap=eff_cap,
+                chat=mid in chat_ids,
+            )
             continue
         for i in range(len(uniq)):
             for j in range(i + 1, len(uniq)):
@@ -286,13 +305,37 @@ def _materialize_cooccurrence(
                         evidence=f"inbox:{mid}",
                     )
                     existing[pair] = eid
+                    new_refs.update(pair)
                 if pair not in counted:
                     counted.add(pair)
                     pistas += 1
                 sources_by_edge[eid].add(mid)
     for eid, mids in sources_by_edge.items():
         add_edge_sources(conn, eid, mids)
+    if new_refs:
+        mark_vertices_dirty(conn, user_id, sorted(new_refs, key=lambda r: (r.slug, r.id)))
     return pistas, skipped
+
+
+def _chat_message_ids(conn: Connection, user_id: int, inbox_ids: Iterable[int]) -> set[int]:
+    """Los inbox_ids que son de un medio de CHAT (su `sources.type` mapea a `SourceKind.CHAT`)."""
+    ids = sorted(set(inbox_ids))
+    if not ids:
+        return set()
+    out: set[int] = set()
+    for r in conn.execute(
+        text(
+            "SELECT i.id AS id, s.type AS type FROM inbox i JOIN sources s ON s.id = i.source_id "
+            "WHERE i.user_id = :u AND i.id = ANY(:ids)"
+        ),
+        {"u": user_id, "ids": ids},
+    ).mappings():
+        try:
+            if kind_for_type(str(r["type"])) == SourceKind.CHAT:
+                out.add(int(r["id"]))
+        except KeyError:
+            pass
+    return out
 
 
 def _materialize_afiliacion(
@@ -325,7 +368,8 @@ def _materialize_afiliacion(
             dst,
             producer=PRODUCER_IDENTIDADES,
             relation_type="afiliado",
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
         )
         if live is not None:
             live.add((src, dst))
@@ -361,7 +405,8 @@ def _materialize_pertenencia(
             dst,
             producer=PRODUCER_IDENTIDADES,
             relation_type="pertenece_a",
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
         )
         if live is not None:
             live.add((src, dst))
@@ -406,7 +451,8 @@ def _materialize_contraparte(
             dst,
             producer=PRODUCER_FINANCE,
             relation_type="contraparte",
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
         )
         if live is not None:
             live.add((src, dst))
@@ -506,7 +552,8 @@ def _materialize_same_event(
             Ref(str(r["b_slug"]), int(r["b_vid"])),
             producer=PRODUCER_EVENT,
             relation_type="mismo_evento",
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
             evidence="event_id",
         )
         n += 1
@@ -558,7 +605,8 @@ def _materialize_cumple(
             Ref("bienestar:habito", int(r["hid"])),
             producer=PRODUCER_BIENESTAR,
             relation_type="cumple",
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
             evidence="cumple",
         )
         n += 1
@@ -597,7 +645,8 @@ def _materialize_participa_en(conn: Connection, user_id: int) -> int:
             Ref(CANAL_SLUG, int(r["canal_id"])),
             producer=PRODUCER_CANAL,
             relation_type=RELTYPE_PARTICIPA_EN,
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
             evidence="sender",
         )
         n += 1
@@ -616,7 +665,7 @@ def _resolve_redundant_cooccurrence(
     terminales NO se tocan. Devuelve cuántas confirmó."""
     redundant = [
         e.id
-        for e in list_edges(conn, user_id, status=STATUS_PISTA, producer=PRODUCER_INBOX)
+        for e in list_edges(conn, user_id, verdict=VERDICT_AMBIGUOUS, producer=PRODUCER_INBOX)
         if e.relation_type == RELTYPE_COOCURRENCIA and frozenset((e.src, e.dst)) in confirmed_pairs
     ]
     if not redundant:
@@ -624,7 +673,13 @@ def _resolve_redundant_cooccurrence(
     sources = edge_sources(conn, redundant)
     n = 0
     for eid in redundant:
-        if resolve_edge(conn, eid, status=STATUS_CONFIRMED):
+        if resolve_edge(
+            conn,
+            eid,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
+            relation="ya existe una relación confirmada entre ambos",
+        ):
             record_decision(
                 conn,
                 user_id,
@@ -698,7 +753,7 @@ def build_relations(
         )
     )
     confirmed_pairs = {
-        frozenset((e.src, e.dst)) for e in list_edges(conn, user_id, status=STATUS_CONFIRMED)
+        frozenset((e.src, e.dst)) for e in list_edges(conn, user_id, verdict=VERDICT_CONFIRMED)
     }
     prov = vertex_inbox_ids(conn, user_id)
     pistas, skipped = _materialize_cooccurrence(

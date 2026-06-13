@@ -205,7 +205,7 @@ async def test_particion_crea_hijo_y_promueve_pistas() -> None:
     rows = _confirmed_rows()
     assert len(rows) == 1 and rows[0]["name"] == "Ctx" and rows[0]["member_count"] == 3
     edges = _edges_by_id()
-    assert edges[e01].status == "confirmed" and edges[e12].status == "confirmed"
+    assert edges[e01].verdict == "confirmed" and edges[e12].verdict == "confirmed"
     # HISTORIAL: la promoción NO pisa la procedencia original y deja decisión del partidor
     assert edges[e01].evidence == "inbox:99"
     with connection() as c:
@@ -232,8 +232,8 @@ async def test_particion_separa_dos_contextos() -> None:
     assert (stats.blobs, stats.created, stats.groups, stats.promoted) == (1, 2, 2, 2)
     assert len(_confirmed_rows()) == 2
     edges = _edges_by_id()
-    assert edges[e01].status == "confirmed" and edges[e23].status == "confirmed"
-    assert edges[e12].status == "pista"  # inter-contexto → sin matar
+    assert edges[e01].verdict == "confirmed" and edges[e23].verdict == "confirmed"
+    assert edges[e12].verdict == "ambiguous"  # inter-contexto → sin matar
 
 
 @pytest.mark.asyncio
@@ -246,7 +246,7 @@ async def test_grupo_bajo_umbral_no_se_confirma() -> None:
     fake = FakeLLM('{"groups":[{"members":[1,2,3],"name":"X","description":"","confidence":0.5}]}')
     stats = await run_cluster_partition(1, client=fake)
     assert (stats.created, stats.groups, stats.rejected) == (0, 0, 1)
-    assert _edges_by_id()[e01].status == "pista"  # ni se promovió ni se mató
+    assert _edges_by_id()[e01].verdict == "ambiguous"  # ni se promovió ni se mató
 
 
 @pytest.mark.asyncio
@@ -262,7 +262,7 @@ async def test_particion_vacia_es_memo_y_no_mata_pistas() -> None:
             text("SELECT status FROM relation_clusters WHERE id = :c"), {"c": cid}
         ).scalar_one()
     assert st == "rejected"  # memo
-    assert _edges_by_id()[e01].status == "pista"  # NO-destructivo
+    assert _edges_by_id()[e01].verdict == "ambiguous"  # NO-destructivo
 
 
 @pytest.mark.asyncio
@@ -309,12 +309,13 @@ async def test_no_toca_aristas_confirmed_deterministas() -> None:
             p[1],
             producer=PRODUCER_IDENTIDADES,
             relation_type="afiliado",
-            status="confirmed",
+            verdict="confirmed",
+            provenance="extracted",
         )
     stats = await run_cluster_partition(1, client=FakeLLM(_G3))
     assert stats.promoted == 0  # no hay pistas; la confirmed determinista no cuenta
     det_edge = _edges_by_id()[det]
-    assert det_edge.status == "confirmed" and det_edge.producer == PRODUCER_IDENTIDADES
+    assert det_edge.verdict == "confirmed" and det_edge.producer == PRODUCER_IDENTIDADES
 
 
 # --- rejected_edges (poda a nivel ARISTA, veredicto explícito del LLM) -------------- #
@@ -334,8 +335,8 @@ async def test_rejected_edges_rechaza_la_pista_y_promueve_el_resto() -> None:
     stats = await run_cluster_partition(1, client=fake)
     assert (stats.blobs, stats.created, stats.promoted, stats.rejected_edges) == (1, 1, 1, 1)
     edges = _edges_by_id()
-    assert edges[e01].status == "rejected"
-    assert edges[e12].status == "confirmed"
+    assert edges[e01].verdict == "rejected"
+    assert edges[e12].verdict == "confirmed"
     with connection() as c:
         decided = c.execute(
             text("SELECT decided_at FROM relation_edges WHERE id = :e"), {"e": e01}
@@ -359,7 +360,7 @@ async def test_rejected_edges_indices_basura_no_rompen() -> None:
     stats = await run_cluster_partition(1, client=fake)
     assert (stats.promoted, stats.rejected_edges) == (2, 0)  # basura ignorada = cascada de siempre
     edges = _edges_by_id()
-    assert edges[e01].status == "confirmed" and edges[e12].status == "confirmed"
+    assert edges[e01].verdict == "confirmed" and edges[e12].verdict == "confirmed"
 
 
 @pytest.mark.asyncio
@@ -376,7 +377,8 @@ async def test_rejected_edges_no_toca_confirmed_determinista() -> None:
             p[1],
             producer=PRODUCER_IDENTIDADES,
             relation_type="afiliado",
-            status="confirmed",
+            verdict="confirmed",
+            provenance="extracted",
         )
         e12 = _pista(c, p[1], p[2])
     fake = FakeLLM(
@@ -386,8 +388,8 @@ async def test_rejected_edges_no_toca_confirmed_determinista() -> None:
     stats = await run_cluster_partition(1, client=fake)
     assert (stats.promoted, stats.rejected_edges) == (1, 0)
     edges = _edges_by_id()
-    assert edges[det].status == "confirmed" and edges[det].producer == PRODUCER_IDENTIDADES
-    assert edges[e12].status == "confirmed"
+    assert edges[det].verdict == "confirmed" and edges[det].producer == PRODUCER_IDENTIDADES
+    assert edges[e12].verdict == "confirmed"
 
 
 @pytest.mark.asyncio

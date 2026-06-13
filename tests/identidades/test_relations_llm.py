@@ -219,7 +219,7 @@ async def test_run_cooccurrence_llm_emits_confirmed_llm_edges() -> None:
     assert len(edges) == 1
     e = edges[0]
     assert e.producer == "llm"
-    assert e.status == "confirmed"
+    assert e.verdict == "confirmed"
     assert e.relation_type == "co-ocurrencia"
     assert e.evidence == "inbox:7 | trabaja con Acme"
     assert _pair(e) == {("identidades:person", p), ("identidades:org", o)}

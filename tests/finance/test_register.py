@@ -106,7 +106,7 @@ def test_cross_module_same_event_edge_at_register() -> None:
     assert ("bienestar", "finance") in slugs
     for e in edges:
         assert e.relation_type == "mismo_evento"
-        assert e.status == "confirmed"
+        assert e.verdict == "confirmed"
 
 
 def test_full_sweep_idempotent_after_incremental() -> None:

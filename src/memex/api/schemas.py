@@ -2101,8 +2101,9 @@ class BackfillAdvanceResponse(BaseModel):
 
 # ---- Grafo de relaciones (vértices + aristas) ---------------------------------------------------
 # El front lee el grafo de SOLO LECTURA (GET /graph). Un vértice se direcciona por (slug, id); inbox
-# NO es vértice (es procedencia). Las aristas llevan su `producer` (quién las formó) y su `status`:
-# `pista` (señal determinista sin vouchar) vs `confirmed` (real) vs `rejected`.
+# NO es vértice (es procedencia). Las aristas llevan su `producer` (quién las formó) y DOS EJES:
+# `provenance` (extracted/inferred) por `verdict` (confirmed/rejected/ambiguous) + `label`
+# y `relation` (justificación corta).
 
 
 class GraphNode(BaseModel):
@@ -2116,10 +2117,11 @@ class GraphNode(BaseModel):
 
 
 class GraphEdge(BaseModel):
-    """Una arista del grafo: referencia `src`→`dst` con su productor y nivel. `confidence` cruza
-    como `float` (la DB es NUMERIC); la estampan los decisores LLM (partidor de cúmulos y resolver
-    par-por-par). `source_inbox_ids`: TODOS los mensajes que generaron la pista de co-ocurrencia
-    (`relation_edge_sources`, no solo el primero del `evidence`); vacío para otros productores."""
+    """Una arista del grafo: referencia `src`→`dst` con su productor y sus dos ejes. `provenance`
+    (cómo lo sabemos) por `verdict` (la decisión) derivan `label` (EXTRACTED/INFERRED/...).
+    `relation` es la justificación corta; `dirty` el flag de groundwork incremental. `confidence`
+    cruza como `float` (la DB es NUMERIC). `source_inbox_ids`: TODOS los mensajes que generaron la
+    co-ocurrencia (`relation_edge_sources`); vacío para otros productores."""
 
     id: int
     src_slug: str
@@ -2128,7 +2130,11 @@ class GraphEdge(BaseModel):
     dst_id: int
     relation_type: str
     producer: str
-    status: str
+    provenance: str
+    verdict: str
+    label: str
+    relation: str
+    dirty: bool
     confidence: float | None
     evidence: str
     source_inbox_ids: list[int] = []

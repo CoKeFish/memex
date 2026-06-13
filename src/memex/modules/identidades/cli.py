@@ -68,8 +68,10 @@ from memex.modules.identidades.providers.base import ContactsProviderError
 from memex.modules.identidades.sync import run_sync
 from memex.relations.edges import (
     PRODUCER_HUMANO,
-    STATUS_CONFIRMED,
-    STATUS_REJECTED,
+    PROVENANCE_EXTRACTED,
+    VERDICT_AMBIGUOUS,
+    VERDICT_CONFIRMED,
+    VERDICT_REJECTED,
     Ref,
     edges_touching,
     propose_edge,
@@ -242,7 +244,7 @@ def _build_parser() -> argparse.ArgumentParser:
     rel_p = sub.add_parser("relations", help="Aristas que tocan una identidad (sus relaciones).")
     rel_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     rel_p.add_argument("--id", type=int, required=True, help="Id de la identidad.")
-    rel_p.add_argument("--status", help="Filtra por estado (pista/confirmed/rejected).")
+    rel_p.add_argument("--verdict", help="Filtra por veredicto (ambiguous/confirmed/rejected).")
     rel_p.add_argument(
         "--json", dest="as_json", action="store_true", help="Emite las aristas como JSON."
     )
@@ -920,7 +922,7 @@ def _cmd_relations(args: argparse.Namespace) -> int:
             _say(f"\nNo existe la identidad id={args.id} para el user {args.user}.\n", err=True)
             return 1
         self_ref, self_name = ref
-        edges = edges_touching(conn, args.user, self_ref, status=args.status)
+        edges = edges_touching(conn, args.user, self_ref, verdict=args.verdict)
         # Resolver nombres de los extremos identidad (lookup batch).
         ident_ids = {e.src.id for e in edges if e.src.slug.startswith("identidades:")} | {
             e.dst.id for e in edges if e.dst.slug.startswith("identidades:")
@@ -948,7 +950,10 @@ def _cmd_relations(args: argparse.Namespace) -> int:
                 "direction": "→" if outgoing else "←",
                 "relation_type": e.relation_type,
                 "producer": e.producer,
-                "status": e.status,
+                "provenance": e.provenance,
+                "verdict": e.verdict,
+                "label": e.label,
+                "relation": e.relation,
                 "other": _endpoint(other),
             }
         )
@@ -1182,7 +1187,9 @@ def _cmd_relate(args: argparse.Namespace) -> int:
             dst_ref,
             producer=PRODUCER_HUMANO,
             relation_type=args.rel_type,
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
+            relation=args.why.strip(),
             evidence=args.why.strip(),
         )
     log.info(
@@ -1197,7 +1204,7 @@ def _cmd_relate(args: argparse.Namespace) -> int:
         "from": {"id": args.from_id, "display_name": a_name},
         "to": {"id": args.to_id, "display_name": b_name},
         "relation_type": args.rel_type,
-        "status": "confirmed",
+        "verdict": "confirmed",
     }
     if args.as_json:
         _emit_json(result)
@@ -1210,12 +1217,12 @@ def _cmd_relate(args: argparse.Namespace) -> int:
 
 
 def _cmd_confirm_relation(args: argparse.Namespace) -> int:
-    """Promueve una PISTA existente (p.ej. co-ocurrencia) a `confirmed`. Reusa `resolve_edge`
-    (monótono: solo toca pistas). La arista deja de ser candidata a re-análisis."""
+    """Promueve una arista AMBIGUA (p.ej. co-ocurrencia) a `confirmed`. Reusa `resolve_edge`
+    (monótono). La arista deja de ser candidata a re-análisis."""
     with connection() as conn:
         edge = conn.execute(
             text(
-                "SELECT status, src_slug, src_id, dst_slug, dst_id, relation_type "
+                "SELECT verdict, src_slug, src_id, dst_slug, dst_id, relation_type "
                 "FROM relation_edges WHERE id = :e AND user_id = :u"
             ),
             {"e": args.edge, "u": args.user},
@@ -1223,15 +1230,21 @@ def _cmd_confirm_relation(args: argparse.Namespace) -> int:
         if edge is None:
             _say(f"\nNo existe la arista id={args.edge} para el user {args.user}.\n", err=True)
             return 1
-        if str(edge[0]) != "pista":
+        if str(edge[0]) != VERDICT_AMBIGUOUS:
             _say(
-                f"\nLa arista {args.edge} ya está {edge[0]} (solo se confirman pistas).\n", err=True
+                f"\nLa arista {args.edge} ya está {edge[0]} (solo se confirman ambiguas).\n",
+                err=True,
             )
             return 1
         changed = resolve_edge(
-            conn, args.edge, status=STATUS_CONFIRMED, evidence=(args.why.strip() or None)
+            conn,
+            args.edge,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
+            relation=(args.why.strip() or None),
+            evidence=(args.why.strip() or None),
         )
-    result = {"edge_id": args.edge, "status": "confirmed", "changed": changed}
+    result = {"edge_id": args.edge, "verdict": "confirmed", "changed": changed}
     if args.as_json:
         _emit_json(result)
     else:
@@ -1240,19 +1253,21 @@ def _cmd_confirm_relation(args: argparse.Namespace) -> int:
 
 
 def _cmd_unrelate(args: argparse.Namespace) -> int:
-    """Descarta una arista: la marca `rejected` (terminal). Funciona sobre pista O confirmed (UPDATE
-    directo acotado al user). Idempotente: una ya rechazada no cambia."""
+    """Descarta una arista: la marca `rejected` (terminal). El humano puede rechazar una ambigua O
+    una confirmed (override; UPDATE directo acotado al user); fija `provenance='extracted'` (es una
+    aserción del dueño, no del LLM) y `dirty=TRUE`. Idempotente: una ya rechazada no cambia."""
     with connection() as conn:
         n = conn.execute(
             text(
                 """
                 UPDATE relation_edges
-                SET status = :rej, decided_at = NOW(),
-                    evidence = COALESCE(NULLIF(:why, ''), evidence)
-                WHERE id = :e AND user_id = :u AND status <> :rej
+                SET verdict = :rej, provenance = 'extracted', decided_at = NOW(), dirty = TRUE,
+                    evidence = COALESCE(NULLIF(:why, ''), evidence),
+                    relation = COALESCE(NULLIF(:why, ''), relation)
+                WHERE id = :e AND user_id = :u AND verdict <> :rej
                 """
             ),
-            {"rej": STATUS_REJECTED, "why": args.why.strip(), "e": args.edge, "u": args.user},
+            {"rej": VERDICT_REJECTED, "why": args.why.strip(), "e": args.edge, "u": args.user},
         ).rowcount
         exists = conn.execute(
             text("SELECT 1 FROM relation_edges WHERE id = :e AND user_id = :u"),
@@ -1261,7 +1276,7 @@ def _cmd_unrelate(args: argparse.Namespace) -> int:
     if exists is None:
         _say(f"\nNo existe la arista id={args.edge} para el user {args.user}.\n", err=True)
         return 1
-    result = {"edge_id": args.edge, "status": "rejected", "changed": n > 0}
+    result = {"edge_id": args.edge, "verdict": "rejected", "changed": n > 0}
     if args.as_json:
         _emit_json(result)
     else:

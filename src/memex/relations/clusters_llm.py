@@ -50,11 +50,12 @@ from memex.relations.decisions import (
 )
 from memex.relations.edges import (
     PRODUCER_INBOX,
+    PROVENANCE_INFERRED,
     RELTYPE_COOCURRENCIA,
     RELTYPE_MIEMBRO_DE,
-    STATUS_CONFIRMED,
-    STATUS_PISTA,
-    STATUS_REJECTED,
+    VERDICT_AMBIGUOUS,
+    VERDICT_CONFIRMED,
+    VERDICT_REJECTED,
     Ref,
     RelationEdge,
     list_edges,
@@ -138,11 +139,11 @@ def _internal_edges(all_edges: list[RelationEdge], members: set[Ref]) -> list[Re
         e
         for e in all_edges
         if e.relation_type != RELTYPE_MIEMBRO_DE
-        and e.status != STATUS_REJECTED
+        and e.verdict != VERDICT_REJECTED
         and e.src in members
         and e.dst in members
     ]
-    internal.sort(key=lambda e: 0 if e.status == STATUS_CONFIRMED else 1)
+    internal.sort(key=lambda e: 0 if e.verdict == VERDICT_CONFIRMED else 1)
     return internal[:_INTERNAL_EDGE_CAP]
 
 
@@ -169,7 +170,7 @@ def _serialize(members: list[Ref], internal: list[RelationEdge], vmap: dict[Ref,
             continue
         rt = e.relation_type or "—"
         ev = f" · {e.evidence}" if e.evidence else ""
-        lines.append(f"{a}-{b}: {rt} · {e.producer} · {e.status}{ev}")
+        lines.append(f"{a}-{b}: {rt} · {e.producer} · {e.label}{ev}")
     return "\n".join(lines)
 
 
@@ -350,7 +351,7 @@ def _cascade_edges(
     pistas = [
         e
         for e in internal
-        if e.status == STATUS_PISTA
+        if e.verdict == VERDICT_AMBIGUOUS
         and e.producer == PRODUCER_INBOX
         and e.relation_type == RELTYPE_COOCURRENCIA
     ]
@@ -371,18 +372,24 @@ def _cascade_edges(
     promoted = rejected = 0
     for e in pistas:
         if frozenset((e.src, e.dst)) in rejected_pairs:  # absorbe la orientación src/dst
-            if resolve_edge(conn, e.id, status=STATUS_REJECTED):
+            if resolve_edge(conn, e.id, verdict=VERDICT_REJECTED, provenance=PROVENANCE_INFERRED):
                 _decide(e.id, VERDICT_REJECT)
                 rejected += 1
             continue
         if survivors is None:  # cúmulo rechazado (caller gateó cluster_reject_pistas)
-            if resolve_edge(conn, e.id, status=STATUS_REJECTED):
+            if resolve_edge(conn, e.id, verdict=VERDICT_REJECTED, provenance=PROVENANCE_INFERRED):
                 _decide(e.id, VERDICT_REJECT)
                 rejected += 1
         elif (
             e.src in survivors
             and e.dst in survivors
-            and resolve_edge(conn, e.id, status=STATUS_CONFIRMED, confidence=conf)
+            and resolve_edge(
+                conn,
+                e.id,
+                verdict=VERDICT_CONFIRMED,
+                provenance=PROVENANCE_INFERRED,
+                confidence=conf,
+            )
         ):
             _decide(e.id, VERDICT_CONFIRM)
             promoted += 1
@@ -398,7 +405,7 @@ def _jaccard(a: frozenset[Ref], b: frozenset[Ref]) -> float:
 def _group_has_confirmed(members: frozenset[Ref], internal: list[RelationEdge]) -> bool:
     """¿El grupo tiene una arista confirmed REAL entre dos miembros (ancla, no co-ocurrencia)?"""
     return any(
-        e.status == STATUS_CONFIRMED
+        e.verdict == VERDICT_CONFIRMED
         and e.relation_type != RELTYPE_COOCURRENCIA
         and e.src in members
         and e.dst in members

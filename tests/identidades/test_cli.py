@@ -417,7 +417,7 @@ def test_relations_lista_ambas_direcciones(capsys: pytest.CaptureFixture[str]) -
     assert len(data["edges"]) == 1
     e = data["edges"][0]
     assert e["direction"] == "→" and "Unity" in e["other"]
-    assert e["relation_type"] == "mantiene_asset" and e["status"] == "confirmed"
+    assert e["relation_type"] == "mantiene_asset" and e["verdict"] == "confirmed"
 
     # desde el otro extremo, la misma arista aparece entrante
     assert main(["relations", "--id", str(unity), "--json"]) == 0
@@ -437,7 +437,7 @@ def test_relate_confirmada_e_idempotente(capsys: pytest.CaptureFixture[str]) -> 
         main(["relate", "--from", str(a), "--to", str(b), "--type", "de_la_empresa", "--json"]) == 0
     )
     e1 = _last_json(capsys.readouterr().out)
-    assert e1["status"] == "confirmed"
+    assert e1["verdict"] == "confirmed"
     # idempotente: re-relacionar el mismo par/tipo no duplica
     assert (
         main(["relate", "--from", str(a), "--to", str(b), "--type", "de_la_empresa", "--json"]) == 0
@@ -456,7 +456,7 @@ def test_relate_confirmada_e_idempotente(capsys: pytest.CaptureFixture[str]) -> 
 def test_confirm_relation_y_unrelate(capsys: pytest.CaptureFixture[str]) -> None:
     a = _mk("persona", "P")
     b = _mk("organizacion", "O")
-    # sembrar una PISTA inbox entre ambas (co-ocurrencia)
+    # sembrar una arista AMBIGUA inbox entre ambas (co-ocurrencia)
     a_slug, b_slug = "identidades:person", "identidades:org"
     with connection() as c:
         edge = int(
@@ -464,8 +464,9 @@ def test_confirm_relation_y_unrelate(capsys: pytest.CaptureFixture[str]) -> None
                 text(
                     "INSERT INTO relation_edges "
                     "(user_id, src_slug, src_id, dst_slug, dst_id, relation_type, "
-                    " producer, status) "
-                    "VALUES (1, :as, :ai, :bs, :bi, 'co-ocurrencia', 'inbox', 'pista') RETURNING id"
+                    " producer, verdict) "
+                    "VALUES (1, :as, :ai, :bs, :bi, 'co-ocurrencia', 'inbox', 'ambiguous') "
+                    "RETURNING id"
                 ),
                 {"as": a_slug, "ai": a, "bs": b_slug, "bi": b},
             ).scalar_one()
@@ -474,7 +475,7 @@ def test_confirm_relation_y_unrelate(capsys: pytest.CaptureFixture[str]) -> None
     capsys.readouterr()
     with connection() as c:
         st = c.execute(
-            text("SELECT status, evidence FROM relation_edges WHERE id = :e"), {"e": edge}
+            text("SELECT verdict, evidence FROM relation_edges WHERE id = :e"), {"e": edge}
         ).first()
     assert st is not None and st[0] == "confirmed" and st[1] == "sí se relacionan"
     # confirmar una ya-confirmada → error claro
@@ -485,7 +486,7 @@ def test_confirm_relation_y_unrelate(capsys: pytest.CaptureFixture[str]) -> None
     capsys.readouterr()
     with connection() as c:
         st = c.execute(
-            text("SELECT status FROM relation_edges WHERE id = :e"), {"e": edge}
+            text("SELECT verdict FROM relation_edges WHERE id = :e"), {"e": edge}
         ).scalar()
     assert st == "rejected"
     assert main(["unrelate", "--edge", "99999"]) == 1

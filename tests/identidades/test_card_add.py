@@ -118,7 +118,7 @@ def test_add_person_with_org_links_affiliation(capsys: pytest.CaptureFixture[str
             c.execute(
                 text(
                     """
-                    SELECT producer, status FROM relation_edges
+                    SELECT producer, verdict FROM relation_edges
                     WHERE user_id = 1 AND relation_type = 'afiliado'
                       AND src_slug = 'identidades:person' AND src_id = :p
                       AND dst_slug = 'identidades:org' AND dst_id = :o
@@ -130,7 +130,7 @@ def test_add_person_with_org_links_affiliation(capsys: pytest.CaptureFixture[str
             .one()
         )
     assert edge["producer"] == "identidades"
-    assert edge["status"] == "confirmed"
+    assert edge["verdict"] == "confirmed"
 
 
 def test_add_org_requires_persona(capsys: pytest.CaptureFixture[str]) -> None:

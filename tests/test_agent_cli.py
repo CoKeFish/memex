@@ -122,7 +122,7 @@ def test_identidad_agente_resuelve_relacion(capsys: pytest.CaptureFixture[str]) 
     assert main(["identidad", "relations", "--id", str(tyler), "--json"]) == 0
     data = _last_json(capsys.readouterr().out)
     assert data["edges"][0]["relation_type"] == "mantiene_asset"
-    assert data["edges"][0]["status"] == "confirmed"
+    assert data["edges"][0]["verdict"] == "confirmed"
 
 
 def test_identidad_agente_set_parent_y_show(capsys: pytest.CaptureFixture[str]) -> None:

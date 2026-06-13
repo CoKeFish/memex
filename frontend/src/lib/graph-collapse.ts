@@ -4,7 +4,7 @@
 // `miembro_de`: un cúmulo miembro de otro cúmulo (futuro: cúmulos jerárquicos) anida solo — el
 // representante es el ancestro plegado MÁS EXTERNO.
 
-import type { GraphEdge, GraphNode } from "@/data/graph"
+import { canonicalLabel, type GraphEdge, type GraphNode } from "@/data/graph"
 import { nodeKey } from "@/lib/graph-layout"
 
 export interface CollapsedEdge extends GraphEdge {
@@ -23,7 +23,7 @@ const CUMULO = "cumulo"
  * nodos PRESENTES (así el plegado respeta los filtros aplicados antes: si la leyenda oculta los
  * cúmulos, no hay membresía y no se pliega nada). Aristas internas al plegado se descartan; las
  * re-ruteadas se agregan por par canónico en una arista sintética determinista (id negativo en
- * orden de clave; `status` confirmed si alguna constituyente lo era). */
+ * orden de clave; `verdict` confirmed si alguna constituyente lo era). */
 export function collapseClusters(
   nodes: GraphNode[],
   edges: GraphEdge[],
@@ -75,7 +75,7 @@ export function collapseClusters(
     const k = `${a}|${b}`
     const cur = agg.get(k) ?? { count: 0, confirmed: false }
     cur.count += 1
-    cur.confirmed = cur.confirmed || e.status === "confirmed"
+    cur.confirmed = cur.confirmed || e.verdict === "confirmed"
     agg.set(k, cur)
   }
 
@@ -86,6 +86,8 @@ export function collapseClusters(
       const [a, b] = k.split("|")
       const ha = a.lastIndexOf("#")
       const hb = b.lastIndexOf("#")
+      const verdict = v.confirmed ? "confirmed" : "ambiguous"
+      const provenance = "inferred"
       return {
         id: -(i + 1),
         srcSlug: a.slice(0, ha),
@@ -94,7 +96,11 @@ export function collapseClusters(
         dstId: Number(b.slice(hb + 1)),
         relationType: "agregada",
         producer: "colapso",
-        status: v.confirmed ? "confirmed" : "pista",
+        provenance,
+        verdict,
+        label: canonicalLabel(provenance, verdict),
+        relation: "",
+        dirty: false,
         confidence: null,
         evidence: "",
         sourceInboxIds: [],

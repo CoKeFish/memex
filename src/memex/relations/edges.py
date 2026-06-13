@@ -6,16 +6,19 @@ Disciplina (modelo v2):
 - Cada arista DEBE declarar su `producer` (quién la formó: `inbox`/`dedup`/`consolidacion`/
   `identidades`/`llm`/`humano`/...). Vocabulario ABIERTO: las constantes `PRODUCER_*` dan
   typo-safety sin cerrar el conjunto (igual que `capabilities`/`CAP_*`); NO se valida contra lista.
-- `status` nace `pista` (DEFAULT NOT NULL en DB; señal determinista sin vouchar, p.ej.
-  co-ocurrencia) y transiciona vía `resolve_edge` a `confirmed`/`rejected` (terminales, monótono).
-  Las relaciones vouchadas (identidades/finance/llm/humano) se proponen directo en `confirmed`. No
-  existe `None` ni `pending`.
+- El NIVEL de la arista son DOS EJES: `provenance` (extracted/inferred — cómo lo sabemos) y
+  `verdict` (confirmed/rejected/ambiguous — la decisión). Una co-ocurrencia nace
+  `extracted+ambiguous` (la co-aparición es un hecho, la relación es sospecha sin juzgar) y
+  transiciona vía `resolve_edge` (monótono, confirm gana). Las relaciones vouchadas deterministas
+  (identidades/finance/...) se proponen directo `extracted+confirmed`. `relation` guarda la
+  justificación corta vigente; `dirty` marca lo desactualizado (groundwork incremental, ADR-021).
 - `propose_edge` es IDEMPOTENTE (ON CONFLICT sobre la UNIQUE lógica, que incluye el productor): el
   mismo productor re-corriendo no duplica ni pisa; distintos productores del mismo par coexisten.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -27,12 +30,29 @@ from memex.logging import get_logger
 
 _log = get_logger("memex.relations.edges")
 
-# --- Nivel de la arista (dos tipos visibles + el descarte) --------------------------- #
-STATUS_PISTA = "pista"  #: señal determinista NO vouchada (co-ocurrencia): "quizás se relacionan"
-STATUS_CONFIRMED = "confirmed"  #: relación REAL, vouchada por dato/LLM/humano
-STATUS_REJECTED = "rejected"  #: pista evaluada y descartada
-#: Las pistas son los candidatos que el LLM evalúa → confirmed/rejected.
-VALID_STATUS: frozenset[str] = frozenset({STATUS_PISTA, STATUS_CONFIRMED, STATUS_REJECTED})
+# --- Nivel de la arista: DOS EJES ortogonales (procedencia por veredicto) --------------- #
+# La procedencia viaja como parte del contrato de la arista (graphify EXTRACTED/INFERRED): se copia
+# la disciplina, no el esquema. La etiqueta canónica visible se deriva de ambos (`canonical_label`).
+PROVENANCE_EXTRACTED = "extracted"  #: leído literal de una fuente determinista — es un hecho
+PROVENANCE_INFERRED = "inferred"  #: el LLM lo dedujo del contexto — conclusión, no textual
+VALID_PROVENANCE: frozenset[str] = frozenset({PROVENANCE_EXTRACTED, PROVENANCE_INFERRED})
+
+VERDICT_CONFIRMED = "confirmed"  #: relación REAL, vouchada por dato/LLM/humano
+VERDICT_REJECTED = "rejected"  #: co-aparición casual, descartada
+VERDICT_AMBIGUOUS = (
+    "ambiguous"  #: sospecha sin decidir (antes 'pista'): sin juzgar, o la IA no supo
+)
+VALID_VERDICT: frozenset[str] = frozenset({VERDICT_CONFIRMED, VERDICT_REJECTED, VERDICT_AMBIGUOUS})
+
+
+def canonical_label(provenance: str, verdict: str) -> str:
+    """La etiqueta única que ve API/frontend/Hermes, derivada de los dos ejes."""
+    if verdict == VERDICT_CONFIRMED:
+        return "EXTRACTED" if provenance == PROVENANCE_EXTRACTED else "INFERRED"
+    if verdict == VERDICT_REJECTED:
+        return "INFERRED REJECTED" if provenance == PROVENANCE_INFERRED else "REJECTED"
+    return "AMBIGUOUS (inferred)" if provenance == PROVENANCE_INFERRED else "AMBIGUOUS"
+
 
 # --- Productores (set ABIERTO; typo-safety, NO un gate de DB) ------------------------- #
 PRODUCER_INBOX = "inbox"  #: el vértice nació de este mensaje (procedencia de ingesta)
@@ -104,8 +124,16 @@ class RelationEdge:
     producer: str
     confidence: Decimal | None
     evidence: str
-    status: str
+    provenance: str
+    verdict: str
+    relation: str
+    dirty: bool
     seed_tag: str | None
+
+    @property
+    def label(self) -> str:
+        """Etiqueta canónica derivada de los dos ejes (EXTRACTED/INFERRED/AMBIGUOUS/...)."""
+        return canonical_label(self.provenance, self.verdict)
 
 
 def _row_to_edge(r: Any) -> RelationEdge:
@@ -118,7 +146,10 @@ def _row_to_edge(r: Any) -> RelationEdge:
         producer=str(r["producer"]),
         confidence=r["confidence"],
         evidence=str(r["evidence"]),
-        status=str(r["status"]),
+        provenance=str(r["provenance"]),
+        verdict=str(r["verdict"]),
+        relation=str(r["relation"]),
+        dirty=bool(r["dirty"]),
         seed_tag=(str(r["seed_tag"]) if r["seed_tag"] is not None else None),
     )
 
@@ -131,22 +162,27 @@ def propose_edge(
     *,
     producer: str,
     relation_type: str = "",
-    status: str = STATUS_PISTA,
+    provenance: str = PROVENANCE_EXTRACTED,
+    verdict: str = VERDICT_AMBIGUOUS,
+    relation: str = "",
     confidence: Decimal | None = None,
     evidence: str = "",
     seed_tag: str | None = None,
 ) -> int:
     """Materializa una arista (idempotente por la UNIQUE lógica) y devuelve su id.
 
-    `producer` es OBLIGATORIO (quién forma la arista). `status` por defecto `pista` (señal sin
-    vouchar, p.ej. co-ocurrencia); una relación REAL determinista (p.ej. persona↔org por dato) pasa
-    `status='confirmed'`. NO valida ontología (cualquier par es legal). NO pisa una arista existente
-    del mismo productor (idempotente); distintos productores del mismo par crean aristas
-    independientes. `ValueError` si `producer` es vacío o `status` es inválido."""
+    `producer` es OBLIGATORIO (quién forma la arista). Por defecto nace `extracted+ambiguous` (una
+    co-ocurrencia: la co-aparición es un hecho, la relación es sospecha sin juzgar). Una relación
+    REAL determinista (p.ej. persona↔org por dato) pasa `verdict='confirmed'` (procedencia
+    `extracted`). NO valida ontología (cualquier par es legal). NO pisa una arista existente del
+    mismo productor (idempotente); distintos productores del mismo par crean aristas independientes.
+    `ValueError` si `producer` es vacío o los ejes son inválidos."""
     if not producer:
         raise ValueError("producer es obligatorio (quién formó la arista)")
-    if status not in VALID_STATUS:
-        raise ValueError(f"status inválido: {status!r}")
+    if provenance not in VALID_PROVENANCE:
+        raise ValueError(f"provenance inválida: {provenance!r}")
+    if verdict not in VALID_VERDICT:
+        raise ValueError(f"verdict inválido: {verdict!r}")
 
     params = {
         "uid": user_id,
@@ -158,18 +194,21 @@ def propose_edge(
         "pr": producer,
         "conf": confidence,
         "ev": evidence,
-        "st": status,
+        "prov": provenance,
+        "vd": verdict,
+        "rel": relation,
         "tag": seed_tag,
     }
-    decided_at_sql = "NOW()" if status in ("confirmed", "rejected") else "NULL"
+    decided_at_sql = "NOW()" if verdict in (VERDICT_CONFIRMED, VERDICT_REJECTED) else "NULL"
     new_id = conn.execute(
         text(
             f"""
             INSERT INTO relation_edges
               (user_id, src_slug, src_id, dst_slug, dst_id, relation_type, producer,
-               confidence, evidence, status, decided_at, seed_tag)
+               confidence, evidence, provenance, verdict, relation, decided_at, seed_tag)
             VALUES
-              (:uid, :ss, :si, :ds, :di, :rt, :pr, :conf, :ev, :st, {decided_at_sql}, :tag)
+              (:uid, :ss, :si, :ds, :di, :rt, :pr, :conf, :ev, :prov, :vd, :rel,
+               {decided_at_sql}, :tag)
             ON CONFLICT ON CONSTRAINT relation_edges_logical_uq DO NOTHING
             RETURNING id
             """
@@ -196,37 +235,72 @@ def resolve_edge(
     conn: Connection,
     edge_id: int,
     *,
-    status: str,
+    verdict: str,
+    provenance: str,
+    relation: str | None = None,
     confidence: Decimal | None = None,
     evidence: str | None = None,
 ) -> bool:
-    """Transiciona una PISTA → `confirmed`/`rejected` (monótono); devuelve si cambió algo.
+    """Transiciona el VEREDICTO de una arista (monótono, CONFIRM GANA); devuelve si cambió algo.
 
-    Una arista terminal NO se re-evalúa (WHERE status='pista'); el LLM/humano deciden una sola vez.
-    NO toca `producer`: la pista la FORMÓ su productor (p.ej. `inbox`) y resolverla es un cambio de
-    NIVEL, no una re-producción. Reescribir `producer` además CHOCARÍA con la UNIQUE lógica (que lo
-    incluye) si ya existe una arista vouchada del mismo par por otro productor — p.ej. la
-    co-ocurrencia que el LLM de identidades confirma directo (`producer='llm'`). Quién resolvió
-    queda en `decided_at` + el cúmulo (la arista `miembro_de`). `confidence`/`evidence=None`
-    dejan el valor existente. (las `confirmed` deterministas no son pistas; no pasan acá.)"""
-    if status not in {STATUS_CONFIRMED, STATUS_REJECTED}:
-        raise ValueError(f"resolve_edge solo a confirmed/rejected, no {status!r}")
+    - A `confirmed`: upgradea desde `ambiguous` Y desde `rejected` (un confirm posterior gana al
+      reject) — guard `verdict <> 'confirmed'`; re-confirmar es no-op idempotente.
+    - A `rejected`: SOLO desde `ambiguous` (no pisa `confirmed`) — guard `verdict='ambiguous'`.
+
+    Setea `provenance` (quién lo decidió: extracted/inferred), `relation` (justificación corta) y
+    marca `dirty=TRUE` (groundwork incremental). NO toca `producer`: la arista la FORMÓ su productor
+    y resolverla es un cambio de NIVEL; reescribir `producer` chocaría con la UNIQUE lógica.
+    `relation`/`confidence`/`evidence=None` dejan el valor existente."""
+    if verdict not in {VERDICT_CONFIRMED, VERDICT_REJECTED}:
+        raise ValueError(f"resolve_edge solo a confirmed/rejected, no {verdict!r}")
+    if provenance not in VALID_PROVENANCE:
+        raise ValueError(f"provenance inválida: {provenance!r}")
+    guard = "verdict <> 'confirmed'" if verdict == VERDICT_CONFIRMED else "verdict = 'ambiguous'"
     rows = conn.execute(
         text(
-            """
+            f"""
             UPDATE relation_edges
-            SET status = :st,
+            SET verdict = :vd,
+                provenance = :prov,
                 decided_at = NOW(),
+                dirty = TRUE,
+                relation = COALESCE(:rel, relation),
                 confidence = COALESCE(:conf, confidence),
                 evidence = COALESCE(:ev, evidence)
-            WHERE id = :id AND status = 'pista'
+            WHERE id = :id AND {guard}
             """
         ),
-        {"id": edge_id, "st": status, "conf": confidence, "ev": evidence},
+        {
+            "id": edge_id,
+            "vd": verdict,
+            "prov": provenance,
+            "rel": relation,
+            "conf": confidence,
+            "ev": evidence,
+        },
     ).rowcount
     if rows == 0:
-        _log.info("relation.edge.resolve_noop", edge_id=edge_id, status=status)
+        _log.info("relation.edge.resolve_noop", edge_id=edge_id, verdict=verdict)
     return rows > 0
+
+
+def mark_vertices_dirty(conn: Connection, user_id: int, refs: Sequence[Ref]) -> None:
+    """Marca vértices como `dirty` en `relation_vertex_state` (upsert). Groundwork incremental
+    (ADR-021): el productor avisa qué cambió para que un futuro mantenedor de cúmulos trabaje solo
+    sobre el delta. La pueblan SOLO la capa grafo (build + fase de confirmación), no los módulos."""
+    if not refs:
+        return
+    conn.execute(
+        text(
+            """
+            INSERT INTO relation_vertex_state (user_id, slug, id, dirty, dirty_at)
+            VALUES (:uid, :slug, :id, TRUE, NOW())
+            ON CONFLICT (user_id, slug, id)
+            DO UPDATE SET dirty = TRUE, dirty_at = NOW()
+            """
+        ),
+        [{"uid": user_id, "slug": r.slug, "id": r.id} for r in dict.fromkeys(refs)],
+    )
 
 
 def get_edge(
@@ -262,25 +336,33 @@ def list_edges(
     conn: Connection,
     user_id: int,
     *,
-    status: str | None = None,
+    verdict: str | None = None,
+    provenance: str | None = None,
     producer: str | None = None,
     seed_tag: str | None = None,
 ) -> list[RelationEdge]:
-    """Aristas del user, opcionalmente filtradas por `status`, `producer` y/o `seed_tag` (para la
-    vista del front, los asserts limpios, o acotar el seed en dev)."""
+    """Aristas del user, opcionalmente filtradas por `verdict`, `provenance`, `producer` y/o
+    `seed_tag` (para la vista del front, los asserts limpios, o acotar el seed en dev)."""
     rows = (
         conn.execute(
             text(
                 """
                 SELECT * FROM relation_edges
                 WHERE user_id = :uid
-                  AND (CAST(:status AS TEXT) IS NULL OR status = CAST(:status AS TEXT))
+                  AND (CAST(:verdict AS TEXT) IS NULL OR verdict = CAST(:verdict AS TEXT))
+                  AND (CAST(:prov AS TEXT) IS NULL OR provenance = CAST(:prov AS TEXT))
                   AND (CAST(:producer AS TEXT) IS NULL OR producer = CAST(:producer AS TEXT))
                   AND (CAST(:tag AS TEXT) IS NULL OR seed_tag = CAST(:tag AS TEXT))
                 ORDER BY id
                 """
             ),
-            {"uid": user_id, "status": status, "producer": producer, "tag": seed_tag},
+            {
+                "uid": user_id,
+                "verdict": verdict,
+                "prov": provenance,
+                "producer": producer,
+                "tag": seed_tag,
+            },
         )
         .mappings()
         .all()
@@ -288,17 +370,17 @@ def list_edges(
     return [_row_to_edge(r) for r in rows]
 
 
-def list_pistas(conn: Connection, user_id: int) -> list[RelationEdge]:
-    """La cola de candidatos: las PISTAS del user (señales por validar / promover a reales)."""
-    return list_edges(conn, user_id, status=STATUS_PISTA)
+def list_ambiguous(conn: Connection, user_id: int) -> list[RelationEdge]:
+    """La cola de candidatos: las aristas AMBIGUAS del user (sospechas por juzgar / promover)."""
+    return list_edges(conn, user_id, verdict=VERDICT_AMBIGUOUS)
 
 
 def edges_touching(
-    conn: Connection, user_id: int, ref: Ref, *, status: str | None = None
+    conn: Connection, user_id: int, ref: Ref, *, verdict: str | None = None
 ) -> list[RelationEdge]:
-    """Las aristas con `ref` en CUALQUIER extremo (src o dst), opcionalmente filtradas por `status`.
+    """Las aristas con `ref` en CUALQUIER extremo (src o dst), con filtro opcional `verdict`.
     Para mostrar todas las relaciones de un vértice (p.ej. una identidad) sin importar la dirección.
-    `list_edges` filtra por status/producer pero no por vértice; esto completa ese eje."""
+    `list_edges` filtra por verdict/producer pero no por vértice; esto completa ese eje."""
     rows = (
         conn.execute(
             text(
@@ -307,11 +389,11 @@ def edges_touching(
                 WHERE user_id = :uid
                   AND ((src_slug = :slug AND src_id = :id)
                     OR (dst_slug = :slug AND dst_id = :id))
-                  AND (CAST(:status AS TEXT) IS NULL OR status = CAST(:status AS TEXT))
+                  AND (CAST(:verdict AS TEXT) IS NULL OR verdict = CAST(:verdict AS TEXT))
                 ORDER BY id
                 """
             ),
-            {"uid": user_id, "slug": ref.slug, "id": ref.id, "status": status},
+            {"uid": user_id, "slug": ref.slug, "id": ref.id, "verdict": verdict},
         )
         .mappings()
         .all()

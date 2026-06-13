@@ -24,8 +24,9 @@ from memex.relations.clustering import CandidateCluster, cluster_signature
 from memex.relations.edges import (
     CUMULO_SLUG,
     PRODUCER_LLM,
+    PROVENANCE_INFERRED,
     RELTYPE_MIEMBRO_DE,
-    STATUS_CONFIRMED,
+    VERDICT_CONFIRMED,
     Ref,
     propose_edge,
 )
@@ -330,7 +331,8 @@ def materialize_cluster_edges(conn: Connection, user_id: int) -> int:
                 Ref(CUMULO_SLUG, c.id),
                 producer=PRODUCER_LLM,
                 relation_type=RELTYPE_MIEMBRO_DE,
-                status=STATUS_CONFIRMED,
+                verdict=VERDICT_CONFIRMED,
+                provenance=PROVENANCE_INFERRED,
                 confidence=c.confidence,
             )
             n += 1

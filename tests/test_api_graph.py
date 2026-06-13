@@ -14,7 +14,8 @@ from memex.modules.bienestar.module import register
 from memex.relations.clustering import cluster_signature
 from memex.relations.edges import (
     PRODUCER_IDENTIDADES,
-    STATUS_CONFIRMED,
+    PROVENANCE_EXTRACTED,
+    VERDICT_CONFIRMED,
     Ref,
     list_edges,
     propose_edge,
@@ -138,7 +139,9 @@ def test_build_y_lectura(client: Any) -> None:
     assert len(body["edges"]) == 1
     e = body["edges"][0]
     assert e["producer"] == "inbox"
-    assert e["status"] == "pista"
+    assert e["provenance"] == "extracted"
+    assert e["verdict"] == "ambiguous"
+    assert e["label"] == "AMBIGUOUS"
     assert e["relation_type"] == "co-ocurrencia"
 
 
@@ -208,8 +211,8 @@ def test_inbox_kinds_en_foco(client: Any) -> None:
     assert body["inbox_kinds"] == {str(tg): "chat"}
 
 
-def test_status_filtra_aristas(client: Any) -> None:
-    # una PISTA (co-ocurrencia) + una REAL (persona↔org)
+def test_verdict_filtra_aristas(client: Any) -> None:
+    # una AMBIGUA (co-ocurrencia) + una CONFIRMED (persona↔org)
     _finance("Rappi", [5])
     _hack("Hack", [5])
     p = int(
@@ -231,12 +234,12 @@ def test_status_filtra_aristas(client: Any) -> None:
     )
     client.post("/graph/build")
 
-    confirmed = client.get("/graph?status=confirmed").json()["edges"]
-    pistas = client.get("/graph?status=pista").json()["edges"]
+    confirmed = client.get("/graph?verdict=confirmed").json()["edges"]
+    ambiguas = client.get("/graph?verdict=ambiguous").json()["edges"]
     assert len(confirmed) == 1
     assert confirmed[0]["relation_type"] == "afiliado"
-    assert len(pistas) == 1
-    assert pistas[0]["relation_type"] == "co-ocurrencia"
+    assert len(ambiguas) == 1
+    assert ambiguas[0]["relation_type"] == "co-ocurrencia"
 
 
 def test_get_graph_poda_aristas_huerfanas(client: Any) -> None:
@@ -270,7 +273,8 @@ def test_cumple_por_actividad(client: Any) -> None:
     assert e["src_slug"] == "bienestar"  # registro → hábito (dirigida)
     assert e["dst_slug"] == "bienestar:habito"
     assert e["producer"] == "bienestar"
-    assert e["status"] == "confirmed"
+    assert e["verdict"] == "confirmed"
+    assert e["provenance"] == "extracted"
 
 
 def test_cumple_por_categoria(client: Any) -> None:
@@ -294,7 +298,7 @@ def test_cumple_idempotente(client: Any) -> None:
     _habito("Correr", activity="correr")
     client.post("/graph/build")
     client.post("/graph/build")  # 2da corrida: no duplica la arista
-    edges = client.get("/graph?status=confirmed").json()["edges"]
+    edges = client.get("/graph?verdict=confirmed").json()["edges"]
     assert len([e for e in edges if e["relation_type"] == "cumple"]) == 1
 
 
@@ -313,7 +317,7 @@ def test_weave_cumple_incremental_registro_despues() -> None:
         add_habit(c, 1, name="Correr", cadence="daily", activity="correr")
         register(c, 1, category="ejercicio", activity="Correr")
     with connection() as c:
-        cumple = [e for e in list_edges(c, 1, status="confirmed") if e.relation_type == "cumple"]
+        cumple = [e for e in list_edges(c, 1, verdict="confirmed") if e.relation_type == "cumple"]
     assert len(cumple) == 1
     assert cumple[0].src.slug == "bienestar"
     assert cumple[0].dst.slug == "bienestar:habito"
@@ -327,7 +331,7 @@ def test_weave_cumple_incremental_habito_despues() -> None:
         register(c, 1, category="ejercicio", activity="correr")  # cumple el hábito de actividad
         add_habit(c, 1, name="Ejercicio", cadence="daily", category="ejercicio")  # por categoría
     with connection() as c:
-        cumple = [e for e in list_edges(c, 1, status="confirmed") if e.relation_type == "cumple"]
+        cumple = [e for e in list_edges(c, 1, verdict="confirmed") if e.relation_type == "cumple"]
     # el registro cumple AMBOS: actividad (al registrar) y categoría (al crear el hábito)
     assert len(cumple) == 2
 
@@ -354,7 +358,8 @@ def _confirmed_edge(a: int, b: int) -> None:
             Ref("identidades:person", b),
             producer=PRODUCER_IDENTIDADES,
             relation_type="afiliado",
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
         )
 
 

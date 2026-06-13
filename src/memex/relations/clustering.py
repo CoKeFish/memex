@@ -35,8 +35,8 @@ from memex.relations.edges import (
     CUMULO_SLUG,
     RELTYPE_COOCURRENCIA,
     RELTYPE_MIEMBRO_DE,
-    STATUS_CONFIRMED,
-    STATUS_PISTA,
+    VERDICT_AMBIGUOUS,
+    VERDICT_CONFIRMED,
     Ref,
     RelationEdge,
     list_edges,
@@ -79,13 +79,13 @@ def _pair_key(e: RelationEdge) -> tuple[Node, Node]:
     return (a, b) if a <= b else (b, a)
 
 
-def _edge_weight(status: str, relation_type: str, cfg: Settings) -> float:
-    """Peso de una arista para la clusterización, por `(status, relation_type)`. Pista → `w_pista`
-    (0 por default = excluida); confirmed co-ocurrencia → `w_cooc_confirmed`; confirmed real →
-    `w_confirmed`. Cualquier otro (rejected) → 0 (se descarta)."""
-    if status == STATUS_PISTA:
+def _edge_weight(verdict: str, relation_type: str, cfg: Settings) -> float:
+    """Peso de una arista para la clusterización, por `(verdict, relation_type)`. Ambigua (sin
+    decidir, o la IA no supo) → `w_pista` (0 por default = excluida); confirmed co-ocurrencia →
+    `w_cooc_confirmed`; confirmed real → `w_confirmed`. Cualquier otro (rejected) → 0."""
+    if verdict == VERDICT_AMBIGUOUS:
         return cfg.cluster_w_pista
-    if status == STATUS_CONFIRMED:
+    if verdict == VERDICT_CONFIRMED:
         if relation_type == RELTYPE_COOCURRENCIA:
             return cfg.cluster_w_cooc_confirmed
         return cfg.cluster_w_confirmed
@@ -120,13 +120,13 @@ def build_cluster_graph(conn: Connection, user_id: int, cfg: Settings | None = N
     real_pairs: set[tuple[Node, Node]] = {
         _pair_key(e)
         for e in all_edges
-        if e.status == STATUS_CONFIRMED and e.relation_type != RELTYPE_COOCURRENCIA
+        if e.verdict == VERDICT_CONFIRMED and e.relation_type != RELTYPE_COOCURRENCIA
     }
 
     weights: dict[tuple[Node, Node], float] = defaultdict(float)
     real: dict[tuple[Node, Node], bool] = defaultdict(bool)
     for e in all_edges:
-        w = _edge_weight(e.status, e.relation_type, cfg)
+        w = _edge_weight(e.verdict, e.relation_type, cfg)
         if w <= 0:
             continue
         a: Node = (e.src.slug, e.src.id)
@@ -138,7 +138,7 @@ def build_cluster_graph(conn: Connection, user_id: int, cfg: Settings | None = N
             continue
         weights[key] += w
         real[key] = real[key] or (
-            e.status == STATUS_CONFIRMED and e.relation_type != RELTYPE_COOCURRENCIA
+            e.verdict == VERDICT_CONFIRMED and e.relation_type != RELTYPE_COOCURRENCIA
         )
     for (a, b), w in weights.items():
         g.add_edge(a, b, weight=min(w, cfg.cluster_pair_weight_max), real=real[(a, b)])

@@ -59,7 +59,7 @@ def test_same_event_producer_connects(conn: Connection) -> None:
     assert int(c["id"]) not in touched
     assert int(d["id"]) not in touched
     for e in edges:
-        assert e.status == "confirmed"
+        assert e.verdict == "confirmed"
         assert e.relation_type == "mismo_evento"
         assert e.src.slug == "bienestar"
         assert e.dst.slug == "bienestar"

@@ -1,13 +1,13 @@
 import { useCallback, useMemo, useRef, useState } from "react"
 import { Link, useSearchParams } from "react-router-dom"
-import { Boxes, Clock, Hammer, Loader2, Maximize2, Minimize2, Sparkles } from "lucide-react"
+import { Boxes, CheckCheck, Clock, Hammer, Loader2, Maximize2, Minimize2, Sparkles } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/common/page-header"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { buildGraph, clusterGraph, fetchGraph, validateClusters } from "@/data"
+import { buildGraph, clusterGraph, confirmCooccurrences, fetchGraph, validateClusters } from "@/data"
 import type { GraphData, GraphEdge, GraphNode } from "@/data/graph"
 // El plegado por cúmulo (miembros ocultos + aristas re-ruteadas al nodo cúmulo) es una función pura.
 import { collapseClusters, type CollapsedEdge } from "@/lib/graph-collapse"
@@ -17,11 +17,19 @@ import { baseRadius, layoutGraph, nodeKey, type Bounds } from "@/lib/graph-layou
 import { inboxRefLabel } from "@/lib/inbox-format"
 import { useAsync } from "@/lib/use-async"
 
-const STATUS_OPTIONS: { value: string; label: string }[] = [
+const VERDICT_OPTIONS: { value: string; label: string }[] = [
   { value: "todas", label: "Todas" },
-  { value: "confirmed", label: "Reales" },
-  { value: "pista", label: "Pistas" },
+  { value: "confirmed", label: "Confirmadas" },
+  { value: "ambiguous", label: "Ambiguas" },
 ]
+
+// Colores por etiqueta canónica (dos ejes): EXTRACTED verde fuerte (hecho determinista), INFERRED
+// verde claro (el LLM lo dedujo), INFERRED REJECTED rojo punteado, AMBIGUOUS gris punteado.
+function edgeColor(verdict: string, provenance: string): string {
+  if (verdict === "confirmed") return provenance === "extracted" ? "#16a34a" : "#22c55e"
+  if (verdict === "rejected") return "#ef4444"
+  return "#94a3b8"
+}
 
 const EMPTY_GRAPH: GraphData = { nodes: [], edges: [], inboxKinds: {} }
 
@@ -52,27 +60,33 @@ function edgeStyle(e: CollapsedEdge): { stroke: string; width: number; dash?: st
   if (e.relationType === "agregada") {
     // sintética del plegado: agrega N aristas re-ruteadas al cúmulo → trazo escalado por N
     const w = 1.5 + Math.min(e.aggregateCount ?? 1, 6) * 0.35
-    return e.status === "confirmed" ? { stroke: "#22c55e", width: w } : { stroke: "#94a3b8", width: w }
+    return { stroke: edgeColor(e.verdict, e.provenance), width: w }
   }
   if (e.relationType === "miembro_de") return { stroke: CUMULO_COLOR, width: 2.2 } // membresía de cúmulo
-  if (e.status === "confirmed") return { stroke: "#22c55e", width: 2 }
-  if (e.status === "rejected") return { stroke: "#ef4444", width: 1.5, dash: "2 4" }
-  return { stroke: "#94a3b8", width: 1.5, dash: "5 4" } // pista
+  const stroke = edgeColor(e.verdict, e.provenance)
+  if (e.verdict === "confirmed") return { stroke, width: e.provenance === "extracted" ? 2.2 : 2 }
+  if (e.verdict === "rejected") return { stroke, width: 1.5, dash: "2 4" }
+  return { stroke, width: 1.5, dash: "5 4" } // ambiguous
 }
 
 function edgeTitle(e: CollapsedEdge): string {
-  if (e.relationType === "agregada") return `${e.aggregateCount ?? 1} relaciones (plegadas) · ${e.status}`
-  return `${e.relationType || "—"} · ${e.status} · ${e.producer}`
+  if (e.relationType === "agregada") return `${e.aggregateCount ?? 1} relaciones (plegadas) · ${e.label}`
+  const just = e.relation ? ` · ${e.relation}` : ""
+  return `${e.relationType || "—"} · ${e.label} · ${e.producer}${just}`
 }
 
 function GraphCanvas({
   data,
   selected,
+  selectedEdgeId,
   onSelect,
+  onSelectEdge,
 }: {
   data: GraphData
   selected: string | null
+  selectedEdgeId: number | null
   onSelect: (k: string | null) => void
+  onSelectEdge: (id: number | null) => void
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const [hover, setHover] = useState<string | null>(null)
@@ -141,8 +155,11 @@ function GraphCanvas({
     setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }))
   }
   const onPointerUp = (e: React.PointerEvent) => {
-    // click en el fondo (sin arrastre) = deseleccionar
-    if (drag.current && !drag.current.moved) onSelect(null)
+    // click en el fondo (sin arrastre) = deseleccionar (nodo y arista)
+    if (drag.current && !drag.current.moved) {
+      onSelect(null)
+      onSelectEdge(null)
+    }
     drag.current = null
     ;(e.target as Element).releasePointerCapture?.(e.pointerId)
   }
@@ -170,20 +187,42 @@ function GraphCanvas({
           if (!a || !b) return null
           const st = edgeStyle(e)
           const lit = !focus || (incident.has(a.key) && incident.has(b.key))
+          const isSelEdge = selectedEdgeId === e.id
+          // Las aristas sintéticas del plegado (id negativo) no son seleccionables (no son reales).
+          const selectable = e.id > 0
           return (
-            <line
-              key={e.id}
-              x1={a.x}
-              y1={a.y}
-              x2={b.x}
-              y2={b.y}
-              stroke={st.stroke}
-              strokeWidth={st.width / view.k}
-              strokeDasharray={st.dash ? st.dash.split(" ").map((n) => Number(n) / view.k).join(" ") : undefined}
-              opacity={lit ? 0.85 : 0.07}
-            >
-              <title>{edgeTitle(e)}</title>
-            </line>
+            <g key={e.id} opacity={lit ? 0.85 : 0.07}>
+              <line
+                x1={a.x}
+                y1={a.y}
+                x2={b.x}
+                y2={b.y}
+                stroke={st.stroke}
+                strokeWidth={(isSelEdge ? st.width + 2 : st.width) / view.k}
+                strokeDasharray={
+                  st.dash ? st.dash.split(" ").map((n) => Number(n) / view.k).join(" ") : undefined
+                }
+              >
+                <title>{edgeTitle(e)}</title>
+              </line>
+              {selectable && (
+                // Banda invisible más ancha: hace clickeable la arista delgada sin tapar nada.
+                <line
+                  x1={a.x}
+                  y1={a.y}
+                  x2={b.x}
+                  y2={b.y}
+                  stroke="transparent"
+                  strokeWidth={10 / view.k}
+                  style={{ cursor: "pointer" }}
+                  onClick={(ev) => {
+                    ev.stopPropagation()
+                    onSelect(null)
+                    onSelectEdge(isSelEdge ? null : e.id)
+                  }}
+                />
+              )}
+            </g>
           )
         })}
         {lay.sims.map((s) => {
@@ -325,13 +364,14 @@ function DetailPanel({
                   <div className="flex items-center gap-1.5">
                     <span
                       className="inline-block h-0.5 w-4 rounded"
-                      style={{ background: e.status === "confirmed" ? "#22c55e" : "#94a3b8" }}
+                      style={{ background: edgeColor(e.verdict, e.provenance) }}
                     />
                     <span className="text-muted-foreground">
-                      {e.relationType || "—"} · {e.status === "confirmed" ? "real" : "pista"}
+                      {e.relationType || "—"} · {e.label}
                     </span>
                   </div>
                   <div className="mt-0.5 truncate font-medium">{other?.label ?? otherKey}</div>
+                  {e.relation && <div className="mt-0.5 text-[11px] italic text-muted-foreground">{e.relation}</div>}
                   {/* procedencia de la ARISTA: TODOS los mensajes que la generaron (no solo el
                       primero del evidence) — mismo drill-down que «Mensajes de origen» del nodo */}
                   {e.sourceInboxIds.length > 0 && (
@@ -387,8 +427,81 @@ function DetailPanel({
   )
 }
 
+/** Panel de una ARISTA seleccionada: su etiqueta canónica, la justificación (`relation`), el tipo,
+ * la confianza y los mensajes de origen (drill-down). El producto del grafo es la relación + su
+ * procedencia, no el dibujo. */
+function EdgeDetailPanel({
+  edge,
+  nodesByKey,
+  inboxKinds,
+}: {
+  edge: GraphEdge
+  nodesByKey: Map<string, GraphNode>
+  inboxKinds: Record<number, string>
+}) {
+  const src = nodesByKey.get(nodeKey(edge.srcSlug, edge.srcId))
+  const dst = nodesByKey.get(nodeKey(edge.dstSlug, edge.dstId))
+  const allChat =
+    edge.sourceInboxIds.length > 0 && edge.sourceInboxIds.every((iid) => inboxKinds[iid] === "chat")
+  return (
+    <div className="w-full shrink-0 space-y-3 rounded-lg border bg-card p-3 text-sm md:w-72">
+      <div>
+        <div className="flex items-center gap-2">
+          <span
+            className="inline-block h-1 w-5 rounded"
+            style={{ background: edgeColor(edge.verdict, edge.provenance) }}
+          />
+          <span className="text-xs font-semibold uppercase tracking-wide">{edge.label}</span>
+          {allChat && (
+            <span className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">chat</span>
+          )}
+        </div>
+        <div className="mt-1.5 font-medium leading-tight">
+          {src?.label ?? `${edge.srcSlug}#${edge.srcId}`}
+          <span className="mx-1 text-muted-foreground">↔</span>
+          {dst?.label ?? `${edge.dstSlug}#${edge.dstId}`}
+        </div>
+        <div className="mt-0.5 text-[11px] text-muted-foreground">
+          {edge.relationType || "—"} · {edge.producer}
+          {edge.confidence != null && ` · ${(edge.confidence * 100).toFixed(0)}%`}
+        </div>
+      </div>
+      {edge.relation && (
+        <div>
+          <div className="mb-1 text-xs font-medium text-muted-foreground">Por qué existe</div>
+          <p className="rounded border bg-muted/30 px-2 py-1.5 text-xs italic">{edge.relation}</p>
+        </div>
+      )}
+      {edge.sourceInboxIds.length > 0 && (
+        <div>
+          <div className="mb-1 text-xs font-medium text-muted-foreground">
+            Mensajes de origen ({edge.sourceInboxIds.length})
+          </div>
+          <ul className="flex flex-wrap gap-1.5">
+            {edge.sourceInboxIds.slice(0, 20).map((iid) => (
+              <li key={iid}>
+                <Link
+                  to={`/datos/${iid}`}
+                  className="inline-block rounded border bg-muted/30 px-2 py-0.5 text-xs text-origin-inbox hover:underline"
+                >
+                  {inboxRefLabel(iid, inboxKinds)}
+                </Link>
+              </li>
+            ))}
+            {edge.sourceInboxIds.length > 20 && (
+              <li className="px-1 py-0.5 text-xs text-muted-foreground">
+                +{edge.sourceInboxIds.length - 20} más
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Leyenda-FILTRO: cada tipo presente en el grafo es un toggle (click = ocultar/mostrar sus
- * vértices); las entradas de aristas (Real/Pista/Miembro) son informativas. */
+ * vértices); las entradas de aristas (EXTRACTED/INFERRED/AMBIGUOUS/Miembro) son informativas. */
 function Legend({
   kinds,
   hidden,
@@ -418,17 +531,23 @@ function Legend({
           </button>
         )
       })}
-      <span className="ml-1 inline-flex items-center gap-1.5">
+      <span className="ml-1 inline-flex items-center gap-1.5" title="Hecho leído de la fuente">
+        <svg width="20" height="6">
+          <line x1="0" y1="3" x2="20" y2="3" stroke="#16a34a" strokeWidth="2.2" />
+        </svg>
+        EXTRACTED
+      </span>
+      <span className="inline-flex items-center gap-1.5" title="El LLM lo dedujo">
         <svg width="20" height="6">
           <line x1="0" y1="3" x2="20" y2="3" stroke="#22c55e" strokeWidth="2" />
         </svg>
-        Real
+        INFERRED
       </span>
-      <span className="inline-flex items-center gap-1.5">
+      <span className="inline-flex items-center gap-1.5" title="Sospecha sin decidir">
         <svg width="20" height="6">
-          <line x1="0" y1="3" x2="20" y2="3" stroke="#94a3b8" strokeWidth="1.5" strokeDasharray="4 3" />
+          <line x1="0" y1="3" x2="20" y2="3" stroke="#94a3b8" strokeWidth="1.5" strokeDasharray="5 4" />
         </svg>
-        Pista
+        AMBIGUOUS
       </span>
       <span className="inline-flex items-center gap-1.5">
         <svg width="20" height="6">
@@ -445,20 +564,25 @@ export function GraphPage() {
   const [searchParams] = useSearchParams()
   const inboxParam = searchParams.get("inbox_id")
   const inboxId = inboxParam ? Number(inboxParam) : undefined
-  const [status, setStatus] = useState<string>("todas")
+  const [verdict, setVerdict] = useState<string>("todas")
   const [onlyConnected, setOnlyConnected] = useState(true)
+  // Reglas para chats: las co-ocurrencias ambiguas de mensajes de chat son ruidosas (la fase de
+  // confirmación ni las juzga por default); ocultarlas es el default.
+  const [hideChatAmbiguous, setHideChatAmbiguous] = useState(true)
   const [hiddenKinds, setHiddenKinds] = useState<ReadonlySet<string>>(() => new Set())
   // Plegado por cúmulo: default TODO plegado (los miembros se ocultan y sus aristas se re-rutean
   // al nodo cúmulo); `expanded` guarda los cúmulos abiertos y «Ver completo» lo apaga entero.
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set())
   const [showFull, setShowFull] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
+  const [selectedEdgeId, setSelectedEdgeId] = useState<number | null>(null)
   const [building, setBuilding] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const [clustering, setClustering] = useState(false)
   const [validating, setValidating] = useState(false)
   const { data, loading, error, reload } = useAsync<GraphData>(
-    () => fetchGraph(status === "todas" ? undefined : status, inboxId),
-    [status, inboxId],
+    () => fetchGraph(verdict === "todas" ? undefined : verdict, inboxId),
+    [verdict, inboxId],
   )
   const full = data ?? EMPTY_GRAPH
 
@@ -471,7 +595,13 @@ export function GraphPage() {
       ? full.nodes.filter((n) => !hiddenKinds.has(n.kind))
       : full.nodes
     const present = new Set(visible.map((n) => nodeKey(n.slug, n.id)))
-    const visibleEdges = full.edges.filter(
+    // Chat-ambigua: co-ocurrencia sin juzgar cuya evidencia es TODA de chats (ruido por default).
+    const isChatAmbiguous = (e: GraphEdge): boolean =>
+      e.verdict === "ambiguous" &&
+      e.sourceInboxIds.length > 0 &&
+      e.sourceInboxIds.every((iid) => full.inboxKinds[iid] === "chat")
+    const baseEdges = hideChatAmbiguous ? full.edges.filter((e) => !isChatAmbiguous(e)) : full.edges
+    const visibleEdges = baseEdges.filter(
       (e) => present.has(nodeKey(e.srcSlug, e.srcId)) && present.has(nodeKey(e.dstSlug, e.dstId)),
     )
     const { nodes, edges } = showFull
@@ -488,7 +618,7 @@ export function GraphPage() {
       edges,
       inboxKinds: full.inboxKinds,
     }
-  }, [full, onlyConnected, hiddenKinds, showFull, expanded])
+  }, [full, onlyConnected, hiddenKinds, showFull, expanded, hideChatAmbiguous])
 
   const nodesByKey = useMemo(
     () => new Map(full.nodes.map((n) => [nodeKey(n.slug, n.id), n])),
@@ -500,12 +630,26 @@ export function GraphPage() {
     () => new Set(shown.nodes.map((n) => nodeKey(n.slug, n.id))),
     [shown.nodes],
   )
+  // La arista seleccionada se busca en el set MOSTRADO (si un filtro la sacó, se suelta).
+  const shownEdgeIds = useMemo(() => new Set(shown.edges.map((e) => e.id)), [shown.edges])
   const [prevShownKeys, setPrevShownKeys] = useState(shownKeys)
   if (prevShownKeys !== shownKeys) {
     setPrevShownKeys(shownKeys)
     if (selected && !shownKeys.has(selected)) setSelected(null)
   }
+  const [prevShownEdgeIds, setPrevShownEdgeIds] = useState(shownEdgeIds)
+  if (prevShownEdgeIds !== shownEdgeIds) {
+    setPrevShownEdgeIds(shownEdgeIds)
+    if (selectedEdgeId != null && !shownEdgeIds.has(selectedEdgeId)) setSelectedEdgeId(null)
+  }
   const selectedNode = selected ? nodesByKey.get(selected) ?? null : null
+  const selectedEdge =
+    selectedEdgeId != null ? full.edges.find((e) => e.id === selectedEdgeId) ?? null : null
+  // Seleccionar un nodo limpia la arista (paneles mutuamente excluyentes).
+  const selectNode = (k: string | null) => {
+    setSelected(k)
+    if (k) setSelectedEdgeId(null)
+  }
   const hiddenCount = full.nodes.length - shown.nodes.length
 
   function toggleCluster(id: number) {
@@ -557,6 +701,23 @@ export function GraphPage() {
     }
   }
 
+  async function onConfirm() {
+    if (!window.confirm("¿Confirmar las co-ocurrencias ambiguas por-mensaje con el LLM? Tiene un costo por llamada.")) return
+    setConfirming(true)
+    try {
+      const r = await confirmCooccurrences()
+      toast.success(
+        `Confirmación: ${r.llmConfirmed} por LLM · ${r.confirmedRecibo} por recibo · ` +
+          `${r.gated} bloqueadas · ${r.summaries} resúmenes ($${r.costUsd.toFixed(4)})`,
+      )
+      reload()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "No se pudo confirmar (¿DEEPSEEK_API_KEY?)")
+    } finally {
+      setConfirming(false)
+    }
+  }
+
   async function onCluster() {
     setClustering(true)
     try {
@@ -594,7 +755,7 @@ export function GraphPage() {
       <PageHeader
         eyebrow="relaciones · grafo"
         title="Grafo de relaciones"
-        description="Cada vértice es una entidad única (cobro/pago, evento, hackatón, persona, organización). Las aristas las forman el inbox (co-ocurrencia = PISTA, sin vouchar) y los datos reales (afiliación/pertenencia del directorio y la contraparte de cada cobro→identidad = REAL). Los CÚMULOS (nodos violeta) son grupos de vértices que el LLM validó como un contexto: «Detectar cúmulos» los arma sobre las aristas reales y «Validar (LLM)» los confirma y nombra. Filtrá «Reales» para ver solo lo confirmado. Rueda = zoom · arrastrá = mover · click en un nodo = ver sus relaciones/miembros."
+        description="Cada vértice es una entidad única (cobro/pago, evento, hackatón, persona, organización). Cada arista lleva su PROCEDENCIA × VEREDICTO: EXTRACTED (hecho leído de la fuente), INFERRED (el LLM lo dedujo) y AMBIGUOUS (co-ocurrencia sin juzgar). «Confirmar (LLM)» abre cada mensaje y juzga sus co-ocurrencias ambiguas (verde = confirmada, con su justificación). Los CÚMULOS (nodos violeta) son grupos que el LLM validó como un contexto. Rueda = zoom · arrastrá = mover · click en un nodo o una arista = ver el detalle."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {inboxId != null && (
@@ -614,12 +775,20 @@ export function GraphPage() {
               <Switch checked={onlyConnected} onCheckedChange={setOnlyConnected} aria-label="Solo conectados" />
               Solo conectados
             </label>
-            <Select value={status} onValueChange={setStatus}>
-              <SelectTrigger className="h-8 w-auto min-w-[90px] text-xs" aria-label="Nivel de arista">
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Switch
+                checked={hideChatAmbiguous}
+                onCheckedChange={setHideChatAmbiguous}
+                aria-label="Ocultar chats ambiguos"
+              />
+              Ocultar chats ambiguos
+            </label>
+            <Select value={verdict} onValueChange={setVerdict}>
+              <SelectTrigger className="h-8 w-auto min-w-[90px] text-xs" aria-label="Veredicto de arista">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {STATUS_OPTIONS.map((o) => (
+                {VERDICT_OPTIONS.map((o) => (
                   <SelectItem key={o.value} value={o.value} className="text-xs">
                     {o.label}
                   </SelectItem>
@@ -629,6 +798,10 @@ export function GraphPage() {
             <Button size="sm" variant="outline" onClick={onBuild} disabled={building}>
               {building ? <Loader2 className="size-4 animate-spin" /> : <Hammer className="size-4" />}
               Armar grafo
+            </Button>
+            <Button size="sm" variant="outline" onClick={onConfirm} disabled={confirming}>
+              {confirming ? <Loader2 className="size-4 animate-spin" /> : <CheckCheck className="size-4" />}
+              Confirmar (LLM)
             </Button>
             <Button size="sm" variant="outline" onClick={onCluster} disabled={clustering}>
               {clustering ? <Loader2 className="size-4 animate-spin" /> : <Boxes className="size-4" />}
@@ -673,21 +846,35 @@ export function GraphPage() {
           ) : (
             <div className="flex flex-col gap-3 md:flex-row">
               <div className="relative min-w-0 flex-1 overflow-hidden rounded-lg border bg-muted/20">
-                <GraphCanvas data={shown} selected={selected} onSelect={setSelected} />
+                <GraphCanvas
+                  data={shown}
+                  selected={selected}
+                  selectedEdgeId={selectedEdgeId}
+                  onSelect={selectNode}
+                  onSelectEdge={setSelectedEdgeId}
+                />
                 <div className="pointer-events-none absolute bottom-2 left-2 flex items-center gap-1 text-[11px] text-muted-foreground">
                   <Maximize2 className="size-3" /> rueda = zoom · arrastrá = mover
                 </div>
               </div>
-              {selectedNode && (
-                <DetailPanel
-                  node={selectedNode}
-                  edges={full.edges}
+              {selectedEdge ? (
+                <EdgeDetailPanel
+                  edge={selectedEdge}
                   nodesByKey={nodesByKey}
                   inboxKinds={full.inboxKinds}
-                  expandedClusters={expanded}
-                  showFull={showFull}
-                  onToggleCluster={toggleCluster}
                 />
+              ) : (
+                selectedNode && (
+                  <DetailPanel
+                    node={selectedNode}
+                    edges={full.edges}
+                    nodesByKey={nodesByKey}
+                    inboxKinds={full.inboxKinds}
+                    expandedClusters={expanded}
+                    showFull={showFull}
+                    onToggleCluster={toggleCluster}
+                  />
+                )
               )}
             </div>
           )}

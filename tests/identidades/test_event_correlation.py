@@ -51,7 +51,7 @@ def test_identidad_bienestar_mismo_evento_tejido_en_el_acto(conn: Connection) ->
     edges = list_edges(conn, 1, producer="event")
     assert len(edges) == 1
     e = edges[0]
-    assert e.status == "confirmed"
+    assert e.verdict == "confirmed"
     assert e.relation_type == "mismo_evento"
     assert {(e.src.slug, e.src.id), (e.dst.slug, e.dst.id)} == {
         ("bienestar", int(reg["id"])),

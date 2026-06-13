@@ -63,26 +63,26 @@ class Settings(BaseSettings):
     # (los chats del usuario son contextos concretos; el partidor maneja el off-topic).
     cluster_exclude_canal: bool = False
 
-    # --- Resolver par-por-par del long-tail de co-ocurrencias (relations/resolve) ---
-    # Veredicto por ARISTA con grounding en el mensaje de origen, para las pistas que el partidor
-    # de cúmulos nunca decide (barrios chicos o rechazados). Determinista primero (recibo de
-    # finanzas → confirm), LLM solo en la zona gris (una llamada POR MENSAJE amortiza todos sus
-    # pares), presupuesto explícito. On-demand (CLI) + job apagado por default.
-    resolve_group_limit: int = 50  # componentes (grupos) por corrida en modo auto
-    resolve_max_llm_calls: int = 20  # presupuesto de llamadas por corrida (1 llamada = 1 mensaje)
-    resolve_min_confidence: float = 0.7  # confirm/reject del LLM exigen confianza >= esto
-    resolve_max_pairs_per_call: int = 40  # tope defensivo de pares serializados por llamada
-    resolve_render_max_chars: int = 6000  # truncado del mensaje renderizado (prompt y grounding)
-    # Resumen previo del mensaje (summarizer) como CONTEXTO AUXILIAR del veredicto: entra al
-    # prompt truncado a este largo, delimitado como derivado y NUNCA fuente de la cita (el
-    # grounding sigue contra el render). 0 = apagado (sin bloque; la sig del memo degenera a la
-    # plana). Costo extra acotado ~200-250 tok/llamada. Toggle = churn one-time: los memos
-    # `dejar` de pares con resumen cambian de sig y se re-evalúan una vez.
-    resolve_summary_max_chars: int = 800
-    # Las señales de correo masivo (list_unsubscribe/precedence/...) son PRIOR y contexto, no
-    # veredicto (un recibo legítimo puede traerlas): por default la zona bulk va al LLM igual.
-    # On: un par cuya evidencia es TODA bulk se rechaza determinista (rule='bulk'), costo cero.
-    resolve_reject_bulk: bool = False
+    # --- Confirmación de co-ocurrencia POR-MENSAJE (relations/per_message) ---
+    # La PRIMERA fase del grafo: abre cada mensaje y, en UNA llamada LLM por mensaje (método B),
+    # juzga sus pares de co-ocurrencia ambiguos → confirm/reject/dejar + `relation` nombrada +
+    # `summary`. Determinista primero (recibo de finanzas → confirm a priori, sin LLM); el resto al
+    # LLM con compuerta alias-aware (cada vértice confirmado debe aparecer en el cuerpo). On-demand
+    # (CLI) + job apagado por default.
+    per_message_max_llm_calls: int = (
+        50  # presupuesto de llamadas por corrida (1 llamada = 1 mensaje)
+    )
+    per_message_min_confidence: float = 0.85  # confirm/reject del LLM exigen confianza >= esto
+    per_message_max_pairs_per_call: int = 40  # tope defensivo de pares serializados por llamada
+    per_message_render_max_chars: int = (
+        6000  # truncado del mensaje renderizado (prompt y compuerta)
+    )
+    # Reglas para chats: generan muchas co-ocurrencias y suelen aportar menos. Por default la fase
+    # NO manda mensajes de chat al LLM (sus pares quedan ambiguos; solo el a-priori del recibo
+    # confirma). El cap de co-ocurrencia de chats es más bajo (menos pares nacen) — ver
+    # `chat_cooccurrence_cap`.
+    confirm_judge_chats: bool = False
+    chat_cooccurrence_cap: int = 4  # tope de vértices/mensaje para co-ocurrencia en chats (< cap)
 
     # --- Sistema de calidad: detección automática de remitentes no relevantes ("por métricas") ---
     # El job `relevance` (apagado por default) marca como CANDIDATO a un remitente email con volumen

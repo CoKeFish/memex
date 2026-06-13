@@ -20,6 +20,7 @@ from memex.relations.clusters_llm import run_cluster_partition
 from memex.relations.decisions import edge_sources
 from memex.relations.deterministic import build_relations, vertex_inbox_ids
 from memex.relations.edges import list_edges
+from memex.relations.per_message import run_per_message_confirm
 from memex.relations.reconcile import detect_and_reconcile
 from memex.relations.timeline import cluster_timeline
 from memex.relations.vertices import list_vertices
@@ -57,7 +58,7 @@ def _inbox_kinds(conn: Connection, user_id: int, inbox_ids: set[int]) -> dict[in
 @router.get("", response_model=GraphResponse)
 async def get_graph(
     user_id: UserID,
-    status: Annotated[str | None, Query(description="pista|confirmed|rejected")] = None,
+    verdict: Annotated[str | None, Query(description="confirmed|rejected|ambiguous")] = None,
     source_inbox_id: Annotated[
         int | None,
         Query(description="enfoca: solo los vértices producidos por este mensaje + sus vecinos"),
@@ -67,15 +68,16 @@ async def get_graph(
 
     Un vértice se direcciona por `(slug, id)`; inbox NO es vértice (es procedencia, drill-down):
     cada nodo lleva sus `source_inbox_ids` (los mensajes de los que salió) para abrir el mensaje
-    original desde el grafo, y `inbox_kinds` trae el medio (email|chat|social) de cada uno. Las
-    aristas llevan su `producer` y su `status` (`pista`/`confirmed`); el front filtra por `status`.
-    Con `source_inbox_id` el grafo se ENFOCA en lo que produjo ese mensaje (sentido inverso del
-    drill-down nodo→mensaje): sus vértices + los vecinos a un salto. Solo LECTURA: no dispara el
-    armado (POST /graph/build).
+    original desde el grafo, y `inbox_kinds` trae el medio (email|chat|social) de cada uno. Cada
+    arista lleva `producer` y los DOS EJES (`provenance` extracted/inferred por `verdict`
+    confirmed/rejected/ambiguous) más su `label` canónico derivado y su `relation` (justificación);
+    el front filtra por `verdict`. Con `source_inbox_id` el grafo se ENFOCA en lo que produjo ese
+    mensaje (sentido inverso del drill-down nodo→mensaje): sus vértices + los vecinos a un salto.
+    Solo LECTURA: no dispara el armado (POST /graph/build).
     """
     with connection() as conn:
         verts = list_vertices(conn, user_id)
-        edges = list_edges(conn, user_id, status=status)
+        edges = list_edges(conn, user_id, verdict=verdict)
         prov = vertex_inbox_ids(conn, user_id)
         if source_inbox_id is not None:
             # Vértices producidos por ESE mensaje (semilla) + las aristas que los tocan; se
@@ -123,7 +125,11 @@ async def get_graph(
             "dst_id": e.dst.id,
             "relation_type": e.relation_type,
             "producer": e.producer,
-            "status": e.status,
+            "provenance": e.provenance,
+            "verdict": e.verdict,
+            "label": e.label,
+            "relation": e.relation,
+            "dirty": e.dirty,
             "confidence": float(e.confidence) if e.confidence is not None else None,
             "evidence": e.evidence,
             "source_inbox_ids": sorted(edge_srcs.get(e.id, set())),
@@ -229,6 +235,41 @@ async def validate_clusters(
         "rejected": stats.rejected,
         "promoted": stats.promoted,
         "skipped": stats.skipped,
+        "errors": stats.errors,
+        "llm_calls": stats.cost.calls,
+        "cost_usd": float(stats.cost.cost_usd),
+    }
+
+
+@router.post("/confirm")
+async def confirm_cooccurrences(
+    user_id: UserID,
+    budget: Annotated[
+        int | None, Query(description="máximo de llamadas LLM (1 = 1 mensaje)")
+    ] = None,
+) -> dict[str, Any]:
+    """Confirmación POR-MENSAJE (metodología B): abre cada mensaje con co-ocurrencias ambiguas y, en
+    una llamada LLM por mensaje, las juzga (recibo a priori + LLM con compuerta alias-aware) y
+    produce un resumen. Usa el LLM (cuesta); on-demand. Monótono: re-corre solo lo pendiente."""
+    stats = await run_per_message_confirm(user_id, budget=budget)
+    _log.info(
+        "graph.confirm.api",
+        user_id=user_id,
+        edges=stats.edges,
+        confirmed_recibo=stats.confirmed_recibo,
+        llm_confirmed=stats.llm_confirmed,
+        errors=stats.errors,
+    )
+    return {
+        "edges": stats.edges,
+        "confirmed_recibo": stats.confirmed_recibo,
+        "messages": stats.messages,
+        "chat_skipped": stats.chat_skipped,
+        "llm_confirmed": stats.llm_confirmed,
+        "llm_rejected": stats.llm_rejected,
+        "llm_dejar": stats.llm_dejar,
+        "gated": stats.gated,
+        "summaries": stats.summaries,
         "errors": stats.errors,
         "llm_calls": stats.cost.calls,
         "cost_usd": float(stats.cost.cost_usd),

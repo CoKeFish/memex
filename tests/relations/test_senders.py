@@ -211,7 +211,7 @@ def test_chat_sender_coocurre_con_lo_extraido() -> None:
     pares = [_pair(e) for e in edges]
     assert {("finance", fin), ("identidades:person", sender_id)} in pares
     for e in edges:
-        assert e.status == "pista"
+        assert e.verdict == "ambiguous"
         assert e.relation_type == "co-ocurrencia"
 
 

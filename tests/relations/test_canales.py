@@ -15,8 +15,9 @@ from memex.relations.clustering import build_cluster_graph
 from memex.relations.deterministic import build_relations
 from memex.relations.edges import (
     PRODUCER_CANAL,
+    PROVENANCE_EXTRACTED,
     RELTYPE_PARTICIPA_EN,
-    STATUS_CONFIRMED,
+    VERDICT_CONFIRMED,
     Ref,
     list_edges,
     propose_edge,
@@ -161,7 +162,7 @@ def test_participa_en_confirmed() -> None:
     assert stats.participa_reales == 1
     assert len(edges) == 1
     e = edges[0]
-    assert e.status == STATUS_CONFIRMED
+    assert e.verdict == VERDICT_CONFIRMED
     assert e.relation_type == RELTYPE_PARTICIPA_EN
     assert e.src.slug == "identidades:person"  # dirigida: quién → dónde
     assert e.dst.slug == "canal"
@@ -248,7 +249,8 @@ def test_canal_clusteriza_por_default(conn: Connection) -> None:
             canal,
             producer=PRODUCER_CANAL,
             relation_type=RELTYPE_PARTICIPA_EN,
-            status=STATUS_CONFIRMED,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
         )
     g = build_cluster_graph(conn, 1)
     assert ("canal", canal.id) in g.nodes
@@ -264,7 +266,8 @@ def test_cluster_exclude_canal(conn: Connection) -> None:
         canal,
         producer=PRODUCER_CANAL,
         relation_type=RELTYPE_PARTICIPA_EN,
-        status=STATUS_CONFIRMED,
+        verdict=VERDICT_CONFIRMED,
+        provenance=PROVENANCE_EXTRACTED,
     )
     cfg = settings.model_copy(update={"cluster_exclude_canal": True})
     g = build_cluster_graph(conn, 1, cfg)

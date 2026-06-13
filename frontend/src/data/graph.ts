@@ -1,7 +1,9 @@
 // Superficie del GRAFO de relaciones contra la API real. Vértices (proyección de los `mod_*`) +
-// aristas (`relation_edges`). Una arista lleva su PRODUCTOR (quién la formó) y su NIVEL `status`:
-// "pista" (señal determinista SIN vouchar, p.ej. co-ocurrencia) vs "confirmed" (REAL, vouchada).
-// Como el resto de `@/data`: funciones async + transform snake_case → camelCase.
+// aristas (`relation_edges`). Cada arista lleva su PRODUCTOR (quién la formó) y DOS EJES:
+// `provenance` (extracted = leído de la fuente / inferred = el LLM lo dedujo) × `verdict`
+// (confirmed/rejected/ambiguous). `label` es la etiqueta canónica derivada de ambos
+// (EXTRACTED/INFERRED/AMBIGUOUS/...) y `relation` la justificación corta. Como el resto de
+// `@/data`: funciones async + transform snake_case → camelCase.
 
 import { apiGet, apiPost } from "@/lib/api"
 
@@ -21,12 +23,29 @@ export interface GraphEdge {
   dstId: number
   relationType: string
   producer: string
-  status: string
+  /** Cómo lo sabemos: "extracted" (determinista) | "inferred" (el LLM lo dedujo). */
+  provenance: string
+  /** La decisión: "confirmed" | "rejected" | "ambiguous". */
+  verdict: string
+  /** Etiqueta canónica derivada (EXTRACTED/INFERRED/INFERRED REJECTED/AMBIGUOUS[(inferred)]). */
+  label: string
+  /** Justificación corta de la relación (la `relation` nombrada del LLM, o texto determinista). */
+  relation: string
+  /** Groundwork incremental (ADR-021): la arista cambió desde el último mantenimiento. */
+  dirty: boolean
   confidence: number | null
   evidence: string
   /** TODOS los mensajes que generaron la pista de co-ocurrencia (no solo el primero del
    * `evidence`); vacío para aristas de otros productores. Mismo drill-down que los nodos. */
   sourceInboxIds: number[]
+}
+
+/** Etiqueta canónica de una arista derivada de los dos ejes — espejo de `edges.canonical_label`
+ *  (backend). Las aristas reales ya la traen en `label`; las sintéticas del plegado la derivan. */
+export function canonicalLabel(provenance: string, verdict: string): string {
+  if (verdict === "confirmed") return provenance === "extracted" ? "EXTRACTED" : "INFERRED"
+  if (verdict === "rejected") return provenance === "inferred" ? "INFERRED REJECTED" : "REJECTED"
+  return provenance === "inferred" ? "AMBIGUOUS (inferred)" : "AMBIGUOUS"
 }
 
 export interface GraphData {
@@ -80,7 +99,11 @@ interface EdgeApiRow {
   dst_id: number
   relation_type: string
   producer: string
-  status: string
+  provenance: string
+  verdict: string
+  label: string
+  relation: string
+  dirty: boolean
   confidence: number | null
   evidence: string
   source_inbox_ids?: number[]
@@ -113,18 +136,22 @@ function toEdge(e: EdgeApiRow): GraphEdge {
     dstId: e.dst_id,
     relationType: e.relation_type,
     producer: e.producer,
-    status: e.status,
+    provenance: e.provenance,
+    verdict: e.verdict,
+    label: e.label,
+    relation: e.relation,
+    dirty: e.dirty,
     confidence: e.confidence,
     evidence: e.evidence,
     sourceInboxIds: e.source_inbox_ids ?? [],
   }
 }
 
-/** El grafo del usuario (GET /graph). `status` filtra aristas (pista|confirmed|rejected);
+/** El grafo del usuario (GET /graph). `verdict` filtra aristas (confirmed|rejected|ambiguous);
  *  `sourceInboxId` ENFOCA el subgrafo en lo que produjo ese mensaje (sus vértices + vecinos). */
-export async function fetchGraph(status?: string, sourceInboxId?: number): Promise<GraphData> {
+export async function fetchGraph(verdict?: string, sourceInboxId?: number): Promise<GraphData> {
   const qs = new URLSearchParams()
-  if (status) qs.set("status", status)
+  if (verdict) qs.set("verdict", verdict)
   if (sourceInboxId != null) qs.set("source_inbox_id", String(sourceInboxId))
   const suffix = qs.toString() ? `?${qs.toString()}` : ""
   const g = await apiGet<GraphApi>(`/graph${suffix}`)
@@ -204,6 +231,54 @@ export async function validateClusters(): Promise<GraphClusterValidateResult> {
     rejected: r.rejected,
     promoted: r.promoted,
     skipped: r.skipped,
+    errors: r.errors,
+    llmCalls: r.llm_calls,
+    costUsd: r.cost_usd,
+  }
+}
+
+export interface GraphConfirmResult {
+  edges: number
+  confirmedRecibo: number
+  messages: number
+  chatSkipped: number
+  llmConfirmed: number
+  llmRejected: number
+  llmDejar: number
+  gated: number
+  summaries: number
+  errors: number
+  llmCalls: number
+  costUsd: number
+}
+
+/** Confirmación por-mensaje de las co-ocurrencias ambiguas (POST /graph/confirm): metodología B
+ *  (recibo a priori + LLM con compuerta alias-aware). Usa el LLM → TIENE COSTO. Monótono. */
+export async function confirmCooccurrences(): Promise<GraphConfirmResult> {
+  const r = await apiPost<{
+    edges: number
+    confirmed_recibo: number
+    messages: number
+    chat_skipped: number
+    llm_confirmed: number
+    llm_rejected: number
+    llm_dejar: number
+    gated: number
+    summaries: number
+    errors: number
+    llm_calls: number
+    cost_usd: number
+  }>("/graph/confirm")
+  return {
+    edges: r.edges,
+    confirmedRecibo: r.confirmed_recibo,
+    messages: r.messages,
+    chatSkipped: r.chat_skipped,
+    llmConfirmed: r.llm_confirmed,
+    llmRejected: r.llm_rejected,
+    llmDejar: r.llm_dejar,
+    gated: r.gated,
+    summaries: r.summaries,
     errors: r.errors,
     llmCalls: r.llm_calls,
     costUsd: r.cost_usd,

@@ -41,7 +41,13 @@ from memex.llm.grounding import DEFAULT_MIN_QUOTE_NORM_LEN, grounded
 from memex.logging import get_logger
 from memex.modules.identidades.prompt import IDENTIDADES_COOCCURRENCE_SYSTEM_PROMPT
 from memex.relations.deterministic import DEFAULT_COOCCURRENCE_CAP
-from memex.relations.edges import PRODUCER_LLM, STATUS_CONFIRMED, Ref, propose_edge
+from memex.relations.edges import (
+    PRODUCER_LLM,
+    PROVENANCE_INFERRED,
+    VERDICT_CONFIRMED,
+    Ref,
+    propose_edge,
+)
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 _log = get_logger("memex.modules.identidades.relations_llm")
@@ -295,7 +301,8 @@ async def run_cooccurrence_llm(
                         Ref(_slug(kind_by_id[b]), b),
                         producer=PRODUCER_LLM,
                         relation_type="co-ocurrencia",
-                        status=STATUS_CONFIRMED,
+                        verdict=VERDICT_CONFIRMED,
+                        provenance=PROVENANCE_INFERRED,
                         evidence=f"inbox:{mid} | {quote}",
                     )
                     stats.edges += 1

@@ -16,7 +16,11 @@ function edge(id: number, a: GraphNode, b: GraphNode, over: Partial<GraphEdge> =
     dstId: b.id,
     relationType: "co-ocurrencia",
     producer: "inbox",
-    status: "pista",
+    provenance: "extracted",
+    verdict: "ambiguous",
+    label: "AMBIGUOUS",
+    relation: "",
+    dirty: false,
     confidence: null,
     evidence: "",
     sourceInboxIds: [],
@@ -25,7 +29,13 @@ function edge(id: number, a: GraphNode, b: GraphNode, over: Partial<GraphEdge> =
 }
 
 const miembro = (id: number, m: GraphNode, c: GraphNode): GraphEdge =>
-  edge(id, m, c, { relationType: "miembro_de", producer: "llm", status: "confirmed" })
+  edge(id, m, c, {
+    relationType: "miembro_de",
+    producer: "llm",
+    provenance: "inferred",
+    verdict: "confirmed",
+    label: "INFERRED",
+  })
 
 const keys = (nodes: GraphNode[]): string[] => nodes.map((n) => nodeKey(n.slug, n.id))
 
@@ -87,19 +97,19 @@ describe("collapseClusters", () => {
     expect(keys(plegadoA.nodes)).not.toContain(nodeKey("identidades:person", 4))
   })
 
-  it("status agregado: confirmed domina sobre pista", () => {
+  it("veredicto agregado: confirmed domina sobre ambiguous", () => {
     const out = collapseClusters(
       [cumulo, m1, m2, fuera],
       [
         miembro(1, m1, cumulo),
         miembro(2, m2, cumulo),
-        edge(3, m1, fuera), // pista
-        edge(4, m2, fuera, { status: "confirmed", relationType: "contraparte" }),
+        edge(3, m1, fuera), // ambiguous
+        edge(4, m2, fuera, { verdict: "confirmed", provenance: "extracted", relationType: "contraparte" }),
       ],
       new Set(),
     )
     expect(out.edges).toHaveLength(1)
-    expect(out.edges[0].status).toBe("confirmed")
+    expect(out.edges[0].verdict).toBe("confirmed")
   })
 
   it("ids sintéticos deterministas: misma entrada → mismos ids", () => {

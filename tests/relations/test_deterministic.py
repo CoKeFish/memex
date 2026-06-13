@@ -155,7 +155,7 @@ def test_cooccurrence_pista_mismo_correo() -> None:
     assert len(edges) == 1
     e = edges[0]
     assert e.producer == "inbox"
-    assert e.status == "pista"
+    assert e.verdict == "ambiguous"
     assert e.relation_type == "co-ocurrencia"
     assert _pair(e) == {("finance", fin), ("hackathones", hack)}
 
@@ -205,7 +205,7 @@ def test_cooccurrence_persona_org_mismo_correo() -> None:
     assert len(edges) == 1
     e = edges[0]
     assert e.producer == "inbox"
-    assert e.status == "pista"
+    assert e.verdict == "ambiguous"
     assert e.relation_type == "co-ocurrencia"
     assert _pair(e) == {("identidades:person", p), ("identidades:org", o)}
 
@@ -250,7 +250,7 @@ def test_afiliacion_real_persona_org() -> None:
     assert stats.afiliacion_reales == 1
     assert len(edges) == 1
     e = edges[0]
-    assert e.status == "confirmed"
+    assert e.verdict == "confirmed"
     assert e.relation_type == "afiliado"
     assert (e.src.slug, e.src.id) == ("identidades:person", p)
     assert (e.dst.slug, e.dst.id) == ("identidades:org", o)
@@ -270,7 +270,7 @@ def test_pertenencia_real_sub_padre() -> None:
     assert stats.pertenencia_reales == 1
     assert len(edges) == 1
     e = edges[0]
-    assert e.status == "confirmed"
+    assert e.verdict == "confirmed"
     assert e.relation_type == "pertenece_a"
     assert (e.src.slug, e.src.id) == ("identidades:org", child)  # dirigida: hijo → padre
     assert (e.dst.slug, e.dst.id) == ("identidades:org", parent)
@@ -346,7 +346,7 @@ def test_contraparte_real_cobro_a_identidad() -> None:
     assert len(edges) == 1
     e = edges[0]
     assert e.producer == "finance"
-    assert e.status == "confirmed"
+    assert e.verdict == "confirmed"
     assert e.relation_type == "contraparte"
     assert (e.src.slug, e.src.id) == ("finance", fin)  # dirigida: cobro → quién cobró/pagó
     assert (e.dst.slug, e.dst.id) == ("identidades:org", org)
@@ -503,9 +503,9 @@ def test_pista_redundante_preexistente_se_confirma() -> None:
     assert stats2.redundant_resolved == 1
     assert len(edges) == 2  # la contraparte confirmada Y la pista (ahora confirmada)
     by_type = {e.relation_type: e for e in edges}
-    assert by_type["contraparte"].status == "confirmed"
+    assert by_type["contraparte"].verdict == "confirmed"
     cooc = by_type["co-ocurrencia"]
-    assert cooc.status == "confirmed"
+    assert cooc.verdict == "confirmed"
     assert cooc.evidence == "inbox:16"  # la procedencia original NO se pisa
     with connection() as c:
         dec = latest_decisions(c, 1, [cooc.id])[cooc.id]
@@ -544,14 +544,14 @@ def test_cooc_promovida_a_confirmed_no_se_toca() -> None:
     with connection() as c:
         build_relations(c, 1)
         eid = list_edges(c, 1)[0].id
-        resolve_edge(c, eid, status="confirmed")
+        resolve_edge(c, eid, verdict="confirmed", provenance="inferred")
     with connection() as c:
         stats = build_relations(c, 1)
         edges = list_edges(c, 1)
     assert stats.redundant_resolved == 0
     assert stats.cooccurrence_pistas == 0
     assert len(edges) == 1
-    assert edges[0].status == "confirmed"
+    assert edges[0].verdict == "confirmed"
     assert edges[0].relation_type == "co-ocurrencia"
 
 
@@ -622,7 +622,7 @@ def test_sources_siguen_creciendo_sobre_terminal() -> None:
     with connection() as c:
         build_relations(c, 1)
         eid = list_edges(c, 1, producer="inbox")[0].id
-        resolve_edge(c, eid, status="confirmed")
+        resolve_edge(c, eid, verdict="confirmed", provenance="inferred")
     # el mismo par aparece en el mensaje 24 (nuevo crudo del consolidado + el hack lo referencia)
     _exec(
         "INSERT INTO mod_finance_transactions "
@@ -645,5 +645,5 @@ def test_sources_siguen_creciendo_sobre_terminal() -> None:
         edges = list_edges(c, 1, producer="inbox")
         srcs = edge_sources(c, [eid])
     assert stats.cooccurrence_pistas == 0  # par ya vouchado: no se re-emite ni cuenta
-    assert len(edges) == 1 and edges[0].status == "confirmed"
+    assert len(edges) == 1 and edges[0].verdict == "confirmed"
     assert srcs == {eid: {23, 24}}
