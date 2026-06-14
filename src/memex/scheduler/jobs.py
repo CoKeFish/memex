@@ -40,7 +40,6 @@ from memex.relations.per_message import ConfirmStats, run_per_message_confirm
 from memex.relations.reconcile import detect_and_reconcile
 from memex.relevance.gate import run_relevance_gate
 from memex.relevance.mining import run_rule_mining
-from memex.summarizer.worker import run_summarization
 
 _log = get_logger("memex.scheduler.jobs")
 
@@ -425,7 +424,6 @@ async def run_graph_confirm(user_id: int) -> ConfirmStats:
 # SKIP LOCKED al worker de OCR antes de habilitar esa concurrencia.
 _REGISTRY: dict[str, Job] = {
     "classify": Job("classify", "PT15M", _sync(run_classification)),
-    "summarize": Job("summarize", "PT1H", run_summarization),
     "extract": Job("extract", "PT1H", run_extraction),
     "ocr": Job("ocr", "PT1H", run_ocr),
     "calendar": Job("calendar", "PT30M", run_calendar_cycle),

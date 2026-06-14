@@ -1,6 +1,6 @@
 """Worker del gate de relevancia: veredicto por correo ANTES de resumen/extracción.
 
-Espejo estructural de `summarizer.worker.run_summarization` (mismo contrato best-effort por
+Espejo estructural de `relations.summary.run_summaries` (mismo contrato best-effort por
 ventana, `LLMQuotaError` aborta, cliente inyectable, dead-letter al fallar el parse), pero el
 LLM default es ANTHROPIC (Opus — decisión del dueño: modelo superior para el portero), no el
 DeepSeek compartido del resto del pipeline.
@@ -28,6 +28,7 @@ from memex.core.observability import CostBySource, record_llm_call
 from memex.db import connection
 from memex.llm import AnthropicClient, ChatMessage, LLMClient, LLMQuotaError
 from memex.logging import bound_log_context, get_logger
+from memex.processing.render import render_payload
 from memex.processing.windows import (
     MAX_GAP_SECONDS,
     MAX_WINDOW_SIZE,
@@ -46,7 +47,6 @@ from memex.relevance.providers import build_gate_client
 from memex.relevance.rules import apply_active_rules
 from memex.relevance.settings import GateSettings, get_settings
 from memex.relevance.verdicts import VerdictItem, clear_verdicts, insert_verdicts, load_gate_workset
-from memex.summarizer.render import render_payload
 
 _log = get_logger("memex.relevance.gate")
 

@@ -17,7 +17,7 @@ from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.cli import main, main_process
 from memex.modules.orchestrator import ExtractStats
 from memex.modules.process import CombinedStats, run_combined
-from memex.summarizer.worker import SummarizeStats
+from memex.relations.summary import SummarizeStats
 
 
 class FakeCombinedLLM:

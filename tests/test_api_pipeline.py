@@ -70,7 +70,7 @@ def _seed_classified(source_id: int, eid: str, *, tier: str = "batch", minute: i
 
 
 def test_summarize_individual(client: Any, seed_source: dict[str, Any]) -> None:
-    from memex.summarizer.worker import summarize_inbox
+    from memex.relations.summary import summarize_inbox
 
     iid = _seed_classified(seed_source["id"], "s1")
     out = asyncio.run(summarize_inbox(1, iid, scope="individual", client=FakeLLM("R1")))
@@ -82,7 +82,7 @@ def test_summarize_individual(client: Any, seed_source: dict[str, Any]) -> None:
 
 
 def test_summarize_idempotent_then_force(client: Any, seed_source: dict[str, Any]) -> None:
-    from memex.summarizer.worker import summarize_inbox
+    from memex.relations.summary import summarize_inbox
 
     iid = _seed_classified(seed_source["id"], "s2")
     asyncio.run(summarize_inbox(1, iid, client=FakeLLM("A")))
@@ -95,7 +95,7 @@ def test_summarize_idempotent_then_force(client: Any, seed_source: dict[str, Any
 
 
 def test_summarize_window_groups_neighbors(client: Any, seed_source: dict[str, Any]) -> None:
-    from memex.summarizer.worker import summarize_inbox
+    from memex.relations.summary import summarize_inbox
 
     sid = seed_source["id"]
     a = _seed_classified(sid, "w1", minute=0)

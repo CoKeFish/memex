@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from memex.summarizer.render import render_payload
+from memex.processing.render import render_payload
 
 
 def test_email_render_has_subject_and_sender() -> None:

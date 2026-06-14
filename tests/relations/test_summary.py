@@ -1,7 +1,8 @@
-"""Worker del summarizer contra la DB (sembrada), con un LLM falso (sin red).
+"""`run_summaries` (relations.summary) contra la DB sembrada, con un LLM falso (sin red).
 
-Cubre el camino feliz + los edge cases de manejo de fallos (content vacío/truncado,
-error del LLM a mitad de corrida, input vacío, multi-source, unicidad anti-duplicación).
+La pasada de resumen es el ÚNICO productor de `summaries` para lo que la confirmación por-mensaje
+no resume (lotes chat/batch e individuales sin pares). Cubre el camino feliz + edge cases de fallo
+(content vacío/truncado, error del LLM a mitad de corrida, input vacío, multi-source, unicidad).
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from memex.core.deadletter import MAX_WORK_ATTEMPTS, STAGE_SUMMARIZE, list_review
 from memex.db import connection
 from memex.llm import ChatMessage, LLMError, LLMQuotaError, LLMResult, LLMUsage, ResponseFormat
-from memex.summarizer.worker import run_summarization
+from memex.relations.summary import run_summaries
 
 
 class FakeLLM:
@@ -135,7 +136,7 @@ def test_batch_window_one_summary(seed_source: dict[str, Any]) -> None:
     _seed(sid, "m3", "batch", {"text": "todo bien"}, minute=2)
 
     fake = FakeLLM()
-    stats = asyncio.run(run_summarization(1, client=fake))
+    stats = asyncio.run(run_summaries(1, client=fake))
 
     assert fake.calls == 1
     assert stats.summaries == 1
@@ -156,7 +157,7 @@ def test_individual_one_summary_each(seed_source: dict[str, Any]) -> None:
     _seed(sid, "m2", "individual", {"subject": "dos"})
 
     fake = FakeLLM()
-    stats = asyncio.run(run_summarization(1, client=fake))
+    stats = asyncio.run(run_summaries(1, client=fake))
 
     assert fake.calls == 2
     assert stats.summaries == 2
@@ -167,7 +168,7 @@ def test_blacklist_is_skipped(seed_source: dict[str, Any]) -> None:
     _seed(seed_source["id"], "m1", "blacklist", {"subject": "promo"})
 
     fake = FakeLLM()
-    stats = asyncio.run(run_summarization(1, client=fake))
+    stats = asyncio.run(run_summaries(1, client=fake))
 
     assert fake.calls == 0
     assert stats.summaries == 0
@@ -178,8 +179,8 @@ def test_idempotent(seed_source: dict[str, Any]) -> None:
     _seed(seed_source["id"], "m1", "individual", {"subject": "uno"})
 
     fake = FakeLLM()
-    asyncio.run(run_summarization(1, client=fake))
-    second = asyncio.run(run_summarization(1, client=fake))
+    asyncio.run(run_summaries(1, client=fake))
+    second = asyncio.run(run_summaries(1, client=fake))
 
     assert fake.calls == 1
     assert second.summaries == 0
@@ -192,7 +193,7 @@ def test_tier_filter(seed_source: dict[str, Any]) -> None:
     _seed(sid, "i1", "individual", {"subject": "importante"})
 
     fake = FakeLLM()
-    stats = asyncio.run(run_summarization(1, tier="individual", client=fake))
+    stats = asyncio.run(run_summaries(1, tier="individual", client=fake))
 
     assert stats.summaries == 1
     assert stats.by_tier.get("individual") == 1
@@ -208,7 +209,7 @@ def test_quota_error_aborts_run(seed_source: dict[str, Any]) -> None:
 
     fake = FakeLLM(quota_on_call=2)
     with pytest.raises(LLMQuotaError):
-        asyncio.run(run_summarization(1, client=fake))
+        asyncio.run(run_summaries(1, client=fake))
 
     assert fake.calls == 2  # abortó en la 2da, no siguió de largo
     assert _count("summaries") == 1  # la 1ra ventana sí persistió
@@ -220,10 +221,10 @@ def test_poison_window_dead_lettered_after_max_attempts(seed_source: dict[str, A
     iid = _seed(seed_source["id"], "i1", "individual", {"subject": "uno"})
 
     for _ in range(MAX_WORK_ATTEMPTS):
-        stats = asyncio.run(run_summarization(1, client=FakeLLM(fail_on_call=1)))
+        stats = asyncio.run(run_summaries(1, client=FakeLLM(fail_on_call=1)))
         assert stats.errors == 1
 
-    after = asyncio.run(run_summarization(1, client=FakeLLM(fail_on_call=1)))
+    after = asyncio.run(run_summaries(1, client=FakeLLM(fail_on_call=1)))
     assert after.errors == 0 and after.summaries == 0  # en review → ya no se procesa
     assert iid in [it["inbox_id"] for it in list_review(1, STAGE_SUMMARIZE)]
 
@@ -235,7 +236,7 @@ def test_multi_source_separate_summaries(seed_source: dict[str, Any]) -> None:
     _seed(sid_b, "b1", "batch", {"text": "de B"})
 
     fake = FakeLLM()
-    stats = asyncio.run(run_summarization(1, client=fake))
+    stats = asyncio.run(run_summaries(1, client=fake))
 
     assert fake.calls == 2  # fuentes distintas → ventanas distintas
     assert stats.summaries == 2
@@ -248,7 +249,7 @@ def test_empty_content_not_persisted(seed_source: dict[str, Any]) -> None:
     _seed(seed_source["id"], "m1", "batch", {"text": "hola"})
 
     fake = FakeLLM(content="")
-    stats = asyncio.run(run_summarization(1, client=fake))
+    stats = asyncio.run(run_summaries(1, client=fake))
 
     assert fake.calls == 1  # llamó, pero
     assert stats.summaries == 0
@@ -257,14 +258,14 @@ def test_empty_content_not_persisted(seed_source: dict[str, Any]) -> None:
     assert _count("summary_inbox_links") == 0
     assert _count_status("error") == 1  # el costo se registró como error
     # reintentable: vuelve a aparecer en el work-set
-    again = asyncio.run(run_summarization(1, client=FakeLLM(content="ok")))
+    again = asyncio.run(run_summaries(1, client=FakeLLM(content="ok")))
     assert again.summaries == 1
 
 
 def test_whitespace_content_rejected(seed_source: dict[str, Any]) -> None:
     _seed(seed_source["id"], "m1", "batch", {"text": "hola"})
 
-    stats = asyncio.run(run_summarization(1, client=FakeLLM(content="  \n  ")))
+    stats = asyncio.run(run_summaries(1, client=FakeLLM(content="  \n  ")))
 
     assert stats.summaries == 0
     assert stats.skipped == 1
@@ -275,7 +276,7 @@ def test_truncated_response_is_flagged(seed_source: dict[str, Any]) -> None:
     _seed(seed_source["id"], "m1", "individual", {"subject": "largo"})
 
     stats = asyncio.run(
-        run_summarization(1, client=FakeLLM(content="resumen cortado", finish_reason="length"))
+        run_summaries(1, client=FakeLLM(content="resumen cortado", finish_reason="length"))
     )
 
     assert stats.summaries == 1  # truncado se persiste igual
@@ -288,7 +289,7 @@ def test_empty_input_payload_skipped_without_llm(seed_source: dict[str, Any]) ->
     _seed(seed_source["id"], "m1", "batch", {})  # renderiza a ""
 
     fake = FakeLLM()
-    stats = asyncio.run(run_summarization(1, client=fake))
+    stats = asyncio.run(run_summaries(1, client=fake))
 
     assert fake.calls == 0  # ni siquiera llama al LLM
     assert stats.summaries == 0
@@ -301,14 +302,14 @@ def test_llm_error_mid_run_is_idempotent(seed_source: dict[str, Any]) -> None:
     _seed(sid, "i2", "individual", {"subject": "dos"})
 
     fake = FakeLLM(fail_on_call=2)  # la 2da ventana explota
-    stats = asyncio.run(run_summarization(1, client=fake))
+    stats = asyncio.run(run_summaries(1, client=fake))
 
     assert stats.summaries == 1
     assert stats.errors == 1
     assert _count("summaries") == 1
     assert _count_status("error") == 1
     # la ventana que falló sigue sin resumir → una corrida nueva la procesa, sin duplicar la 1ra
-    second = asyncio.run(run_summarization(1, client=FakeLLM()))
+    second = asyncio.run(run_summaries(1, client=FakeLLM()))
     assert second.summaries == 1
     assert _count("summaries") == 2
 
@@ -316,7 +317,7 @@ def test_llm_error_mid_run_is_idempotent(seed_source: dict[str, Any]) -> None:
 def test_inbox_belongs_to_at_most_one_summary(seed_source: dict[str, Any]) -> None:
     """UNIQUE(inbox_id) de la 0007: un mensaje no puede ligarse a dos summaries."""
     iid = _seed(seed_source["id"], "m1", "individual", {"subject": "x"})
-    asyncio.run(run_summarization(1, client=FakeLLM()))  # liga iid a un summary
+    asyncio.run(run_summaries(1, client=FakeLLM()))  # liga iid a un summary
 
     with connection() as c:
         other = c.execute(
@@ -354,7 +355,7 @@ def test_pending_ocr_gates_summarization(seed_source: dict[str, Any]) -> None:
     _seed_media_pending(iid)
 
     fake = FakeLLM()
-    stats = asyncio.run(run_summarization(1, client=fake))
+    stats = asyncio.run(run_summaries(1, client=fake))
     assert stats.summaries == 0  # gateado por OCR pendiente
     assert fake.calls == 0  # ni siquiera entra al work-set
     assert _count("summaries") == 0
@@ -365,7 +366,7 @@ def test_pending_ocr_gates_summarization(seed_source: dict[str, Any]) -> None:
             text("UPDATE media_assets SET ocr_status='ok', ocr_text='TOTAL 99' WHERE inbox_id=:i"),
             {"i": iid},
         )
-    stats2 = asyncio.run(run_summarization(1, client=FakeLLM()))
+    stats2 = asyncio.run(run_summaries(1, client=FakeLLM()))
     assert stats2.summaries == 1
     assert _count("summaries") == 1
 
@@ -375,5 +376,5 @@ def test_skipped_ocr_does_not_gate(seed_source: dict[str, Any]) -> None:
     sid = seed_source["id"]
     iid = _seed(sid, "m1", "individual", {"body_text": "cuerpo"})
     _seed_media_pending(iid, status="skipped")
-    stats = asyncio.run(run_summarization(1, client=FakeLLM()))
+    stats = asyncio.run(run_summaries(1, client=FakeLLM()))
     assert stats.summaries == 1

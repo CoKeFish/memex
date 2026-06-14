@@ -26,7 +26,6 @@ function summarize(res: ReprocessResult): string {
       if (stage === "media") return `adjuntos +${n(r.assets_created)}`
       if (stage === "ocr") return `OCR ${n(r.ok)} ok`
       if (stage === "classify") return `clasif ${n(r.classified)}`
-      if (stage === "summarize") return `resumen ${n(r.ok)} ok`
       if (stage === "extract") return `extracción ${n(r.items)} item(s)`
       return stage
     })
@@ -82,7 +81,7 @@ export function ReprocessButton({
           <DialogTitle>Reprocesar mensaje #{inboxId}</DialogTitle>
           <DialogDescription>
             Elegí qué etapas re-ejecutar. Corren en orden de dependencia (adjuntos → OCR →
-            clasificar → resumir → extraer). Puede costar LLM/OCR.
+            clasificar → extraer). Puede costar LLM/OCR.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">

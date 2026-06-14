@@ -4,7 +4,7 @@ Función pura, sin DB ni LLM. `batch` se agrupa por `source_id` y se parte por g
 o tope de cantidad; `individual` es 1 ventana por mensaje. Los umbrales son la perilla de
 costo/granularidad.
 
-Compartido por el summarizer (`memex.summarizer`) y los módulos de extracción
+Compartido por la fase de resumen (`memex.relations.summary`) y los módulos de extracción
 (`memex.modules`): ambos ventanean idéntico porque operan sobre los mismos mensajes
 clasificados originales (etapa combinada, ADR-015 §9).
 

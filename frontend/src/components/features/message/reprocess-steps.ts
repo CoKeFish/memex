@@ -3,7 +3,7 @@
 
 import type { MessageJourney } from "@/types/domain"
 
-/** Una etapa reprocesable. `stage` = nombre del backend (media/ocr/classify/summarize/extract). */
+/** Una etapa reprocesable. `stage` = nombre del backend (media/ocr/classify/extract). */
 export interface ReprocessStep {
   stage: string
   label: string
@@ -16,8 +16,6 @@ export function reprocessStepsFor(j: MessageJourney | null): ReprocessStep[] {
     { stage: "classify", label: "Re-clasificar", hint: "determinista · sin LLM" },
   ]
   if (!j) return out
-  if (j.steps.some((s) => s.kind === "resumen"))
-    out.push({ stage: "summarize", label: "Re-resumir", hint: "LLM" })
   if (j.steps.some((s) => s.kind === "modulo"))
     out.push({ stage: "extract", label: "Re-extraer (módulos)", hint: "LLM · finanzas/calendario" })
   if (j.media.length > 0)

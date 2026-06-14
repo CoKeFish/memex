@@ -442,10 +442,10 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
 async def get_inbox_window(inbox_id: int, user_id: UserID) -> dict[str, Any]:
     """Lote de procesamiento del mensaje: con quiénes se resumió (o se resumiría) junto.
 
-    Solo lectura, sin LLM. La semántica de `mode` vive en `summarizer.worker.inbox_window`;
+    Solo lectura, sin LLM. La semántica de `mode` vive en `relations.summary.inbox_window`;
     acá solo se hidratan los miembros con el shape de fila de la lista (orden conversacional).
     """
-    from memex.summarizer.worker import inbox_window
+    from memex.relations.summary import inbox_window
 
     try:
         win = inbox_window(user_id, inbox_id)
@@ -549,7 +549,7 @@ async def summarize_inbox_endpoint(
 ) -> dict[str, Any]:
     """Resume (LLM) un mensaje o su ventana. Requiere clasificación previa."""
     from memex.llm import LLMConfigError, LLMError, LLMQuotaError
-    from memex.summarizer.worker import InboxNotClassifiedError, summarize_inbox
+    from memex.relations.summary import InboxNotClassifiedError, summarize_inbox
 
     bind_request_context(inbox_id=inbox_id)  # atribuye el costo LLM a este mensaje
     try:

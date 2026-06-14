@@ -3,7 +3,8 @@
 El dueño quiere poder correr ambos a la vez O aislados; ambos leen los mismos mensajes
 clasificados ORIGINALES. Acá se corren secuencialmente compartiendo un único cliente LLM. Cada
 paso usa su propio cursor (`summary_inbox_links` / `module_extractions`) y es idempotente, así
-que repetir es seguro y los aislados (`memex-summarize` / `memex-extract`) siguen disponibles.
+que repetir es seguro. El resumen (`run_summaries`) es la misma pieza que usa la fase de
+co-ocurrencia (`relations.summary`); el aislado `memex-extract` sigue disponible.
 
 Optimización futura (seam): single-pass real (una sola carga + ventaneo, ambos pasos por
 ventana). No cambia resultados; acá no se construye.
@@ -17,8 +18,8 @@ from memex.llm import LLMClient, aclose_llm, build_llm_client
 from memex.logging import get_logger
 from memex.modules.orchestrator import _GROUP_SIZE_DEFAULT, ExtractStats, run_extraction
 from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
+from memex.relations.summary import SummarizeStats, run_summaries
 from memex.relevance.gate import GateStats, run_relevance_gate
-from memex.summarizer.worker import SummarizeStats, run_summarization
 
 _log = get_logger("memex.modules.process")
 
@@ -65,7 +66,7 @@ async def run_combined(
             max_gap_seconds=max_gap_seconds,
             client=gate_client,
         )
-        summarize = await run_summarization(
+        summarize = await run_summaries(
             user_id,
             source_id=source_id,
             limit=limit,

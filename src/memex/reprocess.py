@@ -2,9 +2,9 @@
 
 Un punto único que comparten el endpoint (`POST /inbox/{id}/reprocess`) y el CLI `memex-reprocess`.
 Las etapas corren en orden de dependencia (`STAGE_ORDER`): `media` + `ocr` alimentan el texto que
-`summarize`/`extract` consumen, y `classify` precede a ambos. Cada etapa
-DELEGA en la función que ya existe (no reimplementa): backfill, run_ocr, classify, summarize_inbox,
-extract_inbox. Best-effort por etapa: una que falla se loguea y se reporta en su slot del resultado,
+`extract` consume, y `classify` precede. Cada etapa DELEGA en la función que ya existe (no
+reimplementa): backfill, run_ocr, classify, extract_inbox. Best-effort por etapa: una que falla se
+loguea y se reporta en su slot del resultado,
 sin frenar las demás (un reproceso multi-etapa con éxito parcial es normal).
 
 Sin scheduler ni colas (ADR / decisión `no-background-processing-default`): el endpoint corre
@@ -28,14 +28,13 @@ from memex.logging import bound_log_context, get_logger
 from memex.modules.orchestrator import extract_inbox, run_extraction
 from memex.ocr.worker import run_ocr
 from memex.relevance.gate import run_relevance_gate
-from memex.summarizer.worker import run_summarization, summarize_inbox
 
 _log = get_logger("memex.reprocess")
 
 #: Orden de dependencia de las etapas. Se corren SIEMPRE en este orden, sea cual sea el set elegido.
 #: `relevance` (gate de intereses, solo correos) corre tras classify y ANTES de cualquier LLM:
-#: con el gate encendido, summarize/extract excluyen lo no-relevante (apagado → no-op).
-STAGE_ORDER: tuple[str, ...] = ("media", "ocr", "classify", "relevance", "summarize", "extract")
+#: con el gate encendido, extract excluye lo no-relevante (apagado → no-op).
+STAGE_ORDER: tuple[str, ...] = ("media", "ocr", "classify", "relevance", "extract")
 VALID_STAGES = frozenset(STAGE_ORDER)
 #: Predicados de selección acotados (no especulativos): adjuntos declarados sin media / con error.
 ONLY_FILTERS = frozenset({"unstored-attachments", "errored"})
@@ -161,31 +160,6 @@ async def _relevance_targets(user_id: int, inbox_ids: list[int], force: bool) ->
     }
 
 
-async def _summarize_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[str, Any]:
-    """Resume respetando los tiers, igual que el daemon (salta blacklist, ventanea batch).
-
-    Lote (>1) → `run_summarization(inbox_ids=...)`: un solo cliente LLM para todo el lote. Un solo
-    mensaje (botón "Reprocesar" de /datos/:id) → vía per-mensaje, que honra el click explícito y
-    refresca su resumen aunque sea blacklist.
-    """
-    if len(inbox_ids) == 1:
-        try:
-            r = await summarize_inbox(user_id, inbox_ids[0], scope="individual", force=force)
-            return {"ok": 1, "errors": 0, "cost_usd": float(r.get("cost_usd", 0) or 0)}
-        except Exception as e:  # best-effort (no clasificado, sin LLM, etc.)
-            _log.warning("reprocess.summarize_failed", inbox_id=inbox_ids[0], error=str(e))
-            return {"ok": 0, "errors": 1, "cost_usd": 0.0}
-    stats = await run_summarization(user_id, inbox_ids=inbox_ids, force=force)
-    return {
-        "ok": stats.summaries,
-        "summaries": stats.summaries,
-        "messages": stats.messages,
-        "skipped": stats.skipped,
-        "errors": stats.errors,
-        "cost_usd": float(stats.cost.total.cost_usd),
-    }
-
-
 async def _extract_targets(user_id: int, inbox_ids: list[int], force: bool) -> dict[str, Any]:
     """Extrae respetando los tiers, igual que el daemon (salta blacklist, ventanea batch).
 
@@ -266,8 +240,6 @@ async def _run_stages(
                 )
             elif stage == "relevance":
                 per_stage["relevance"] = await _relevance_targets(user_id, targets, force)
-            elif stage == "summarize":
-                per_stage["summarize"] = await _summarize_targets(user_id, targets, force)
             elif stage == "extract":
                 per_stage["extract"] = await _extract_targets(user_id, targets, force)
         except Exception as e:  # una etapa que falla no frena las demás; se reporta en su slot

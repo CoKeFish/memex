@@ -112,6 +112,13 @@ def _recibo(c: Any, inbox_id: int) -> None:
     )
 
 
+def _classify(c: Any, inbox_id: int, tier: str) -> None:
+    c.execute(
+        text("INSERT INTO classifications (user_id, inbox_id, tier) VALUES (1, :i, :t)"),
+        {"i": inbox_id, "t": tier},
+    )
+
+
 # --- parse_confirm (puro) ---------------------------------------------------------- #
 
 
@@ -170,6 +177,7 @@ async def test_llm_confirma_pasa_compuerta_y_persiste_resumen() -> None:
         o = Ref("identidades:org", _identity(c, "organizacion", "Acme"))
         iid = _inbox(c, "Juan Niebla le pago a Acme la factura del mes")
         _cooc(c, p, o, iid)
+        _classify(c, iid, "individual")  # individual → el juicio persiste su resumen
     fake = FakeLLM(
         '{"verdicts": [{"pair": 1, "verdict": "confirm", "relation": "pagó la factura", '
         '"confidence": 0.95}], "summary": "Juan le pagó a Acme."}'
@@ -232,3 +240,96 @@ async def test_dry_run_no_escribe() -> None:
     with connection() as c:
         e = get_edge(c, 1, p, o, producer=PRODUCER_INBOX, relation_type=RELTYPE_COOCURRENCIA)
     assert e is not None and e.verdict == "ambiguous"  # nada cambió
+
+
+# --- FASE 3: resumen de las unidades sin resumir (run_summaries) ------------------- #
+
+
+def _summary_of(inbox_id: int) -> tuple[str, str, dict[str, Any]] | None:
+    """(content, tier, metadata) del resumen ligado al mensaje, o None."""
+    with connection() as c:
+        row = c.execute(
+            text(
+                "SELECT s.content, s.tier, s.metadata FROM summaries s "
+                "JOIN summary_inbox_links sl ON sl.summary_id = s.id WHERE sl.inbox_id = :i"
+            ),
+            {"i": inbox_id},
+        ).first()
+    return (row[0], row[1], row[2]) if row is not None else None
+
+
+@pytest.mark.asyncio
+async def test_individual_sin_pares_lo_resume_run_summaries() -> None:
+    """Un individual SIN co-ocurrencias (el juicio no lo toca) igual recibe resumen, vía la pasada
+    de resumen (tier individual, origin 'summarize')."""
+    with connection() as c:
+        iid = _inbox(c, "Recordatorio: tu factura vence el viernes")
+        _classify(c, iid, "individual")
+    stats = await run_per_message_confirm(1, client=FakeLLM("Resumen del correo."))
+    assert stats.summaries == 1
+    summ = _summary_of(iid)
+    assert summ is not None
+    assert summ[0] == "Resumen del correo." and summ[1] == "individual"
+    assert summ[2]["origin"] == "summarize"
+
+
+@pytest.mark.asyncio
+async def test_chat_se_resume_por_lote() -> None:
+    """Chat: nunca individual; su LOTE (varios mensajes contiguos de la misma fuente) se resume en
+    UNA sola llamada, ligada a todos sus mensajes (tier batch)."""
+    with connection() as c:
+        sid = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (1, 'tg', 'telegram') RETURNING id"
+            )
+        ).scalar_one()
+        ids: list[int] = []
+        for k in range(3):
+            iid = c.execute(
+                text(
+                    "INSERT INTO inbox (user_id, source_id, external_id, occurred_at, payload) "
+                    "VALUES (1, :sid, :eid, :occ, CAST(:p AS JSONB)) RETURNING id"
+                ),
+                {
+                    "sid": sid,
+                    "eid": f"c{k}",
+                    "occ": datetime(2026, 6, 3, 12, k, tzinfo=UTC),
+                    "p": json.dumps({"text": f"mensaje {k}"}),
+                },
+            ).scalar_one()
+            _classify(c, int(iid), "batch")
+            ids.append(int(iid))
+    stats = await run_per_message_confirm(1, client=FakeLLM("Resumen de la conversación."))
+    assert stats.summaries == 1  # UN resumen para el lote de 3
+    with connection() as c:
+        n_links = c.execute(
+            text("SELECT count(*) FROM summary_inbox_links WHERE inbox_id = ANY(:ids)"),
+            {"ids": ids},
+        ).scalar()
+    assert n_links == 3  # los 3 ligados al MISMO resumen
+    summ = _summary_of(ids[0])
+    assert summ is not None and summ[1] == "batch"
+
+
+@pytest.mark.asyncio
+async def test_batch_con_pares_lo_resume_run_summaries_no_el_juicio() -> None:
+    """Un mensaje BATCH con pares: el juicio lo confirma pero NO persiste su resumen (sería partir
+    el lote); el resumen lo produce run_summaries por LOTE (tier batch, origin 'summarize')."""
+    with connection() as c:
+        p = Ref("identidades:person", _identity(c, "persona", "Juan Niebla"))
+        o = Ref("identidades:org", _identity(c, "organizacion", "Acme"))
+        iid = _inbox(c, "Juan Niebla le pago a Acme")
+        _cooc(c, p, o, iid)
+        _classify(c, iid, "batch")
+    fake = FakeLLM(
+        '{"verdicts": [{"pair": 1, "verdict": "confirm", "relation": "pagó", '
+        '"confidence": 0.95}], "summary": "ignorado en batch"}'
+    )
+    stats = await run_per_message_confirm(1, client=fake)
+    assert stats.llm_confirmed == 1  # el juicio corrió y confirmó la arista
+    assert stats.summaries == 1  # 1 resumen, de run_summaries (no del juicio)
+    summ = _summary_of(iid)
+    assert summ is not None
+    assert summ[1] == "batch"  # lote, no individual
+    assert summ[2]["origin"] == "summarize"  # run_summaries, no el juicio (graph_confirm)

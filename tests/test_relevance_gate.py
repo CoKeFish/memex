@@ -455,7 +455,7 @@ def test_mining_accumulation_threshold_and_rule_method_excluded() -> None:
 
 
 def test_reprocess_stage_order_and_disabled_noop() -> None:
-    assert STAGE_ORDER == ("media", "ocr", "classify", "relevance", "summarize", "extract")
+    assert STAGE_ORDER == ("media", "ocr", "classify", "relevance", "extract")
     sid = _seed_source()
     iid = _seed_msg(sid, "m1")
     out = asyncio.run(reprocess(1, stages=["relevance"], targets=[iid]))

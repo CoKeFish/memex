@@ -3,10 +3,15 @@
 Una co-ocurrencia nace `extracted+ambiguous` (la co-aparición es un hecho; la relación, sospecha sin
 juzgar). Esta fase abre cada mensaje y, en UNA llamada LLM por mensaje, juzga TODOS los pares de
 co-ocurrencia que nacieron de él: por par devuelve veredicto (confirm/reject/dejar) + una `relation`
-nombrada EMERGENTE; y en la misma llamada, un `summary` del mensaje (que reemplaza al del summarizer
-para ese correo). Es el reemplazo del resolver par-por-par viejo (basado en cúmulos + citas): acá la
-unidad es el MENSAJE, no el vecindario, y la compuerta anti-alucinación es determinista (el vértice
-confirmado debe aparecer en el cuerpo por nombre/alias, `relations.gate`), no una cita textual.
+nombrada EMERGENTE; y en la misma llamada, un `summary` del mensaje. Es el reemplazo del resolver
+par-por-par viejo (basado en cúmulos + citas): acá la unidad es el MENSAJE, no el vecindario, y la
+compuerta anti-alucinación es determinista (el vértice confirmado debe aparecer en el cuerpo por
+nombre/alias, `relations.gate`), no una cita textual.
+
+Esta fase es el ÚNICO productor de `summaries` (reemplaza al summarizer). El resumen del juicio se
+persiste SOLO para tier `individual` (correo = unidad); los `batch` (chat/email batch) se resumen
+por LOTE en `run_summaries` (`relations.summary`), que también cubre los individuales sin pares de
+co-ocurrencia. Así toda unidad relevante termina con resumen, lo juzgue o no la co-ocurrencia.
 
 Cascada determinista-primero (FrugalGPT/Snorkel):
 1. A PRIORI sin LLM: un par cuya evidencia incluye un RECIBO (mensaje que produjo una transacción de
@@ -76,6 +81,7 @@ from memex.relations.edges import (
 )
 from memex.relations.gate import both_endpoints_present, normalize_body, vertex_surface_forms
 from memex.relations.prompt import GRAPH_CONFIRM_SYSTEM_PROMPT
+from memex.relations.summary import persist_summary, run_summaries
 from memex.relations.vertices import Vertex, list_vertices
 from memex.sources import kind_for_type
 
@@ -111,7 +117,7 @@ class ConfirmStats:
     llm_rejected: int = 0  # rechazadas por el LLM (todos sus mensajes lo rechazan)
     llm_dejar: int = 0  # memo `dejar` del LLM (evaluada completa, sin veredicto)
     gated: int = 0  # confirms del LLM degradados: un extremo no aparece en el cuerpo
-    summaries: int = 0  # resúmenes de B persistidos
+    summaries: int = 0  # resúmenes persistidos (individual del juicio + lotes de run_summaries)
     budget_exhausted: bool = False
     estimated_calls: int = 0  # dry-run: llamadas que haría
     errors: int = 0
@@ -129,6 +135,7 @@ class MessageLabeler:
 
     def __init__(self, conn: Connection, user_id: int, inbox_ids: Iterable[int]) -> None:
         self._labels: dict[int, str] = {}
+        self._tiers: dict[int, str] = {}  #: tier efectivo (clasificación o fallback), por mensaje
         ids = sorted(set(inbox_ids))
         if not ids:
             return
@@ -163,12 +170,13 @@ class MessageLabeler:
         ).mappings()
         for r in rows:
             mid = int(r["id"])
-            if mid in recibo:
-                self._labels[mid] = LABEL_RECIBO
-                continue
             tier = tiers.get(mid)
             if tier is None:
                 tier = classify(dict(r["payload"])).tier
+            self._tiers[mid] = tier
+            if mid in recibo:
+                self._labels[mid] = LABEL_RECIBO
+                continue
             if tier == TIER_BLACKLIST:
                 self._labels[mid] = LABEL_BULK
                 continue
@@ -180,6 +188,12 @@ class MessageLabeler:
 
     def label(self, inbox_id: int) -> str:
         return self._labels.get(inbox_id, LABEL_DESCONOCIDO)
+
+    def tier(self, inbox_id: int) -> str | None:
+        """El tier efectivo del mensaje (clasificación, con fallback a `classify`); None si no se
+        precargó. Se usa para persistir el resumen del juicio SOLO en `individual` (los `batch` los
+        resume `run_summaries` por lote)."""
+        return self._tiers.get(inbox_id)
 
 
 # --- universo + evidencia ------------------------------------------------------------- #
@@ -334,48 +348,6 @@ async def judge_message(
     return verdicts, summary, result
 
 
-# --- persistencia del resumen de B ---------------------------------------------------- #
-
-
-def _persist_b_summary(conn: Connection, user_id: int, inbox_id: int, content: str) -> None:
-    """Persiste el resumen de B para el mensaje (tier 'individual', origen 'graph_confirm'),
-    reemplazando el resumen vigente del summarizer para ese inbox: 'son lo mismo, cambia el origen'.
-    Respeta el `UNIQUE(inbox_id)` de `summary_inbox_links` re-linkeando; GC del resumen viejo si
-    quedó huérfano. Un resumen `batch` que pierde ESTE inbox conserva sus otros links."""
-    if not content.strip():
-        return
-    old = conn.execute(
-        text("SELECT summary_id FROM summary_inbox_links WHERE inbox_id = :iid"),
-        {"iid": inbox_id},
-    ).scalar()
-    new_id = conn.execute(
-        text(
-            """
-            INSERT INTO summaries (user_id, tier, content, metadata)
-            VALUES (:uid, 'individual', :content, '{"origin": "graph_confirm"}'::jsonb)
-            RETURNING id
-            """
-        ),
-        {"uid": user_id, "content": content},
-    ).scalar_one()
-    conn.execute(
-        text("DELETE FROM summary_inbox_links WHERE inbox_id = :iid"),
-        {"iid": inbox_id},
-    )
-    conn.execute(
-        text("INSERT INTO summary_inbox_links (summary_id, inbox_id) VALUES (:sid, :iid)"),
-        {"sid": int(new_id), "iid": inbox_id},
-    )
-    if old is not None:
-        conn.execute(
-            text(
-                "DELETE FROM summaries s WHERE s.id = :old AND s.user_id = :uid "
-                "AND NOT EXISTS (SELECT 1 FROM summary_inbox_links WHERE summary_id = :old)"
-            ),
-            {"old": int(old), "uid": user_id},
-        )
-
-
 # --- agregación de votos por arista --------------------------------------------------- #
 
 
@@ -523,6 +495,20 @@ async def run_per_message_confirm(
             client=client,
         )
 
+    # --- FASE 3: resumen de las unidades sin resumir (único productor de `summaries`) - #
+    # Cubre lo que la Fase 2 no resumió: lotes (chat / email batch) e individuales sin pares de
+    # co-ocurrencia. El `client` inyectado (test fake) se reusa; en producción `run_summaries` arma
+    # el suyo (consumer `summarizer`). `LLMQuotaError` propaga (lo pagado quedó persistido por
+    # unidad). El budget del juicio y el LIMIT del resumen son topes independientes.
+    if not no_llm:
+        summ = await run_summaries(user_id, client=client)
+        stats.summaries += summ.summaries
+        stats.errors += summ.errors
+        stats.cost.calls += summ.cost.total.calls
+        stats.cost.prompt_tokens += summ.cost.total.prompt_tokens
+        stats.cost.completion_tokens += summ.cost.total.completion_tokens
+        stats.cost.cost_usd += summ.cost.total.cost_usd
+
     _log.info(
         "relation.confirm.done",
         user_id=user_id,
@@ -561,8 +547,8 @@ async def _run_llm_phase(
 ) -> None:
     """El loop por mensaje (orden #pares DESC, máxima amortización), tope `budget` llamadas. Cada
     llamada juzga los pares PENDIENTES del mensaje (los ya confirmados en esta corrida se saltan),
-    persiste el resumen de B, aplica la compuerta a los confirms y acumula votos. Agrega al final
-    (también si el presupuesto/cuota cortaron: lo pagado no se tira)."""
+    persiste el resumen si el mensaje es `individual`, aplica la compuerta a los confirms y acumula
+    votos. Agrega al final (también si el presupuesto/cuota cortaron: lo pagado no se tira)."""
     order = sorted(by_msg, key=lambda m: (-len(by_msg[m]), m))
     # Formas de superficie de todos los extremos involucrados (para la compuerta).
     refs = {e.src for e in gray} | {e.dst for e in gray}
@@ -627,10 +613,14 @@ async def _run_llm_phase(
                 evaluated[e.id].add(mid)
                 if vote.gated_ok and vote.confidence >= min_conf:
                     confirmed_ids.add(e.id)
-            # Persistir el resumen de B (independiente de los veredictos).
-            if summary:
+            # Persistir el resumen SOLO para tier individual (correo = unidad). Los batch (chat /
+            # email batch) los resume `run_summaries` por LOTE → no se persiste acá, para no partir
+            # el lote (sus co-miembros sin pares aún no se resumieron). Ver `relations.summary`.
+            if summary and labeler.tier(mid) == "individual":
                 with connection() as conn:
-                    _persist_b_summary(conn, user_id, mid, summary)
+                    persist_summary(
+                        conn, user_id, [mid], summary, tier="individual", origin="graph_confirm"
+                    )
                 stats.summaries += 1
             _record_call_cost(user_id, mid, len(pend), gated_msg, result, stats)
     finally:

@@ -1,10 +1,10 @@
-"""Windowing puro del summarizer (sin DB ni LLM)."""
+"""Windowing puro del pipeline (sin DB ni LLM)."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from memex.summarizer.windows import (
+from memex.processing.windows import (
     MAX_GAP_SECONDS,
     MAX_WINDOW_SIZE,
     WorkRow,

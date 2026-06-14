@@ -357,7 +357,6 @@ function reprocessStepsForRow(row: InboxRow): ReprocessStep[] {
     out.push({ stage: "ocr", label: "Re-OCR de adjuntos", hint: "vuelve a transcribir los adjuntos" })
   out.push({ stage: "classify", label: "Re-clasificar", hint: "determinista · sin LLM" })
   if (row.classification) {
-    out.push({ stage: "summarize", label: "Re-resumir", hint: "LLM" })
     out.push({ stage: "extract", label: "Re-extraer (módulos)", hint: "LLM · finanzas/calendario/hackatones" })
   }
   return out

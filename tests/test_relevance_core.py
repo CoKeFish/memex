@@ -15,6 +15,7 @@ from memex.core.relevance_marks import set_mark
 from memex.db import connection
 from memex.modules.finance.module import FinanceModule
 from memex.modules.workset import load_module_workset
+from memex.relations.summary import _load_workset as load_summarize_workset
 from memex.relevance import (
     EMAIL_TYPES,
     VerdictItem,
@@ -37,7 +38,6 @@ from memex.relevance import (
     upsert_settings,
 )
 from memex.relevance.rules import EmailFields, extract_email_fields
-from memex.summarizer.worker import _load_workset as load_summarize_workset
 
 
 def _seed_source(name: str = "mail", source_type: str = "imap") -> int:
