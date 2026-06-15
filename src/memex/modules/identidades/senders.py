@@ -542,3 +542,57 @@ def backfill_senders(conn: Connection, user_id: int) -> dict[str, int]:
         out[kind.value] = len(ids)
     _log.info("identidades.senders.backfill.done", user_id=user_id, **out)
     return out
+
+
+def renormalize_domain_identifiers(conn: Connection, user_id: int) -> int:
+    """Re-normaliza `value_norm` de los identifiers `kind='domain'` al dominio REGISTRABLE (eTLD+1).
+
+    One-shot tras cambiar la normalización de dominio (`norm_identifier('domain')` ahora colapsa
+    subdominios): los identifiers viejos quedaron con el host completo (`tm.openai.com`). Re-deriva
+    `value_norm` desde `value`; solo toca los que cambian (idempotente). Si el nuevo valor colisiona
+    con OTRO identifier `domain` de la misma identidad (la UNIQUE per-identidad) borra el duplicado;
+    si no, actualiza. Devuelve cuántos cambió (update o borrado)."""
+    rows = (
+        conn.execute(
+            text(
+                "SELECT id, identity_id, platform, value, value_norm "
+                "FROM mod_identidades_identifiers "
+                "WHERE user_id = :u AND kind = 'domain' ORDER BY id"
+            ),
+            {"u": user_id},
+        )
+        .mappings()
+        .all()
+    )
+    changed = 0
+    for r in rows:
+        new_vn = norm_identifier("domain", str(r["value"]))
+        if new_vn == r["value_norm"]:
+            continue
+        dup = conn.execute(
+            text(
+                "SELECT 1 FROM mod_identidades_identifiers "
+                "WHERE user_id = :u AND identity_id = :iid AND platform = :p AND kind = 'domain' "
+                "AND value_norm = :vn AND id <> :id"
+            ),
+            {
+                "u": user_id,
+                "iid": r["identity_id"],
+                "p": r["platform"],
+                "vn": new_vn,
+                "id": r["id"],
+            },
+        ).first()
+        if dup is not None:
+            conn.execute(
+                text("DELETE FROM mod_identidades_identifiers WHERE id = :id"), {"id": r["id"]}
+            )
+        else:
+            conn.execute(
+                text("UPDATE mod_identidades_identifiers SET value_norm = :vn WHERE id = :id"),
+                {"vn": new_vn, "id": r["id"]},
+            )
+        changed += 1
+    if changed:
+        _log.info("identidades.senders.renormalize_domains.done", user_id=user_id, changed=changed)
+    return changed

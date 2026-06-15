@@ -24,6 +24,10 @@ dependencies = [
     "pyzipper>=0.4.0",
     "cryptography>=44",
     "argon2-cffi>=23",
+    # Dominio registrable (eTLD+1) del remitente de correo: colapsa subdominios al dominio que la org
+    # posee (mail.acme.com → acme.com) vía la Public Suffix List. Se usa OFFLINE (snapshot PSL
+    # embebido, suffix_list_urls=()), determinista, sin red — ver normalize.registrable_domain.
+    "tldextract>=5",
     # Detección de comunidades del grafo de relaciones (cúmulos). louvain_communities es PURO-Python
     # (sin scipy/build nativo — importa en Windows). PINEADO a 3.6.x a propósito: un bump de minor
     # reordena las particiones de Louvain → cambia las `signature` de los cúmulos → re-validación

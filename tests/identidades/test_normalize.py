@@ -14,6 +14,7 @@ from memex.modules.identidades.normalize import (
     norm_identifier,
     normalize_match,
     org_core,
+    registrable_domain,
 )
 
 _NAMES = ["Café Ñoño", "  Ada   Lovelace  ", "JOSÉ", "naïve façade", "Müller", "Bogotá D.C."]
@@ -57,3 +58,23 @@ def test_norm_identifier() -> None:
     assert norm_identifier("domain", "info@Unity.com") == "unity.com"
     assert norm_identifier("phone", "+57 (300) 123-45") == "+5730012345"
     assert norm_identifier("url", "HTTPS://Example.com/Path/") == "https://example.com/path"
+    # dominio → registrable (eTLD+1): colapsa subdominios, respeta sufijos multi-etiqueta.
+    assert norm_identifier("domain", "noreply@accounts.google.com") == "google.com"
+    assert norm_identifier("domain", "x@tm.openai.com") == "openai.com"
+    assert norm_identifier("domain", "x@tienda.com.co") == "tienda.com.co"
+    assert norm_identifier("domain", "x@sub.tienda.com.co") == "tienda.com.co"
+
+
+def test_registrable_domain() -> None:
+    # colapsa subdominios al dominio que la org posee
+    assert registrable_domain("acme.com") == "acme.com"
+    assert registrable_domain("mail.acme.com") == "acme.com"
+    assert registrable_domain("a.b.c.acme.com") == "acme.com"
+    # sufijos multi-etiqueta (la PSL los conoce; un recorte de 2 etiquetas fallaría)
+    assert registrable_domain("forums.bbc.co.uk") == "bbc.co.uk"
+    assert registrable_domain("otra.com.co") == "otra.com.co"
+    # idempotente
+    assert registrable_domain(registrable_domain("mail.acme.com")) == "acme.com"
+    # fallback: host sin sufijo público / vacío
+    assert registrable_domain("localhost") == "localhost"
+    assert registrable_domain("") == ""

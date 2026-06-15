@@ -20,6 +20,13 @@ from __future__ import annotations
 import re
 import unicodedata
 
+import tldextract
+
+#: Extractor de la Public Suffix List EMBEBIDA y OFFLINE: `suffix_list_urls=()` desactiva el fetch
+#: por HTTP (usa el snapshot que trae el paquete) y `cache_dir=None` evita escribir caché en disco →
+#: determinista, sin red. Carga perezosa del snapshot en la 1ª llamada. Lo usa `registrable_domain`.
+_TLD_EXTRACT = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
+
 #: Sufijos legales/societarios a quitar del núcleo de orgs. ESPEJO de
 #: `migrations/versions/0033_identidades_v2.py::_ORG_SUFFIXES` (mantener en sync — test de paridad).
 _ORG_SUFFIXES: tuple[str, ...] = (
@@ -172,6 +179,21 @@ def org_core(name: str) -> str:
     return _WS_RE.sub(" ", base).strip()
 
 
+def registrable_domain(host: str) -> str:
+    """Dominio REGISTRABLE (eTLD+1) de un host: lo que la organización realmente posee, colapsando
+    los subdominios. `mail.acme.com`/`billing.acme.com` → `acme.com`; `accounts.google.com` →
+    `google.com`. Usa la Public Suffix List (vía `_TLD_EXTRACT`, offline) para acertar con los
+    sufijos multi-etiqueta: `a.tienda.com.co` → `tienda.com.co`, `forums.bbc.co.uk` → `bbc.co.uk`
+    (un recorte ingenuo de 2 etiquetas mezclaría orgs distintas bajo `com.co`/`co.uk`).
+
+    Fallback al host pelado (lower) si la PSL no determina un sufijo (host interno, IP, sin TLD
+    público) — no perder el dato."""
+    h = host.strip().lower()
+    if not h:
+        return ""
+    return _TLD_EXTRACT(h).top_domain_under_public_suffix or h
+
+
 def norm_identifier(kind: str, value: str) -> str:
     """Normaliza el valor de un identificador para el match acotado por plataforma. ESPEJO de la
     normalización usada en el sync/extracción al insertar `mod_identidades_identifiers.value_norm`.
@@ -179,7 +201,8 @@ def norm_identifier(kind: str, value: str) -> str:
     - email: lower + strip.
     - phone: solo dígitos y `+`.
     - handle: lower + strip + sin `@` inicial.
-    - domain: parte tras el último `@` (si la hay), lower + strip.
+    - domain: parte tras el último `@` (si la hay) → DOMINIO REGISTRABLE (eTLD+1, colapsa
+      subdominios; ver `registrable_domain`). Idempotente sobre un registrable.
     - url: lower + strip + sin `/` final.
     - platform_id: strip tal cual (el id que asigna la plataforma es opaco; sin lower-tricks).
     - otro: lower + strip.
@@ -192,7 +215,7 @@ def norm_identifier(kind: str, value: str) -> str:
     if kind == "handle":
         return v.lower().lstrip("@")
     if kind == "domain":
-        return v.rpartition("@")[2].strip().lower()
+        return registrable_domain(v.rpartition("@")[2])
     if kind == "url":
         return v.lower().rstrip("/")
     return v.lower()

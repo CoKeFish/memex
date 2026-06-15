@@ -16,6 +16,7 @@ from memex.core.source import SourceKind
 from memex.db import connection
 from memex.modules.identidades.senders import (
     backfill_senders,
+    renormalize_domain_identifiers,
     weave_chat_structure,
     weave_email_senders,
     weave_sender_structure,
@@ -341,6 +342,50 @@ def test_email_corporativo_dominio_conocido_no_duplica() -> None:
     assert n == 1
     assert len(_identities()) == 1  # no nació otra org
     assert _sender_mentions()[0]["rid"] == o
+
+
+def test_email_subdominio_corporativo_colapsa_al_registrable() -> None:
+    # el identifier 'domain' guarda el dominio REGISTRABLE: un correo de un subdominio
+    # (notifications@email.acme.com) crea la org «acme.com», y otro de OTRO subdominio
+    # (billing@acme.com) resuelve a la MISMA org (no duplica).
+    src = _source("imap", "mail")
+    m1 = _inbox(src, "m1", _email_payload("notifications@email.acme.com", "Acme"))
+    m2 = _inbox(src, "m2", _email_payload("billing@acme.com", "Acme Billing"))
+    with connection() as c:
+        weave_email_senders(c, 1, [m1, m2])
+    ids = _identities()
+    assert len(ids) == 1  # un solo org para ambos subdominios
+    org_id = ids[0][0]
+    assert ("domain", "domain", "acme.com") in _identifiers_of(org_id)
+    mentions = _sender_mentions()
+    assert {m["rid"] for m in mentions} == {org_id}  # ambos correos → la misma org
+    assert {m["ids"][0] for m in mentions} == {m1, m2}
+
+
+def test_renormalize_domain_identifiers_colapsa_e_idempotente() -> None:
+    # un identifier 'domain' viejo con host completo se colapsa al registrable; re-correr no cambia.
+    o = _org("OpenAI")
+    _identifier(o, "domain", "domain", "tm.openai.com")  # valor viejo (host completo)
+    with connection() as c:
+        changed = renormalize_domain_identifiers(c, 1)
+    assert changed == 1
+    assert ("domain", "domain", "openai.com") in _identifiers_of(o)
+    assert ("domain", "domain", "tm.openai.com") not in _identifiers_of(o)
+    with connection() as c:
+        changed2 = renormalize_domain_identifiers(c, 1)  # idempotente
+    assert changed2 == 0
+
+
+def test_renormalize_domain_identifiers_dedup_colision() -> None:
+    # misma identidad, dos dominios que colapsan al mismo registrable → queda uno (UNIQUE intacta)
+    o = _org("OpenAI")
+    _identifier(o, "domain", "domain", "openai.com")
+    _identifier(o, "domain", "domain", "tm.openai.com")  # colapsa a openai.com (duplicado)
+    with connection() as c:
+        changed = renormalize_domain_identifiers(c, 1)
+    assert changed == 1  # el duplicado se borró
+    domains = {vn for p, k, vn in _identifiers_of(o) if k == "domain"}
+    assert domains == {"openai.com"}
 
 
 def test_email_freemail_conocido_resuelve_persona() -> None:

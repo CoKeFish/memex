@@ -146,7 +146,9 @@ class KnownIndex:
         iid = self._email.get(key)
         if iid is not None:
             return self._res(iid, method)
-        domain = key.rpartition("@")[2]
+        # Dominio REGISTRABLE (eTLD+1) — mismo cómputo que los identifiers `domain` se guardan
+        # (norm_identifier('domain')), si no el lookup no matchearía un identifier colapsado.
+        domain = norm_identifier("domain", key)
         if domain:
             oid = self._domain.get(domain)
             if oid is not None:

@@ -65,7 +65,7 @@ from memex.modules.identidades.module import register_card
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.providers import known_providers
 from memex.modules.identidades.providers.base import ContactsProviderError
-from memex.modules.identidades.senders import backfill_senders
+from memex.modules.identidades.senders import backfill_senders, renormalize_domain_identifiers
 from memex.modules.identidades.sync import run_sync
 from memex.relations.deterministic import weave_pertenencia
 from memex.relations.edges import (
@@ -123,7 +123,8 @@ Comandos del agente:
   help         muestra esta ayuda
 
 Mantenimiento (no del agente; usar 'memex-identidades' directo, no 'memex identidad'):
-  sync · add-account · accounts · interest · merge · backfill-productos · backfill-senders
+  sync · add-account · accounts · interest · merge · backfill-productos · backfill-senders ·
+  renormalize-domains
 
 add — desde una tarjeta de contacto / vCard (la lee el agente, no memex):
   memex-identidades add --name "<nombre>" --kind <persona|organizacion|producto> [--email <e>]
@@ -426,6 +427,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Resuelve+persiste el remitente (sin LLM) de mensajes ya procesados pre-Fase-2.",
     )
     bs_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+
+    rd_p = sub.add_parser(
+        "renormalize-domains",
+        help="Re-normaliza los identifiers 'domain' al dominio registrable (eTLD+1). One-shot.",
+    )
+    rd_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
 
     return parser
 
@@ -1667,6 +1674,19 @@ def _cmd_backfill_senders(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_renormalize_domains(args: argparse.Namespace) -> int:
+    """Re-normaliza los identifiers 'domain' al dominio registrable (eTLD+1). One-shot idempotente
+    tras cambiar la normalización; correr luego `memex-graph confirm --no-llm` por si cambió alguna
+    resolución de remitente."""
+    with connection() as conn:
+        changed = renormalize_domain_identifiers(conn, args.user)
+    _say(
+        f"\nrenormalize-domains (user {args.user}): {changed} identifier(s) 'domain' colapsados al "
+        f"dominio registrable. Correr `memex-graph confirm --no-llm` si re-resuelven remitentes.\n"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -1728,6 +1748,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_backfill_productos(args)
         if args.cmd == "backfill-senders":
             return _cmd_backfill_senders(args)
+        if args.cmd == "renormalize-domains":
+            return _cmd_renormalize_domains(args)
         if args.cmd == "interest":
             if args.interest_cmd == "add":
                 return _cmd_interest_add(args)
