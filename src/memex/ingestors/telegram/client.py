@@ -26,6 +26,7 @@ from typing import Any
 from telethon import TelegramClient, events
 from telethon.tl.custom.dialog import Dialog
 from telethon.tl.custom.message import Message
+from telethon.tl.functions.messages import GetForumTopicsRequest
 
 from memex.ingestors.telegram.config import TelegramConfig
 from memex.logging import get_logger
@@ -162,6 +163,24 @@ class TelegramClientWrapper:
         client = self._require_client()
         async for dialog in client.iter_dialogs():
             yield dialog
+
+    async def iter_forum_topics(self, chat_id: int) -> AsyncIterator[tuple[int, str]]:
+        """Foros (supergrupos con topics): yieldea `(topic_id, título)` de cada tema.
+
+        `topic_id` = id del mensaje ROOT del topic — exactamente lo que la allowlist filtra
+        (`AllowedChat.topic_ids`). Salta los `ForumTopicDeleted` (sin id/title)."""
+        client = self._require_client()
+        entity = await client.get_entity(chat_id)
+        result = await client(
+            GetForumTopicsRequest(
+                peer=entity, offset_date=None, offset_id=0, offset_topic=0, limit=100
+            )
+        )
+        for topic in result.topics:
+            tid = getattr(topic, "id", None)
+            title = getattr(topic, "title", None)
+            if isinstance(tid, int) and isinstance(title, str):
+                yield tid, title
 
     # ---- streaming (event-driven) ---- #
 

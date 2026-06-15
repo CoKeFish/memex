@@ -1,6 +1,7 @@
 // Wizard "Conectar Telegram" + selector de grupos/canales (un Dialog, multi-paso).
 // Login: pedir código → ingresar código → [contraseña 2FA]. Luego: discover + multi-select de chats
-// que se persisten en `allowed_chats` del source vinculado. Credenciales resueltas server-side (vault).
+// que se persisten en `allowed_chats` del source vinculado. Los supergrupos con TEMAS (forum) se
+// expanden para elegir sub-canales puntuales (topic_ids). Credenciales server-side (vault).
 
 import { Loader2, Plug, RefreshCw } from "lucide-react"
 import { type FormEvent, useState } from "react"
@@ -13,7 +14,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import {
+  type AllowedChatInput,
   discoverTelegramChats,
+  discoverTelegramTopics,
   getTelegramSource,
   type ManagedAccount,
   requestTelegramCode,
@@ -21,6 +24,7 @@ import {
   submitTelegramCode,
   submitTelegramPassword,
   type TelegramChat,
+  type TelegramTopic,
 } from "@/data/accounts"
 import { ApiError } from "@/lib/api"
 
@@ -52,7 +56,11 @@ export function TelegramConnect({
   const [sourceId, setSourceId] = useState<number | null>(null)
   const [baseConfig, setBaseConfig] = useState<Record<string, unknown>>({})
   const [chats, setChats] = useState<TelegramChat[]>([])
-  const [selected, setSelected] = useState<Set<number>>(new Set())
+  // chatId → topics específicos elegidos ([] = todos los temas del chat). Presencia = chat incluido.
+  const [selected, setSelected] = useState<Map<number, number[]>>(new Map())
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  const [topicsByChat, setTopicsByChat] = useState<Map<number, TelegramTopic[]>>(new Map())
+  const [loadingTopics, setLoadingTopics] = useState<Set<number>>(new Set())
 
   async function loadChats(): Promise<void> {
     const [src, discovered] = await Promise.all([
@@ -63,7 +71,7 @@ export function TelegramConnect({
     if (src) {
       setSourceId(src.sourceId)
       setBaseConfig(src.config)
-      setSelected(new Set(src.allowedChatIds))
+      setSelected(new Map(src.allowedChats.map((c) => [c.chatId, c.topicIds ?? []])))
     }
   }
 
@@ -73,7 +81,9 @@ export function TelegramConnect({
     setCode("")
     setPassword("")
     setChats([])
-    setSelected(new Set())
+    setSelected(new Map())
+    setExpanded(new Set())
+    setTopicsByChat(new Map())
     setSourceId(null)
     setOpen(true)
     setBusy(true)
@@ -129,13 +139,50 @@ export function TelegramConnect({
     }
   }
 
-  function toggle(chatId: number): void {
+  function toggleChat(chatId: number): void {
     setSelected((prev) => {
+      const next = new Map(prev)
+      if (next.has(chatId)) next.delete(chatId)
+      else next.set(chatId, [])
+      return next
+    })
+  }
+
+  function toggleTopic(chatId: number, topicId: number): void {
+    setSelected((prev) => {
+      const next = new Map(prev)
+      const cur = next.get(chatId) ?? []
+      next.set(
+        chatId,
+        cur.includes(topicId) ? cur.filter((t) => t !== topicId) : [...cur, topicId],
+      )
+      return next
+    })
+  }
+
+  async function expandChat(chatId: number): Promise<void> {
+    const isExpanding = !expanded.has(chatId)
+    setExpanded((prev) => {
       const next = new Set(prev)
       if (next.has(chatId)) next.delete(chatId)
       else next.add(chatId)
       return next
     })
+    if (isExpanding && !topicsByChat.has(chatId) && !loadingTopics.has(chatId)) {
+      setLoadingTopics((prev) => new Set(prev).add(chatId))
+      try {
+        const topics = await discoverTelegramTopics(account.id, chatId)
+        setTopicsByChat((prev) => new Map(prev).set(chatId, topics))
+      } catch (e) {
+        toast.error(errMsg(e))
+      } finally {
+        setLoadingTopics((prev) => {
+          const next = new Set(prev)
+          next.delete(chatId)
+          return next
+        })
+      }
+    }
   }
 
   async function saveChats(): Promise<void> {
@@ -145,7 +192,10 @@ export function TelegramConnect({
     }
     setBusy(true)
     try {
-      const picks = chats.filter((c) => selected.has(c.chatId)).map((c) => ({ chatId: c.chatId }))
+      const picks: AllowedChatInput[] = [...selected].map(([chatId, topicArr]) => ({
+        chatId,
+        topicIds: topicArr.length ? topicArr : null,
+      }))
       await setAllowedChats(sourceId, picks, baseConfig)
       toast.success(`${picks.length} chat(s) guardados`)
       setOpen(false)
@@ -170,7 +220,7 @@ export function TelegramConnect({
               {step === "code" && `Te enviamos un código a ${phoneMasked}. Ingresalo abajo.`}
               {step === "2fa" &&
                 "Tu cuenta tiene verificación en dos pasos. Ingresá tu contraseña."}
-              {step === "chats" && "Elegí los grupos/canales a ingerir."}
+              {step === "chats" && "Elegí los grupos/canales (y temas) a ingerir."}
             </DialogDescription>
           </DialogHeader>
 
@@ -221,17 +271,66 @@ export function TelegramConnect({
                 </p>
               ) : (
                 <div className="max-h-72 space-y-1 overflow-y-auto rounded-md border border-border p-2">
-                  {chats.map((c) => (
-                    <label key={c.chatId} className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={selected.has(c.chatId)}
-                        onChange={() => toggle(c.chatId)}
-                      />
-                      <span className="truncate">{c.name || "(sin nombre)"}</span>
-                      <span className="eyebrow ml-auto text-muted-foreground">{c.kind}</span>
-                    </label>
-                  ))}
+                  {chats.map((c) => {
+                    const topicSel = selected.get(c.chatId) ?? []
+                    const isExpanded = expanded.has(c.chatId)
+                    const topics = topicsByChat.get(c.chatId) ?? []
+                    return (
+                      <div key={c.chatId}>
+                        <div className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={selected.has(c.chatId)}
+                            onChange={() => toggleChat(c.chatId)}
+                          />
+                          <span className="truncate">{c.name || "(sin nombre)"}</span>
+                          <span className="eyebrow text-muted-foreground">{c.kind}</span>
+                          {c.isForum && (
+                            <button
+                              type="button"
+                              className="ml-auto text-xs text-muted-foreground hover:text-foreground"
+                              onClick={() => expandChat(c.chatId)}
+                            >
+                              {isExpanded ? "▾ temas" : "▸ temas"}
+                              {topicSel.length ? ` (${topicSel.length})` : ""}
+                            </button>
+                          )}
+                        </div>
+                        {c.isForum && isExpanded && (
+                          <div className="mt-1 ml-6 space-y-0.5 border-l border-border pl-2">
+                            {loadingTopics.has(c.chatId) ? (
+                              <p className="text-[11px] text-muted-foreground">cargando temas…</p>
+                            ) : topics.length === 0 ? (
+                              <p className="text-[11px] text-muted-foreground">
+                                sin temas (o sin permiso)
+                              </p>
+                            ) : (
+                              <>
+                                <p className="text-[11px] text-muted-foreground">
+                                  {topicSel.length
+                                    ? "solo estos temas:"
+                                    : "todos los temas (marcá para acotar)"}
+                                </p>
+                                {topics.map((t) => (
+                                  <label
+                                    key={t.topicId}
+                                    className="flex items-center gap-2 text-xs"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={topicSel.includes(t.topicId)}
+                                      onChange={() => toggleTopic(c.chatId, t.topicId)}
+                                    />
+                                    <span className="truncate">{t.title}</span>
+                                  </label>
+                                ))}
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
               )}
               <div className="flex items-center justify-end gap-2">

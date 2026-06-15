@@ -253,10 +253,46 @@ async def list_chats(account_id: int, user_id: UserID) -> dict[str, Any]:
         async with TelegramClientWrapper(cfg) as tc:
             async for d in tc.iter_dialogs():
                 kind = "channel" if d.is_channel else ("group" if d.is_group else "user")
-                chats.append({"chat_id": int(d.id), "name": str(d.name or ""), "kind": kind})
+                # `forum=True` en la entity = supergrupo con TEMAS (sub-canales) — el front lo
+                # expande para que elijas topics puntuales (AllowedChat.topic_ids).
+                is_forum = bool(getattr(getattr(d, "entity", None), "forum", False))
+                chats.append(
+                    {
+                        "chat_id": int(d.id),
+                        "name": str(d.name or ""),
+                        "kind": kind,
+                        "is_forum": is_forum,
+                    }
+                )
     except TelegramAuthError as e:
         raise HTTPException(
             status_code=422, detail="Telegram no está conectado; hacé el login primero"
         ) from e
     _log.info("telegram.discover.ok", account_id=account_id, count=len(chats))
     return {"chats": chats}
+
+
+@router.get("/chats/{chat_id}/topics")
+async def list_topics(account_id: int, chat_id: int, user_id: UserID) -> dict[str, Any]:
+    """Temas (forum topics) de un chat — los 'sub-canales' de un supergrupo con foros."""
+    with connection() as conn:
+        _assert_owns(conn, user_id, account_id)
+        cfg = _resolve_tg_config(conn, user_id, account_id)
+
+    topics: list[dict[str, Any]] = []
+    try:
+        async with TelegramClientWrapper(cfg) as tc:
+            async for tid, title in tc.iter_forum_topics(chat_id):
+                topics.append({"topic_id": tid, "title": title})
+    except TelegramAuthError as e:
+        raise HTTPException(
+            status_code=422, detail="Telegram no está conectado; hacé el login primero"
+        ) from e
+    except Exception as e:
+        # Chat sin foros / sin permiso a topics → no es fatal: sin temas (el front muestra el chat
+        # entero). Logueamos el detalle.
+        _log.warning(
+            "telegram.topics.failed", account_id=account_id, chat_id=chat_id, exc_msg=str(e)
+        )
+        return {"topics": []}
+    return {"topics": topics}

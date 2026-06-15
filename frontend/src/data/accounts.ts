@@ -213,24 +213,49 @@ export interface TelegramChat {
   chatId: number
   name: string
   kind: "channel" | "group" | "user"
+  /** supergrupo con TEMAS (forum) — tiene sub-canales seleccionables (topics). */
+  isForum: boolean
 }
 
 /** Discover: lista los grupos/canales accesibles (requiere sesión = login hecho). */
 export async function discoverTelegramChats(accountId: number): Promise<TelegramChat[]> {
-  const r = await apiGet<{ chats: { chat_id: number; name: string; kind: string }[] }>(
-    `/accounts/${accountId}/telegram/chats`,
-  )
+  const r = await apiGet<{
+    chats: { chat_id: number; name: string; kind: string; is_forum?: boolean }[]
+  }>(`/accounts/${accountId}/telegram/chats`)
   return r.chats.map((c) => ({
     chatId: c.chat_id,
     name: c.name,
     kind: c.kind as TelegramChat["kind"],
+    isForum: Boolean(c.is_forum),
   }))
+}
+
+export interface TelegramTopic {
+  topicId: number
+  title: string
+}
+
+/** Temas (forum topics) de un chat — los 'sub-canales' de un supergrupo con foros. */
+export async function discoverTelegramTopics(
+  accountId: number,
+  chatId: number,
+): Promise<TelegramTopic[]> {
+  const r = await apiGet<{ topics: { topic_id: number; title: string }[] }>(
+    `/accounts/${accountId}/telegram/chats/${chatId}/topics`,
+  )
+  return r.topics.map((t) => ({ topicId: t.topic_id, title: t.title }))
+}
+
+export interface AllowedChatSel {
+  chatId: number
+  /** topics específicos elegidos; null = todos los temas del chat. */
+  topicIds: number[] | null
 }
 
 export interface TelegramSourceInfo {
   sourceId: number
   config: Record<string, unknown>
-  allowedChatIds: number[]
+  allowedChats: AllowedChatSel[]
 }
 
 /** La source telegram vinculada a la cuenta (para leer/guardar allowed_chats). null si no hay. */
@@ -240,15 +265,24 @@ export async function getTelegramSource(accountId: number): Promise<TelegramSour
   >("/sources")
   const src = rows.find((s) => s.type === "telegram" && s.account_id === accountId)
   if (!src) return null
-  const raw = (src.config?.["allowed_chats"] as { chat_id?: unknown }[] | undefined) ?? []
-  const allowedChatIds = raw
-    .map((c) => Number(c.chat_id))
-    .filter((n) => Number.isFinite(n))
-  return { sourceId: src.id, config: src.config ?? {}, allowedChatIds }
+  const raw =
+    (src.config?.["allowed_chats"] as { chat_id?: unknown; topic_ids?: unknown }[] | undefined) ??
+    []
+  const allowedChats: AllowedChatSel[] = raw
+    .map((c) => ({
+      chatId: Number(c.chat_id),
+      topicIds: Array.isArray(c.topic_ids)
+        ? c.topic_ids.map(Number).filter((n) => Number.isFinite(n))
+        : null,
+    }))
+    .filter((c) => Number.isFinite(c.chatId))
+  return { sourceId: src.id, config: src.config ?? {}, allowedChats }
 }
 
 export interface AllowedChatInput {
   chatId: number
+  /** null = todos los temas; [ids] = solo esos topics. */
+  topicIds?: number[] | null
   streaming?: boolean
   priority?: boolean
 }
@@ -261,6 +295,7 @@ export async function setAllowedChats(
 ): Promise<void> {
   const allowed_chats = chats.map((c) => ({
     chat_id: c.chatId,
+    topic_ids: c.topicIds === undefined ? null : c.topicIds,
     streaming: c.streaming ?? false,
     priority: c.priority ?? false,
   }))
