@@ -83,6 +83,56 @@ _ROLE_TOKENS = frozenset(
     }
 )
 
+#: Dominios de correo PERSONAL gratuito (free-mail). El dominio NO representa a una organización: el
+#: remitente es la PERSONA dueña de la dirección, no el proveedor. Por eso, al resolver el remitente
+#: de un correo (Fase 2), un dominio free-mail NO crea la org del dominio (sería ruido como una org
+#: "gmail.com") — se resuelve por el email exacto si ya se conoce. Lista CURADA (no exhaustiva): se
+#: amplía si aparece un proveedor frecuente. Cubre los comunes globales + los usados en Colombia.
+FREEMAIL_DOMAINS = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "outlook.com",
+        "outlook.es",
+        "hotmail.com",
+        "hotmail.es",
+        "hotmail.co.uk",
+        "live.com",
+        "live.com.mx",
+        "msn.com",
+        "yahoo.com",
+        "yahoo.es",
+        "yahoo.com.mx",
+        "ymail.com",
+        "rocketmail.com",
+        "icloud.com",
+        "me.com",
+        "mac.com",
+        "aol.com",
+        "protonmail.com",
+        "proton.me",
+        "pm.me",
+        "gmx.com",
+        "gmx.net",
+        "zoho.com",
+        "mail.com",
+        "yandex.com",
+        "tutanota.com",
+        "fastmail.com",
+        "hey.com",
+    }
+)
+
+
+def is_freemail(domain: str) -> bool:
+    """True si `domain` es un proveedor de correo personal gratuito (gmail, outlook, …).
+
+    El dominio de un free-mail NO identifica a una organización (lo comparten millones de personas
+    sin relación entre sí): el remitente es la persona dueña de la dirección. Por eso la resolución
+    del remitente de correo NO crea una org para estos dominios. `domain` se compara normalizado
+    (lower, ya sin el local-part); pasar `norm_identifier('domain', email)` o el dominio pelado."""
+    return domain.strip().lower() in FREEMAIL_DOMAINS
+
 
 def is_role_email(email: str) -> bool:
     """True si `email` es una dirección ROLE/RELAY (noreply, notifications, mailer-daemon, …).

@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from memex.config import settings
 from memex.db import connection
-from memex.modules.identidades.chat_senders import weave_chat_structure
+from memex.modules.identidades.senders import weave_chat_structure
 from memex.relations.clustering import build_cluster_graph
 from memex.relations.cooccurrence import generate_cooccurrence
 from memex.relations.edges import (

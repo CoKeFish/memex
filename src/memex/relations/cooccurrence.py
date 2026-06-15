@@ -11,8 +11,10 @@ esos pares para no doble-contar el peso. La PROCEDENCIA de cada pista se acumula
 `relation_edge_sources` (TODOS los mensajes donde el par co-ocurrió, no solo el primero).
 
 La provenance vértice→mensaje (`vertex_inbox_ids`) NO es arista (inbox es atributo): vive en
-`source_inbox_ids` (o se DERIVA del payload: remitente y canal). Es la base de la co-ocurrencia y la
-consume también el drill-down del API (`/graph`) y la timeline de cúmulos.
+`source_inbox_ids`, en las MENCIONES (incluido el REMITENTE, persistido en el paso 5 como
+avistamiento 'sender' por `modules/identidades/senders.py` — ya NO se deriva al vuelo) o se DERIVA
+del payload (solo el CANAL). Es la base de la co-ocurrencia y la consume también el drill-down del
+API (`/graph`) y la timeline de cúmulos.
 
 Antes esto vivía en el barrido global `build_relations`; ahora `generate_cooccurrence` es la primera
 parte de la fase de co-ocurrencia, que luego juzga (`run_per_message_confirm`).
@@ -63,50 +65,13 @@ DEFAULT_COOCCURRENCE_CAP = 8
 #: está acá: su vértice es el CONSOLIDADO, cuya procedencia es TRANSITIVA (vía links → crudos).
 _DIRECT_SOURCES: tuple[tuple[str, str], ...] = (("hackathones", "mod_hackathones_events"),)
 
-#: Brazos de REMITENTE de la provenance: el remitente de un mensaje, resuelto DETERMINISTA contra
-#: `mod_identidades_identifiers`, entra a la provenance de ese mensaje (→ co-ocurre con lo
-#: extraído de él) SIN persistir menciones (derivado on-the-fly, igual que la procedencia
-#: transitiva de finance/calendar). Solo RESUELVE: la creación de remitentes de chat desconocidos
-#: vive en `chat_senders.ensure_chat_sender_identities` (corre antes, en el paso 5 vía
-#: `weave_chat_structure`). Bots y mensajes de servicio quedan fuera (relay ≠ persona). El
-#: identifier social debe llevar la `platform` real (`instagram|facebook|x`); un handle manual con
-#: platform='unknown' NO matchea (estricto a propósito: evita falsos positivos cross-plataforma).
-_SENDER_PROVENANCE_SQL = """
-    SELECT i.id AS mid, idf.identity_id AS iid, ident.kind AS kind
-    FROM inbox i
-    JOIN mod_identidades_identifiers idf
-      ON idf.user_id = i.user_id AND idf.kind = 'email'
-     AND idf.value_norm = lower(i.payload->'from'->>'email')
-    JOIN mod_identidades ident ON ident.id = idf.identity_id
-    WHERE i.user_id = :u AND i.payload->'from'->>'email' IS NOT NULL
-    UNION
-    SELECT i.id AS mid, idf.identity_id AS iid, ident.kind AS kind
-    FROM inbox i
-    JOIN mod_identidades_identifiers idf
-      ON idf.user_id = i.user_id AND idf.platform = 'telegram'
-     AND idf.kind = 'platform_id'
-     AND idf.value_norm = i.payload->'sender'->>'user_id'
-    JOIN mod_identidades ident ON ident.id = idf.identity_id
-    WHERE i.user_id = :u AND i.payload->'sender'->>'user_id' IS NOT NULL
-      AND (i.payload->'sender'->>'is_bot')::boolean IS NOT TRUE
-    UNION
-    SELECT i.id AS mid, idf.identity_id AS iid, ident.kind AS kind
-    FROM inbox i
-    JOIN mod_identidades_identifiers idf
-      ON idf.user_id = i.user_id AND idf.kind = 'handle'
-     AND idf.platform = i.payload->>'platform'
-     AND idf.value_norm = lower(i.payload->>'account')
-    JOIN mod_identidades ident ON ident.id = idf.identity_id
-    WHERE i.user_id = :u AND i.payload->>'post_id' IS NOT NULL
-      AND i.payload->>'account' IS NOT NULL
-"""
-
 
 def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
     """Mapa vértice → ids de los mensajes (inbox) de los que salió. Directo para hackathones
     (`source_inbox_ids`); TRANSITIVO para finance y calendar (consolidado→crudos) e identidades
-    (persona/org ← menciones); DERIVADO para el remitente (payload→identifiers, sin filas
-    intermedias). Base de la co-ocurrencia (y, luego, del pre-filtro)."""
+    (persona/org/producto ← menciones, INCLUIDO el remitente, persistido en el paso 5 como
+    avistamiento 'sender'); DERIVADO solo para el CANAL (payload→canal). Base de la co-ocurrencia
+    (y, luego, del pre-filtro)."""
     prov: dict[Ref, set[int]] = defaultdict(set)
 
     for slug, table in _DIRECT_SOURCES:
@@ -157,10 +122,6 @@ def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
         ids = [int(x) for x in (r["ids"] or [])]
         slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
         prov[Ref(slug, int(r["iid"]))].update(ids)
-
-    for r in conn.execute(text(_SENDER_PROVENANCE_SQL), {"u": user_id}).mappings():
-        slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
-        prov[Ref(slug, int(r["iid"]))].add(int(r["mid"]))
 
     # CANAL (derivado): el canal está en TODO mensaje de su chat → co-ocurre con lo que salga de
     # cada uno. NO cuenta para el cap (es estructural, ver `_materialize_cooccurrence`).

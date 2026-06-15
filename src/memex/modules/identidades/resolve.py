@@ -110,6 +110,30 @@ class KnownIndex:
         if ak:
             self._alias.setdefault(ak, identity_id)
 
+    # --- accessores por-identificador para la resolución de REMITENTE (Fase 2) -------------- #
+    # La resolución del remitente (modules/identidades/senders.py) tiene una POLÍTICA propia por
+    # medio (corporativo→org por dominio, free-mail→persona por email, social→handle) distinta de
+    # `resolve()`/`_by_email` (que corta la cascada de menciones en los emails role a propósito).
+    # Estos lookups exponen los índices ya cargados para que senders.py reutilice el `KnownIndex`
+    # (una sola carga por lote) + el `add()` intra-lote, sin re-consultar la DB por mensaje. Los
+    # valores van YA normalizados (`norm_identifier`).
+
+    def email_identity(self, value_norm: str) -> int | None:
+        """Identidad cuyo identifier email coincide exacto, si la hay."""
+        return self._email.get(value_norm)
+
+    def domain_identity(self, value_norm: str) -> int | None:
+        """Org cuyo identifier `domain` coincide exacto, si la hay."""
+        return self._domain.get(value_norm)
+
+    def handle_identity(self, platform: str, value_norm: str) -> int | None:
+        """Identidad con ese `handle` en ESA plataforma, si la hay (estricto por plataforma)."""
+        return self._handle_by_platform.get((platform, value_norm))
+
+    def kind_of(self, identity_id: int) -> str | None:
+        """kind canónico (persona|organizacion|producto) de una identidad del índice, si está."""
+        return self._kind.get(identity_id)
+
     def _res(self, identity_id: int, method: str) -> Resolution:
         return Resolution(self._kind.get(identity_id), identity_id, method)
 

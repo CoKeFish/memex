@@ -65,6 +65,7 @@ from memex.modules.identidades.module import register_card
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.providers import known_providers
 from memex.modules.identidades.providers.base import ContactsProviderError
+from memex.modules.identidades.senders import backfill_senders
 from memex.modules.identidades.sync import run_sync
 from memex.relations.deterministic import weave_pertenencia
 from memex.relations.edges import (
@@ -122,7 +123,7 @@ Comandos del agente:
   help         muestra esta ayuda
 
 Mantenimiento (no del agente; usar 'memex-identidades' directo, no 'memex identidad'):
-  sync · add-account · accounts · interest · merge · backfill-productos
+  sync · add-account · accounts · interest · merge · backfill-productos · backfill-senders
 
 add — desde una tarjeta de contacto / vCard (la lee el agente, no memex):
   memex-identidades add --name "<nombre>" --kind <persona|organizacion|producto> [--email <e>]
@@ -419,6 +420,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Aplica la reclasificación. Sin esto solo imprime la lista (dry-run).",
     )
+
+    bs_p = sub.add_parser(
+        "backfill-senders",
+        help="Resuelve+persiste el remitente (sin LLM) de mensajes ya procesados pre-Fase-2.",
+    )
+    bs_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
 
     return parser
 
@@ -1643,6 +1650,23 @@ def _cmd_backfill_productos(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_backfill_senders(args: argparse.Namespace) -> int:
+    """Backfill determinista (sin LLM) del remitente de mensajes ya procesados pre-Fase-2: crea/
+    resuelve la identidad del remitente por medio y persiste su avistamiento. Idempotente. Después
+    correr `memex-graph confirm --no-llm` para que los remitentes co-ocurran."""
+    with connection() as conn:
+        out = backfill_senders(conn, args.user)
+    if not out:
+        _say(f"\nSin mensajes procesados para backfillar (user {args.user}).\n")
+        return 0
+    breakdown = " ".join(f"{kind}={n}" for kind, n in sorted(out.items()))
+    _say(
+        f"\nbackfill-senders (user {args.user}): {breakdown}. "
+        f"Correr `memex-graph confirm --no-llm` para regenerar la co-ocurrencia.\n"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -1702,6 +1726,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_candidates(args)
         if args.cmd == "backfill-productos":
             return _cmd_backfill_productos(args)
+        if args.cmd == "backfill-senders":
+            return _cmd_backfill_senders(args)
         if args.cmd == "interest":
             if args.interest_cmd == "add":
                 return _cmd_interest_add(args)

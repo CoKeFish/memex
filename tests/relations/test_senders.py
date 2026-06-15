@@ -1,7 +1,9 @@
-"""Remitente→identidad en el grafo: la provenance DERIVADA (payload→identifiers) mete al remitente
-resuelto en la co-ocurrencia de sus mensajes, y `ensure_chat_sender_identities` crea (una sola vez)
-la identidad de los remitentes de CHAT desconocidos. Email/social solo RESUELVEN (nunca crean);
-bots y mensajes de servicio quedan fuera."""
+"""Remitente como identidad de PRIMERA CLASE (Fase 2): el remitente de TODO mensaje se resuelve y se
+persiste como avistamiento (`mod_identidades_mentions`, `resolution_method='sender'`) en la
+extracción (paso 5), y co-ocurre con lo extraído por el brazo NORMAL de menciones (ya NO por un
+brazo derivado al vuelo). Política de creación asimétrica por medio: chat→persona, email corp→org
+por dominio (free-mail→persona, sin crear), social→org por handle. Ver
+`modules/identidades/senders.py`."""
 
 from __future__ import annotations
 
@@ -10,8 +12,15 @@ from typing import Any
 
 from sqlalchemy import text
 
+from memex.core.source import SourceKind
 from memex.db import connection
-from memex.modules.identidades.chat_senders import weave_chat_structure
+from memex.modules.identidades.senders import (
+    backfill_senders,
+    weave_chat_structure,
+    weave_email_senders,
+    weave_sender_structure,
+    weave_social_senders,
+)
 from memex.relations.cooccurrence import generate_cooccurrence
 from memex.relations.edges import list_edges
 
@@ -73,6 +82,10 @@ def _email_payload(email: str, name: str = "X") -> dict[str, Any]:
     return {"from": {"email": email, "name": name}, "folder": "Inbox", "subject": "s"}
 
 
+def _social_payload(platform: str, account: str) -> dict[str, Any]:
+    return {"platform": platform, "account": account, "post_id": "p1", "text": "post"}
+
+
 def _finance(merchant: str, inbox_ids: list[int]) -> int:
     crudo = int(
         _exec(
@@ -109,6 +122,16 @@ def _person(name: str) -> int:
     )
 
 
+def _org(name: str) -> int:
+    return int(
+        _exec(
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'organizacion', :n) RETURNING id",
+            n=name,
+        )
+    )
+
+
 def _identifier(identity_id: int, platform: str, kind: str, value: str) -> None:
     _exec(
         "INSERT INTO mod_identidades_identifiers "
@@ -121,12 +144,32 @@ def _identifier(identity_id: int, platform: str, kind: str, value: str) -> None:
     )
 
 
+def _extracted(inbox_id: int, slug: str = "identidades") -> None:
+    """Marca un mensaje como YA procesado (cursor en module_extractions) — lo que hace elegible al
+    backfill (resolvió su gate de relevancia/blacklist en su momento)."""
+    _exec(
+        "INSERT INTO module_extractions (user_id, module_slug, inbox_id) VALUES (1, :s, :i)",
+        s=slug,
+        i=inbox_id,
+    )
+
+
 def _identities() -> list[tuple[int, str]]:
     with connection() as c:
         return [
             (int(r.id), str(r.display_name))
             for r in c.execute(
                 text("SELECT id, display_name FROM mod_identidades WHERE user_id = 1 ORDER BY id")
+            ).all()
+        ]
+
+
+def _identity_kinds() -> list[str]:
+    with connection() as c:
+        return [
+            str(r.kind)
+            for r in c.execute(
+                text("SELECT kind FROM mod_identidades WHERE user_id = 1 ORDER BY id")
             ).all()
         ]
 
@@ -145,11 +188,35 @@ def _identifiers_of(identity_id: int) -> set[tuple[str, str, str]]:
         }
 
 
+def _sender_mentions() -> list[dict[str, Any]]:
+    """Avistamientos de remitente persistidos (resolution_method='sender')."""
+    with connection() as c:
+        return [
+            {
+                "rid": int(r["resolved_identity_id"]),
+                "rkind": str(r["resolved_kind"]),
+                "ids": [int(x) for x in r["source_inbox_ids"]],
+            }
+            for r in c.execute(
+                text(
+                    "SELECT resolved_identity_id, resolved_kind, source_inbox_ids "
+                    "FROM mod_identidades_mentions "
+                    "WHERE user_id = 1 AND resolution_method = 'sender' ORDER BY id"
+                )
+            )
+            .mappings()
+            .all()
+        ]
+
+
 def _pair(e: Any) -> set[tuple[str, int]]:
     return {(e.src.slug, e.src.id), (e.dst.slug, e.dst.id)}
 
 
-def test_chat_sender_desconocido_se_crea_idempotente() -> None:
+# --- chat -------------------------------------------------------------------------------- #
+
+
+def test_chat_sender_desconocido_se_crea_con_mencion_idempotente() -> None:
     src = _source("telegram", "tg")
     m1 = _inbox(src, "m1", _tg_payload(111, username="Juanito", display_name="Juan Niebla"))
     with connection() as c:
@@ -163,10 +230,14 @@ def test_chat_sender_desconocido_se_crea_idempotente() -> None:
         ("telegram", "platform_id", "111"),
         ("telegram", "handle", "juanito"),
     }
+    mentions = _sender_mentions()
+    assert len(mentions) == 1
+    assert mentions[0] == {"rid": iid, "rkind": "persona", "ids": [m1]}
     with connection() as c:
         _, senders2, _ = weave_chat_structure(c, 1, [m1])  # re-correr: ya existe, no duplica
     assert senders2 == 0
     assert len(_identities()) == 1
+    assert len(_sender_mentions()) == 1  # la mención NO se re-inserta
 
 
 def test_bot_y_service_message_se_saltan() -> None:
@@ -180,12 +251,14 @@ def test_bot_y_service_message_se_saltan() -> None:
     assert senders == 0
     assert participa == 0
     assert _identities() == []
+    assert _sender_mentions() == []
     with connection() as c:
         assert list_edges(c, 1) == []
 
 
 def test_enriquecimiento_por_username_no_crea() -> None:
-    # el username ya era identifier de una identidad → se le ata el platform_id (no nace otra).
+    # el username ya era identifier de una identidad → se le ata el platform_id (no nace otra) y la
+    # mención del remitente apunta a esa identidad.
     p = _person("Juan Niebla")
     _identifier(p, "telegram", "handle", "juanito")
     src = _source("telegram", "tg")
@@ -195,17 +268,18 @@ def test_enriquecimiento_por_username_no_crea() -> None:
     assert senders == 0
     assert len(_identities()) == 1
     assert ("telegram", "platform_id", "111") in _identifiers_of(p)
+    mentions = _sender_mentions()
+    assert len(mentions) == 1 and mentions[0]["rid"] == p
 
 
-def test_chat_sender_coocurre_con_lo_extraido() -> None:
-    # el remitente del mensaje co-ocurre con el hecho extraído de ESE mensaje, sin mención alguna.
-    # (el mensaje también trae su canal → 2 pistas: remitente↔gasto y canal↔gasto; la
-    # remitente↔canal la suprime el participa_en confirmed del par.)
+def test_chat_sender_coocurre_via_mencion() -> None:
+    # el remitente co-ocurre con el hecho extraído de su mensaje, ahora vía la mención persistida.
+    # 2 pistas: remitente↔gasto y canal↔gasto (remitente↔canal la suprime el participa_en).
     src = _source("telegram", "tg")
     mid = _inbox(src, "m1", _tg_payload(111, display_name="Juan Niebla"))
     fin = _finance("Rappi", [mid])
     with connection() as c:
-        _, senders, _ = weave_chat_structure(c, 1, [mid])  # paso 5: remitente + canal + participa
+        _, senders, _ = weave_chat_structure(c, 1, [mid])  # paso 5
         generate_cooccurrence(c, 1)  # paso 7
         edges = list_edges(c, 1, producer="inbox")
     assert senders == 1
@@ -213,65 +287,182 @@ def test_chat_sender_coocurre_con_lo_extraido() -> None:
     assert len(edges) == 2
     pares = [_pair(e) for e in edges]
     assert {("finance", fin), ("identidades:person", sender_id)} in pares
-    for e in edges:
-        assert e.verdict == "ambiguous"
-        assert e.relation_type == "co-ocurrencia"
+    mentions = _sender_mentions()
+    assert len(mentions) == 1 and mentions[0]["rid"] == sender_id
 
 
-def test_email_remitente_conocido_coocurre() -> None:
+# --- email ------------------------------------------------------------------------------- #
+
+
+def test_email_corporativo_conocido_por_email_resuelve_persona() -> None:
+    # un contacto corporativo real (email exacto NO-role conocido) gana sobre el dominio → persona.
     p = _person("Ana Rivas")
     _identifier(p, "email", "email", "ana@rivas.co")
     src = _source("imap", "mail")
-    mid = _inbox(src, "m1", _email_payload("Ana@Rivas.co"))  # case-insensitive por lower()
+    mid = _inbox(src, "m1", _email_payload("Ana@Rivas.co", "Ana Rivas"))  # case-insensitive
     fin = _finance("Uber", [mid])
     with connection() as c:
-        generate_cooccurrence(c, 1)  # email solo RESUELVE (sin weave_chat_structure)
+        n = weave_email_senders(c, 1, [mid])
+        generate_cooccurrence(c, 1)
         edges = list_edges(c, 1, producer="inbox")
+    assert n == 1
+    assert len(_identities()) == 1  # NO se creó org del dominio
     assert len(edges) == 1
     assert _pair(edges[0]) == {("finance", fin), ("identidades:person", p)}
 
 
-def test_email_remitente_desconocido_no_crea_ni_coocurre() -> None:
+def test_email_corporativo_desconocido_crea_org_y_coocurre() -> None:
+    # remitente de servicio de un dominio corporativo → crea la ORG del dominio + co-ocurre.
     src = _source("imap", "mail")
-    mid = _inbox(src, "m1", _email_payload("nadie@desconocido.com"))
-    _finance("Uber", [mid])
+    mid = _inbox(src, "m1", _email_payload("notifications@nequi.com", "Nequi"))
+    fin = _finance("Compra", [mid])
     with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+        generate_cooccurrence(c, 1)
+        edges = list_edges(c, 1, producer="inbox")
+    assert n == 1
+    ids = _identities()
+    assert len(ids) == 1
+    org_id, display = ids[0]
+    assert display == "Nequi"
+    assert ("domain", "domain", "nequi.com") in _identifiers_of(org_id)
+    assert len(edges) == 1
+    assert _pair(edges[0]) == {("finance", fin), ("identidades:org", org_id)}
+
+
+def test_email_corporativo_dominio_conocido_no_duplica() -> None:
+    # ya existe la org con el dominio → otro correo del mismo dominio resuelve, no crea otra.
+    o = _org("Nequi")
+    _identifier(o, "domain", "domain", "nequi.com")
+    src = _source("imap", "mail")
+    mid = _inbox(src, "m1", _email_payload("soporte@nequi.com", "Nequi Soporte"))
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+    assert n == 1
+    assert len(_identities()) == 1  # no nació otra org
+    assert _sender_mentions()[0]["rid"] == o
+
+
+def test_email_freemail_conocido_resuelve_persona() -> None:
+    p = _person("Ana")
+    _identifier(p, "email", "email", "ana@gmail.com")
+    src = _source("imap", "mail")
+    mid = _inbox(src, "m1", _email_payload("ana@gmail.com", "Ana"))
+    fin = _finance("Tienda", [mid])
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+        generate_cooccurrence(c, 1)
+        edges = list_edges(c, 1, producer="inbox")
+    assert n == 1
+    assert len(_identities()) == 1
+    assert _pair(edges[0]) == {("finance", fin), ("identidades:person", p)}
+
+
+def test_email_freemail_desconocido_no_crea_ni_coocurre() -> None:
+    src = _source("imap", "mail")
+    mid = _inbox(src, "m1", _email_payload("random.person@gmail.com", "Random"))
+    _finance("Tienda", [mid])
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
         generate_cooccurrence(c, 1)
         edges = list_edges(c, 1)
-    assert _identities() == []  # email NUNCA crea
+    assert n == 0
+    assert _identities() == []  # free-mail desconocido NO crea
+    assert _sender_mentions() == []
     assert edges == []  # un solo vértice en el mensaje → sin pares
 
 
-def test_social_cuenta_conocida_coocurre() -> None:
+# --- social ------------------------------------------------------------------------------ #
+
+
+def test_social_desconocido_crea_org_y_coocurre() -> None:
+    src = _source("apify_instagram", "ig")
+    mid = _inbox(src, "m1", _social_payload("instagram", "LaCuenta"))
+    fin = _finance("Tienda", [mid])
+    with connection() as c:
+        n = weave_social_senders(c, 1, [mid])
+        generate_cooccurrence(c, 1)
+        edges = list_edges(c, 1, producer="inbox")
+    assert n == 1
+    ids = _identities()
+    assert len(ids) == 1
+    org_id, display = ids[0]
+    assert display == "LaCuenta"
+    assert ("instagram", "handle", "lacuenta") in _identifiers_of(org_id)
+    assert _pair(edges[0]) == {("finance", fin), ("identidades:org", org_id)}
+
+
+def test_social_conocido_resuelve() -> None:
     p = _person("La Cuenta")
     _identifier(p, "instagram", "handle", "lacuenta")
     src = _source("apify_instagram", "ig")
-    mid = _inbox(
-        src,
-        "m1",
-        {"platform": "instagram", "account": "LaCuenta", "post_id": "p1", "text": "post"},
-    )
+    mid = _inbox(src, "m1", _social_payload("instagram", "LaCuenta"))
     fin = _finance("Tienda", [mid])
     with connection() as c:
+        n = weave_social_senders(c, 1, [mid])
         generate_cooccurrence(c, 1)
         edges = list_edges(c, 1, producer="inbox")
-    assert len(edges) == 1
+    assert n == 1
+    assert len(_identities()) == 1
     assert _pair(edges[0]) == {("finance", fin), ("identidades:person", p)}
 
 
-def test_social_handle_platform_unknown_no_matchea() -> None:
-    # un handle manual con platform='unknown' NO resuelve al remitente social (estricto a
-    # propósito: el match exige la plataforma real).
+def test_social_platform_unknown_no_resuelve_crea_nueva() -> None:
+    # un handle manual con platform='unknown' NO resuelve el post de instagram (estricto por
+    # plataforma): se crea una org nueva con el handle en la plataforma real.
     p = _person("La Cuenta")
     _identifier(p, "unknown", "handle", "lacuenta")
     src = _source("apify_instagram", "ig")
-    mid = _inbox(
-        src,
-        "m1",
-        {"platform": "instagram", "account": "lacuenta", "post_id": "p1", "text": "post"},
-    )
-    _finance("Tienda", [mid])
+    mid = _inbox(src, "m1", _social_payload("instagram", "lacuenta"))
+    fin = _finance("Tienda", [mid])
     with connection() as c:
+        n = weave_social_senders(c, 1, [mid])
         generate_cooccurrence(c, 1)
         edges = list_edges(c, 1, producer="inbox")
-    assert edges == []
+    assert n == 1
+    ids = _identities()
+    assert len(ids) == 2  # la persona manual + la org nueva
+    new_org = next(i for i, _ in ids if i != p)
+    assert ("instagram", "handle", "lacuenta") in _identifiers_of(new_org)
+    assert _pair(edges[0]) == {("finance", fin), ("identidades:org", new_org)}
+
+
+# --- dispatcher -------------------------------------------------------------------------- #
+
+
+def test_dispatcher_rutea_por_kind() -> None:
+    me = _inbox(_source("imap", "mail"), "e1", _email_payload("notifications@acme.com", "Acme"))
+    mc = _inbox(_source("telegram", "tg"), "c1", _tg_payload(222, display_name="Pedro"))
+    ms = _inbox(_source("apify_instagram", "ig"), "s1", _social_payload("instagram", "marca"))
+    with connection() as c:
+        weave_sender_structure(c, 1, [me], SourceKind.EMAIL)
+        weave_sender_structure(c, 1, [mc], SourceKind.CHAT)
+        weave_sender_structure(c, 1, [ms], SourceKind.SOCIAL)
+    assert sorted(_identity_kinds()) == ["organizacion", "organizacion", "persona"]
+    assert len(_sender_mentions()) == 3
+
+
+# --- backfill ---------------------------------------------------------------------------- #
+
+
+def test_backfill_senders_solo_procesados() -> None:
+    # email corporativo + chat + social YA procesados (module_extractions) → se backfillean; un
+    # correo SIN procesar (sin cursor) se ignora (no pasó el gate en su momento).
+    me = _inbox(_source("imap", "mail"), "e1", _email_payload("notifications@nequi.com", "Nequi"))
+    mc = _inbox(_source("telegram", "tg"), "c1", _tg_payload(333, display_name="Carla"))
+    ms = _inbox(_source("instagram", "ig"), "s1", _social_payload("instagram", "marca"))
+    unprocessed = _inbox(_source("imap", "mail2"), "e2", _email_payload("info@otra.com", "Otra"))
+    for mid in (me, mc, ms):
+        _extracted(mid)
+    with connection() as c:
+        out = backfill_senders(c, 1)
+    assert out == {"email": 1, "chat": 1, "social": 1}
+    assert sorted(_identity_kinds()) == ["organizacion", "organizacion", "persona"]
+    mentions = _sender_mentions()
+    assert len(mentions) == 3
+    assert {m["ids"][0] for m in mentions} == {me, mc, ms}  # el no-procesado quedó sin mención
+    assert unprocessed not in {m["ids"][0] for m in mentions}
+    with connection() as c:  # idempotente
+        out2 = backfill_senders(c, 1)
+    assert out2 == {"email": 1, "chat": 1, "social": 1}
+    assert len(_sender_mentions()) == 3
