@@ -287,6 +287,44 @@ export interface AllowedChatInput {
   priority?: boolean
 }
 
+// ----- Cliente local (ingesta desde la PC del usuario, vía gateway) ----- //
+
+export interface ServerIdentity {
+  userId: number
+  email: string
+  authEnforced: boolean
+}
+
+/** GET /auth/me — quién resuelve el server + si exige auth (define si el cliente necesita token). */
+export async function fetchMe(): Promise<ServerIdentity> {
+  const r = await apiGet<{ user_id: number; email: string; auth_enforced: boolean }>("/auth/me")
+  return { userId: r.user_id, email: r.email, authEnforced: r.auth_enforced }
+}
+
+export interface LocalClientSource {
+  sourceId: number
+  name: string
+  type: string
+}
+
+export interface LocalClientStatus {
+  authEnforced: boolean
+  /** Sources sin cuenta vinculada — las crea el gateway cuando un cliente local reporta. */
+  sources: LocalClientSource[]
+}
+
+/** Estado para la tarjeta del cliente local: si el server pide auth + qué clientes reportaron. */
+export async function fetchLocalClientStatus(): Promise<LocalClientStatus> {
+  const [me, rows] = await Promise.all([
+    fetchMe(),
+    apiGet<{ id: number; name: string; type: string; account_id: number | null }[]>("/sources"),
+  ])
+  const sources = rows
+    .filter((s) => s.account_id == null)
+    .map((s) => ({ sourceId: s.id, name: s.name, type: s.type }))
+  return { authEnforced: me.authEnforced, sources }
+}
+
 /** Persiste allowed_chats en el config del source (PATCH /sources/{id}; preserva el resto). */
 export async function setAllowedChats(
   sourceId: number,

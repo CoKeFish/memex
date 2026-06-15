@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from dataclasses import dataclass
@@ -45,3 +46,20 @@ class LocalConfig:
 
         api_token = str(os.environ.get("MEMEX_LOCAL_TOKEN") or data.get("api_token") or "").strip()
         return cls(gateway_url=gateway_url, api_token=api_token)
+
+    def save(self, path: Path | None = None) -> Path:
+        """Escribe la config a `config.toml` (crea el directorio si falta). Devuelve el path.
+
+        Lo usa `memex-local-client connect` para persistir la conexión sin que el usuario
+        edite TOML a mano. `json.dumps` produce un string básico de TOML válido para los
+        valores típicos (URL + token). Sobrescribe idempotentemente.
+        """
+        path = path or main_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = (
+            "# Config del cliente local memex — generado por `memex-local-client connect`.\n"
+            f"gateway_url = {json.dumps(self.gateway_url)}\n"
+            f"api_token = {json.dumps(self.api_token)}\n"
+        )
+        path.write_text(body, encoding="utf-8")
+        return path

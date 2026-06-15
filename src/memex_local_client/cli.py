@@ -2,6 +2,10 @@
 
 Subcomandos:
 
+- `connect <url> [--token T]`          — conecta a memex: valida y escribe la config.
+- `setup [--url --token --plugin]`     — onboarding guiado: conectar + instalar un plugin.
+- `doctor`                             — diagnóstico: conexión + plugins listos.
+- `autostart enable|disable|status`    — auto-arranque del daemon al iniciar sesión (Windows).
 - `daemon start`                       — arranca el scheduler (bloquea).
 - `plugin list`                        — qué plugins hay, instalados/habilitados.
 - `plugin install <ruta>`              — copia un plugin al directorio del cliente.
@@ -13,8 +17,9 @@ Subcomandos:
 - `status`                             — resumen de últimas corridas por plugin.
 - `runs [--plugin X] [--limit N]`      — historial detallado de corridas.
 
-Auth setup separado: el comando `memex-local-client plugin authorize` se invoca una
-vez por plugin que use OAuth (típicamente el IMAP universitario).
+Lo primero es `connect` (o `setup`): sin eso no hay `config.toml` y el daemon no sabe a
+qué servidor hablar. Auth setup separado: `plugin authorize` se invoca una vez por plugin
+que use OAuth (típicamente el IMAP universitario).
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from dotenv import load_dotenv
 from memex.logging import get_logger, setup_logging
 from memex_local_client.config import LocalConfig, LocalConfigError
 from memex_local_client.discovery import discover_plugins
-from memex_local_client.paths import ensure_layout, plugins_dir
+from memex_local_client.paths import ensure_layout, main_config_path, plugins_dir
 from memex_local_client.protocol import Problem
 from memex_local_client.registry import (
     RegistryError,
@@ -47,6 +52,33 @@ from memex_local_client.state import open_state
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="memex-local-client")
     sub = p.add_subparsers(dest="group", required=True)
+
+    connect_p = sub.add_parser("connect", help="Conecta a memex (valida + escribe la config).")
+    connect_p.add_argument("url", help="URL del gateway/API, p.ej. http://localhost:8787")
+    connect_p.add_argument(
+        "--token", default="", help="Bearer token (si el server tiene auth enforced)."
+    )
+
+    setup_p = sub.add_parser("setup", help="Onboarding guiado: conectar + instalar un plugin.")
+    setup_p.add_argument("--url", default=None, help="URL del gateway (si falta, se pregunta).")
+    setup_p.add_argument("--token", default="", help="Bearer token opcional.")
+    setup_p.add_argument(
+        "--plugin", default=None, help="plugin bundled a instalar (selftest|outlook-desktop|…)."
+    )
+    setup_p.add_argument(
+        "--from",
+        dest="from_dir",
+        default=None,
+        help="dir de plugins bundled (default: <repo>/plugins).",
+    )
+
+    sub.add_parser("doctor", help="Diagnóstico: conexión + plugins listos.")
+
+    autostart_p = sub.add_parser("autostart", help="Auto-arranque del daemon (Windows).")
+    asub = autostart_p.add_subparsers(dest="cmd", required=True)
+    asub.add_parser("enable", help="Registra la tarea (corre al iniciar sesión).")
+    asub.add_parser("disable", help="Quita la tarea.")
+    asub.add_parser("status", help="¿está registrada?")
 
     daemon = sub.add_parser("daemon", help="Daemon lifecycle.")
     dsub = daemon.add_subparsers(dest="cmd", required=True)
@@ -87,6 +119,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.group == "connect":
+            return _cmd_connect(args, log)
+        if args.group == "setup":
+            return _cmd_setup(args, log)
+        if args.group == "doctor":
+            return _cmd_doctor_top(log)
+        if args.group == "autostart":
+            return _cmd_autostart(args, log)
         if args.group == "daemon" and args.cmd == "start":
             return _cmd_daemon_start(log)
         if args.group == "plugin":
@@ -107,6 +147,145 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help()
     return 1
+
+
+def _prompt(label: str, default: str = "") -> str:
+    """Pide un valor por stdin si hay TTY; si no, devuelve el default (testeable/automatizable)."""
+    if not sys.stdin.isatty():
+        return default
+    suffix = f" [{default}]" if default else ""
+    try:
+        ans = input(f"{label}{suffix}: ").strip()
+    except EOFError:
+        return default
+    return ans or default
+
+
+def _cmd_connect(args: argparse.Namespace, log: Any) -> int:
+    from memex_local_client.connect import ConnectError, connect
+
+    try:
+        who = connect(args.url, args.token)
+    except ConnectError as e:
+        print(f"[x] no se pudo conectar: {e}")
+        return 1
+    extra = " (con token)" if args.token else ""
+    print(
+        f"[ok] conectado a {args.url.rstrip('/')} como {who.email or 'usuario'} "
+        f"(user_id={who.user_id}){extra}"
+    )
+    print(f"     config: {main_config_path()}")
+    if who.auth_enforced and not args.token:
+        print("     nota: el server pide auth; reconectá con --token si la ingesta falla.")
+    print("     siguiente: 'setup' para instalar un plugin, o 'daemon start' si ya tenés uno.")
+    return 0
+
+
+def _cmd_setup(args: argparse.Namespace, log: Any) -> int:
+    from memex_local_client.connect import ConnectError, bundled_plugins_dir, connect
+
+    url = args.url or _prompt("URL del gateway", "http://localhost:8787")
+    try:
+        who = connect(url, args.token)
+    except ConnectError as e:
+        print(f"[x] no se pudo conectar: {e}")
+        return 1
+    print(f"[ok] conectado como {who.email or 'usuario'} (user_id={who.user_id})")
+
+    bundled = Path(args.from_dir) if args.from_dir else bundled_plugins_dir()
+    if bundled is None or not bundled.exists():
+        print("[x] no encuentro los plugins bundled; pasá --from <dir>.")
+        return 1
+    available = sorted(
+        d.name for d in bundled.iterdir() if d.is_dir() and (d / "__init__.py").exists()
+    )
+    print("plugins disponibles: " + (", ".join(available) or "(ninguno)"))
+
+    plugin = args.plugin or _prompt("¿cuál instalar? (enter = ninguno)", "")
+    if not plugin:
+        print("listo. instalá uno cuando quieras: plugin install <ruta>")
+        return 0
+    if plugin not in available:
+        print(f"[x] {plugin!r} no está en {bundled}")
+        return 1
+
+    name = install_plugin(bundled / plugin)
+    disc = discover_plugins(plugins_dir())
+    with open_state() as state:
+        enable(name, state, disc.plugins)
+    log.info("memex_local_client.cli.plugin_installed", name=name)
+
+    example = plugins_dir() / name / "config.example.toml"
+    dst = plugins_dir() / name / "config.toml"
+    if example.exists() and not dst.exists():
+        dst.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+        print(f"[ok] copié config.example.toml -> config.toml ({dst})")
+        print("     revisá/completá ese archivo antes de correr el daemon.")
+    print(f"[ok] {name} instalado y habilitado.")
+    for prob in disc.plugins[name].validate_requirements(load_plugin_config(name, plugins_dir())):
+        print(f"     [{prob.severity}] {prob.code}: {prob.message}")
+    print("siguiente: 'daemon start' (o 'autostart enable' en Windows).")
+    return 0
+
+
+def _cmd_doctor_top(log: Any) -> int:
+    from memex_local_client.connect import ConnectError, check_connection
+
+    try:
+        cfg = LocalConfig.load()
+    except LocalConfigError as e:
+        print(f"[x] sin conexión configurada: {e}")
+        print("    corré: memex-local-client connect http://localhost:8787")
+        return 1
+    print(f"config: {main_config_path()}")
+    print(f"  gateway_url = {cfg.gateway_url}")
+    print(f"  api_token   = {'(set)' if cfg.api_token else '(vacio)'}")
+    try:
+        who = check_connection(cfg.gateway_url, cfg.api_token)
+    except ConnectError as e:
+        print(f"conexion: [x] {e}")
+        return 1
+    print(
+        f"conexion: [ok] {who.email or 'usuario'} "
+        f"(user_id={who.user_id}, auth_enforced={who.auth_enforced})"
+    )
+
+    disc = discover_plugins(plugins_dir())
+    with open_state() as state:
+        views = list_views(state)
+    if not views:
+        print("plugins: ninguno instalado. usá 'setup' o 'plugin install <ruta>'.")
+    else:
+        print("plugins:")
+        for v in views:
+            tag = "ENABLED" if v.enabled else ("installed" if v.installed else "registered")
+            print(f"  {v.name:24s} {tag:11s} schedule={v.schedule} source_id={v.source_id}")
+            if v.enabled and v.name in disc.plugins:
+                probs = disc.plugins[v.name].validate_requirements(
+                    load_plugin_config(v.name, plugins_dir())
+                )
+                for prob in probs:
+                    print(f"      [{prob.severity}] {prob.code}: {prob.message}")
+    for err in disc.errors:
+        print(f"  ! {err.plugin_dir.name}: {err.reason}")
+    return 0
+
+
+def _cmd_autostart(args: argparse.Namespace, log: Any) -> int:
+    from memex_local_client import autostart
+
+    try:
+        if args.cmd == "enable":
+            res = autostart.enable()
+        elif args.cmd == "disable":
+            res = autostart.disable()
+        else:
+            res = autostart.status()
+    except autostart.AutostartError as e:
+        print(f"[x] {e}")
+        return 1
+    print(("[ok] " if res.ok else "[--] ") + res.message)
+    return 0
 
 
 def _cmd_daemon_start(log: Any) -> int:

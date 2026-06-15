@@ -26,6 +26,7 @@ PLUGINS_DIR = REPO_ROOT / "plugins"
 # Config mínima válida por plugin para construir su Source sin tocar red/COM.
 MINIMAL_CONFIG: dict[str, dict[str, Any]] = {
     "outlook-desktop": {},
+    "selftest": {},
     "imap-university": {
         "server": "imap.test.edu",
         "auth": "basic",

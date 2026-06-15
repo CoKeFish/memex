@@ -63,6 +63,16 @@ class MemexServerClient:
     def __exit__(self, *args: object) -> None:
         self.close()
 
+    def whoami(self) -> dict[str, Any]:
+        """GET /auth/me — valida la conexión (URL + token) y devuelve el usuario.
+
+        Sin efectos secundarios: lo usa el cliente local (`connect`/`doctor`) para
+        confirmar que el gateway responde y que el token, si hace falta, es aceptado.
+        Devuelve `{user_id, email, display_name, auth_enforced}`.
+        """
+        data: dict[str, Any] = self._request("GET", "/auth/me").json()
+        return data
+
     def get_sources_by_type(self, source_type: str) -> list[dict[str, Any]]:
         data = self._request("GET", "/sources").json()
         return [s for s in data if s.get("type") == source_type and s.get("enabled", True)]

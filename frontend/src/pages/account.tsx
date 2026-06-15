@@ -1,4 +1,5 @@
 import { AccountsManager } from "@/components/features/account/accounts-manager"
+import { LocalClientPanel } from "@/components/features/account/local-client-panel"
 import { PageHeader } from "@/components/common/page-header"
 import {
   ApiAccessPanel,
@@ -20,6 +21,7 @@ export function AccountPage() {
       />
       <div className="grid gap-5 lg:grid-cols-2">
         <AccountsManager />
+        <LocalClientPanel />
         <IdentityPanel identity={a.identity} />
         <CliAccessPanel cli={a.cli} />
         <ApiAccessPanel api={a.api} />
