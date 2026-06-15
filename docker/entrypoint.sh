@@ -24,8 +24,22 @@ print("[entrypoint] Postgres NO respondió en 60s")
 sys.exit(1)
 PY
 
-echo "[entrypoint] aplicando migraciones..."
-.venv/bin/alembic upgrade head
+# Migraciones: las aplica UN solo proceso (el api, cuyo comando es `uvicorn`). Los daemons
+# (scheduler / ingest-scheduler, comando `python -m ...`) las OMITEN para no correr `alembic upgrade
+# head` los tres a la vez: el upgrade es transaccional, así que la carrera no corrompe nada, pero los
+# perdedores logueaban un ERROR "expected to match one row ... 0 found" en cada deploy (cosmético).
+# Override explícito con MEMEX_RUN_MIGRATIONS=1/0 (compose-go NO soporta el merge YAML `<<`, por eso
+# el gate va por comando y no por env por-servicio).
+run_migrations="${MEMEX_RUN_MIGRATIONS:-}"
+if [ -z "$run_migrations" ]; then
+  [ "${1:-}" = "uvicorn" ] && run_migrations=1 || run_migrations=0
+fi
+if [ "$run_migrations" = "1" ]; then
+  echo "[entrypoint] aplicando migraciones..."
+  .venv/bin/alembic upgrade head
+else
+  echo "[entrypoint] migraciones OMITIDAS (las aplica el api)"
+fi
 
 echo "[entrypoint] arrancando: $*"
 exec .venv/bin/"$@"
