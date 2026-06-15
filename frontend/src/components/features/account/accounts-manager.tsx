@@ -23,6 +23,7 @@ import {
 import { ApiError } from "@/lib/api"
 import type { Tone } from "@/lib/status"
 import { useAsync } from "@/lib/use-async"
+import { TelegramConnect } from "./telegram-connect"
 
 const HEALTH_TONE: Record<HealthStatus, Tone> = {
   healthy: "ok",
@@ -228,6 +229,9 @@ function AccountCard({ account, onChange }: { account: ManagedAccount; onChange:
                 Conectar con Google
               </button>
             ))}
+          {account.kind === "chat" && account.provider === "telegram" && (
+            <TelegramConnect account={account} onDone={onChange} />
+          )}
           <button type="button" className={btnCls} disabled={checking} onClick={runHealthCheck}>
             <RefreshCw className={`size-3 ${checking ? "animate-spin" : ""}`} /> Validar
           </button>
