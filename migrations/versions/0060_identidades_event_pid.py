@@ -18,7 +18,7 @@ Dos piezas para que las identidades entren a la correlación determinista del gr
 - `mod_identidades_identifiers.kind` admite `'platform_id'`: el id ESTABLE que asigna la
   plataforma (el `user_id` de Telegram). No es un `handle` (el username es mutable o ausente; el
   id no) y no se inventa un sentinel dentro de 'handle'. Lo escribe la creación determinista de
-  identidades de remitentes de chat (`chat_senders.py`) y lo consume la provenance derivada del
+  identidades de remitentes de chat (`senders.py`) y lo consume la provenance derivada del
   grafo (brazo CHAT de `vertex_inbox_ids`). El CHECK de 0033 es inline sin nombre → autonombre de
   Postgres (mismo truco que 0057); queda con nombre explícito.
 

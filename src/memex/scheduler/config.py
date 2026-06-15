@@ -29,16 +29,13 @@ class SchedulerSettings(BaseSettings):
     enabled_jobs: str = ""  # CSV de nombres de job; VACÍO = desarmado (no procesa nada)
     tick_seconds: float = 5.0
     interval_classify: str = "PT15M"  # reglas, barato
-    interval_summarize: str = "PT1H"  # LLM, más grueso
     interval_extract: str = "PT1H"  # LLM
     interval_ocr: str = "PT1H"  # visión, opt-in
     interval_calendar: str = "PT30M"
     interval_finance: str = "PT1H"  # dedup F2 (LLM) + consolidación, post-extracción
     interval_relevance: str = "P1D"  # detección de candidatos a filtrar (sin LLM), diario
-    interval_graph: str = (
-        "P1D"  # cúmulos: build + detección/reconciliación + validación LLM, diario
-    )
-    interval_graph_resolve: str = "P1D"  # long-tail de pistas par-por-par (prefiltro + LLM gris)
+    # cúmulos: co-ocurrencia + detección/reconciliación + validación LLM + reconcile, diario
+    interval_graph: str = "P1D"
     interval_log_purge: str = "P1D"  # retención de log_events, diario
 
     def interval_for(self, job_name: str) -> str | None:

@@ -20,8 +20,8 @@ migración aplicada y el código viejo corriendo, una mención 'agente' violarí
 DOWNGRADE (lossy): re-pliega kind/resolved_kind 'producto' → 'organizacion' ANTES de estrechar los
 CHECKs; las menciones ex-'agente' QUEDAN como 'producto' (valor ya válido pre-0057): 'agente' no se
 restaura. Si el backfill de reclasificación corrió, las aristas/membresías con slug
-'identidades:producto' quedan apuntando a un vértice que ya no proyecta y la poda del grafo las
-barre en el siguiente build.
+'identidades:producto' quedan apuntando a un vértice que ya no proyecta y las barre
+prune_orphan_edges/reconcile_graph.
 """
 
 from collections.abc import Sequence

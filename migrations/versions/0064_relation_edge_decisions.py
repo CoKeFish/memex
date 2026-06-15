@@ -21,7 +21,7 @@ nunca se destruye (patrón NELL candidate→promoted / Wikidata statement+refere
 - `relation_edge_sources`: TODOS los mensajes que generaron una pista de co-ocurrencia, no solo el
   primero (`evidence='inbox:N'` conserva el primero por idempotencia de `propose_edge`; un segundo
   mensaje con el mismo par debe quedar ligado igual, requisito del dueño). Append-only; la puebla
-  `_materialize_cooccurrence` en cada `build` (backfill natural, sin data migration), incluso si la
+  `generate_cooccurrence` (`relations/cooccurrence.py`; backfill natural, sin data migration), incluso si la
   arista ya es terminal — así un terminal que gana evidencia nueva es detectable y reportable.
 
 `user_id` FK a users ON DELETE CASCADE en decisions (multi-tenant + el TRUNCATE de tests arrastra);

@@ -4,8 +4,8 @@ Server-side: habla con la DB directo (`memex.db`), NO el HTTP client — no es u
 así que no aplica la regla de aislamiento de ADR-001.
 
 Trackea su progreso por la AUSENCIA de fila en `classifications` (que tiene
-`UNIQUE(inbox_id)`), NO por `inbox.processed_at`: ese ciclo de vida lo querrá también el
-futuro summarizer, así que el classifier no lo consume. Sin LLM.
+`UNIQUE(inbox_id)`), NO por `inbox.processed_at`: ese ciclo de vida lo usa también
+relations/summary.py, así que el classifier no lo consume. Sin LLM.
 """
 
 from __future__ import annotations

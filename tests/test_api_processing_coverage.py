@@ -112,7 +112,7 @@ def _seed_lot(
             ),
             {
                 "u": user_id,
-                "stages": ["summarize"],
+                "stages": ["extract"],
                 "cfg": json.dumps(config),
                 "tids": target_ids,
                 "f": frontier,

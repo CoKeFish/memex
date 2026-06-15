@@ -202,8 +202,8 @@ class SocialPostPayload(BasePayload):
     """Payload schema para un post público de red social (broadcast).
 
     Compartido por las tres sources sociales (`instagram`, `facebook`, `x`),
-    discriminadas por `platform`. El downstream (classifier / summarizer de
-    oportunidades) es agnóstico de plataforma: le importan `text`, `url` y
+    discriminadas por `platform`. El downstream (classifier / relations/summary.py)
+    es agnóstico de plataforma: le importan `text`, `url` y
     `posted_at`; los campos específicos (`shortcode`, `is_paid_partnership`) son
     opcionales y quedan `None` donde no aplican.
 

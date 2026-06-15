@@ -33,7 +33,7 @@ _log = get_logger("memex.api.stats")
 
 #: Jobs del scheduler server-side (memex-scheduler), en orden estable para la UI. Un job desconocido
 #: que aparezca en worker_runs igual se muestra (se anexa al final) — no se oculta actividad.
-_JOBS = ("classify", "summarize", "extract", "ocr", "calendar", "log_purge")
+_JOBS = ("classify", "extract", "ocr", "calendar", "log_purge")
 
 #: Última corrida 'running' pasado este umbral = worker colgado (daemon muerto).
 _STALE = "interval '30 minutes'"

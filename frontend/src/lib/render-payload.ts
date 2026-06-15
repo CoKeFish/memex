@@ -3,7 +3,7 @@
 // telegram / social. Mismo orden de precedencia que el Python para que el feed de
 // inbox muestre lo mismo que ve el summarizer/los módulos. La paridad (incluido el
 // manifest de adjuntos y su formato de tamaño) se fija con vectores de test idénticos
-// en `render-payload.test.ts` y `tests/test_summarizer_render.py`.
+// en `render-payload.test.ts` y `tests/test_processing_render.py`.
 
 export interface RenderedPayload {
   sender: string

@@ -17,7 +17,7 @@ from sqlalchemy import text
 
 from memex.db import connection
 
-_JOBS = ("classify", "summarize", "extract", "ocr", "calendar", "log_purge")
+_JOBS = ("classify", "extract", "ocr", "calendar", "log_purge")
 
 
 def _seed_source(name: str, stype: str = "imap", user_id: int = 1) -> int:

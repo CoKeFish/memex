@@ -1,9 +1,9 @@
 """POST /inbox/{id}/reprocess — re-aplica etapas a un mensaje.
 
 Se prueba con la etapa `classify` (determinista, sin LLM/IMAP/OCR): ejercita el endpoint + el
-orquestador + el delegado de clasificación end-to-end. Las etapas externas (media/ocr/summarize/
-extract) van con fakes en sus tests unitarios. Cubre: classify crea la fila; force re-clasifica;
-stage inválida → 422; id ajeno/inexistente → 404.
+orquestador + el delegado de clasificación end-to-end. Las etapas externas (media/ocr/classify/
+relevance/extract) van con fakes en sus tests unitarios. Cubre: classify crea la fila; force
+re-clasifica; stage inválida → 422; id ajeno/inexistente → 404.
 """
 
 from __future__ import annotations

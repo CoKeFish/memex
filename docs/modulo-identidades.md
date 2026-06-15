@@ -131,7 +131,7 @@ trigramas `pg_trgm`), sin LLM en línea.
 | Fusión | `merge_identities` (`merge.py`) — cascada completa + auditoría |
 | Tarjeta manual | `register_card` (`memex identidad add`) |
 | Tus contactos | `run_sync` + `GooglePeopleClient` (`sync.py`, `providers/`) |
-| Conexiones del grafo | `_materialize_afiliacion`/`_pertenencia`/`_cooccurrence` + `weave_afiliacion` (`relations/deterministic.py`); overflow por `run_cooccurrence_llm` |
+| Conexiones del grafo | `_materialize_afiliacion`/`_pertenencia` + `weave_afiliacion` (`relations/deterministic.py`); `generate_cooccurrence` (`relations/cooccurrence.py`); overflow por `run_cooccurrence_llm` |
 | Servir a otros módulos | `provide_domain` → `IdentidadesDomainReader` (`domain.py`), vía `ctx.deps['identidades']` |
 | Avance del cursor | lo hace el **orquestador** (`_insert_cursor`) en la misma tx que `persist` |
 

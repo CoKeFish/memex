@@ -11,7 +11,7 @@ Primer slice del contrato de imágenes + OCR (backlog "Contrato de almacenamient
   referencia (`object_key` + `bucket` + `sha256` + `content_type`/`size`), nunca el blob ni
   el secreto. Lo escribe el server al ingestar (en `ingest_batch`, junto al inbox, misma tx).
 - ESTADO + TEXTO de OCR: la etapa aparte `memex-ocr` reclama las filas `pending`, OCR-ea con un
-  proveedor de visión y escribe `ocr_text`/`ocr_status`. El render (summarizer + módulos) inyecta
+  proveedor de visión y escribe `ocr_text`/`ocr_status`. El render (relations/summary.py + módulos) inyecta
   ese texto vía JOIN sobre `ocr_status='ok'`.
 
 `ocr_status` es una máquina de estados (espeja `inbox.processed_at`): el worker reclama solo

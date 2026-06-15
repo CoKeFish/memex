@@ -48,7 +48,6 @@ function LoadingRow({ label }: { label: string }) {
 //: Etiquetas en español de los jobs. El slug (lo que se grepea en logs y DB) queda visible al lado.
 const JOB_LABELS: Record<string, string> = {
   classify: "Clasificación",
-  summarize: "Resumen",
   extract: "Extracción",
   ocr: "OCR (adjuntos)",
   calendar: "Calendario",

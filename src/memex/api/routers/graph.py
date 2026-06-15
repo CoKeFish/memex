@@ -73,7 +73,7 @@ async def get_graph(
     confirmed/rejected/ambiguous) más su `label` canónico derivado y su `relation` (justificación);
     el front filtra por `verdict`. Con `source_inbox_id` el grafo se ENFOCA en lo que produjo ese
     mensaje (sentido inverso del drill-down nodo→mensaje): sus vértices + los vecinos a un salto.
-    Solo LECTURA: no dispara el armado (POST /graph/build).
+    Solo LECTURA: no dispara el armado (POST /graph/reconcile).
     """
     with connection() as conn:
         verts = list_vertices(conn, user_id)
@@ -175,7 +175,7 @@ async def reconcile_graph_endpoint(user_id: UserID) -> dict[str, Any]:
 async def cluster_graph(user_id: UserID) -> dict[str, Any]:
     """Detecta los cúmulos (Louvain) y los reconcilia contra lo persistido. On-demand, SIN LLM e
     idempotente: re-detectar la misma partición no cambia nada. NO dispara el armado del grafo
-    (POST /graph/build) ni la validación LLM (POST /graph/cluster/validate)."""
+    (POST /graph/reconcile) ni la validación LLM (POST /graph/cluster/validate)."""
     with connection() as conn:
         stats = detect_and_reconcile(conn, user_id)
     _log.info(

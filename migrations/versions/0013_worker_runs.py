@@ -4,7 +4,7 @@ Revision ID: 0013
 Revises: 0012
 Create Date: 2026-05-31
 
-El daemon `memex-scheduler` corre los workers idempotentes (classify/summarize/extract/calendar)
+El daemon `memex-scheduler` corre los workers idempotentes (classify/extract/calendar)
 en intervalos y deja rastro acá: el Dashboard (backlog) lo lee, y un post-mortem ve qué job falló
 y cuándo. `status='running'` inicial → un daemon que muere a media corrida deja una fila huérfana
 VISIBLE (no un hueco silencioso). `stats` JSONB = `dataclasses.asdict` del stats del worker.

@@ -1,7 +1,8 @@
 """Historial de aristas: veredictos (`relation_edge_decisions`) + sources (`relation_edge_sources`).
 
-Capa BI-CAPA del veredicto par-por-par (subsistema `resolve`): el veredicto vigente ES el status
-del edge (`resolve_edge`, monótono); acá vive el POR QUÉ — quién decidió (`method`), con qué regla
+Capa BI-CAPA del veredicto por-mensaje (`relations/per_message.py`): el veredicto vigente ES el
+status del edge (`resolve_edge`, monótono); acá vive el POR QUÉ — quién decidió (`method`), con
+qué regla
 o cita (`rule`/`quote`), sobre qué mensaje (`inbox_id`) y con qué evidencia (`evidence_sig`). La
 señal original (la pista y sus mensajes) nunca se destruye: NELL candidate→promoted, Wikidata
 statement+references.

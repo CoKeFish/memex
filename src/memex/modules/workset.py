@@ -1,13 +1,13 @@
 """Carga del work-set de extracción: mensajes clasificados ORIGINALES pendientes (ADR-015 §9).
 
 Trackea progreso por la AUSENCIA de fila en `module_extractions` (cursor por (module_slug,
-inbox_id)), igual que el summarizer con `summary_inbox_links`. El work-set es la UNIÓN de los
+inbox_id)), igual que relations/summary.py con `summary_inbox_links`. El work-set es la UNIÓN de los
 pendientes de cada módulo activo: un mensaje entra si AL MENOS UN módulo activo consume su
 categoría (`consumes_kinds`) y todavía no tiene cursor para ese módulo. Los mensajes de una
 categoría que ningún módulo activo consume no se cargan (no hay nada que hacer con ellos).
 
 Excluir los ya-hechos en SQL (NOT EXISTS por módulo) evita el "stall" de cargar siempre las
-mismas filas ya procesadas. El LIMIT corta a nivel de MENSAJE (igual que el summarizer):
+mismas filas ya procesadas. El LIMIT corta a nivel de MENSAJE (igual que relations/summary.py):
 ineficiencia entre corridas, no incorrectitud (la idempotencia del cursor lo cubre).
 """
 

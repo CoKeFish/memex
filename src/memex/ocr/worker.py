@@ -10,7 +10,8 @@ Dedup por contenido: antes de gastar una llamada de visión, busca otra fila con
 Manejo de fallos (cada asset es independiente y reintentable):
 - Falla de OCR o de descarga → se marca `error` (+attempts) y se sigue con los demás (best-effort).
 - Transcripción vacía = OCR válido (imagen sin texto legible) → se guarda `''` con estado `ok`.
-- Se persiste el estado en DB ANTES de registrar el costo (`llm_calls`), igual que el summarizer.
+- Se persiste el estado en DB ANTES de registrar el costo (`llm_calls`), igual que
+  relations/summary.py.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ _ZIP_CONTENT_TYPES = frozenset(
 )
 #: finish_reason que cuenta como transcripción completa. Cualquier otro (length, content_filter)
 #: = truncada: se guarda igual (es lo mejor que hay) pero se marca para auditoría, NUNCA queda
-#: indistinguible de un OCR completo. Espeja `summarizer.worker._OK_FINISH`.
+#: indistinguible de un OCR completo. Espeja `relations.summary._OK_FINISH`.
 _OK_FINISH = frozenset({"stop"})
 
 

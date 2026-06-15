@@ -11,7 +11,7 @@ Implementa el storage del primer slice de ADR-015 (extracción modular por inter
   UNIQUE(user_id, module_slug).
 - `module_extractions` — cursor de idempotencia: una fila por (module_slug, inbox_id) marca
   que ese mensaje ya pasó por la extracción de ese módulo. El orquestador trackea progreso
-  por la AUSENCIA de fila (igual que el summarizer con summary_inbox_links). UNIQUE
+  por la AUSENCIA de fila (igual que relations/summary.py con summary_inbox_links). UNIQUE
   (module_slug, inbox_id) + ON CONFLICT DO NOTHING hace la doble-extracción imposible.
 - `mod_finance_expenses` — tabla DEL MÓDULO finance (patrón `mod_<slug>_*`). NO hay tabla
   central `extracted_facts`: cada módulo es dueño de su forma. `source_inbox_ids BIGINT[]`

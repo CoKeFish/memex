@@ -52,7 +52,7 @@ def test_finish_run_ok_persists_stats_json(conn: Any) -> None:
 
 
 def test_finish_run_error_records_message(conn: Any) -> None:
-    run_id = runs.start_run(1, "summarize")
+    run_id = runs.start_run(1, "extract")
     runs.finish_run(run_id, status="error", error="boom")
     row = (
         conn.execute(

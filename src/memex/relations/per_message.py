@@ -240,7 +240,7 @@ class PairVerdict:
 
 def parse_confirm(content: str, n_pairs: int) -> tuple[dict[int, PairVerdict], str]:
     """Parsea `{"verdicts":[{pair, verdict, relation, confidence}], "summary": "..."}`. ULTRA
-    DEFENSIVO (molde `resolve_llm.parse_verdicts` + `experiments/parsing.py`): basura → `({}, "")`;
+    DEFENSIVO (molde `parse_confirm` + `experiments/parsing.py`): basura → `({}, "")`;
     ids fuera de 1..n o bool-como-int fuera; verdict fuera del vocabulario fuera; `confirm` sin
     `relation` degrada a `dejar`; confianza clampeada 0..1; dedup primero-gana."""
     try:

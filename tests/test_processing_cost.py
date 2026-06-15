@@ -59,7 +59,7 @@ def test_finish_run_serializes_decimal_stats() -> None:
     stats.cost.record(None, prompt_tokens=10, completion_tokens=5, cost_usd=Decimal("0.001"))
     stats.cost.record(7, prompt_tokens=20, completion_tokens=9, cost_usd=Decimal("0.002"))
 
-    rid = runs.start_run(1, "summarize")
+    rid = runs.start_run(1, "extract")
     runs.finish_run(rid, status="ok", stats=stats)
 
     with connection() as c:

@@ -3,7 +3,7 @@
 Define el Protocol `OCRClient` (la abstracción contra la que tipan los callers) y los tipos
 que viajan por él (`OcrResult`, `OcrError`). Un proveedor concreto (`OpenAIVisionClient`)
 implementa este Protocol; los callers (el worker `memex-ocr`) NUNCA tipan contra la clase
-concreta, igual que el summarizer tipa contra `LLMClient`.
+concreta, igual que relations/summary.py tipa contra `LLMClient`.
 
 A diferencia de `LLMClient.complete` (texto → texto), acá la entrada es UNA imagen (bytes +
 content-type) y la salida es su transcripción. `OcrResult` reusa `LLMUsage` y mapea 1:1 a

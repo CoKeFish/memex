@@ -1,8 +1,8 @@
 """System prompt fijo del OCR por visión.
 
 Objetivo: TRANSCRIPCIÓN literal, no descripción ni interpretación. El texto OCR-eado alimenta
-después al render → summarizer y módulos de extracción (finance, calendar), así que debe ser
-el texto crudo de la imagen, en su idioma original, sin agregados del modelo.
+después al render → relations/summary.py y módulos de extracción (finance, calendar), así que
+debe ser el texto crudo de la imagen, en su idioma original, sin agregados del modelo.
 """
 
 OCR_SYSTEM_PROMPT = (

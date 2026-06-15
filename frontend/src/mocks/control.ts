@@ -10,7 +10,6 @@ export const schedulerEnabled = false
 
 export const schedulerJobs: SchedulerJob[] = [
   { job: "classify", enabled: true, cron: "*/15 * * * *", lastRun: iso(28 * MIN), nextRun: iso(-2 * MIN) },
-  { job: "summarize", enabled: true, cron: "30 * * * *", lastRun: iso(47 * MIN), nextRun: iso(-13 * MIN) },
   { job: "extract", enabled: true, cron: "0 */2 * * *", lastRun: iso(2 * HOUR), nextRun: iso(-58 * MIN) },
   { job: "calendar", enabled: false, cron: "0 */6 * * *", lastRun: iso(22 * MIN), nextRun: null },
   { job: "ocr", enabled: true, cron: "*/30 * * * *", lastRun: iso(29 * MIN), nextRun: iso(-1 * MIN) },
@@ -46,16 +45,6 @@ const RUN: Record<WorkerJob, RunPreview> = {
       { label: "costo", value: "US$0 (sin LLM)" },
     ],
     command: "memex-classify run --user 1",
-  },
-  summarize: {
-    job: "summarize",
-    pending: 180,
-    estimate: [
-      { label: "ventanas", value: "~12" },
-      { label: "llamadas LLM", value: "~14" },
-      { label: "costo est.", value: "US$0.03" },
-    ],
-    command: "memex-summarize run --tier batch --limit 200",
   },
   extract: {
     job: "extract",

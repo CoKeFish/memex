@@ -1,13 +1,13 @@
 """Render de un `inbox.payload` a texto plano, agnóstico de la fuente.
 
 Calca el helper del spike: prueba claves comunes de email / telegram / social. Compartido por
-el summarizer y los módulos de extracción — ambos arman su prompt con el contenido ORIGINAL
+relations/summary.py y los módulos de extracción — ambos arman su prompt con el contenido ORIGINAL
 (nunca un resumen previo; ADR-015 §9), así que renderizan idéntico.
 
 `ocr_text` es el texto OCR-eado de las imágenes del mensaje (etapa `memex-ocr`). Se inyecta
-junto al body para que summarizer y módulos lo vean igual que `body_text`/`subject` — así datos
-que solo viven en imágenes (recibos/flyers) llegan al LLM. NO se muta `inbox.payload` (es el
-original inmutable); el texto viaja por separado en `WorkRow.ocr_text` y se pasa acá.
+junto al body para que relations/summary.py y módulos lo vean igual que `body_text`/`subject` —
+así datos que solo viven en imágenes (recibos/flyers) llegan al LLM. NO se muta `inbox.payload`
+(es el original inmutable); el texto viaja por separado en `WorkRow.ocr_text` y se pasa acá.
 
 Los adjuntos DECLARADOS (`payload.attachments`) se renderizan como un manifest de una línea
 (`[Adjuntos: nombre (tamaño), …]`): aunque el adjunto no se haya almacenado/OCR-eado (tipo fuera

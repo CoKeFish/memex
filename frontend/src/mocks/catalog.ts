@@ -46,7 +46,6 @@ export const PURPOSE_CHART: Record<LlmPurpose, string> = Object.fromEntries(
 
 export const JOBS: { key: WorkerJob; label: string }[] = [
   { key: "classify", label: "Clasificar" },
-  { key: "summarize", label: "Resumir" },
   { key: "extract", label: "Extraer" },
   { key: "calendar", label: "Calendario" },
   { key: "ocr", label: "OCR" },

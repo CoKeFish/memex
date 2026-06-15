@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { renderPayload } from "./render-payload"
 
-// VECTORES ESPEJO de tests/test_summarizer_render.py (render Python): no hay runner
+// VECTORES ESPEJO de tests/test_processing_render.py (render Python): no hay runner
 // cross-language, la paridad se fija duplicando estos vectores — cambiar uno = cambiar el otro.
 describe("attachmentsManifest (vía renderPayload)", () => {
   it("línea completa con sender (pinea separadores, orden y formato exactos)", () => {

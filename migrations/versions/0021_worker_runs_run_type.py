@@ -4,7 +4,7 @@ Revision ID: 0021
 Revises: 0020
 Create Date: 2026-06-02
 
-`worker_runs` nació como log de las corridas del daemon (job='classify'|'summarize'|…). Ahora el API
+`worker_runs` nació como log de las corridas del daemon (job='classify'|'extract'|…). Ahora el API
 encola corridas MANUALES por lote (POST /processing/run) reusando la misma tabla como cola+log:
 
 - `run_type` distingue el origen: 'job' (un worker del scheduler) vs 'reprocess' (corrida manual por

@@ -1,7 +1,7 @@
 """Schema check para `summaries` + `summary_inbox_links` (migración 0006).
 
-No hay consumidor todavía (el summarizer es futuro), así que verificamos que el DDL
-impone lo diseñado: `tier` acotado por CHECK, FK a users, y el puente N:M
+El consumidor es relations/summary.py (run_summaries/persist_summary escriben `summaries`); acá
+verificamos que el DDL impone lo diseñado: `tier` acotado por CHECK, FK a users, y el puente N:M
 (summary_inbox_links) con PK compuesta + cascadas hacia summary e inbox.
 """
 

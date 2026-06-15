@@ -329,8 +329,6 @@ function workerStats(job: WorkerJob): Record<string, number | Record<string, num
   switch (job) {
     case "classify":
       return { scanned: rng.int(200, 900), classified: rng.int(200, 900), by_tier: { blacklist: rng.int(20, 120), batch: rng.int(150, 700), individual: rng.int(5, 60) } }
-    case "summarize":
-      return { messages: rng.int(50, 400), summarized: rng.int(20, 120), skipped: rng.int(0, 30), errors: rng.int(0, 6), by_tier: { batch: rng.int(10, 90), individual: rng.int(5, 40) } }
     case "extract":
       return { routed: rng.int(10, 80), extracted: rng.int(0, 30), by_module: { finance: rng.int(0, 12), calendar: rng.int(0, 18) } }
     case "calendar":
@@ -342,7 +340,7 @@ function workerStats(job: WorkerJob): Record<string, number | Record<string, num
 
 const workerRuns: WorkerRun[] = []
 let wId = 0
-const JOB_KEYS: WorkerJob[] = ["classify", "summarize", "extract", "calendar", "ocr"]
+const JOB_KEYS: WorkerJob[] = ["classify", "extract", "calendar", "ocr"]
 for (const job of JOB_KEYS) {
   const runs = rng.int(5, 9)
   for (let k = 0; k < runs; k++) {
@@ -360,12 +358,12 @@ for (const job of JOB_KEYS) {
     })
   }
 }
-// Summarize: corrida COLGADA (running, iniciada hace 47 min > 30 min) → daemon huérfano.
+// Extract: corrida COLGADA (running, iniciada hace 47 min > 30 min) → daemon huérfano.
 workerRuns.push({
   id: ++wId,
-  job: "summarize",
+  job: "extract",
   status: "running",
-  stats: { messages: 180, summarized: 40, skipped: 2, errors: 0 },
+  stats: { routed: 64, extracted: 8, by_module: { finance: 2, calendar: 5 } },
   error: null,
   startedAt: iso(47 * MIN),
   finishedAt: null,
@@ -472,7 +470,7 @@ export const seedAlerts: AlertEvent[] = [
     id: "al-stale",
     severity: "alta",
     kind: "worker-stale",
-    title: "Worker summarize colgado",
+    title: "Worker extract colgado",
     detail: "La corrida lleva 47 min en 'running' (umbral 30 min) — posible daemon caído.",
     at: iso(15 * MIN),
     read: false,

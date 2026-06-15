@@ -202,7 +202,7 @@ def load_gate_workset(
 ) -> list[WorkRow]:
     """Correos clasificados PENDIENTES de gate: sin veredicto y sin mark manual.
 
-    Misma forma que `summarizer._load_workset`: tier batch/individual (blacklist ni se mira),
+    Misma forma que `relations.summary._load_workset`: tier batch/individual (blacklist ni se mira),
     gates de media (no juzgar antes de que el OCR esté terminal — el texto de las imágenes
     puede ser la señal) y dead-letter propio (`stage='relevance'`). `inbox_ids` acota a un
     set explícito (etapa de reproceso).

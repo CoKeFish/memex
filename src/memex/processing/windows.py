@@ -8,7 +8,7 @@ Compartido por la fase de resumen (`memex.relations.summary`) y los módulos de 
 (`memex.modules`): ambos ventanean idéntico porque operan sobre los mismos mensajes
 clasificados originales (etapa combinada, ADR-015 §9).
 
-`WorkRow.source_type` (el `sources.type`: imap/telegram/...) es opcional: el summarizer no lo
+`WorkRow.source_type` (el `sources.type`: imap/telegram/...) es opcional: relations/summary.py no lo
 usa (default `""`); los módulos lo pueblan para derivar el `SourceKind` y pre-filtrar por
 `consumes_kinds` sin tocar el LLM.
 """

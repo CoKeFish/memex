@@ -14,7 +14,7 @@ llamada LLM cada vez, sin progreso.
 `work_item_failures` lleva un contador de fallos por (stage, inbox_id). Al alcanzar el umbral
 (memex.core.deadletter.MAX_WORK_ATTEMPTS=3) el item pasa a status='review' ('pendiente de
 revisión') y los worksets lo EXCLUYEN: deja de reintentarse, SIN descartarse en silencio (queda
-visible vía `memex-{extract,summarize} review` y recuperable con `requeue`).
+visible vía el router de revisión del API y recuperable con `requeue`).
 
 Granularidad por inbox_id (no por módulo): el fallo se detecta a nivel VENTANA (una llamada LLM
 por ventana), que no tiene identidad estable entre corridas; los inbox_id sí. Como una ventana

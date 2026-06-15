@@ -1,10 +1,10 @@
-"""summaries + summary_inbox_links: salida del summarizer multi-tier
+"""summaries + summary_inbox_links: salida del resumen multi-tier (relations/summary.py)
 
 Revision ID: 0006
 Revises: 0005
 Create Date: 2026-05-29
 
-Tablas base para el summarizer post-classifier (ADR-002 / ADR-003). Un `summary`
+Tablas base para el resumen post-classifier (lo escribe relations/summary.py; ADR-002 / ADR-003). Un `summary`
 es la salida de UNA llamada al LLM y tiene un `tier`:
 
 - `individual` — resume 1 mensaje (tier individual de ADR-002).
@@ -19,8 +19,7 @@ N:M; el caso `individual` es un único link. Un experimento (2026-05-29) confirm
 el LLM atribuye de forma fiable la salida a sus mensajes de origen, por lo que el
 puente modela bien la relación 1-llamada↔N-mensajes.
 
-El summarizer que las escribe todavía no existe (forward-declared, igual que
-`classifications` en la 0005 y `llm_calls` en la 0002). `llm_calls` queda intacta:
+El escritor de estas tablas es relations/summary.py (`persist_summary`). `llm_calls` queda intacta:
 no se le toca el `inbox_id` 1:1 (sirve al tier individual); el N:M vive acá.
 
 Fuera de alcance (a propósito, por decisión del dueño):

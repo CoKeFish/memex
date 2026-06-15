@@ -8,8 +8,8 @@ y no contra `MemexServerClient`.
 
 `LLMResult` está pensado para mapear 1:1 a los argumentos de
 `memex.core.observability.record_llm_call` (model, prompt_tokens, completion_tokens,
-cost_usd, latency_ms) — ese es el *seam* con el futuro classifier/summarizer, que
-queda fuera de alcance acá.
+cost_usd, latency_ms) — ese es el *seam* con los consumidores LLM (p. ej.
+relations/summary.py; classifier a futuro), que queda fuera de alcance acá.
 """
 
 from __future__ import annotations

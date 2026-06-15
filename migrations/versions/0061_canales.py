@@ -17,7 +17,7 @@ chat) + aristas confirmadas `participa_en` persona→canal.
 `metadata` puede absorber `topic_id` si algún día los topics son sub-canales (cúmulos jerárquicos
 no necesitan nada estructural acá: las aristas son genéricas).
 
-El índice por expresión sobre inbox acelera los JOIN payload→canal del build (sync, provenance y
+El índice por expresión sobre inbox acelera los JOIN payload→canal del tejido de canales (sync, provenance y
 participa_en). El predicado del índice parcial es EXACTAMENTE `payload->>'chat_id' IS NOT NULL`
 — las queries deben usar ese mismo predicado (no el operador `?`) para que el planner lo use.
 """
@@ -54,7 +54,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Las aristas que tocaban vértices 'canal' quedan huérfanas; la poda del build las barre.
+    # Las aristas que tocaban vértices 'canal' quedan huérfanas; prune_orphan_edges/reconcile_graph las barre.
     op.execute(
         """
         DROP INDEX IF EXISTS inbox_payload_chat_id;

@@ -115,7 +115,7 @@ gasto↔comida (`mismo_evento`), deduplica y consolida — todo atómico. Si no 
 inferir, omitís el paso 2 (el gasto queda sin contraparte, que es lo correcto).
 
 > Un mensaje con UN solo hecho (solo una factura, o solo una comida) **no** necesita `start`/`end`:
-> registrá directo. `POST /graph/build` solo re-deriva TODO el grafo en frío (respaldo), no es requisito.
+> registrá directo. `POST /graph/reconcile` solo hace mantenimiento (poda aristas huérfanas y reconcilia las aristas reales obsoletas de directorio/finanzas); NO re-deriva el grafo (los módulos tejen las aristas reales de forma incremental al escribir), no es requisito.
 
 ## Qué NO hacer
 - No mandes texto crudo a memex para que "lo procese" — vos estructurás, memex guarda.

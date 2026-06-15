@@ -2,7 +2,7 @@
 // los payload models de src/memex/core/payloads.py (EmailPayload / TelegramPayload /
 // SocialPostPayload). La paridad la vigila tests/test_filter_attributes_parity.py (backend): si un
 // campo cambia allá, ese test rompe y esta tabla se actualiza a mano. Convención "VECTORES ESPEJO"
-// (misma que render-payload.ts ↔ test_summarizer_render.py).
+// (misma que render-payload.ts ↔ tests/test_processing_render.py).
 
 export interface OperatorDoc {
   op: "equals" | "in" | "regex" | "prefix"

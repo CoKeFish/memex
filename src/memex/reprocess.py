@@ -144,7 +144,7 @@ async def _relevance_targets(user_id: int, inbox_ids: list[int], force: bool) ->
     """Corre el gate de relevancia sobre los targets (apagado → no-op con stats en cero).
 
     `force` borra primero los veredictos NO manuales de esos ids (re-juzga). A diferencia de
-    summarize/extract no hay vía per-mensaje especial: el gate ventanea igual con 1 que con N.
+    extract no hay vía per-mensaje especial: el gate ventanea igual con 1 que con N.
     """
     stats = await run_relevance_gate(user_id, inbox_ids=inbox_ids, force=force)
     return {

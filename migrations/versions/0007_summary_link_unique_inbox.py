@@ -11,7 +11,7 @@ dato duplicado) porque la PK (summary_id, inbox_id) lo permite.
 
 Esta migración agrega `UNIQUE(inbox_id)`: cada mensaje pertenece a LO SUMO a un summary.
 Hace la duplicación imposible a nivel DB — el segundo INSERT de link viola la UNIQUE y su
-transacción (que incluye el summary, en `_persist_summary`) hace rollback completo, sin
+transacción (que incluye el summary, en `persist_summary` de relations/summary.py) hace rollback completo, sin
 orphan. Reemplaza el índice no-único de la 0006 (la UNIQUE crea su propio índice, que sirve
 igual para el reverse-lookup inbox→summaries).
 """

@@ -1,7 +1,7 @@
 """Gate R3 en el work-set de extracción de módulos (load_module_workset).
 
 Un mensaje con OCR no-terminal (pending / error reintentable) NO entra al work-set de extracción
-hasta que su media esté en estado terminal (ok / skipped). Espeja el gate del summarizer.
+hasta que su media esté en estado terminal (ok / skipped). Espeja el gate de relations/summary.py.
 """
 
 from __future__ import annotations

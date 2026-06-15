@@ -146,7 +146,7 @@ def test_push_tracked_separately() -> None:
 
 def test_auto_sync_requires_daemon_and_job() -> None:
     _seed_account()
-    _seed_scheduler(daemon_enabled=True, enabled_jobs="classify,summarize")
+    _seed_scheduler(daemon_enabled=True, enabled_jobs="classify,extract")
     data = _health()
     assert data["daemon_enabled"] is True
     assert data["calendar_job_enabled"] is False

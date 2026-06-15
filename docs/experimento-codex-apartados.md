@@ -16,8 +16,9 @@ El flag `--provider codex` inyecta el cliente por corrida (override one-off, NO 
 persistida). Acepta `--codex-model` y `--model`.
 
 ```bash
-# Summarizer
-memex-summarize run --user 1 --limit 50 --provider codex
+# Summarizer (HISTÓRICO / DEPRECADO): el CLI `memex-summarize` ya no existe.
+# El resumen se consolidó en la fase de co-ocurrencia (relations/summary.py),
+# así que ya no se corre como apartado suelto.
 # Orchestrator (ruteo + extracción)
 memex-extract run --user 1 --limit 50 --provider codex
 # Combinado (resumen + extracción en una pasada)

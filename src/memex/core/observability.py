@@ -4,8 +4,8 @@
   for the lifetime of a single ingestor execution, binding `run_id`,
   `source_id`, and `user_id` to structlog contextvars so every log emitted
   inside automatically carries them.
-- `record_llm_call`: persistence helper for `llm_calls`. Not used yet — the
-  summarizer is the eventual caller. Signature is fixed to avoid refactor.
+- `record_llm_call`: persistence helper for `llm_calls`. Used across LLM
+  consumers to record cost/latency. Signature is fixed to avoid refactor.
 """
 
 from __future__ import annotations

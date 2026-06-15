@@ -97,7 +97,7 @@ dead-letter a los 3 intentos, como summarize/extract.
 ## Dónde corre
 
 - **Corridas de procesamiento**: etapa `relevance` en `STAGE_ORDER` (entre classify y
-  summarize) → la heredan `/procesamiento` (de una y por ventanas), `memex-reprocess` y
+  extract) → la heredan `/procesamiento` (de una y por ventanas), `memex-reprocess` y
   `POST /inbox/{id}/reprocess`. También al inicio de `run_combined` (`memex-process`).
 - **Jobs del scheduler**: `relevance_gate` (PT1H) y `relevance_rules` (P1D), fuera de
   `enabled_jobs` por default.

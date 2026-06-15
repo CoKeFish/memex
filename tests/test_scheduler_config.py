@@ -24,5 +24,6 @@ def test_build_jobs_skips_unknown_job() -> None:
 
 
 def test_build_jobs_skips_bad_interval() -> None:
-    jobs = build_jobs(SchedulerSettings(enabled_jobs="summarize", interval_summarize="not-iso"))
+    # Job real (registrado) con intervalo ISO inválido → rama bad_interval (no unknown_job).
+    jobs = build_jobs(SchedulerSettings(enabled_jobs="classify", interval_classify="not-iso"))
     assert jobs == []

@@ -4,8 +4,8 @@ La vista /filtros documenta in-page qué atributos del payload acepta el scope d
 (`frontend/src/lib/filter-attributes.ts`). Esa referencia es TS estático curado; este test deriva
 los dot-paths REALES desde los modelos Pydantic de `memex.core.payloads` y los compara contra los
 VECTORES ESPEJO (duplicados acá y en `filter-attributes.test.ts`, convención de
-`render-payload.ts` ↔ `test_summarizer_render.py`). Cambiar un campo en `payloads.py` rompe este
-test y obliga a actualizar la referencia de ambos lados. Sin DB.
+`render-payload.ts` ↔ `tests/test_processing_render.py`). Cambiar un campo en `payloads.py` rompe
+este test y obliga a actualizar la referencia de ambos lados. Sin DB.
 """
 
 from __future__ import annotations

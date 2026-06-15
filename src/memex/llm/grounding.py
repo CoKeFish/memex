@@ -3,8 +3,8 @@
 Patrón ODKE+ (el «grounder» que exige soporte textual explícito antes de aceptar un hecho): el LLM
 debe citar el fragmento que justifica su veredicto y la contención se verifica acá, sin red — un
 veredicto sin cita verificable se descarta/degrada en el caller. Extraído de
-`modules/identidades/relations_llm.py` (vía >8) para reusarlo en el resolver par-por-par del grafo;
-el comportamiento es idéntico al original.
+`modules/identidades/relations_llm.py` (vía >8) para reusarlo en la confirmación por-mensaje del
+grafo (`relations/per_message.py`); el comportamiento es idéntico al original.
 """
 
 from __future__ import annotations

@@ -262,7 +262,7 @@ export interface WorkerLatest {
 }
 
 export function workerLatest(now: Date = NOW): WorkerLatest[] {
-  const jobs: WorkerJob[] = ["classify", "summarize", "extract", "calendar", "ocr"]
+  const jobs: WorkerJob[] = ["classify", "extract", "calendar", "ocr"]
   return jobs.map((job) => {
     const runs = workerRuns
       .filter((r) => r.job === job)

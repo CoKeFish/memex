@@ -98,8 +98,8 @@ def upgrade() -> None:
         CREATE INDEX relation_edges_user_verdict ON relation_edges (user_id, verdict);
         CREATE INDEX relation_edges_dirty ON relation_edges (user_id) WHERE dirty;
 
-        -- 6. dirty por vértice (groundwork incremental; la pueblan build_relations + la fase
-        --    de confirmación, NO los módulos de dominio). Keyed por (slug,id) como las aristas.
+        -- 6. dirty por vértice (groundwork incremental; la pueblan la fase de confirmación +
+        --    reconcile_graph, NO los módulos de dominio). Keyed por (slug,id) como las aristas.
         CREATE TABLE relation_vertex_state (
             user_id  BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             slug     TEXT NOT NULL,
