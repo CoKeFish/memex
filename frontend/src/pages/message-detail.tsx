@@ -662,7 +662,8 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
             {trace ? (
               <TraceTree nodes={trace} />
             ) : (
-              /* FALLBACK (borrar con trace_nodes): traza heurística por corridas + estado interno por módulo. */
+              /* Sin árbol por-mensaje (lotes/chat: el árbol solo se arma en ventanas de 1 msg):
+                 traza heurística por corridas + estado interno por módulo. */
               <>
                 {llm && llm.calls > 0 ? (
                   <LlmTrace llm={llm} runs={runs} />

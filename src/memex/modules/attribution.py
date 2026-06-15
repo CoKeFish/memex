@@ -3,9 +3,8 @@
 `module_extractions.item_count` = hechos públicos que el dominio ATRIBUYE a cada mensaje vía la
 puerta `read_for_inbox` (overlap de `source_inbox_ids`): lo que el mensaje contiene/respalda HOY,
 aunque el dedup haya unido sus hechos a filas pre-existentes. ÚNICA fuente del conteo — la
-consumen el orquestador al escribir el cursor (los tres caminos: persist / empty_input /
-ruteado-fuera) y `memex-quality backfill-counts` (reparación histórica) → cero divergencia por
-construcción.
+consume el orquestador al escribir el cursor (los tres caminos: persist / empty_input /
+ruteado-fuera) → cero divergencia por construcción.
 """
 
 from __future__ import annotations

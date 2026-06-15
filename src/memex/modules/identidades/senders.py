@@ -35,7 +35,6 @@ Idempotencia: el alta de identidad usa `NOT EXISTS`/`ON CONFLICT DO NOTHING`; la
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Sequence
 from typing import Any
 
@@ -61,7 +60,6 @@ from memex.modules.identidades.resolve import (
 from memex.modules.identidades.schema import IdentityItem
 from memex.relations.canales import sync_canales
 from memex.relations.deterministic import weave_participa_en
-from memex.sources import kind_for_type
 
 _log = get_logger("memex.modules.identidades.senders")
 
@@ -214,9 +212,7 @@ def ensure_chat_sender_identities(
             enriched += 1
         _insert_identifier(conn, user_id, identity_id, "telegram", "platform_id", tg_id, tg_id)
     if created or enriched:
-        _log.info(
-            "identidades.chat_senders.done", user_id=user_id, created=created, enriched=enriched
-        )
+        _log.info("identidades.senders.done", user_id=user_id, created=created, enriched=enriched)
     return created
 
 
@@ -499,100 +495,3 @@ def weave_sender_structure(
         weave_email_senders(conn, user_id, ids)
     elif kind == SourceKind.SOCIAL:
         weave_social_senders(conn, user_id, ids)
-
-
-# --- backfill (one-shot, para mensajes ya procesados antes de la Fase 2) ------------------ #
-
-
-def backfill_senders(conn: Connection, user_id: int) -> dict[str, int]:
-    """Backfill DETERMINISTA (sin LLM) del remitente de PRIMERA CLASE sobre mensajes YA procesados.
-
-    Los mensajes anteriores a la Fase 2 no tienen avistamiento de remitente (el hook no existía).
-    Este one-shot resuelve + persiste el remitente de cada mensaje que YA pasó por la extracción
-    (tiene cursor en `module_extractions` → pasó el gate de relevancia/blacklist en su momento),
-    agrupando por medio y delegando en `weave_sender_structure`. Idempotente (las menciones llevan
-    guard `NOT EXISTS`). NO genera co-ocurrencia: correr después `memex-graph confirm --no-llm` para
-    que los remitentes co-ocurran. Devuelve {kind: mensajes considerados por medio}."""
-    rows = (
-        conn.execute(
-            text(
-                """
-                SELECT i.id AS id, s.type AS type
-                FROM inbox i
-                JOIN sources s ON s.id = i.source_id
-                WHERE i.user_id = :u
-                  AND EXISTS (SELECT 1 FROM module_extractions me WHERE me.inbox_id = i.id)
-                ORDER BY i.id
-                """
-            ),
-            {"u": user_id},
-        )
-        .mappings()
-        .all()
-    )
-    by_kind: dict[SourceKind, list[int]] = defaultdict(list)
-    for r in rows:
-        try:
-            by_kind[kind_for_type(str(r["type"]))].append(int(r["id"]))
-        except KeyError:
-            continue  # tipo de fuente sin categoría conocida → sin remitente que resolver
-    out: dict[str, int] = {}
-    for kind, ids in by_kind.items():
-        weave_sender_structure(conn, user_id, ids, kind)
-        out[kind.value] = len(ids)
-    _log.info("identidades.senders.backfill.done", user_id=user_id, **out)
-    return out
-
-
-def renormalize_domain_identifiers(conn: Connection, user_id: int) -> int:
-    """Re-normaliza `value_norm` de los identifiers `kind='domain'` al dominio REGISTRABLE (eTLD+1).
-
-    One-shot tras cambiar la normalización de dominio (`norm_identifier('domain')` ahora colapsa
-    subdominios): los identifiers viejos quedaron con el host completo (`tm.openai.com`). Re-deriva
-    `value_norm` desde `value`; solo toca los que cambian (idempotente). Si el nuevo valor colisiona
-    con OTRO identifier `domain` de la misma identidad (la UNIQUE per-identidad) borra el duplicado;
-    si no, actualiza. Devuelve cuántos cambió (update o borrado)."""
-    rows = (
-        conn.execute(
-            text(
-                "SELECT id, identity_id, platform, value, value_norm "
-                "FROM mod_identidades_identifiers "
-                "WHERE user_id = :u AND kind = 'domain' ORDER BY id"
-            ),
-            {"u": user_id},
-        )
-        .mappings()
-        .all()
-    )
-    changed = 0
-    for r in rows:
-        new_vn = norm_identifier("domain", str(r["value"]))
-        if new_vn == r["value_norm"]:
-            continue
-        dup = conn.execute(
-            text(
-                "SELECT 1 FROM mod_identidades_identifiers "
-                "WHERE user_id = :u AND identity_id = :iid AND platform = :p AND kind = 'domain' "
-                "AND value_norm = :vn AND id <> :id"
-            ),
-            {
-                "u": user_id,
-                "iid": r["identity_id"],
-                "p": r["platform"],
-                "vn": new_vn,
-                "id": r["id"],
-            },
-        ).first()
-        if dup is not None:
-            conn.execute(
-                text("DELETE FROM mod_identidades_identifiers WHERE id = :id"), {"id": r["id"]}
-            )
-        else:
-            conn.execute(
-                text("UPDATE mod_identidades_identifiers SET value_norm = :vn WHERE id = :id"),
-                {"vn": new_vn, "id": r["id"]},
-            )
-        changed += 1
-    if changed:
-        _log.info("identidades.senders.renormalize_domains.done", user_id=user_id, changed=changed)
-    return changed

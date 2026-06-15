@@ -15,8 +15,6 @@ from sqlalchemy import text
 from memex.core.source import SourceKind
 from memex.db import connection
 from memex.modules.identidades.senders import (
-    backfill_senders,
-    renormalize_domain_identifiers,
     weave_chat_structure,
     weave_email_senders,
     weave_sender_structure,
@@ -142,16 +140,6 @@ def _identifier(identity_id: int, platform: str, kind: str, value: str) -> None:
         p=platform,
         k=kind,
         v=value,
-    )
-
-
-def _extracted(inbox_id: int, slug: str = "identidades") -> None:
-    """Marca un mensaje como YA procesado (cursor en module_extractions) — lo que hace elegible al
-    backfill (resolvió su gate de relevancia/blacklist en su momento)."""
-    _exec(
-        "INSERT INTO module_extractions (user_id, module_slug, inbox_id) VALUES (1, :s, :i)",
-        s=slug,
-        i=inbox_id,
     )
 
 
@@ -362,32 +350,6 @@ def test_email_subdominio_corporativo_colapsa_al_registrable() -> None:
     assert {m["ids"][0] for m in mentions} == {m1, m2}
 
 
-def test_renormalize_domain_identifiers_colapsa_e_idempotente() -> None:
-    # un identifier 'domain' viejo con host completo se colapsa al registrable; re-correr no cambia.
-    o = _org("OpenAI")
-    _identifier(o, "domain", "domain", "tm.openai.com")  # valor viejo (host completo)
-    with connection() as c:
-        changed = renormalize_domain_identifiers(c, 1)
-    assert changed == 1
-    assert ("domain", "domain", "openai.com") in _identifiers_of(o)
-    assert ("domain", "domain", "tm.openai.com") not in _identifiers_of(o)
-    with connection() as c:
-        changed2 = renormalize_domain_identifiers(c, 1)  # idempotente
-    assert changed2 == 0
-
-
-def test_renormalize_domain_identifiers_dedup_colision() -> None:
-    # misma identidad, dos dominios que colapsan al mismo registrable → queda uno (UNIQUE intacta)
-    o = _org("OpenAI")
-    _identifier(o, "domain", "domain", "openai.com")
-    _identifier(o, "domain", "domain", "tm.openai.com")  # colapsa a openai.com (duplicado)
-    with connection() as c:
-        changed = renormalize_domain_identifiers(c, 1)
-    assert changed == 1  # el duplicado se borró
-    domains = {vn for p, k, vn in _identifiers_of(o) if k == "domain"}
-    assert domains == {"openai.com"}
-
-
 def test_email_freemail_conocido_resuelve_persona() -> None:
     p = _person("Ana")
     _identifier(p, "email", "email", "ana@gmail.com")
@@ -484,30 +446,4 @@ def test_dispatcher_rutea_por_kind() -> None:
         weave_sender_structure(c, 1, [mc], SourceKind.CHAT)
         weave_sender_structure(c, 1, [ms], SourceKind.SOCIAL)
     assert sorted(_identity_kinds()) == ["organizacion", "organizacion", "persona"]
-    assert len(_sender_mentions()) == 3
-
-
-# --- backfill ---------------------------------------------------------------------------- #
-
-
-def test_backfill_senders_solo_procesados() -> None:
-    # email corporativo + chat + social YA procesados (module_extractions) → se backfillean; un
-    # correo SIN procesar (sin cursor) se ignora (no pasó el gate en su momento).
-    me = _inbox(_source("imap", "mail"), "e1", _email_payload("notifications@nequi.com", "Nequi"))
-    mc = _inbox(_source("telegram", "tg"), "c1", _tg_payload(333, display_name="Carla"))
-    ms = _inbox(_source("instagram", "ig"), "s1", _social_payload("instagram", "marca"))
-    unprocessed = _inbox(_source("imap", "mail2"), "e2", _email_payload("info@otra.com", "Otra"))
-    for mid in (me, mc, ms):
-        _extracted(mid)
-    with connection() as c:
-        out = backfill_senders(c, 1)
-    assert out == {"email": 1, "chat": 1, "social": 1}
-    assert sorted(_identity_kinds()) == ["organizacion", "organizacion", "persona"]
-    mentions = _sender_mentions()
-    assert len(mentions) == 3
-    assert {m["ids"][0] for m in mentions} == {me, mc, ms}  # el no-procesado quedó sin mención
-    assert unprocessed not in {m["ids"][0] for m in mentions}
-    with connection() as c:  # idempotente
-        out2 = backfill_senders(c, 1)
-    assert out2 == {"email": 1, "chat": 1, "social": 1}
     assert len(_sender_mentions()) == 3

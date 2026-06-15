@@ -103,9 +103,6 @@ class ModelPricing:
 # Defaults verificados 2026-06-03 vs doc oficial de DeepSeek. `deepseek-chat`/`deepseek-reasoner`
 # son alias DEPRECADOS (retiro 2026-07-24) de deepseek-v4-flash; `deepseek-v4-flash-preview` es la
 # variante preview de v4-flash → todos se cobran a tarifa flash (sin estos alias el costo era $0).
-_V32 = ModelPricing(
-    Decimal("0.028"), Decimal("0.28"), Decimal("0.42")
-)  # histórico V3.2-Exp; deepseek-chat ya NO mapea acá
 _FLASH = ModelPricing(Decimal("0.0028"), Decimal("0.14"), Decimal("0.28"))
 _PRO = ModelPricing(Decimal("0.003625"), Decimal("0.435"), Decimal("0.87"))
 

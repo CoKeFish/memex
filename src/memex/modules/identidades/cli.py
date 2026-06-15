@@ -31,8 +31,6 @@ Subcomandos de MANTENIMIENTO (solo `memex-identidades` directo):
   accounts     — lista las cuentas de proveedor de un user.
   interest     — `add` / `list` / `remove` de la lista manual de organizaciones de interés.
   merge        — desempate LLM (FASE 2) de los candidatos de merge de la zona gris del difuso.
-  backfill-productos — reclasifica orgs→producto por voto de menciones (DRY-RUN por default;
-                 `--apply` escribe). Determinista, sin LLM.
 
 La AUTORIZACIÓN de Google NO se hace acá: se conecta la cuenta desde el dashboard (/cuenta), que
 guarda el token cifrado en el vault (Decisión 6). Server-side: habla con la DB vía `connection()`,
@@ -57,7 +55,6 @@ from sqlalchemy.engine import Connection
 from memex.cli.provider_flags import add_provider_flags, client_from_flags
 from memex.db import connection
 from memex.logging import get_logger, setup_logging
-from memex.modules.identidades.backfill import apply_reclassification, find_product_candidates
 from memex.modules.identidades.dedup_llm import run_merge_phase2
 from memex.modules.identidades.hierarchy import would_create_cycle
 from memex.modules.identidades.merge import merge_identities
@@ -65,7 +62,6 @@ from memex.modules.identidades.module import register_card
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.providers import known_providers
 from memex.modules.identidades.providers.base import ContactsProviderError
-from memex.modules.identidades.senders import backfill_senders, renormalize_domain_identifiers
 from memex.modules.identidades.sync import run_sync
 from memex.relations.deterministic import weave_pertenencia
 from memex.relations.edges import (
@@ -123,8 +119,7 @@ Comandos del agente:
   help         muestra esta ayuda
 
 Mantenimiento (no del agente; usar 'memex-identidades' directo, no 'memex identidad'):
-  sync · add-account · accounts · interest · merge · backfill-productos · backfill-senders ·
-  renormalize-domains
+  sync · add-account · accounts · interest · merge
 
 add — desde una tarjeta de contacto / vCard (la lee el agente, no memex):
   memex-identidades add --name "<nombre>" --kind <persona|organizacion|producto> [--email <e>]
@@ -410,29 +405,6 @@ def _build_parser() -> argparse.ArgumentParser:
     cand_p.add_argument(
         "--json", dest="as_json", action="store_true", help="Emite la lista como JSON."
     )
-
-    bf_p = sub.add_parser(
-        "backfill-productos",
-        help="Reclasifica orgs→producto por voto de menciones (dry-run sin --apply).",
-    )
-    bf_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
-    bf_p.add_argument(
-        "--apply",
-        action="store_true",
-        help="Aplica la reclasificación. Sin esto solo imprime la lista (dry-run).",
-    )
-
-    bs_p = sub.add_parser(
-        "backfill-senders",
-        help="Resuelve+persiste el remitente (sin LLM) de mensajes ya procesados pre-Fase-2.",
-    )
-    bs_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
-
-    rd_p = sub.add_parser(
-        "renormalize-domains",
-        help="Re-normaliza los identifiers 'domain' al dominio registrable (eTLD+1). One-shot.",
-    )
-    rd_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
 
     return parser
 
@@ -1633,60 +1605,6 @@ def _cmd_candidates(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_backfill_productos(args: argparse.Namespace) -> int:
-    """Dry-run por default: imprime la lista de orgs que el voto reclasificaría y NO escribe.
-    `--apply` aplica todo (kind + menciones + aristas + membresías + candidatos) en una tx."""
-    with connection() as conn:
-        cands = find_product_candidates(conn, args.user)
-        if not cands:
-            _say(f"\nSin candidatos org→producto para el user {args.user}.\n")
-            return 0
-        _say(f"\nCandidatos a reclasificar org→producto (user {args.user}):")
-        for c in cands:
-            _say(f"  [{c.id}] {c.display_name} votos={c.votos_producto}/{c.votos_total}")
-        if not args.apply:
-            _say(f"\nDRY-RUN: {len(cands)} candidatos; no se escribió nada. Aplicá con --apply.\n")
-            return 0
-        stats = apply_reclassification(conn, args.user, [c.id for c in cands])
-    _say(
-        f"\nReclasificadas {stats.reclassified} identidades a producto; "
-        f"menciones={stats.mentions} aristas={stats.edges} "
-        f"membresías={stats.cluster_members} "
-        f"candidatos de merge rechazados={stats.merge_candidates_rejected}.\n"
-    )
-    return 0
-
-
-def _cmd_backfill_senders(args: argparse.Namespace) -> int:
-    """Backfill determinista (sin LLM) del remitente de mensajes ya procesados pre-Fase-2: crea/
-    resuelve la identidad del remitente por medio y persiste su avistamiento. Idempotente. Después
-    correr `memex-graph confirm --no-llm` para que los remitentes co-ocurran."""
-    with connection() as conn:
-        out = backfill_senders(conn, args.user)
-    if not out:
-        _say(f"\nSin mensajes procesados para backfillar (user {args.user}).\n")
-        return 0
-    breakdown = " ".join(f"{kind}={n}" for kind, n in sorted(out.items()))
-    _say(
-        f"\nbackfill-senders (user {args.user}): {breakdown}. "
-        f"Correr `memex-graph confirm --no-llm` para regenerar la co-ocurrencia.\n"
-    )
-    return 0
-
-
-def _cmd_renormalize_domains(args: argparse.Namespace) -> int:
-    """Re-normaliza los identifiers 'domain' al dominio registrable (eTLD+1). One-shot idempotente
-    tras cambiar la normalización; correr luego `memex-graph confirm --no-llm` por si cambió alguna
-    resolución de remitente."""
-    with connection() as conn:
-        changed = renormalize_domain_identifiers(conn, args.user)
-    _say(
-        f"\nrenormalize-domains (user {args.user}): {changed} identifier(s) 'domain' colapsados al "
-        f"dominio registrable. Correr `memex-graph confirm --no-llm` si re-resuelven remitentes.\n"
-    )
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -1744,12 +1662,6 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_merge(args)
         if args.cmd == "candidates":
             return _cmd_candidates(args)
-        if args.cmd == "backfill-productos":
-            return _cmd_backfill_productos(args)
-        if args.cmd == "backfill-senders":
-            return _cmd_backfill_senders(args)
-        if args.cmd == "renormalize-domains":
-            return _cmd_renormalize_domains(args)
         if args.cmd == "interest":
             if args.interest_cmd == "add":
                 return _cmd_interest_add(args)

@@ -292,28 +292,6 @@ async def test_pull_captures_recurring_event_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pull_backfills_recurring_event_id_on_resync() -> None:
-    # Evento ya en la DB con recurring_event_id NULL (sincronizado antes del feature). Un resync con
-    # el MISMO etag pero recurringEventId presente debe ACTUALIZAR (backfill), no quedar unchanged.
-    aid = _seed_account()
-    await run_pull(
-        1, aid, client=FakeProvider(ProviderPage(events=(_ev("a", "Clase", etag="e1"),)))
-    )
-    assert _events(aid)[0]["recurring_event_id"] is None
-
-    stats = await run_pull(
-        1,
-        aid,
-        client=FakeProvider(
-            ProviderPage(events=(_ev("a", "Clase", etag="e1", recurring_event_id="serie-clase"),))
-        ),
-    )
-
-    assert (stats.created, stats.modified, stats.unchanged) == (0, 1, 0)
-    assert _events(aid)[0]["recurring_event_id"] == "serie-clase"
-
-
-@pytest.mark.asyncio
 async def test_pull_paginates_and_accumulates() -> None:
     aid = _seed_account()
     fake = FakeProvider(

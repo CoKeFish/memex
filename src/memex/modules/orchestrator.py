@@ -1,7 +1,8 @@
 """Orquestador de extracción (ADR-015 §2): Etapa A (ruteo) + Etapa B (extracción agrupada).
 
-Parte de la etapa COMBINADA sobre los mensajes clasificados ORIGINALES (junto al summarizer,
-no downstream). La unidad de trabajo es una ventana (lote batch / mensaje individual).
+Parte de la etapa de extracción sobre los mensajes clasificados ORIGINALES (el resumen se
+produce aparte, en la fase de co-ocurrencia: relations/summary.py; no downstream). La unidad de
+trabajo es una ventana (lote batch / mensaje individual).
 
 Etapa A — ruteo (SIEMPRE primero; dependency-aware): pre-filtro determinista por
 `consumes_kinds`; con 0/1 candidato hace short-circuit (sin LLM); con ≥2 candidatos, 1 llamada
@@ -101,7 +102,7 @@ _GROUP_SIZE_DEFAULT = 8
 _GROUPED_MAX_TOKENS_CAP = 8192
 #: finish_reasons de respuesta COMPLETA. Otro valor (p. ej. "length" por max_tokens) = truncada →
 #: el JSON queda inválido y `parse_items` da []; se trata como error reintentable (sin cursor), no
-#: como "0 items extraídos". Espejo del summarizer (`summarizer/worker.py`).
+#: como "0 items extraídos". Espejo de `relations/summary.py`.
 _OK_FINISH = frozenset({"stop"})
 
 
@@ -160,8 +161,8 @@ def _insert_cursor(
     inbox_ids: list[int],
 ) -> None:
     """Marca el cursor (module_slug, inbox_id). `item_count` = hechos públicos que el dominio
-    ATRIBUYE a cada mensaje (`attributed_counts`, la MISMA función que `memex-quality
-    backfill-counts`), sea cual sea el camino (persist / empty_input / ruteado-fuera) y aunque el
+    ATRIBUYE a cada mensaje (`attributed_counts`), sea cual sea el camino (persist / empty_input /
+    ruteado-fuera) y aunque el
     dedup haya unido los hechos a filas pre-existentes — un reproceso o un ruteo distinto no
     degrada la señal de relevancia. ON CONFLICT DO NOTHING preserva el count previo — re-extraer
     sin `force` no lo pisa (con `force` se borró antes y se reescribe)."""

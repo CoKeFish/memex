@@ -3,7 +3,6 @@
 Subcomandos:
   detect          — corre la detección de candidatos a filtrar (job manual, sin LLM).
   candidates      — lista los candidatos (filtro opcional por estado).
-  backfill-counts — recalcula module_extractions.item_count histórico desde las tablas de dominio.
   judge           — juez LLM de relevancia (zona gris) para un candidato (opcional, gateado).
 
 Conecta directo a Postgres (`memex.db.connection`); pensado para el server (mismo host que la DB).
@@ -11,7 +10,6 @@ Conecta directo a Postgres (`memex.db.connection`); pensado para el server (mism
 Ejemplos:
   memex-quality detect --user-id 1
   memex-quality candidates --user-id 1 --status open
-  memex-quality backfill-counts --user-id 1
 """
 
 from __future__ import annotations
@@ -21,7 +19,6 @@ import sys
 
 from memex.db import connection
 from memex.logging import setup_logging
-from memex.quality.backfill import backfill_item_counts
 from memex.quality.candidates import list_candidates, run_relevance_detection
 
 
@@ -45,12 +42,6 @@ def cmd_candidates(args: argparse.Namespace) -> int:
             f"[{r['status']}] {r['sender_label']} <{r['email'] or '—'}> "
             f"msgs={r['messages']} rel={pct_s} inertes={r['inert']} score={r['score']}"
         )
-    return 0
-
-
-def cmd_backfill_counts(args: argparse.Namespace) -> int:
-    stats = backfill_item_counts(args.user_id)
-    print(f"backfill: {stats.scanned} filas evaluadas, {stats.updated} corregidas")
     return 0
 
 
@@ -86,10 +77,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--status", default="open", choices=["open", "confirmed", "dismissed", "all"]
     )
     p_cand.set_defaults(func=cmd_candidates)
-
-    p_bf = sub.add_parser("backfill-counts", help="recalcula item_count histórico")
-    p_bf.add_argument("--user-id", type=int, default=1)
-    p_bf.set_defaults(func=cmd_backfill_counts)
 
     p_judge = sub.add_parser("judge", help="juez LLM de relevancia para un candidato (opcional)")
     p_judge.add_argument("--user-id", type=int, default=1)

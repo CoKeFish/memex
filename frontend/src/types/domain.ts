@@ -301,11 +301,13 @@ export interface InboxRow {
   summary?: InboxSummary | null
   extraction?: InboxExtraction | null
   /** Estado interno por-módulo (dedup, seam contraparte→identidad, consolidación) — vista debug.
-   *  DEPRECATED: lo supersede `trace` (árbol jerárquico); se conserva como fallback. */
+   *  Camino VIGENTE para mensajes sin árbol por-mensaje: `trace` solo se arma en ventanas de un
+   *  mensaje, así que los lotes (chat, correos batch, daemon) siempre se renderizan acá. */
   extractionDebug?: ExtractionDebug | null
   llm?: InboxLlmUsage | null
-  /** Árbol de traza jerárquica de la extracción (GET /inbox/{id}). null ⇒ mensaje viejo sin árbol
-   *  persistido → el front cae al fallback (LlmTrace + extractionDebug). */
+  /** Árbol de traza jerárquica de la extracción (GET /inbox/{id}). null ⇒ sin árbol por-mensaje:
+   *  solo se arma en ventanas de un mensaje, así que lotes/chat caen al fallback
+   *  (LlmTrace + extractionDebug). */
   trace?: TraceNodeDto[] | null
   /** Adjuntos del mensaje (media_assets) — solo en el detalle (GET /inbox/{id}). */
   media?: MediaAsset[]
@@ -350,7 +352,7 @@ export interface IngestionRun {
   isStale?: boolean
 }
 
-export type WorkerJob = "classify" | "summarize" | "extract" | "calendar" | "ocr"
+export type WorkerJob = "classify" | "extract" | "calendar" | "ocr"
 export type WorkerRunStatus = "running" | "ok" | "error"
 
 export interface WorkerRun {

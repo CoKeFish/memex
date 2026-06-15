@@ -21,7 +21,6 @@ from memex.llm.pricing import (
 
 # Defaults verificados 2026-05-31 (ver docstring de pricing.py). Anclados acá para que un
 # cambio de tabla rompa el test a propósito (precios volátiles = único lugar a tocar).
-_V32 = ModelPricing(Decimal("0.028"), Decimal("0.28"), Decimal("0.42"))
 _FLASH = ModelPricing(Decimal("0.0028"), Decimal("0.14"), Decimal("0.28"))
 _PRO = ModelPricing(Decimal("0.0145"), Decimal("1.74"), Decimal("3.48"))
 

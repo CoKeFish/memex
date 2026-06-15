@@ -44,10 +44,11 @@ CAP_EXTRACT = "extract"
 #: Futuras, declaradas pero SIN flujo en este slice (las ejercitan calendar/hackathones):
 CAP_PROVIDE_DOMAIN = "provide_domain"
 CAP_CONTRIBUTE_DOMAIN = "contribute_domain"
-#: DEPRECATED (lo supersede la traza jerárquica `ctx.trace` → `trace_nodes`; se conserva como
-#: FALLBACK para mensajes viejos sin árbol). Expone el ESTADO INTERNO por-mensaje (dedup, seam,
-#: consolidación) para la vista de DEBUG `/datos/:id` — lo que `read_for_inbox` oculta. Vía
-#: `InboxDebugProvider`.
+#: Expone el ESTADO INTERNO por-mensaje (dedup, seam, consolidación) para la vista de DEBUG
+#: `/datos/:id` — lo que `read_for_inbox` oculta. Vía `InboxDebugProvider`. NO es legacy: la traza
+#: jerárquica `ctx.trace` → `trace_nodes` solo se construye para ventanas de UN mensaje (extracción
+#: individual); los lotes (chat siempre, correos batch, el daemon) nunca generan árbol por diseño y
+#: caen acá — es el camino de debug VIGENTE para todo lo procesado en lote.
 CAP_DEBUG_INBOX = "debug_inbox"
 
 

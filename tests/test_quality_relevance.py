@@ -314,11 +314,10 @@ def test_empty_input_cursor_cuenta_atribucion_previa(seed_source: dict[str, Any]
     assert _item_count(m1, "finance") == 1
 
 
-def test_write_path_coincide_con_backfill(seed_source: dict[str, Any]) -> None:
-    """Invariante: el write-path deja exactamente lo que `backfill-counts` recalcularía (misma
-    función `attributed_counts`) — el backfill no encuentra nada que reparar."""
-    from memex.quality.backfill import backfill_item_counts
-
+def test_write_path_escribe_item_count_atribuido(seed_source: dict[str, Any]) -> None:
+    """El write-path del orquestador escribe `item_count` = atribución por mensaje
+    (`attributed_counts`): un mensaje vacío con un hecho sembrado y un mensaje con cuerpo quedan
+    ambos en 1, sea cual sea el camino."""
     sid = seed_source["id"]
     _enable_finance()
     m1 = _seed_empty_msg(sid, "vacio")
@@ -329,8 +328,6 @@ def test_write_path_coincide_con_backfill(seed_source: dict[str, Any]) -> None:
 
     assert _item_count(m1, "finance") == 1
     assert _item_count(m2, "finance") == 1
-    stats = backfill_item_counts(1)
-    assert stats.updated == 0
 
 
 # --- (3) endpoint ---------------------------------------------------------------- #
@@ -534,23 +531,6 @@ def test_candidates_endpoints(client: Any, seed_source: dict[str, Any]) -> None:
     assert all(i["sender_key"] != "spam@x.com" for i in open_items)
     bad = client.post("/quality/candidates/status", json={"sender_key": "nope", "status": "open"})
     assert bad.status_code == 404
-
-
-def test_backfill_item_counts(seed_source: dict[str, Any]) -> None:
-    from memex.quality.backfill import backfill_item_counts
-
-    sid = seed_source["id"]
-    _enable_finance()
-    m1 = _seed_msg(sid, "m1", email="a@x.com", tier="batch", minute=0, body="pagué $10")
-    asyncio.run(run_extraction(1, client=_OneFactLLM()))
-    # Simular histórico: el cursor se escribió con el conteo correcto → lo reseteamos a 0.
-    with connection() as c:
-        c.execute(
-            text("UPDATE module_extractions SET item_count = 0 WHERE inbox_id = :i"), {"i": m1}
-        )
-    stats = backfill_item_counts(1)
-    assert stats.updated == 1
-    assert _item_count(m1, "finance") == 1
 
 
 # --- (7) juez LLM de zona gris (opcional, default-off) --------------------------- #

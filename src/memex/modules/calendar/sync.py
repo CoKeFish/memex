@@ -202,7 +202,7 @@ def _upsert_event(
     existing = conn.execute(
         text(
             """
-            SELECT id, provider_etag, recurring_event_id FROM mod_calendar_events
+            SELECT id, provider_etag FROM mod_calendar_events
             WHERE provider = :provider AND provider_account_id = :aid
               AND provider_event_id = :peid
             """
@@ -274,15 +274,7 @@ def _upsert_event(
 
     event_id = int(existing[0])
     current_etag = existing[1]
-    current_recurring = existing[2]
-    # "Sin cambios" exige también que `recurring_event_id` ya coincida: así un full resync
-    # backfillea la columna en eventos viejos (mismo etag, columna NULL) desde la API, sin
-    # re-parsear el id.
-    if (
-        ev.etag is not None
-        and current_etag == ev.etag
-        and current_recurring == ev.recurring_event_id
-    ):
+    if ev.etag is not None and current_etag == ev.etag:
         return "unchanged", None
 
     conn.execute(
