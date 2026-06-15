@@ -37,6 +37,7 @@ from memex.api.routers import (
     review,
     sources,
     stats,
+    telegram,
 )
 from memex.api.streaming import build_streaming_runner
 from memex.config import settings
@@ -106,6 +107,7 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(accounts.router)
 app.include_router(oauth.router)
+app.include_router(telegram.router)
 app.include_router(ingest.router)
 app.include_router(ingest_scheduler.router)
 app.include_router(inbox.router)

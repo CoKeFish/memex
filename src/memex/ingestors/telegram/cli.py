@@ -39,7 +39,7 @@ from memex.core.source import SourceConfigError, SourceRecord
 from memex.ingestors.memex_server_client import MemexAPIError, MemexServerClient
 from memex.ingestors.runner import run_ingestor
 from memex.ingestors.telegram.client import TelegramClientWrapper
-from memex.ingestors.telegram.config import TelegramConfig, TelegramConfigError
+from memex.ingestors.telegram.config import AllowedChat, TelegramConfig, TelegramConfigError
 from memex.ingestors.telegram.source import make_source
 from memex.ingestors.telegram.streaming import TelegramStreamingSource
 from memex.logging import get_logger, setup_logging
@@ -117,6 +117,24 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         required=True,
         help="Source id whose streaming chats we listen to.",
+    )
+
+    setchats_p = sub.add_parser(
+        "set-chats",
+        help="Set a telegram source's allowed_chats (REPLACES the list) — CLI parity with the UI.",
+    )
+    setchats_p.add_argument("--source-id", type=int, required=True)
+    setchats_p.add_argument(
+        "--chat-ids",
+        required=True,
+        help="Comma-separated chat ids — use the `=` form for negative ids "
+        "(e.g. --chat-ids=-100123,-100456). Run `discover` to find them.",
+    )
+    setchats_p.add_argument(
+        "--streaming", action="store_true", help="Mark ALL given chats as streaming (live)."
+    )
+    setchats_p.add_argument(
+        "--priority", action="store_true", help="Mark ALL given chats as priority."
     )
 
     return parser
@@ -332,6 +350,40 @@ def _cmd_listen(args: argparse.Namespace, client: MemexServerClient, log: Any) -
         return 1
 
 
+def _cmd_set_chats(args: argparse.Namespace, client: MemexServerClient, log: Any) -> int:
+    """Reemplaza `allowed_chats` del source con los chat_ids dados (persiste en `sources.config`).
+
+    Paridad CLI del selector de la UI: `discover` lista los chats, esto persiste la elección. Valida
+    cada entrada como `AllowedChat` (mismo schema que el ingestor) antes de escribir.
+    """
+    sources = _select_sources(client, args.source_id)
+    if not sources:
+        log.error("telegram.cli.source.not_found", source_id=args.source_id)
+        return 1
+    src = sources[0]
+    try:
+        chat_ids = [int(x.strip()) for x in args.chat_ids.split(",") if x.strip()]
+    except ValueError:
+        print("--chat-ids debe ser enteros separados por coma.", file=sys.stderr)
+        return 1
+    if not chat_ids:
+        print("--chat-ids vacío.", file=sys.stderr)
+        return 1
+    chats = [
+        AllowedChat(chat_id=cid, streaming=args.streaming, priority=args.priority).model_dump()
+        for cid in chat_ids
+    ]
+    cfg = dict(src.get("config", {}) or {})
+    cfg["allowed_chats"] = chats
+    client.patch_source(args.source_id, cfg)  # persiste vía el API (aislamiento: HTTP, no DB)
+    log.info("telegram.cli.set_chats", source_id=args.source_id, count=len(chats))
+    print(
+        f"\nallowed_chats del source {args.source_id}: {len(chats)} chat(s) "
+        f"(streaming={args.streaming}, priority={args.priority}).\n"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -355,6 +407,8 @@ def main(argv: list[str] | None = None) -> int:
                 return _cmd_discover(args, client, log)
             if args.cmd == "listen":
                 return _cmd_listen(args, client, log)
+            if args.cmd == "set-chats":
+                return _cmd_set_chats(args, client, log)
             log.error("telegram.cli.unknown_command", cmd=args.cmd)
             return 1
     except MemexAPIError as e:

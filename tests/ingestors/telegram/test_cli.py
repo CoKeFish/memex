@@ -25,7 +25,7 @@ def test_help_for_each_subcommand() -> None:
     p = _parser()
     # subparsers action exposes `choices` as the dict of subcommand names.
     subs = p._subparsers._group_actions[0].choices
-    assert set(subs.keys()) == {"auth", "run", "discover", "listen"}
+    assert set(subs.keys()) == {"auth", "run", "discover", "listen", "set-chats"}
 
 
 def test_run_with_no_telegram_sources_returns_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -37,6 +37,24 @@ def test_run_with_no_telegram_sources_returns_zero(monkeypatch: pytest.MonkeyPat
     with patch("memex.ingestors.telegram.cli.MemexServerClient", return_value=fake_client):
         rc = main(["run"])
     assert rc == 0
+
+
+def test_set_chats_persists_via_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_client = MagicMock()
+    fake_client.__enter__.return_value = fake_client
+    fake_client.__exit__.return_value = None
+    fake_client.get_sources_by_type.return_value = [{"id": 5, "user_id": 1, "config": {}}]
+
+    with patch("memex.ingestors.telegram.cli.MemexServerClient", return_value=fake_client):
+        rc = main(["set-chats", "--source-id", "5", "--chat-ids=-100,-200", "--streaming"])
+
+    assert rc == 0
+    fake_client.patch_source.assert_called_once()
+    sid, cfg = fake_client.patch_source.call_args.args
+    assert sid == 5
+    chats = cfg["allowed_chats"]
+    assert {c["chat_id"] for c in chats} == {-100, -200}
+    assert all(c["streaming"] for c in chats)
     fake_client.get_sources_by_type.assert_called_once_with("telegram")
 
 

@@ -100,6 +100,12 @@ class MemexServerClient:
         result: dict[str, Any] = resp.json()
         return result
 
+    def patch_source(self, source_id: int, config: dict[str, Any]) -> dict[str, Any]:
+        """PATCH /sources/{id} — reemplaza el `config` de la source. Devuelve la fila."""
+        resp = self._request("PATCH", f"/sources/{source_id}", json={"config": config})
+        result: dict[str, Any] = resp.json()
+        return result
+
     def get_checkpoint(self, source_id: int) -> dict[str, Any] | None:
         data = self._request("GET", f"/sources/{source_id}/checkpoint").json()
         cursor = data.get("cursor")
