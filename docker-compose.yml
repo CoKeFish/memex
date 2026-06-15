@@ -121,6 +121,12 @@ services:
       MEMEX_IMAP_GMAIL_USER: ${MEMEX_IMAP_GMAIL_USER:-}
       MEMEX_IMAP_GMAIL_CLIENT_SECRET_JSON: /secrets/google_client_secret.json
       MEMEX_IMAP_GMAIL_TOKEN_JSON: /secrets/gmail_token.json
+      # OAuth web "Conectar con Google" del dashboard (/cuenta). Reusa el client_secret montado en
+      # ./secrets; el redirect base es el ORIGEN público del dashboard (dev = Vite :5173, que
+      # proxea /api → API). Si el client es 'installed' y Google rechaza el redirect, crear un
+      # cliente OAuth "Web application" con la URI {base}/api/oauth/google/callback y apuntar acá.
+      MEMEX_GOOGLE_OAUTH_CLIENT_SECRET_JSON: ${MEMEX_GOOGLE_OAUTH_CLIENT_SECRET_JSON:-/secrets/google_client_secret.json}
+      MEMEX_OAUTH_REDIRECT_BASE_URL: ${MEMEX_OAUTH_REDIRECT_BASE_URL:-http://localhost:5173}
     ports:
       - "8787:8787"
     volumes:
