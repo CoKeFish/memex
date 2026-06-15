@@ -42,6 +42,7 @@ from memex.core.observability import (
 from memex.core.observability import (
     cost_fields as _cost_fields,
 )
+from memex.core.source import SourceKind
 from memex.core.trace import create_root, open_module_tracer
 from memex.db import connection
 from memex.llm import ChatMessage, LLMClient, LLMQuotaError, LLMResult, aclose_llm, build_llm_client
@@ -675,6 +676,16 @@ async def _process_window(
     candidates = candidates_for_kind(kind, active)
     if not candidates:
         return  # el workset no debería traer kinds no-consumidos; defensivo
+
+    # Paso 5 — estructura de chat (canal + remitente + «participa_en») del LOTE, DETERMINISTA e
+    # INDEPENDIENTE del ruteo LLM: todo lote de chat la teje aunque el router no elija identidades
+    # (el remitente y su canal son estructura del medio, no contenido extraído). Requiere
+    # identidades activa: crea las identidades de remitente. Import local (no acopla import-time).
+    if kind == SourceKind.CHAT and "identidades" in active_by_slug:
+        from memex.modules.identidades.chat_senders import weave_chat_structure
+
+        with connection() as conn:
+            weave_chat_structure(conn, user_id, [r.inbox_id for r in window.rows])
 
     with connection() as conn:
         done = _done_by_id(conn, [r.inbox_id for r in window.rows])

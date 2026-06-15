@@ -56,15 +56,11 @@ export interface GraphData {
   inboxKinds: Record<number, string>
 }
 
-export interface GraphBuildResult {
-  cooccurrencePistas: number
-  afiliacionReales: number
-  pertenenciaReales: number
-  contraparteReales: number
-  participaReales: number
-  chatSenders: number
-  canales: number
-  highFanoutSkipped: number
+export interface GraphReconcileResult {
+  staleAfiliacion: number
+  stalePertenencia: number
+  staleContraparte: number
+  orphansPruned: number
 }
 
 export interface GraphClusterResult {
@@ -158,27 +154,21 @@ export async function fetchGraph(verdict?: string, sourceInboxId?: number): Prom
   return { nodes: g.nodes.map(toNode), edges: g.edges.map(toEdge), inboxKinds: g.inbox_kinds ?? {} }
 }
 
-/** Corre el paso determinista (POST /graph/build): materializa pistas + reales sobre lo guardado. */
-export async function buildGraph(): Promise<GraphBuildResult> {
+/** Mantenimiento del grafo (POST /graph/reconcile, sin LLM): poda huérfanas + reconcilia las reales
+ *  cuyo dato de origen cambió. Las aristas las tejen los módulos al escribir; las pistas, la fase de
+ *  co-ocurrencia («Confirmar»). */
+export async function reconcileGraph(): Promise<GraphReconcileResult> {
   const r = await apiPost<{
-    cooccurrence_pistas: number
-    afiliacion_reales: number
-    pertenencia_reales?: number
-    contraparte_reales?: number
-    participa_reales?: number
-    chat_senders?: number
-    canales?: number
-    high_fanout_skipped: number
-  }>("/graph/build")
+    stale_afiliacion: number
+    stale_pertenencia: number
+    stale_contraparte: number
+    orphans_pruned: number
+  }>("/graph/reconcile")
   return {
-    cooccurrencePistas: r.cooccurrence_pistas,
-    afiliacionReales: r.afiliacion_reales,
-    pertenenciaReales: r.pertenencia_reales ?? 0,
-    contraparteReales: r.contraparte_reales ?? 0,
-    participaReales: r.participa_reales ?? 0,
-    chatSenders: r.chat_senders ?? 0,
-    canales: r.canales ?? 0,
-    highFanoutSkipped: r.high_fanout_skipped,
+    staleAfiliacion: r.stale_afiliacion,
+    stalePertenencia: r.stale_pertenencia,
+    staleContraparte: r.stale_contraparte,
+    orphansPruned: r.orphans_pruned,
   }
 }
 

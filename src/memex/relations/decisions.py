@@ -11,7 +11,7 @@ statement+references.
   `dejar` no transiciona: es el memo "no decidible con ESTA evidencia" — el resolver no re-gasta
   LLM mientras `evidence_sig` no cambie.
 - Sources: TODOS los mensajes que generaron la pista (no solo el primero que quedó en
-  `evidence='inbox:N'`). Las puebla `_materialize_cooccurrence` en cada build, también para
+  `evidence='inbox:N'`). Las puebla `_materialize_cooccurrence` en cada generación, también para
   aristas terminales (un rechazado que gana evidencia nueva se detecta comparando la sig actual
   contra la de su última decisión).
 """

@@ -6,20 +6,20 @@ from sqlalchemy.engine import Connection
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
-    GraphBuildResult,
     GraphClusterResult,
     GraphClustersResponse,
     GraphClusterTimeline,
     GraphClusterValidateResult,
+    GraphReconcileResult,
     GraphResponse,
 )
-from memex.config import settings
 from memex.db import connection
 from memex.logging import get_logger
 from memex.relations.clusters_llm import run_cluster_partition
+from memex.relations.cooccurrence import vertex_inbox_ids
 from memex.relations.decisions import edge_sources
-from memex.relations.deterministic import build_relations, vertex_inbox_ids
 from memex.relations.edges import list_edges
+from memex.relations.maintenance import reconcile_graph
 from memex.relations.per_message import run_per_message_confirm
 from memex.relations.reconcile import detect_and_reconcile
 from memex.relations.timeline import cluster_timeline
@@ -146,42 +146,28 @@ async def get_graph(
     return {"nodes": nodes, "edges": out_edges, "inbox_kinds": inbox_kinds}
 
 
-@router.post("/build", response_model=GraphBuildResult)
-async def build_graph(user_id: UserID) -> dict[str, Any]:
-    """Corre el paso de relaciones DETERMINISTAS (on-demand, explícito): materializa pistas de
-    co-ocurrencia + afiliaciones reales sobre lo ya guardado. Idempotente y sin LLM. NO dispara
-    extracción/consolidación (consume lo disponible). El tope de fan-out es configurable
-    (`MEMEX_COOCCURRENCE_CAP`)."""
+@router.post("/reconcile", response_model=GraphReconcileResult)
+async def reconcile_graph_endpoint(user_id: UserID) -> dict[str, Any]:
+    """Mantenimiento del grafo (on-demand, explícito): reconcilia las aristas reales del
+    directorio/finanzas cuyo dato de origen cambió (contraparte re-resuelta, afiliación o padre
+    quitado) y poda las huérfanas (extremo tombstoneado/borrado/fusionado/cúmulo disuelto). NO teje
+    aristas nuevas —eso lo hacen los módulos al escribir (paso 5)— ni genera co-ocurrencia.
+    Idempotente y sin LLM."""
     with connection() as conn:
-        stats = build_relations(conn, user_id, cooccurrence_cap=settings.cooccurrence_cap)
+        stats = reconcile_graph(conn, user_id)
     _log.info(
-        "graph.build.api",
+        "graph.reconcile.api",
         user_id=user_id,
-        pistas=stats.cooccurrence_pistas,
-        reales=stats.afiliacion_reales,
-        pertenencia=stats.pertenencia_reales,
-        contraparte=stats.contraparte_reales,
-        cumple=stats.cumple_reales,
-        participa=stats.participa_reales,
-        canales=stats.canales,
-        chat_senders=stats.chat_senders,
-        skipped=stats.high_fanout_skipped,
+        stale_afiliacion=stats.stale_afiliacion,
+        stale_pertenencia=stats.stale_pertenencia,
+        stale_contraparte=stats.stale_contraparte,
         orphans_pruned=stats.orphans_pruned,
-        stale_pruned=stats.stale_pruned,
     )
     return {
-        "cooccurrence_pistas": stats.cooccurrence_pistas,
-        "afiliacion_reales": stats.afiliacion_reales,
-        "pertenencia_reales": stats.pertenencia_reales,
-        "contraparte_reales": stats.contraparte_reales,
-        "cumple_reales": stats.cumple_reales,
-        "participa_reales": stats.participa_reales,
-        "high_fanout_skipped": stats.high_fanout_skipped,
+        "stale_afiliacion": stats.stale_afiliacion,
+        "stale_pertenencia": stats.stale_pertenencia,
+        "stale_contraparte": stats.stale_contraparte,
         "orphans_pruned": stats.orphans_pruned,
-        "stale_pruned": stats.stale_pruned,
-        "cluster_edges": stats.cluster_edges,
-        "chat_senders": stats.chat_senders,
-        "canales": stats.canales,
     }
 
 

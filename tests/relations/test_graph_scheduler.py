@@ -1,5 +1,6 @@
 """Job `graph` del scheduler: registrado y APAGADO por default; `run_graph_cycle` encadena
-build→detect→validate (validador mockeado, sin LLM) y `LLMQuotaError` corta SOLO la validación."""
+genera-co-ocurrencia→detect→validate→reconcile (validador mockeado, sin LLM) y `LLMQuotaError` corta
+SOLO la validación (lo determinista ya corrió)."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ from sqlalchemy.engine import Connection
 from memex.db import connection
 from memex.llm.client import LLMQuotaError
 from memex.relations.clusters_llm import ClusterPartitionStats
+from memex.relations.deterministic import weave_event
 from memex.scheduler import jobs as jobs_mod
 from memex.scheduler.config import SchedulerSettings, build_jobs
 
@@ -27,12 +29,13 @@ def _registro(conn: Connection, activity: str, event_id: str) -> int:
 
 
 def _seed_triangle() -> None:
-    """Tres hechos del MISMO evento → el build materializa el triángulo «mismo_evento» desde la
-    fuente de verdad (antes se sembraban aristas `afiliado` directas sin respaldo en
-    `person_orgs`; la reconciliación del build ahora las barrería, como corresponde)."""
+    """Tres hechos del MISMO evento → `weave_event` teje el triángulo «mismo_evento» desde la fuente
+    de verdad (paso 5; los registros se seedean crudos, así que se teje a mano). El ciclo del grafo
+    luego detecta el cúmulo sobre esas aristas confirmadas."""
     with connection() as c:
         for act in ("a", "b", "c"):
             _registro(c, act, "evt-triangulo")
+        weave_event(c, 1, "evt-triangulo")
 
 
 def test_graph_job_registrado() -> None:

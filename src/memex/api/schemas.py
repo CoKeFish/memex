@@ -2150,21 +2150,14 @@ class GraphResponse(BaseModel):
     inbox_kinds: dict[int, str] = {}
 
 
-class GraphBuildResult(BaseModel):
-    """Resumen del paso determinista (POST /graph/build)."""
+class GraphReconcileResult(BaseModel):
+    """Resumen del mantenimiento del grafo (POST /graph/reconcile): reconciliación de reales stale
+    + poda de huérfanas."""
 
-    cooccurrence_pistas: int
-    afiliacion_reales: int
-    pertenencia_reales: int = 0
-    contraparte_reales: int = 0
-    cumple_reales: int = 0
-    participa_reales: int = 0
-    high_fanout_skipped: int
+    stale_afiliacion: int = 0
+    stale_pertenencia: int = 0
+    stale_contraparte: int = 0
     orphans_pruned: int = 0
-    stale_pruned: int = 0
-    cluster_edges: int = 0
-    chat_senders: int = 0
-    canales: int = 0
 
 
 class GraphClusterResult(BaseModel):

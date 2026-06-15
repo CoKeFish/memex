@@ -1,11 +1,12 @@
 """Creación determinista de identidades para REMITENTES DE CHAT desconocidos.
 
 Los chats están allowlisteados (grupos curados): quien escribe ahí es gente real que vale tener en
-el directorio aunque el LLM nunca la extraiga como mención. Este paso (lo llama `build_relations`
-antes de armar la provenance) garantiza que todo remitente humano de chat exista en
-`mod_identidades` con su identificador ESTABLE de plataforma (`kind='platform_id'`, el `user_id`
-de Telegram) — la provenance derivada del grafo (brazo CHAT de `vertex_inbox_ids`) resuelve por
-ese identificador, así que crear acá = el remitente co-ocurre con lo extraído de sus mensajes.
+el directorio aunque el LLM nunca la extraiga como mención. Este paso (lo teje
+`weave_chat_structure` al procesar el LOTE, paso 5) garantiza que todo remitente humano de chat
+exista en `mod_identidades` con su identificador ESTABLE de plataforma (`kind='platform_id'`, el
+`user_id` de Telegram) — la provenance derivada del grafo (brazo CHAT de `vertex_inbox_ids`)
+resuelve por ese identificador, así que crear acá = el remitente co-ocurre con lo extraído de sus
+mensajes.
 
 Decisiones:
 - Match SOLO determinista: `platform_id` exacto y, como ENRIQUECIMIENTO, el `handle` de telegram
@@ -25,23 +26,35 @@ Idempotente: el gating es `NOT EXISTS platform_id` + los `ON CONFLICT DO NOTHING
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
 from memex.modules.identidades.module import _insert_identifier
 from memex.modules.identidades.normalize import norm_identifier
+from memex.relations.canales import sync_canales
+from memex.relations.deterministic import weave_participa_en
 
 _log = get_logger("memex.modules.identidades.chat_senders")
 
 
-def _find_unknown_senders(conn: Connection, user_id: int) -> list[dict[str, str | None]]:
+def _find_unknown_senders(
+    conn: Connection, user_id: int, inbox_ids: Sequence[int] | None = None
+) -> list[dict[str, str | None]]:
     """Remitentes de chat humanos SIN identifier `platform_id` aún: una fila por `user_id` de
-    plataforma, con el username/display_name más reciente (el título de la gente cambia)."""
+    plataforma, con el username/display_name más reciente (el título de la gente cambia). Con
+    `inbox_ids` acota a los remitentes de esos mensajes (tejido por-lote)."""
+    scope = "" if inbox_ids is None else " AND i.id = ANY(:ids)"
+    params: dict[str, Any] = {"u": user_id}
+    if inbox_ids is not None:
+        params["ids"] = list(inbox_ids)
     rows = (
         conn.execute(
             text(
-                """
+                f"""
                 SELECT DISTINCT ON (i.payload->'sender'->>'user_id')
                        i.payload->'sender'->>'user_id'      AS tg_id,
                        i.payload->'sender'->>'username'     AS username,
@@ -54,11 +67,11 @@ def _find_unknown_senders(conn: Connection, user_id: int) -> list[dict[str, str 
                         SELECT 1 FROM mod_identidades_identifiers f
                         WHERE f.user_id = i.user_id AND f.platform = 'telegram'
                           AND f.kind = 'platform_id'
-                          AND f.value_norm = i.payload->'sender'->>'user_id')
+                          AND f.value_norm = i.payload->'sender'->>'user_id'){scope}
                 ORDER BY i.payload->'sender'->>'user_id', i.id DESC
                 """
             ),
-            {"u": user_id},
+            params,
         )
         .mappings()
         .all()
@@ -82,14 +95,17 @@ def _identity_by_handle(conn: Connection, user_id: int, username_norm: str) -> i
     return int(val) if val is not None else None
 
 
-def ensure_chat_sender_identities(conn: Connection, user_id: int) -> int:
+def ensure_chat_sender_identities(
+    conn: Connection, user_id: int, inbox_ids: Sequence[int] | None = None
+) -> int:
     """Crea (una sola vez) la identidad `persona` de cada remitente de CHAT aún desconocido y le
     ata su identificador estable (`platform_id`). Si el username ya era identifier de una identidad
-    existente, ENRIQUECE (ata el `platform_id` a esa identidad) en vez de crear. Devuelve cuántas
-    identidades CREÓ (el enriquecimiento no cuenta)."""
+    existente, ENRIQUECE (ata el `platform_id` a esa identidad) en vez de crear. Con `inbox_ids`
+    acota a los remitentes de esos mensajes (tejido por-lote); sin él, barre todo el user. Devuelve
+    cuántas identidades CREÓ (el enriquecimiento no cuenta)."""
     created = 0
     enriched = 0
-    for s in _find_unknown_senders(conn, user_id):
+    for s in _find_unknown_senders(conn, user_id, inbox_ids):
         tg_id = str(s["tg_id"])
         username = s["username"]
         username_norm = norm_identifier("handle", username) if username else ""
@@ -126,3 +142,21 @@ def ensure_chat_sender_identities(conn: Connection, user_id: int) -> int:
             "identidades.chat_senders.done", user_id=user_id, created=created, enriched=enriched
         )
     return created
+
+
+def weave_chat_structure(
+    conn: Connection, user_id: int, inbox_ids: Sequence[int]
+) -> tuple[int, int, int]:
+    """Teje la estructura de chat de un LOTE (paso 5, al procesar la conversación), en la misma tx:
+    (1) upsert del canal, (2) creación de la identidad del remitente desconocido + su `platform_id`,
+    (3) arista REAL «participa_en» (remitente→canal). Orden obligatorio: el canal y el identifier
+    deben existir antes de tejer `participa_en` (que los JOINea). Determinista e idempotente;
+    independiente del ruteo LLM (todo mensaje de chat tiene esta estructura). Devuelve
+    (canales, remitentes_creados, participa)."""
+    ids = list(inbox_ids)
+    if not ids:
+        return 0, 0, 0
+    canales = sync_canales(conn, user_id, ids)
+    senders = ensure_chat_sender_identities(conn, user_id, ids)
+    participa = weave_participa_en(conn, user_id, ids)
+    return canales, senders, participa

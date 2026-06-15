@@ -52,6 +52,7 @@ from memex.llm import ChatMessage, LLMClient, LLMResult, aclose_llm, build_llm_c
 from memex.llm.client import LLMQuotaError
 from memex.logging import get_logger
 from memex.processing.render import render_payload
+from memex.relations.cooccurrence import generate_cooccurrence, vertex_inbox_ids
 from memex.relations.decisions import (
     METHOD_LLM,
     METHOD_REGLA,
@@ -63,7 +64,6 @@ from memex.relations.decisions import (
     latest_decisions,
     record_decision,
 )
-from memex.relations.deterministic import vertex_inbox_ids
 from memex.relations.edges import (
     CANAL_SLUG,
     PRODUCER_INBOX,
@@ -394,6 +394,13 @@ async def run_per_message_confirm(
     run_id = uuid.uuid4().hex
     budget = budget if budget is not None else settings.per_message_max_llm_calls
     min_conf = settings.per_message_min_confidence
+
+    # Paso 7 (generación): materializa las pistas de co-ocurrencia (determinista, idempotente) ANTES
+    # de cargar el universo a juzgar. Reemplaza al barrido global `build_relations`. En `dry_run` NO
+    # se genera (no se escribe nada): la proyección se hace sobre las pistas ya existentes.
+    if not dry_run:
+        with connection() as conn:
+            generate_cooccurrence(conn, user_id, cap=settings.cooccurrence_cap)
 
     with connection() as conn:
         universe = _load_universe(conn, user_id)

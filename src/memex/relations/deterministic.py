@@ -1,56 +1,31 @@
-"""Paso de relaciones DETERMINISTAS del grafo: materializa, sin LLM, las aristas derivables de los
-datos ya guardados. Es un paso más del pipeline (on-demand, apagado por default, encadenable por el
-daemon): CONSUME lo disponible, no dispara pasos previos. Idempotente.
+"""Tejedores de las aristas REALES del grafo: las que un dato ya guardado GARANTIZA (no
+co-ocurrencia, no LLM). Cada módulo las teje INCREMENTAL al escribir (paso 5 del pipeline,
+`weave_*`), en la misma tx del caller, para no depender de un barrido global. Idempotentes.
 
-Produce las clases de arista (ver `memex.relations.edges`); las deterministas nacen
-`extracted+confirmed` (hecho leído de la fuente), la co-ocurrencia nace `extracted+ambiguous`:
-- PISTAS de co-ocurrencia (`producer='inbox'`, `extracted+ambiguous`): dos vértices del MISMO
-  mensaje. Señal barata de "quizás se relacionan" — NO asegura relación (el LLM la valida después).
-  Se acota el fan-out: un mensaje con demasiados vértices (digest) se SALTA y se loguea. Un par que
-  YA tiene arista confirmada (cualquier producer/relation_type/orientación) se suprime — y la pista
-  redundante pre-existente se CONFIRMA con decisión `regla/'redundante'` (historial, no DELETE) —
-  porque no aporta sobre la relación vouchada; el grafo de clusterización salta la co-ocurrencia
-  de esos pares para no doble-contar el peso. La PROCEDENCIA de cada pista se acumula en
-  `relation_edge_sources` (TODOS los mensajes donde el par co-ocurrió, no solo el primero del
-  `evidence`), incluso cuando la arista ya es terminal.
-- REALES de afiliación/pertenencia (`producer='identidades'`, `extracted+confirmed`): persona↔org y
-  sub→padre que el directorio enlaza explícitamente (dato, no adivinanza).
-- REALES de contraparte (`producer='finance'`, `extracted+confirmed`): cobro/pago CONSOLIDADO →
-  identidad del cobrador/pagador (su `counterparty_identity_id` resuelto). El enlace por identidad
-  entre finanzas y el directorio — determinista, el conector más valioso del grafo.
-- REALES de cumplimiento (`producer='bienestar'`, `extracted+confirmed`): registro de bienestar →
-  hábito que cumple, por match determinista de `activity` (normalizada) o `category` — la misma
-  lógica que la adherencia (`habits._period_counts`).
-- REALES de participación (`producer='canal'`, `extracted+confirmed`): persona → canal de chat en
-  el que escribió (remitente resuelto por su identifier `platform_id`). La estructura del medio,
-  independiente del cap de co-ocurrencia.
+Aristas reales (nacen `extracted+confirmed`):
+- afiliación (`producer='identidades'`): persona→org que el directorio enlaza explícitamente.
+- pertenencia (`producer='identidades'`): sub→padre (`parent_identity_id`): programa→universidad.
+- contraparte (`producer='finance'`): cobro/pago CONSOLIDADO → identidad del cobrador/pagador
+  resuelto (`counterparty_identity_id`). El enlace por identidad finanzas↔directorio.
+- cumple (`producer='bienestar'`): registro → hábito que cumple (match determinista de
+  `activity`/`category`).
+- mismo_evento (`producer='event'`): hechos que comparten `event_id` (la correlación de Hermes).
+- participa_en (`producer='canal'`): persona → canal de chat donde escribió (remitente resuelto).
 
-La provenance vértice→mensaje NO es arista (inbox es atributo): vive en `source_inbox_ids` (o se
-DERIVA del payload: remitente y canal).
+Cada materializador `_*` admite un scope opcional (uso incremental) o barre todo (sin scope). Los
+`_*_pairs` (read-only) exponen los pares vigentes HOY: los reusa la reconciliación de
+`relations.maintenance`. La generación de co-ocurrencia vive en `relations.cooccurrence`; la poda
+y la reconciliación, en `relations.maintenance`.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from memex.config import settings
-from memex.core.source import SourceKind
-from memex.logging import get_logger
-from memex.relations.canales import sync_canales
-from memex.relations.decisions import (
-    METHOD_REGLA,
-    VERDICT_CONFIRM,
-    add_edge_sources,
-    edge_sources,
-    evidence_signature,
-    record_decision,
-)
 from memex.relations.edges import (
     CANAL_SLUG,
     PRODUCER_BIENESTAR,
@@ -58,309 +33,55 @@ from memex.relations.edges import (
     PRODUCER_EVENT,
     PRODUCER_FINANCE,
     PRODUCER_IDENTIDADES,
-    PRODUCER_INBOX,
     PROVENANCE_EXTRACTED,
-    RELTYPE_COOCURRENCIA,
     RELTYPE_PARTICIPA_EN,
-    VERDICT_AMBIGUOUS,
     VERDICT_CONFIRMED,
     Ref,
-    list_edges,
-    mark_vertices_dirty,
     propose_edge,
-    resolve_edge,
 )
-from memex.relations.vertices import IDENTITY_SLUG_BY_KIND, list_vertices
-from memex.sources import kind_for_type
-
-_log = get_logger("memex.relations.deterministic")
-
-#: Tope de vértices por mensaje para emitir co-ocurrencia. Un mensaje con más (digest/newsletter) se
-#: salta: ahí la co-ocurrencia es ruido (C(n,2) aristas sin sentido). Los saltados se loguean.
-DEFAULT_COOCCURRENCE_CAP = 8
-
-#: Vértices cuyo enlace a inbox es DIRECTO (columna `source_inbox_ids`): slug → tabla. finance ya NO
-#: está acá: su vértice es el CONSOLIDADO, cuya procedencia es TRANSITIVA (vía links → crudos).
-_DIRECT_SOURCES: tuple[tuple[str, str], ...] = (("hackathones", "mod_hackathones_events"),)
+from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 #: Normalización SQL del `activity` para el match registro↔hábito (lower + colapso de whitespace).
 #: Copia DELIBERADA del fragmento de `bienestar` (habits.py / module.py): NO se importa de ahí
 #: porque esos módulos ya importan este paquete → invertir la dependencia crearía un ciclo.
 _NORM_ACTIVITY = "lower(btrim(regexp_replace({x}, '\\s+', ' ', 'g')))"
 
-
-@dataclass(frozen=True)
-class RelationStats:
-    """Resumen de un paso determinista."""
-
-    cooccurrence_pistas: int
-    afiliacion_reales: int
-    high_fanout_skipped: int
-    pertenencia_reales: int = 0
-    contraparte_reales: int = 0
-    same_event_reales: int = 0
-    cumple_reales: int = 0
-    orphans_pruned: int = 0
-    redundant_resolved: int = 0  # pistas cooc confirmadas por regla: ya hay real del mismo par
-    stale_pruned: int = 0  # reales reconciliadas: su enlace de origen ya no existe en el directorio
-    cluster_edges: int = 0  # aristas miembro_de vivas tras materializar los cúmulos confirmados
-    chat_senders: int = 0  # identidades creadas para remitentes de chat desconocidos
-    canales: int = 0  # canales de chat vivos tras el sync
-    participa_reales: int = 0  # aristas identidad→canal materializadas
+#: CASE SQL kind→slug de identidad, generado desde el único punto de verdad (vertices.py). El ELSE
+#: NULL es defensivo: un kind fuera del mapa no emite arista (y el SELECT final lo filtra).
+_IDENTITY_KIND_CASE = " ".join(f"WHEN '{k}' THEN '{v}'" for k, v in IDENTITY_SLUG_BY_KIND.items())
 
 
-#: Brazos de REMITENTE de la provenance: el remitente de un mensaje, resuelto DETERMINISTA contra
-#: `mod_identidades_identifiers`, entra a la provenance de ese mensaje (→ co-ocurre con lo
-#: extraído de él) SIN persistir menciones (derivado on-the-fly, igual que la procedencia
-#: transitiva de finance/calendar). Solo RESUELVE: la creación de remitentes de chat desconocidos
-#: vive en `chat_senders.ensure_chat_sender_identities` (corre antes, desde `build_relations`).
-#: Bots y mensajes de servicio quedan fuera (relay ≠ persona). El identifier social debe llevar la
-#: `platform` real (`instagram|facebook|x`); un handle manual con platform='unknown' NO matchea
-#: (estricto a propósito: evita falsos positivos cross-plataforma).
-_SENDER_PROVENANCE_SQL = """
-    SELECT i.id AS mid, idf.identity_id AS iid, ident.kind AS kind
-    FROM inbox i
-    JOIN mod_identidades_identifiers idf
-      ON idf.user_id = i.user_id AND idf.kind = 'email'
-     AND idf.value_norm = lower(i.payload->'from'->>'email')
-    JOIN mod_identidades ident ON ident.id = idf.identity_id
-    WHERE i.user_id = :u AND i.payload->'from'->>'email' IS NOT NULL
-    UNION
-    SELECT i.id AS mid, idf.identity_id AS iid, ident.kind AS kind
-    FROM inbox i
-    JOIN mod_identidades_identifiers idf
-      ON idf.user_id = i.user_id AND idf.platform = 'telegram'
-     AND idf.kind = 'platform_id'
-     AND idf.value_norm = i.payload->'sender'->>'user_id'
-    JOIN mod_identidades ident ON ident.id = idf.identity_id
-    WHERE i.user_id = :u AND i.payload->'sender'->>'user_id' IS NOT NULL
-      AND (i.payload->'sender'->>'is_bot')::boolean IS NOT TRUE
-    UNION
-    SELECT i.id AS mid, idf.identity_id AS iid, ident.kind AS kind
-    FROM inbox i
-    JOIN mod_identidades_identifiers idf
-      ON idf.user_id = i.user_id AND idf.kind = 'handle'
-     AND idf.platform = i.payload->>'platform'
-     AND idf.value_norm = lower(i.payload->>'account')
-    JOIN mod_identidades ident ON ident.id = idf.identity_id
-    WHERE i.user_id = :u AND i.payload->>'post_id' IS NOT NULL
-      AND i.payload->>'account' IS NOT NULL
-"""
+# --- afiliación (persona→org) --------------------------------------------------------- #
 
 
-def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
-    """Mapa vértice → ids de los mensajes (inbox) de los que salió. Directo para hackathones
-    (`source_inbox_ids`); TRANSITIVO para finance y calendar (consolidado→crudos) e identidades
-    (persona/org ← menciones); DERIVADO para el remitente (payload→identifiers, sin filas
-    intermedias). Base de la co-ocurrencia (y, luego, del pre-filtro)."""
-    prov: dict[Ref, set[int]] = defaultdict(set)
-
-    for slug, table in _DIRECT_SOURCES:
-        for r in conn.execute(
-            text(f"SELECT id, source_inbox_ids FROM {table} WHERE user_id = :u"), {"u": user_id}
-        ).mappings():
-            prov[Ref(slug, int(r["id"]))].update(int(x) for x in (r["source_inbox_ids"] or []))
-
-    for r in conn.execute(
-        text(
-            """
-            SELECT l.consolidated_id AS cid, t.source_inbox_ids AS ids
-            FROM mod_finance_transaction_links l
-            JOIN mod_finance_transactions t ON t.id = l.transaction_id
-            JOIN mod_finance_consolidated c ON c.id = l.consolidated_id
-            WHERE l.user_id = :u AND NOT c.deleted
-            """
-        ),
-        {"u": user_id},
-    ).mappings():
-        prov[Ref("finance", int(r["cid"]))].update(int(x) for x in (r["ids"] or []))
-
-    for r in conn.execute(
-        text(
-            """
-            SELECT l.consolidated_id AS cid, e.source_inbox_ids AS ids
-            FROM mod_calendar_event_links l
-            JOIN mod_calendar_events e ON e.id = l.event_id
-            JOIN mod_calendar_consolidated c ON c.id = l.consolidated_id
-            WHERE l.user_id = :u AND NOT c.deleted
-            """
-        ),
-        {"u": user_id},
-    ).mappings():
-        prov[Ref("calendar", int(r["cid"]))].update(int(x) for x in (r["ids"] or []))
-
-    for r in conn.execute(
-        text(
-            """
-            SELECT m.resolved_identity_id AS iid, i.kind AS kind, m.source_inbox_ids AS ids
-            FROM mod_identidades_mentions m
-            JOIN mod_identidades i ON i.id = m.resolved_identity_id
-            WHERE m.user_id = :u AND m.resolved_identity_id IS NOT NULL
-            """
-        ),
-        {"u": user_id},
-    ).mappings():
-        ids = [int(x) for x in (r["ids"] or [])]
-        slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
-        prov[Ref(slug, int(r["iid"]))].update(ids)
-
-    for r in conn.execute(text(_SENDER_PROVENANCE_SQL), {"u": user_id}).mappings():
-        slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
-        prov[Ref(slug, int(r["iid"]))].add(int(r["mid"]))
-
-    # CANAL (derivado): el canal está en TODO mensaje de su chat → co-ocurre con lo que salga de
-    # cada uno. NO cuenta para el cap (es estructural, ver `_materialize_cooccurrence`).
-    for r in conn.execute(
-        text(
-            """
-            SELECT c.id AS cid, i.id AS mid
-            FROM mod_canales c
-            JOIN inbox i ON i.user_id = c.user_id AND i.payload->>'chat_id' = c.external_id
-            WHERE c.user_id = :u AND i.payload->>'chat_id' IS NOT NULL
-            """
-        ),
-        {"u": user_id},
-    ).mappings():
-        prov[Ref(CANAL_SLUG, int(r["cid"]))].add(int(r["mid"]))
-
-    return dict(prov)
-
-
-def _materialize_cooccurrence(
-    conn: Connection,
-    user_id: int,
-    prov: dict[Ref, set[int]],
-    cap: int,
-    confirmed_pairs: set[frozenset[Ref]],
-) -> tuple[int, int]:
-    """Por cada mensaje, una arista-pista entre cada par de vértices que salieron de él (par
-    canónico ordenado). Salta mensajes con más de `cap` vértices de CONTENIDO y los pares de
-    `confirmed_pairs` (ya hay arista confirmada entre ambos, cualquier orientación): la pista no
-    aporta sobre una relación vouchada y, promovida por la cascada, doble-contaría el peso del par
-    en la clusterización. El CANAL no cuenta para el cap (es estructural y fijo en todo mensaje de
-    chat; contarlo acercaría injustamente los chats al tope — el remitente SÍ cuenta, es contenido
-    real); los pares de un mensaje no saltado se emiten canal incluido. PROCEDENCIA: cada
-    par-mensaje se acumula en `relation_edge_sources` (también para aristas ya terminales — el
-    `evidence='inbox:N'` conserva solo el primero por idempotencia, esta tabla los conserva
-    TODOS). DIFERIDO: un mensaje saltado pierde también sus pares cross-type — el relevo LLM
-    (`relations_llm`) solo cubre identidad↔identidad; un relevo mixto queda pendiente. Devuelve
-    (pistas, saltados)."""
-    by_msg: dict[int, set[Ref]] = defaultdict(set)
-    for ref, ids in prov.items():
-        for mid in ids:
-            by_msg[mid].add(ref)
-
-    # Reglas para chats: generan muchas co-ocurrencias y suelen aportar menos → cap más bajo (el
-    # MÍNIMO entre el cap general y `chat_cooccurrence_cap`), así nacen menos pares de un chat.
-    chat_ids = _chat_message_ids(conn, user_id, by_msg.keys())
-    chat_cap = min(cap, settings.chat_cooccurrence_cap)
-
-    # Aristas cooc ya materializadas (cualquier status): la procedencia sigue creciendo sobre
-    # ellas sin re-proponer. El par canónico (slug, id) coincide con cómo se crearon.
-    existing: dict[tuple[Ref, Ref], int] = {
-        (e.src, e.dst): e.id
-        for e in list_edges(conn, user_id, producer=PRODUCER_INBOX)
-        if e.relation_type == RELTYPE_COOCURRENCIA
-    }
-
-    pistas = 0
-    skipped = 0
-    counted: set[tuple[Ref, Ref]] = set()
-    new_refs: set[Ref] = set()  # vértices de pares NUEVOS → dirty (groundwork incremental ADR-021)
-    sources_by_edge: dict[int, set[int]] = defaultdict(set)
-    for mid, refs in by_msg.items():
-        uniq = sorted(refs, key=lambda r: (r.slug, r.id))
-        if len(uniq) < 2:
-            continue
-        content = sum(1 for r in uniq if r.slug != CANAL_SLUG)
-        eff_cap = chat_cap if mid in chat_ids else cap  # chat_cap = min(cap, chat_cooccurrence_cap)
-        if content > eff_cap:
-            skipped += 1
-            _log.info(
-                "relation.cooccurrence.skip_high_fanout",
-                inbox_id=mid,
-                vertices=content,
-                cap=eff_cap,
-                chat=mid in chat_ids,
-            )
-            continue
-        for i in range(len(uniq)):
-            for j in range(i + 1, len(uniq)):
-                pair = (uniq[i], uniq[j])
-                eid = existing.get(pair)
-                if frozenset(pair) in confirmed_pairs:
-                    # Par ya vouchado: no se propone ni cuenta; si la cooc quedó materializada
-                    # (confirmada por redundancia/partidor, o aún pista) su procedencia crece.
-                    if eid is not None:
-                        sources_by_edge[eid].add(mid)
-                    continue
-                if eid is None:
-                    eid = propose_edge(
-                        conn,
-                        user_id,
-                        uniq[i],
-                        uniq[j],
-                        producer=PRODUCER_INBOX,
-                        relation_type=RELTYPE_COOCURRENCIA,
-                        evidence=f"inbox:{mid}",
-                    )
-                    existing[pair] = eid
-                    new_refs.update(pair)
-                if pair not in counted:
-                    counted.add(pair)
-                    pistas += 1
-                sources_by_edge[eid].add(mid)
-    for eid, mids in sources_by_edge.items():
-        add_edge_sources(conn, eid, mids)
-    if new_refs:
-        mark_vertices_dirty(conn, user_id, sorted(new_refs, key=lambda r: (r.slug, r.id)))
-    return pistas, skipped
-
-
-def _chat_message_ids(conn: Connection, user_id: int, inbox_ids: Iterable[int]) -> set[int]:
-    """Los inbox_ids que son de un medio de CHAT (su `sources.type` mapea a `SourceKind.CHAT`)."""
-    ids = sorted(set(inbox_ids))
-    if not ids:
-        return set()
-    out: set[int] = set()
-    for r in conn.execute(
-        text(
-            "SELECT i.id AS id, s.type AS type FROM inbox i JOIN sources s ON s.id = i.source_id "
-            "WHERE i.user_id = :u AND i.id = ANY(:ids)"
-        ),
-        {"u": user_id, "ids": ids},
-    ).mappings():
-        try:
-            if kind_for_type(str(r["type"])) == SourceKind.CHAT:
-                out.add(int(r["id"]))
-        except KeyError:
-            pass
-    return out
-
-
-def _materialize_afiliacion(
-    conn: Connection,
-    user_id: int,
-    *,
-    person_ids: Sequence[int] | None = None,
-    live: set[tuple[Ref, Ref]] | None = None,
-) -> int:
-    """Una arista REAL persona→org por cada enlace explícito del directorio. Con `person_ids` acota
-    a esas personas (uso incremental); sin él, barre todas (full-sweep). Idempotente. Devuelve
-    cuántas. Con `live` (full-sweep) acumula los pares vigentes para la reconciliación."""
+def _afiliacion_pairs(
+    conn: Connection, user_id: int, *, person_ids: Sequence[int] | None = None
+) -> Iterator[tuple[Ref, Ref]]:
+    """Los pares persona→org que el directorio enlaza explícitamente HOY (read-only). Con
+    `person_ids` acota a esas personas; sin él, todas. Base del tejido y de la reconciliación."""
     scope = "" if person_ids is None else " AND person_id = ANY(:pids)"
     params: dict[str, Any] = {"u": user_id}
     if person_ids is not None:
         params["pids"] = list(person_ids)
-    n = 0
     for r in conn.execute(
         text(
             f"SELECT person_id, org_id FROM mod_identidades_person_orgs WHERE user_id = :u{scope}"
         ),
         params,
     ).mappings():
-        src = Ref("identidades:person", int(r["person_id"]))
-        dst = Ref("identidades:org", int(r["org_id"]))
+        yield (
+            Ref("identidades:person", int(r["person_id"])),
+            Ref("identidades:org", int(r["org_id"])),
+        )
+
+
+def _materialize_afiliacion(
+    conn: Connection, user_id: int, *, person_ids: Sequence[int] | None = None
+) -> int:
+    """Una arista REAL persona→org por cada enlace explícito del directorio. Con `person_ids` acota
+    (incremental); sin él, barre todas. Idempotente. Devuelve cuántas."""
+    n = 0
+    for src, dst in _afiliacion_pairs(conn, user_id, person_ids=person_ids):
         propose_edge(
             conn,
             user_id,
@@ -371,33 +92,48 @@ def _materialize_afiliacion(
             verdict=VERDICT_CONFIRMED,
             provenance=PROVENANCE_EXTRACTED,
         )
-        if live is not None:
-            live.add((src, dst))
         n += 1
     return n
 
 
-def _materialize_pertenencia(
-    conn: Connection, user_id: int, *, live: set[tuple[Ref, Ref]] | None = None
-) -> int:
-    """Una arista REAL «pertenece_a» sub→padre por cada `parent_identity_id` del directorio (la
-    jerarquía genérica «sub»: programa→universidad, producto→empresa, …). Dirigida (hijo→padre).
-    Devuelve cuántas. Con `live` acumula los pares vigentes para la reconciliación."""
-    n = 0
+# --- pertenencia (sub→padre) ---------------------------------------------------------- #
+
+
+def _pertenencia_pairs(
+    conn: Connection, user_id: int, *, child_ids: Sequence[int] | None = None
+) -> Iterator[tuple[Ref, Ref]]:
+    """Los pares hijo→padre de la jerarquía «sub» del directorio HOY (read-only). Con `child_ids`
+    acota a esos hijos; sin él, todos."""
+    scope = "" if child_ids is None else " AND c.id = ANY(:cids)"
+    params: dict[str, Any] = {"u": user_id}
+    if child_ids is not None:
+        params["cids"] = list(child_ids)
     for r in conn.execute(
         text(
-            """
+            f"""
             SELECT c.id AS child_id, c.kind AS child_kind,
                    p.id AS parent_id, p.kind AS parent_kind
             FROM mod_identidades c
             JOIN mod_identidades p ON p.id = c.parent_identity_id
-            WHERE c.user_id = :u AND c.parent_identity_id IS NOT NULL
+            WHERE c.user_id = :u AND c.parent_identity_id IS NOT NULL{scope}
             """
         ),
-        {"u": user_id},
+        params,
     ).mappings():
-        src = Ref(IDENTITY_SLUG_BY_KIND[str(r["child_kind"])], int(r["child_id"]))
-        dst = Ref(IDENTITY_SLUG_BY_KIND[str(r["parent_kind"])], int(r["parent_id"]))
+        yield (
+            Ref(IDENTITY_SLUG_BY_KIND[str(r["child_kind"])], int(r["child_id"])),
+            Ref(IDENTITY_SLUG_BY_KIND[str(r["parent_kind"])], int(r["parent_id"])),
+        )
+
+
+def _materialize_pertenencia(
+    conn: Connection, user_id: int, *, child_ids: Sequence[int] | None = None
+) -> int:
+    """Una arista REAL «pertenece_a» sub→padre por cada `parent_identity_id` del directorio (la
+    jerarquía genérica «sub»: programa→universidad, producto→empresa, …). Dirigida (hijo→padre). Con
+    `child_ids` acota (incremental); sin él, barre todas. Idempotente. Devuelve cuántas."""
+    n = 0
+    for src, dst in _pertenencia_pairs(conn, user_id, child_ids=child_ids):
         propose_edge(
             conn,
             user_id,
@@ -408,29 +144,22 @@ def _materialize_pertenencia(
             verdict=VERDICT_CONFIRMED,
             provenance=PROVENANCE_EXTRACTED,
         )
-        if live is not None:
-            live.add((src, dst))
         n += 1
     return n
 
 
-def _materialize_contraparte(
-    conn: Connection,
-    user_id: int,
-    *,
-    consolidated_ids: Sequence[int] | None = None,
-    live: set[tuple[Ref, Ref]] | None = None,
-) -> int:
-    """Una arista REAL «contraparte» cobro→identidad por cada transacción CONSOLIDADA cuya
-    contraparte resolvió a una identidad del directorio (`counterparty_identity_id`). Dirigida (el
-    cobro/pago → quién cobró/pagó). El enlace por identidad finanzas↔directorio. Con
-    `consolidated_ids` acota a esos consolidados (incremental); sin él, barre todos. Idempotente.
-    Con `live` (full-sweep) acumula los pares vigentes para la reconciliación."""
+# --- contraparte (cobro→identidad) ---------------------------------------------------- #
+
+
+def _contraparte_pairs(
+    conn: Connection, user_id: int, *, consolidated_ids: Sequence[int] | None = None
+) -> Iterator[tuple[Ref, Ref]]:
+    """Los pares cobro→identidad de finanzas consolidadas cuya contraparte resolvió HOY (read-only).
+    Con `consolidated_ids` acota; sin él, todos."""
     scope = "" if consolidated_ids is None else " AND c.id = ANY(:cids)"
     params: dict[str, Any] = {"u": user_id}
     if consolidated_ids is not None:
         params["cids"] = list(consolidated_ids)
-    n = 0
     for r in conn.execute(
         text(
             f"""
@@ -442,8 +171,21 @@ def _materialize_contraparte(
         ),
         params,
     ).mappings():
-        src = Ref("finance", int(r["cid"]))
-        dst = Ref(IDENTITY_SLUG_BY_KIND[str(r["kind"])], int(r["iid"]))
+        yield (
+            Ref("finance", int(r["cid"])),
+            Ref(IDENTITY_SLUG_BY_KIND[str(r["kind"])], int(r["iid"])),
+        )
+
+
+def _materialize_contraparte(
+    conn: Connection, user_id: int, *, consolidated_ids: Sequence[int] | None = None
+) -> int:
+    """Una arista REAL «contraparte» cobro→identidad por cada transacción CONSOLIDADA cuya
+    contraparte resolvió a una identidad del directorio (`counterparty_identity_id`). Dirigida (el
+    cobro/pago → quién cobró/pagó). El enlace por identidad finanzas↔directorio. Con
+    `consolidated_ids` acota (incremental); sin él, barre todos. Idempotente. Devuelve cuántas."""
+    n = 0
+    for src, dst in _contraparte_pairs(conn, user_id, consolidated_ids=consolidated_ids):
         propose_edge(
             conn,
             user_id,
@@ -454,49 +196,11 @@ def _materialize_contraparte(
             verdict=VERDICT_CONFIRMED,
             provenance=PROVENANCE_EXTRACTED,
         )
-        if live is not None:
-            live.add((src, dst))
         n += 1
     return n
 
 
-def _prune_stale_reales(
-    conn: Connection,
-    user_id: int,
-    *,
-    producer: str,
-    relation_type: str,
-    live: set[tuple[Ref, Ref]],
-) -> int:
-    """Reconciliación de las aristas REALES derivadas del directorio/finanzas: borra las
-    (producer + relation_type) cuyo enlace de ORIGEN ya no existe (padre quitado o cambiado,
-    afiliación borrada, contraparte re-resuelta). Los materializadores son aditivos y
-    `prune_orphan_edges` solo ve extremos muertos: sin esto, una corrección dejaría la arista
-    vieja viva para siempre (ambos vértices siguen proyectando). Solo full-sweep. Devuelve
-    cuántas borró."""
-    stale = [
-        e.id
-        for e in list_edges(conn, user_id, producer=producer)
-        if e.relation_type == relation_type and (e.src, e.dst) not in live
-    ]
-    if stale:
-        conn.execute(
-            text("DELETE FROM relation_edges WHERE user_id = :u AND id = ANY(:ids)"),
-            {"u": user_id, "ids": stale},
-        )
-        _log.info(
-            "relation.reconcile.pruned",
-            user_id=user_id,
-            producer=producer,
-            relation_type=relation_type,
-            pruned=len(stale),
-        )
-    return len(stale)
-
-
-#: CASE SQL kind→slug de identidad, generado desde el único punto de verdad (vertices.py). El ELSE
-#: NULL es defensivo: un kind fuera del mapa no emite arista (y el SELECT final lo filtra).
-_IDENTITY_KIND_CASE = " ".join(f"WHEN '{k}' THEN '{v}'" for k, v in IDENTITY_SLUG_BY_KIND.items())
+# --- mismo_evento (event_id compartido) ----------------------------------------------- #
 
 
 def _materialize_same_event(
@@ -560,6 +264,9 @@ def _materialize_same_event(
     return n
 
 
+# --- cumple (registro→hábito) --------------------------------------------------------- #
+
+
 def _materialize_cumple(
     conn: Connection,
     user_id: int,
@@ -613,15 +320,25 @@ def _materialize_cumple(
     return n
 
 
-def _materialize_participa_en(conn: Connection, user_id: int) -> int:
-    """Una arista REAL «participa_en» identidad→canal por cada remitente RESUELTO (identifier
+# --- participa_en (identidad→canal) --------------------------------------------------- #
+
+
+def weave_participa_en(
+    conn: Connection, user_id: int, inbox_ids: Sequence[int] | None = None
+) -> int:
+    """REAL: una arista «participa_en» identidad→canal por cada remitente RESUELTO (identifier
     `platform_id`) que escribió en ese canal. Dirigida (quién → dónde). La estructura del medio:
-    sobrevive aunque el mensaje sea over-cap (no depende de la co-ocurrencia). Bots fuera (relay ≠
-    persona). Full-sweep idempotente. Devuelve cuántas."""
+    sobrevive aunque el mensaje sea over-cap (no depende de la co-ocurrencia). Con `inbox_ids` acota
+    a esos mensajes (tejido por-lote desde `weave_chat_structure`); sin él, barre todos. Bots fuera
+    (relay ≠ persona). Idempotente. Devuelve cuántas."""
+    scope = "" if inbox_ids is None else " AND i.id = ANY(:ids)"
+    params: dict[str, Any] = {"u": user_id}
+    if inbox_ids is not None:
+        params["ids"] = list(inbox_ids)
     n = 0
     for r in conn.execute(
         text(
-            """
+            f"""
             SELECT DISTINCT c.id AS canal_id, idf.identity_id AS iid, ident.kind AS kind
             FROM inbox i
             JOIN mod_canales c ON c.user_id = i.user_id AND c.platform = 'telegram'
@@ -632,10 +349,10 @@ def _materialize_participa_en(conn: Connection, user_id: int) -> int:
              AND idf.value_norm = i.payload->'sender'->>'user_id'
             JOIN mod_identidades ident ON ident.id = idf.identity_id
             WHERE i.user_id = :u AND i.payload->>'chat_id' IS NOT NULL
-              AND (i.payload->'sender'->>'is_bot')::boolean IS NOT TRUE
+              AND (i.payload->'sender'->>'is_bot')::boolean IS NOT TRUE{scope}
             """
         ),
-        {"u": user_id},
+        params,
     ).mappings():
         slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
         propose_edge(
@@ -653,156 +370,7 @@ def _materialize_participa_en(conn: Connection, user_id: int) -> int:
     return n
 
 
-def _resolve_redundant_cooccurrence(
-    conn: Connection, user_id: int, confirmed_pairs: set[frozenset[Ref]]
-) -> int:
-    """CONFIRMA (sin borrar: historial) las pistas de co-ocurrencia que quedaron REDUNDANTES: ya
-    existe una arista confirmada entre los mismos dos vértices (cualquier producer/relation_type/
-    orientación) — el dato real vouchó la relación y la pista hereda el veredicto, con decisión
-    `regla/'redundante'` y su procedencia intacta. El peso del par no se doble-cuenta: el grafo de
-    clusterización salta la co-ocurrencia de pares con real confirmada (`build_cluster_graph`).
-    Mismo triple-filtro (pista + inbox + co-ocurrencia) que la cascada del partidor: las ya
-    terminales NO se tocan. Devuelve cuántas confirmó."""
-    redundant = [
-        e.id
-        for e in list_edges(conn, user_id, verdict=VERDICT_AMBIGUOUS, producer=PRODUCER_INBOX)
-        if e.relation_type == RELTYPE_COOCURRENCIA and frozenset((e.src, e.dst)) in confirmed_pairs
-    ]
-    if not redundant:
-        return 0
-    sources = edge_sources(conn, redundant)
-    n = 0
-    for eid in redundant:
-        if resolve_edge(
-            conn,
-            eid,
-            verdict=VERDICT_CONFIRMED,
-            provenance=PROVENANCE_EXTRACTED,
-            relation="ya existe una relación confirmada entre ambos",
-        ):
-            record_decision(
-                conn,
-                user_id,
-                eid,
-                verdict=VERDICT_CONFIRM,
-                method=METHOD_REGLA,
-                rule="redundante",
-                evidence_sig=evidence_signature(sources.get(eid, set())),
-            )
-            n += 1
-    return n
-
-
-def prune_orphan_edges(conn: Connection, user_id: int) -> int:
-    """Borra de `relation_edges` toda arista con un extremo que ya no resuelve a un vértice vivo
-    (consolidado tombstoneado, fila borrada, identidad absorbida en un merge…). Usa la MISMA
-    proyección que LEE el grafo (`list_vertices`): prune y lectura nunca divergen. Paso FINAL de
-    `build_relations` (tras los materializadores aditivos). Devuelve cuántas borró. NOTA: un
-    `(slug, id)` que hoy no proyecte `list_vertices` se trata como huérfano; los cúmulos (vértices
-    nativos `cumulo`) YA están en `NODE_SOURCES` (solo confirmados): sus `miembro_de` sobreviven
-    y las de un cúmulo disuelto (que deja de proyectar) se barren acá."""
-    live = {v.ref for v in list_vertices(conn, user_id)}
-    orphan_ids = [e.id for e in list_edges(conn, user_id) if e.src not in live or e.dst not in live]
-    if orphan_ids:
-        conn.execute(
-            text("DELETE FROM relation_edges WHERE user_id = :u AND id = ANY(:ids)"),
-            {"u": user_id, "ids": orphan_ids},
-        )
-    return len(orphan_ids)
-
-
-def build_relations(
-    conn: Connection, user_id: int, *, cooccurrence_cap: int = DEFAULT_COOCCURRENCE_CAP
-) -> RelationStats:
-    """Materializa las aristas deterministas del user (idempotente). Consume lo disponible; NO
-    dispara extracción/consolidación. Devuelve el resumen."""
-    # Canales de chat (upsert desde payloads) y remitentes desconocidos → identidades (una sola
-    # vez), ANTES de la provenance: los brazos derivados resuelven por `mod_canales` y por el
-    # identifier `platform_id` que esto garantiza. Import local de chat_senders: identidades
-    # importa este módulo (los weave_*) — el diferido evita el ciclo.
-    from memex.modules.identidades.chat_senders import ensure_chat_sender_identities
-
-    canales = sync_canales(conn, user_id)
-    chat_senders = ensure_chat_sender_identities(conn, user_id)
-    # REALES primero: la co-ocurrencia consulta las confirmadas (las de ESTA corrida incluidas)
-    # para suprimir pistas redundantes sobre pares ya vouchados.
-    afil_live: set[tuple[Ref, Ref]] = set()
-    pert_live: set[tuple[Ref, Ref]] = set()
-    contra_live: set[tuple[Ref, Ref]] = set()
-    afil = _materialize_afiliacion(conn, user_id, live=afil_live)
-    pert = _materialize_pertenencia(conn, user_id, live=pert_live)
-    contraparte = _materialize_contraparte(conn, user_id, live=contra_live)
-    same_event = _materialize_same_event(conn, user_id)
-    cumple = _materialize_cumple(conn, user_id)
-    participa = _materialize_participa_en(conn, user_id)
-    # Reconciliación ANTES de confirmed_pairs: una confirmada stale (corrección del directorio)
-    # suprimiría pistas de co-ocurrencia legítimas sobre ese par.
-    stale = (
-        _prune_stale_reales(
-            conn, user_id, producer=PRODUCER_IDENTIDADES, relation_type="afiliado", live=afil_live
-        )
-        + _prune_stale_reales(
-            conn,
-            user_id,
-            producer=PRODUCER_IDENTIDADES,
-            relation_type="pertenece_a",
-            live=pert_live,
-        )
-        + _prune_stale_reales(
-            conn, user_id, producer=PRODUCER_FINANCE, relation_type="contraparte", live=contra_live
-        )
-    )
-    confirmed_pairs = {
-        frozenset((e.src, e.dst)) for e in list_edges(conn, user_id, verdict=VERDICT_CONFIRMED)
-    }
-    prov = vertex_inbox_ids(conn, user_id)
-    pistas, skipped = _materialize_cooccurrence(
-        conn, user_id, prov, cooccurrence_cap, confirmed_pairs
-    )
-    redundant = _resolve_redundant_cooccurrence(conn, user_id, confirmed_pairs)
-    # Re-deriva las aristas `miembro_de` de los cúmulos confirmados (idempotente + GC de podados o
-    # movidos) ANTES del prune. Import local: no acopla networkx al import de este módulo.
-    from memex.relations.cluster_store import materialize_cluster_edges
-
-    cluster_edges = materialize_cluster_edges(conn, user_id)
-    # Paso FINAL: barrer aristas huérfanas (extremo ido: tombstone/borrado/merge/cúmulo disuelto).
-    # Idempotente: los materializadores son aditivos y nunca re-crean aristas a vértices muertos.
-    pruned = prune_orphan_edges(conn, user_id)
-    stats = RelationStats(
-        cooccurrence_pistas=pistas,
-        afiliacion_reales=afil,
-        high_fanout_skipped=skipped,
-        pertenencia_reales=pert,
-        contraparte_reales=contraparte,
-        same_event_reales=same_event,
-        cumple_reales=cumple,
-        orphans_pruned=pruned,
-        redundant_resolved=redundant,
-        stale_pruned=stale,
-        cluster_edges=cluster_edges,
-        chat_senders=chat_senders,
-        canales=canales,
-        participa_reales=participa,
-    )
-    _log.info(
-        "relation.build.done",
-        user_id=user_id,
-        cooccurrence_pistas=pistas,
-        afiliacion_reales=afil,
-        pertenencia_reales=pert,
-        contraparte_reales=contraparte,
-        same_event_reales=same_event,
-        cumple_reales=cumple,
-        participa_reales=participa,
-        high_fanout_skipped=skipped,
-        orphans_pruned=pruned,
-        redundant_resolved=redundant,
-        stale_pruned=stale,
-        cluster_edges=cluster_edges,
-        chat_senders=chat_senders,
-        canales=canales,
-    )
-    return stats
+# --- weaves incrementales (paso 5: el módulo teje al escribir) ------------------------- #
 
 
 def weave_event(conn: Connection, user_id: int, event_id: str) -> int:
@@ -821,6 +389,14 @@ def weave_afiliacion(conn: Connection, user_id: int, person_id: int) -> int:
     depender del full-sweep. Ambos extremos (persona/org) ya existen. Idempotente. Devuelve
     cuántas."""
     return _materialize_afiliacion(conn, user_id, person_ids=[person_id])
+
+
+def weave_pertenencia(conn: Connection, user_id: int, child_id: int) -> int:
+    """INCREMENTAL: teje la arista «pertenece_a» de UN hijo recién apuntado a su padre
+    (`parent_identity_id`), en la misma tx del caller. Lo llaman los puntos que asignan el padre
+    (API/CLI `set-parent`, organizador LLM, merge), para no depender del full-sweep. Si el hijo no
+    tiene padre, no crea nada. Idempotente. Devuelve cuántas."""
+    return _materialize_pertenencia(conn, user_id, child_ids=[child_id])
 
 
 def weave_finance_consolidated(

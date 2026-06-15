@@ -66,6 +66,7 @@ from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.providers import known_providers
 from memex.modules.identidades.providers.base import ContactsProviderError
 from memex.modules.identidades.sync import run_sync
+from memex.relations.deterministic import weave_pertenencia
 from memex.relations.edges import (
     PRODUCER_HUMANO,
     PROVENANCE_EXTRACTED,
@@ -832,6 +833,10 @@ def _cmd_set_parent(args: argparse.Namespace) -> int:
             ),
             {"p": None if args.clear else args.parent, "id": args.id, "uid": args.user},
         )
+        # Tejer «pertenece_a» al setear el padre (paso 5, misma tx). Quitar el padre deja la arista
+        # vieja stale: la limpia `reconcile_graph`, no este punto.
+        if not args.clear:
+            weave_pertenencia(conn, args.user, args.id)
     result = {
         "id": args.id,
         "display_name": child,

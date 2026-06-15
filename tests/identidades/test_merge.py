@@ -9,7 +9,8 @@ from typing import Any
 from sqlalchemy import text
 
 from memex.modules.identidades.merge import merge_identities
-from memex.relations.deterministic import build_relations
+from memex.relations.cluster_store import materialize_cluster_edges
+from memex.relations.maintenance import reconcile_graph
 
 
 def _mk_person(conn: Any, name: str, email: str | None = None) -> int:
@@ -237,17 +238,19 @@ def test_merge_membresia_duplicada_gana_superviviente(conn: Any) -> None:
     assert [(int(r[0]), bool(r[1])) for r in rows] == [(surv, True)]
 
 
-def test_merge_membresia_sin_churn_en_build(conn: Any) -> None:
+def test_merge_membresia_sin_churn_en_mantenimiento(conn: Any) -> None:
     # regresión del churn observado en dev: la membresía huérfana de la absorbida hacía que cada
-    # build re-creara su arista `miembro_de` (a un vértice muerto) y la podara como huérfana.
+    # corrida re-creara su arista `miembro_de` (a un vértice muerto) y la podara como huérfana. La
+    # materialización (fase de cúmulos) crea solo la del superviviente; reconcile no halla huérfana.
     surv = _mk_person(conn, "Rodion")
     absb = _mk_person(conn, "CoKeFish")
     cid = _mk_cluster(conn, "Blizzard", "6" * 64)
     _add_member(conn, cid, absb)
     assert merge_identities(conn, 1, surv, absb) is True
-    stats = build_relations(conn, 1)
-    assert stats.orphans_pruned == 0
-    assert stats.cluster_edges == 1  # la miembro_de del superviviente, viva
+    cluster_edges = materialize_cluster_edges(conn, 1)
+    rstats = reconcile_graph(conn, 1)
+    assert rstats.orphans_pruned == 0
+    assert cluster_edges == 1  # la miembro_de del superviviente, viva
     pair = conn.execute(
         text(
             "SELECT src_slug, src_id FROM relation_edges "

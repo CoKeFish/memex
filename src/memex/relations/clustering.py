@@ -99,7 +99,7 @@ def build_cluster_graph(conn: Connection, user_id: int, cfg: Settings | None = N
     par se suman con tope `pair_weight_max`. La co-ocurrencia (cualquier status) de un par que YA
     tiene arista REAL confirmada NO pesa: la conectividad la da la real y sumarla doble-contaría el
     par (las pistas redundantes se confirman en vez de borrarse — ver
-    `deterministic._resolve_redundant_cooccurrence`). Quita nodos aislados (no clusterizan). Cada
+    `cooccurrence._resolve_redundant_cooccurrence`). Quita nodos aislados (no clusterizan). Cada
     arista lleva `real` (¿es confirmed-real?) para el `has_confirmed_edge`."""
     cfg = cfg or settings
     excluded = {CUMULO_SLUG} | ({CANAL_SLUG} if cfg.cluster_exclude_canal else set())

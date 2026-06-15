@@ -35,7 +35,8 @@ from memex.modules.orchestrator import run_extraction
 from memex.ocr.worker import run_ocr
 from memex.quality.candidates import run_relevance_detection
 from memex.relations.clusters_llm import run_cluster_partition
-from memex.relations.deterministic import build_relations
+from memex.relations.cooccurrence import generate_cooccurrence
+from memex.relations.maintenance import reconcile_graph
 from memex.relations.per_message import ConfirmStats, run_per_message_confirm
 from memex.relations.reconcile import detect_and_reconcile
 from memex.relevance.gate import run_relevance_gate
@@ -296,8 +297,8 @@ def _identidades_accounts(user_id: int) -> list[int]:
 
 async def run_identidades_cycle(user_id: int) -> IdentidadesCycleStats:
     """Ciclo del módulo identidades: sync (ingress) por cuenta habilitada → desempate LLM de los
-    candidatos de merge. Best-effort por paso; `LLMQuotaError` corta el LLM. La construcción del
-    grafo (`build_relations`) es on-demand (`POST /graph/build`), no se dispara acá."""
+    candidatos de merge. Best-effort por paso; `LLMQuotaError` corta el LLM. Las aristas reales del
+    grafo las tejen los módulos al escribir; el ciclo del grafo (`run_graph_cycle`) corre aparte."""
     cycle = IdentidadesCycleStats()
     accounts = _identidades_accounts(user_id)
     cycle.accounts = len(accounts)
@@ -359,8 +360,8 @@ async def run_identidades_cycle(user_id: int) -> IdentidadesCycleStats:
 
 @dataclass
 class GraphCycleStats:
-    """Roll-up de un ciclo del grafo: build determinista + detección/reconciliación de cúmulos +
-    validación LLM de los pendientes."""
+    """Roll-up de un ciclo del grafo: generación de co-ocurrencia + detección/reconciliación de
+    cúmulos + validación LLM de los pendientes + mantenimiento."""
 
     detected: int = 0
     new_candidates: int = 0
@@ -371,19 +372,27 @@ class GraphCycleStats:
 
 
 def _graph_detect(user_id: int) -> Any:
-    """build_relations + detect_and_reconcile en una tx (sync, para `to_thread`)."""
+    """generate_cooccurrence + detect_and_reconcile en una tx (sync, para `to_thread`). Genera las
+    pistas (determinista) antes de detectar, para que la clusterización tenga co-ocurrencia fresca
+    aunque el job de confirmación (`graph_confirm`) no haya corrido."""
     from memex.config import settings  # import local: estilo del módulo (evita ciclos al importar)
 
     with connection() as conn:
-        build_relations(conn, user_id, cooccurrence_cap=settings.cooccurrence_cap)
+        generate_cooccurrence(conn, user_id, cap=settings.cooccurrence_cap)
         return detect_and_reconcile(conn, user_id)
 
 
+def _graph_reconcile(user_id: int) -> None:
+    """reconcile_graph en su tx (sync, para `to_thread`): poda huérfanas + reconcilia reales."""
+    with connection() as conn:
+        reconcile_graph(conn, user_id)
+
+
 async def run_graph_cycle(user_id: int) -> GraphCycleStats:
-    """Ciclo del grafo: build (determinista) → detección + reconciliación de cúmulos (determinista,
-    sync) → validación LLM de los pendientes. Best-effort por PASO: un paso que falla se loguea y no
-    frena el resto. `LLMQuotaError` corta SOLO la validación (lo determinista ya corrió). Arranca
-    APAGADO (no está en `enabled_jobs`)."""
+    """Ciclo del grafo: generación de co-ocurrencia + detección/reconciliación de cúmulos
+    (determinista, sync) → validación LLM de los pendientes → mantenimiento (reconcile). Best-effort
+    por PASO: un paso que falla se loguea y no frena el resto. `LLMQuotaError` corta SOLO la
+    validación (lo determinista ya corrió). Arranca APAGADO (no está en `enabled_jobs`)."""
     cycle = GraphCycleStats()
     try:
         r = await asyncio.to_thread(_graph_detect, user_id)
@@ -405,6 +414,12 @@ async def run_graph_cycle(user_id: int) -> GraphCycleStats:
         cycle.errors += 1
         cycle.steps_failed.append("validate")
         _log.warning("scheduler.graph.step_failed", step="validate", error=str(e))
+    try:  # mantenimiento al final: determinista, sin LLM
+        await asyncio.to_thread(_graph_reconcile, user_id)
+    except Exception as e:
+        cycle.errors += 1
+        cycle.steps_failed.append("reconcile")
+        _log.warning("scheduler.graph.step_failed", step="reconcile", error=str(e))
     return cycle
 
 

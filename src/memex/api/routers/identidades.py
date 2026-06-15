@@ -41,6 +41,7 @@ from memex.modules.identidades.hierarchy import run_organize, would_create_cycle
 from memex.modules.identidades.merge import merge_identities
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.sync import run_sync
+from memex.relations.deterministic import weave_pertenencia
 
 router = APIRouter(prefix="/identidades", tags=["identidades"])
 
@@ -506,6 +507,10 @@ async def update_identity(
             .mappings()
             .first()
         )
+        # Tejer «pertenece_a» al setear el padre (paso 5, misma tx). Quitar/cambiar el padre deja la
+        # arista vieja stale: la limpia `reconcile_graph` (mantenimiento), no este punto.
+        if row is not None and set_parent and body.parent_id is not None:
+            weave_pertenencia(conn, user_id, identity_id)
     if row is None:
         raise HTTPException(status_code=404, detail="identidad no encontrada")
     return _identity_row(row)

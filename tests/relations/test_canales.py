@@ -11,8 +11,9 @@ from sqlalchemy import text
 
 from memex.config import settings
 from memex.db import connection
+from memex.modules.identidades.chat_senders import weave_chat_structure
 from memex.relations.clustering import build_cluster_graph
-from memex.relations.deterministic import build_relations
+from memex.relations.cooccurrence import generate_cooccurrence
 from memex.relations.edges import (
     PRODUCER_CANAL,
     PROVENANCE_EXTRACTED,
@@ -131,22 +132,22 @@ def _pair(e: Any) -> set[tuple[str, int]]:
 
 def test_sync_idempotente_y_titulo_mas_reciente() -> None:
     src = _source("telegram", "tg")
-    _inbox(src, "m1", _tg_payload(None, chat_title="Parche"))
-    _inbox(src, "m2", _tg_payload(None, chat_title="Parche 2.0"))  # renombrado
+    m1 = _inbox(src, "m1", _tg_payload(None, chat_title="Parche"))
+    m2 = _inbox(src, "m2", _tg_payload(None, chat_title="Parche 2.0"))  # renombrado
     with connection() as c:
-        stats = build_relations(c, 1)
-    assert stats.canales == 1
+        canales, _, _ = weave_chat_structure(c, 1, [m1, m2])
+    assert canales == 1
     assert _canales() == [("900", "Parche 2.0")]
     with connection() as c:
-        build_relations(c, 1)  # re-correr no duplica
+        weave_chat_structure(c, 1, [m1, m2])  # re-correr no duplica
     assert _canales() == [("900", "Parche 2.0")]
 
 
 def test_canal_es_vertice() -> None:
     src = _source("telegram", "tg")
-    _inbox(src, "m1", _tg_payload(None, chat_title="Parche"))
+    m1 = _inbox(src, "m1", _tg_payload(None, chat_title="Parche"))
     with connection() as c:
-        build_relations(c, 1)
+        weave_chat_structure(c, 1, [m1])
         verts = list_vertices(c, 1, slugs=("canal",))
     assert len(verts) == 1
     assert verts[0].kind == "canal"
@@ -155,11 +156,11 @@ def test_canal_es_vertice() -> None:
 
 def test_participa_en_confirmed() -> None:
     src = _source("telegram", "tg")
-    _inbox(src, "m1", _tg_payload(111, display_name="Juan Niebla"))
+    m1 = _inbox(src, "m1", _tg_payload(111, display_name="Juan Niebla"))
     with connection() as c:
-        stats = build_relations(c, 1)
+        _, _, participa = weave_chat_structure(c, 1, [m1])
         edges = list_edges(c, 1, producer=PRODUCER_CANAL)
-    assert stats.participa_reales == 1
+    assert participa == 1
     assert len(edges) == 1
     e = edges[0]
     assert e.verdict == VERDICT_CONFIRMED
@@ -170,11 +171,11 @@ def test_participa_en_confirmed() -> None:
 
 def test_bot_sin_participa_en() -> None:
     src = _source("telegram", "tg")
-    _inbox(src, "m1", _tg_payload(500, username="robobot", is_bot=True))
+    m1 = _inbox(src, "m1", _tg_payload(500, username="robobot", is_bot=True))
     with connection() as c:
-        stats = build_relations(c, 1)
-    assert stats.participa_reales == 0
-    assert stats.canales == 1  # el canal sí existe (el mensaje es del chat)
+        canales, _, participa = weave_chat_structure(c, 1, [m1])
+    assert participa == 0
+    assert canales == 1  # el canal sí existe (el mensaje es del chat)
 
 
 def test_canal_coocurre_y_participa_suprime_su_pista() -> None:
@@ -185,9 +186,10 @@ def test_canal_coocurre_y_participa_suprime_su_pista() -> None:
     mid = _inbox(src, "m1", _tg_payload(111, display_name="Juan Niebla"))
     fin = _finance("Rappi", [mid])
     with connection() as c:
-        stats = build_relations(c, 1)
+        weave_chat_structure(c, 1, [mid])  # paso 5: canal + remitente + participa_en
+        pistas_n, _, _ = generate_cooccurrence(c, 1)
         pistas = list_edges(c, 1, producer="inbox")
-    assert stats.cooccurrence_pistas == 2
+    assert pistas_n == 2
     canal_id = int(_exec("SELECT id FROM mod_canales WHERE user_id = 1"))
     pares = [_pair(e) for e in pistas]
     assert any(("canal", canal_id) in p and ("finance", fin) in p for p in pares)
@@ -204,15 +206,16 @@ def test_canal_no_cuenta_para_el_cap() -> None:
     _finance("A", [mid])
     _finance("B", [mid])
     with connection() as c:
-        stats = build_relations(c, 1, cooccurrence_cap=3)
-    assert stats.high_fanout_skipped == 0
+        weave_chat_structure(c, 1, [mid])  # paso 5: el participa_en suprime el par remitente↔canal
+        pistas_n, skipped, _ = generate_cooccurrence(c, 1, cap=3)
+    assert skipped == 0
     # C(4,2)=6 pares - 1 suprimido (remitente↔canal ya confirmed por participa_en) = 5 pistas
-    assert stats.cooccurrence_pistas == 5
+    assert pistas_n == 5
     _exec("DELETE FROM relation_edges WHERE user_id = 1")
     with connection() as c:
-        stats2 = build_relations(c, 1, cooccurrence_cap=2)
-    assert stats2.high_fanout_skipped == 1
-    assert stats2.cooccurrence_pistas == 0
+        pistas2, skipped2, _ = generate_cooccurrence(c, 1, cap=2)
+    assert skipped2 == 1
+    assert pistas2 == 0
 
 
 def _canal_row(conn: Connection, external_id: str, name: str) -> Ref:

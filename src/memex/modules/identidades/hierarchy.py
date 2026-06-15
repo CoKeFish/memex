@@ -39,6 +39,7 @@ from memex.llm import ChatMessage, LLMClient, LLMResult, aclose_llm, build_llm_c
 from memex.logging import get_logger
 from memex.modules.identidades.normalize import org_core
 from memex.modules.identidades.prompt import IDENTIDADES_HIERARCHY_SYSTEM_PROMPT
+from memex.relations.deterministic import weave_pertenencia
 
 _log = get_logger("memex.modules.identidades.hierarchy")
 
@@ -257,6 +258,9 @@ def _set_parent(conn: Connection, user_id: int, child_id: int, parent_id: int) -
         ),
         {"p": parent_id, "c": child_id, "u": user_id},
     )
+    # Teje «pertenece_a» en la misma tx (paso 5). Si el padre cambió, la arista vieja la limpia
+    # `reconcile_graph` (mantenimiento).
+    weave_pertenencia(conn, user_id, child_id)
 
 
 def _apply_cleanup_name(conn: Connection, user_id: int, child_id: int, cleaned_name: str) -> bool:

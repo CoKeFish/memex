@@ -7,7 +7,7 @@ import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
-import { buildGraph, clusterGraph, confirmCooccurrences, fetchGraph, validateClusters } from "@/data"
+import { clusterGraph, confirmCooccurrences, fetchGraph, reconcileGraph, validateClusters } from "@/data"
 import type { GraphData, GraphEdge, GraphNode } from "@/data/graph"
 // El plegado por cúmulo (miembros ocultos + aristas re-ruteadas al nodo cúmulo) es una función pura.
 import { collapseClusters, type CollapsedEdge } from "@/lib/graph-collapse"
@@ -576,7 +576,7 @@ export function GraphPage() {
   const [showFull, setShowFull] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [selectedEdgeId, setSelectedEdgeId] = useState<number | null>(null)
-  const [building, setBuilding] = useState(false)
+  const [reconciling, setReconciling] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [clustering, setClustering] = useState(false)
   const [validating, setValidating] = useState(false)
@@ -681,23 +681,19 @@ export function GraphPage() {
     })
   }
 
-  async function onBuild() {
-    setBuilding(true)
+  async function onReconcile() {
+    setReconciling(true)
     try {
-      const r = await buildGraph()
-      const reales =
-        r.afiliacionReales + r.pertenenciaReales + r.contraparteReales + r.participaReales
+      const r = await reconcileGraph()
+      const stale = r.staleAfiliacion + r.stalePertenencia + r.staleContraparte
       toast.success(
-        `Grafo armado: ${r.cooccurrencePistas} pistas, ${reales} reales (${r.contraparteReales} contraparte)` +
-          (r.canales ? ` · ${r.canales} canales` : "") +
-          (r.chatSenders ? ` · ${r.chatSenders} remitentes nuevos` : "") +
-          (r.highFanoutSkipped ? ` · ${r.highFanoutSkipped} mensajes saltados` : ""),
+        `Mantenimiento: ${stale} reales reconciliadas · ${r.orphansPruned} huérfanas podadas`,
       )
       reload()
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "No se pudo armar el grafo")
+      toast.error(e instanceof Error ? e.message : "No se pudo reconciliar el grafo")
     } finally {
-      setBuilding(false)
+      setReconciling(false)
     }
   }
 
@@ -795,9 +791,9 @@ export function GraphPage() {
                 ))}
               </SelectContent>
             </Select>
-            <Button size="sm" variant="outline" onClick={onBuild} disabled={building}>
-              {building ? <Loader2 className="size-4 animate-spin" /> : <Hammer className="size-4" />}
-              Armar grafo
+            <Button size="sm" variant="outline" onClick={onReconcile} disabled={reconciling}>
+              {reconciling ? <Loader2 className="size-4 animate-spin" /> : <Hammer className="size-4" />}
+              Reconciliar
             </Button>
             <Button size="sm" variant="outline" onClick={onConfirm} disabled={confirming}>
               {confirming ? <Loader2 className="size-4 animate-spin" /> : <CheckCheck className="size-4" />}
@@ -823,7 +819,7 @@ export function GraphPage() {
       ) : full.nodes.length === 0 ? (
         <EmptyState
           title="Grafo vacío"
-          hint="Todavía no hay vértices. Corré la extracción en Procesamiento; cuando haya datos, tocá «Armar grafo»."
+          hint="Todavía no hay vértices. Corré la extracción en Procesamiento: los vértices y sus aristas reales se tejen al procesar."
         />
       ) : (
         <div className="space-y-3">
@@ -840,7 +836,7 @@ export function GraphPage() {
               hint={
                 hiddenKinds.size > 0
                   ? "Todos los vértices quedaron filtrados: reactivá tipos en la leyenda o apagá «Solo conectados»."
-                  : "No hay aristas deterministas. Tocá «Armar grafo», o apagá «Solo conectados» para ver los vértices sueltos."
+                  : "No hay aristas. Las reales se tejen al procesar; las pistas, con «Confirmar». O apagá «Solo conectados» para ver los vértices sueltos."
               }
             />
           ) : (

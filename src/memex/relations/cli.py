@@ -1,18 +1,19 @@
-"""CLI `memex-graph` — grafo de relaciones: armado determinista + cúmulos (detección).
+"""CLI `memex-graph` — grafo de relaciones: co-ocurrencia + cúmulos + mantenimiento.
 
 Subcomandos:
-  build     — paso determinista (`build_relations`): pistas de co-ocurrencia + aristas reales.
-  confirm   — confirmación POR-MENSAJE (metodología B): juzga las co-ocurrencias ambiguas de cada
-              mensaje (recibo a priori + LLM con compuerta alias-aware) + resumen.
+  confirm   — co-ocurrencia POR-MENSAJE (metodología B): GENERA las pistas y las juzga (recibo a
+              priori + LLM con compuerta alias-aware) + resumen. Reemplaza al viejo `build`.
   cluster   — detecta los cúmulos (Louvain) y los reconcilia contra lo persistido (sin LLM).
   validate  — valida con el LLM los cúmulos pendientes (confirma/nombra/describe/poda).
-  cycle     — build → confirm → cluster → validate, de corrido.
+  reconcile — mantenimiento del grafo (sin LLM): poda huérfanas + reconcilia las reales stale.
+  cycle     — confirm → cluster → validate → reconcile, de corrido.
   list      — lista los cúmulos del user (opcional `--status`).
   help      — resumen de los comandos.
 
-Todo on-demand; los jobs del scheduler NO se encienden por esto. `confirm`/`validate`/`cycle` usan
-el LLM (DEEPSEEK_API_KEY vía doppler; `confirm --dry-run/--no-llm` no). Server-side: habla con la
-DB vía `connection()` (igual que `memex-identidades`). Exit 0 si OK; 1 si error fatal.
+Las aristas REALES NO se arman acá: las tejen los módulos al escribir (paso 5). Todo on-demand; los
+jobs del scheduler NO se encienden por esto. `confirm`/`validate`/`cycle` usan el LLM
+(DEEPSEEK_API_KEY vía doppler; `confirm --dry-run/--no-llm` y `reconcile` no). Server-side: habla
+con la DB vía `connection()` (igual que `memex-identidades`). Exit 0 si OK; 1 si error fatal.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from memex.db import connection
 from memex.llm.client import LLMError
 from memex.logging import get_logger, setup_logging
 from memex.relations.clusters_llm import run_cluster_partition
-from memex.relations.deterministic import build_relations
+from memex.relations.maintenance import reconcile_graph
 from memex.relations.reconcile import detect_and_reconcile
 
 
@@ -42,13 +43,13 @@ def _say(msg: str, *, err: bool = False) -> None:
     print(_safe(msg), file=sys.stderr if err else sys.stdout)
 
 
-_HELP = """memex-graph — grafo de relaciones (armado determinista + cúmulos).
+_HELP = """memex-graph — grafo de relaciones (co-ocurrencia + cúmulos + mantenimiento).
 
-  build               corre el paso determinista (pistas de co-ocurrencia + aristas reales)
-  confirm             confirma co-ocurrencias ambiguas por-mensaje (recibo a priori + LLM B)
+  confirm             GENERA y confirma co-ocurrencias por-mensaje (recibo a priori + LLM B)
   cluster             detecta cúmulos (Louvain) y reconcilia contra lo persistido (sin LLM)
   validate            valida con el LLM los cúmulos pendientes (confirma/nombra/poda)
-  cycle               build → confirm → cluster → validate, de corrido
+  reconcile           mantenimiento: poda huérfanas + reconcilia reales stale (sin LLM)
+  cycle               confirm → cluster → validate → reconcile, de corrido
   list [--status S]   lista los cúmulos del user
   help                muestra esta ayuda
 
@@ -59,16 +60,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="memex-graph")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    b = sub.add_parser("build", help="Paso determinista del grafo (build_relations).")
-    b.add_argument("--user", type=int, default=1, help="User id (default 1).")
-    b.add_argument(
-        "--cooccurrence-cap",
-        type=int,
-        default=None,
-        help="Tope de vértices por mensaje para la co-ocurrencia "
-        "(default: settings.cooccurrence_cap).",
-    )
-
     c = sub.add_parser("cluster", help="Detecta y reconcilia los cúmulos (sin LLM).")
     c.add_argument("--user", type=int, default=1, help="User id (default 1).")
 
@@ -76,15 +67,11 @@ def _build_parser() -> argparse.ArgumentParser:
     v.add_argument("--user", type=int, default=1, help="User id (default 1).")
     v.add_argument("--limit", type=int, default=None, help="Máximo de cúmulos a validar.")
 
-    cy = sub.add_parser("cycle", help="build → cluster → validate, de corrido.")
+    rc = sub.add_parser("reconcile", help="Mantenimiento: poda huérfanas + reconcilia reales.")
+    rc.add_argument("--user", type=int, default=1, help="User id (default 1).")
+
+    cy = sub.add_parser("cycle", help="confirm → cluster → validate → reconcile, de corrido.")
     cy.add_argument("--user", type=int, default=1, help="User id (default 1).")
-    cy.add_argument(
-        "--cooccurrence-cap",
-        type=int,
-        default=None,
-        help="Tope de vértices por mensaje para la co-ocurrencia "
-        "(default: settings.cooccurrence_cap).",
-    )
 
     cf = sub.add_parser("confirm", help="Confirmación por-mensaje de co-ocurrencias ambiguas.")
     cf.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -125,26 +112,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _cooccurrence_cap(args: argparse.Namespace) -> int:
-    """El cap del flag o, sin él, el de settings — la MISMA fuente que el API y el scheduler."""
-    if args.cooccurrence_cap is not None:
-        return int(args.cooccurrence_cap)
-    from memex.config import settings  # import local: estilo del módulo
-
-    return settings.cooccurrence_cap
-
-
-def _cmd_build(args: argparse.Namespace) -> int:
+def _cmd_reconcile(args: argparse.Namespace) -> int:
     with connection() as conn:
-        stats = build_relations(conn, args.user, cooccurrence_cap=_cooccurrence_cap(args))
+        stats = reconcile_graph(conn, args.user)
     _say(
-        f"\ngraph build: pistas={stats.cooccurrence_pistas} afiliacion={stats.afiliacion_reales} "
-        f"pertenencia={stats.pertenencia_reales} contraparte={stats.contraparte_reales} "
-        f"mismo_evento={stats.same_event_reales} cumple={stats.cumple_reales} "
-        f"participa={stats.participa_reales} canales={stats.canales} "
-        f"remitentes_chat={stats.chat_senders} "
-        f"saltados={stats.high_fanout_skipped} huerfanas_podadas={stats.orphans_pruned} "
-        f"redundantes_confirmadas={stats.redundant_resolved}\n"
+        f"\ngraph reconcile: stale_afiliacion={stats.stale_afiliacion} "
+        f"stale_pertenencia={stats.stale_pertenencia} "
+        f"stale_contraparte={stats.stale_contraparte} "
+        f"huerfanas_podadas={stats.orphans_pruned}\n"
     )
     return 0
 
@@ -174,19 +149,21 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 def _cmd_cycle(args: argparse.Namespace) -> int:
     from memex.relations.per_message import run_per_message_confirm
 
-    with connection() as conn:
-        b = build_relations(conn, args.user, cooccurrence_cap=_cooccurrence_cap(args))
     cf = asyncio.run(run_per_message_confirm(args.user))
     with connection() as conn:
         r = detect_and_reconcile(conn, args.user)
     v = asyncio.run(run_cluster_partition(args.user))
+    with connection() as conn:
+        rc = reconcile_graph(conn, args.user)
     _say(
-        f"\ngraph cycle: [build] pistas={b.cooccurrence_pistas} cluster_edges={b.cluster_edges} | "
-        f"[confirm] aristas={cf.edges} recibo={cf.confirmed_recibo} llm_conf={cf.llm_confirmed} "
-        f"llm_rej={cf.llm_rejected} gated={cf.gated} | "
+        f"\ngraph cycle: [confirm] aristas={cf.edges} recibo={cf.confirmed_recibo} "
+        f"llm_conf={cf.llm_confirmed} llm_rej={cf.llm_rejected} gated={cf.gated} "
+        f"resumenes={cf.summaries} | "
         f"[detect] detectados={r.detected} nuevos={r.new_candidates} disueltos={r.dissolved} | "
         f"[partition] contextos={v.groups} (nuevos={v.created} sync={v.synced}) "
-        f"promovidas={v.promoted} ruido={v.rejected} errores={v.errors}\n"
+        f"promovidas={v.promoted} ruido={v.rejected} errores={v.errors} | "
+        f"[reconcile] stale={rc.stale_afiliacion + rc.stale_pertenencia + rc.stale_contraparte} "
+        f"huerfanas={rc.orphans_pruned}\n"
     )
     return 1 if (v.errors or cf.errors) else 0
 
@@ -258,12 +235,12 @@ def main(argv: list[str] | None = None) -> int:
     log.info("graph.cli.start", cmd=args.cmd)
 
     try:
-        if args.cmd == "build":
-            return _cmd_build(args)
         if args.cmd == "cluster":
             return _cmd_cluster(args)
         if args.cmd == "validate":
             return _cmd_validate(args)
+        if args.cmd == "reconcile":
+            return _cmd_reconcile(args)
         if args.cmd == "cycle":
             return _cmd_cycle(args)
         if args.cmd == "confirm":

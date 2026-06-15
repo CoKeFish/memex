@@ -11,7 +11,8 @@ from typing import Any
 from sqlalchemy import text
 
 from memex.db import connection
-from memex.relations.deterministic import build_relations
+from memex.modules.identidades.chat_senders import weave_chat_structure
+from memex.relations.cooccurrence import generate_cooccurrence
 from memex.relations.edges import list_edges
 
 
@@ -150,10 +151,10 @@ def _pair(e: Any) -> set[tuple[str, int]]:
 
 def test_chat_sender_desconocido_se_crea_idempotente() -> None:
     src = _source("telegram", "tg")
-    _inbox(src, "m1", _tg_payload(111, username="Juanito", display_name="Juan Niebla"))
+    m1 = _inbox(src, "m1", _tg_payload(111, username="Juanito", display_name="Juan Niebla"))
     with connection() as c:
-        stats = build_relations(c, 1)
-    assert stats.chat_senders == 1
+        _, senders, _ = weave_chat_structure(c, 1, [m1])
+    assert senders == 1
     ids = _identities()
     assert len(ids) == 1
     iid, display = ids[0]
@@ -163,20 +164,21 @@ def test_chat_sender_desconocido_se_crea_idempotente() -> None:
         ("telegram", "handle", "juanito"),
     }
     with connection() as c:
-        stats2 = build_relations(c, 1)  # re-correr: ya existe, no crea ni duplica
-    assert stats2.chat_senders == 0
+        _, senders2, _ = weave_chat_structure(c, 1, [m1])  # re-correr: ya existe, no duplica
+    assert senders2 == 0
     assert len(_identities()) == 1
 
 
 def test_bot_y_service_message_se_saltan() -> None:
     src = _source("telegram", "tg")
-    _inbox(src, "m1", _tg_payload(500, username="robobot", display_name="Robo", is_bot=True))
+    m1 = _inbox(src, "m1", _tg_payload(500, username="robobot", display_name="Robo", is_bot=True))
     payload_service = _tg_payload(1)
     payload_service["sender"] = None  # mensaje de servicio / broadcast anónimo
-    _inbox(src, "m2", payload_service)
+    m2 = _inbox(src, "m2", payload_service)
     with connection() as c:
-        stats = build_relations(c, 1)
-    assert stats.chat_senders == 0
+        _, senders, participa = weave_chat_structure(c, 1, [m1, m2])
+    assert senders == 0
+    assert participa == 0
     assert _identities() == []
     with connection() as c:
         assert list_edges(c, 1) == []
@@ -187,10 +189,10 @@ def test_enriquecimiento_por_username_no_crea() -> None:
     p = _person("Juan Niebla")
     _identifier(p, "telegram", "handle", "juanito")
     src = _source("telegram", "tg")
-    _inbox(src, "m1", _tg_payload(111, username="juanito", display_name="Juan N"))
+    m1 = _inbox(src, "m1", _tg_payload(111, username="juanito", display_name="Juan N"))
     with connection() as c:
-        stats = build_relations(c, 1)
-    assert stats.chat_senders == 0
+        _, senders, _ = weave_chat_structure(c, 1, [m1])
+    assert senders == 0
     assert len(_identities()) == 1
     assert ("telegram", "platform_id", "111") in _identifiers_of(p)
 
@@ -203,9 +205,10 @@ def test_chat_sender_coocurre_con_lo_extraido() -> None:
     mid = _inbox(src, "m1", _tg_payload(111, display_name="Juan Niebla"))
     fin = _finance("Rappi", [mid])
     with connection() as c:
-        stats = build_relations(c, 1)
+        _, senders, _ = weave_chat_structure(c, 1, [mid])  # paso 5: remitente + canal + participa
+        generate_cooccurrence(c, 1)  # paso 7
         edges = list_edges(c, 1, producer="inbox")
-    assert stats.chat_senders == 1
+    assert senders == 1
     sender_id = _identities()[0][0]
     assert len(edges) == 2
     pares = [_pair(e) for e in edges]
@@ -222,7 +225,7 @@ def test_email_remitente_conocido_coocurre() -> None:
     mid = _inbox(src, "m1", _email_payload("Ana@Rivas.co"))  # case-insensitive por lower()
     fin = _finance("Uber", [mid])
     with connection() as c:
-        build_relations(c, 1)
+        generate_cooccurrence(c, 1)  # email solo RESUELVE (sin weave_chat_structure)
         edges = list_edges(c, 1, producer="inbox")
     assert len(edges) == 1
     assert _pair(edges[0]) == {("finance", fin), ("identidades:person", p)}
@@ -233,9 +236,8 @@ def test_email_remitente_desconocido_no_crea_ni_coocurre() -> None:
     mid = _inbox(src, "m1", _email_payload("nadie@desconocido.com"))
     _finance("Uber", [mid])
     with connection() as c:
-        stats = build_relations(c, 1)
+        generate_cooccurrence(c, 1)
         edges = list_edges(c, 1)
-    assert stats.chat_senders == 0
     assert _identities() == []  # email NUNCA crea
     assert edges == []  # un solo vértice en el mensaje → sin pares
 
@@ -251,7 +253,7 @@ def test_social_cuenta_conocida_coocurre() -> None:
     )
     fin = _finance("Tienda", [mid])
     with connection() as c:
-        build_relations(c, 1)
+        generate_cooccurrence(c, 1)
         edges = list_edges(c, 1, producer="inbox")
     assert len(edges) == 1
     assert _pair(edges[0]) == {("finance", fin), ("identidades:person", p)}
@@ -270,6 +272,6 @@ def test_social_handle_platform_unknown_no_matchea() -> None:
     )
     _finance("Tienda", [mid])
     with connection() as c:
-        build_relations(c, 1)
+        generate_cooccurrence(c, 1)
         edges = list_edges(c, 1, producer="inbox")
     assert edges == []

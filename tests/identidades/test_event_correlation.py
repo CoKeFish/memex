@@ -1,7 +1,7 @@
 """identidades en los eventos del agente: `register_card` con `event_id` deja la MENCIÓN-evento
 (la evidencia del avistamiento) y teje incremental las aristas `mismo_evento` con los hechos de
-bienestar/finanzas del MISMO evento; sin `event_id` no hay mención. El full-sweep
-(`build_relations`) materializa lo mismo desde la mención persistida (idempotente)."""
+bienestar/finanzas del MISMO evento; sin `event_id` no hay mención. Re-tejer el evento
+(`weave_event`) materializa lo mismo desde la mención persistida (idempotente)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from sqlalchemy import text
 from memex.modules.bienestar.habits import add_habit
 from memex.modules.bienestar.module import register
 from memex.modules.identidades.module import register_card
-from memex.relations.deterministic import build_relations
+from memex.relations.deterministic import weave_event
 from memex.relations.edges import list_edges
 
 if TYPE_CHECKING:
@@ -59,21 +59,21 @@ def test_identidad_bienestar_mismo_evento_tejido_en_el_acto(conn: Connection) ->
     }
 
 
-def test_full_sweep_materializa_identidad_evento(conn: Connection) -> None:
-    # la mención-evento persiste → un build full-sweep posterior re-deriva la arista (idempotente),
-    # p.ej. tras una poda; dos menciones de la MISMA identidad+evento no duplican (UNION del CTE).
+def test_weave_event_materializa_desde_mencion(conn: Connection) -> None:
+    # la mención-evento persiste → re-tejer el evento re-deriva la arista (idempotente), p.ej. tras
+    # una poda; dos menciones de la MISMA identidad+evento no duplican (UNION del CTE).
     add_habit(conn, 1, name="Gym", cadence="daily", category="ejercicio")
     reg = register(conn, 1, category="ejercicio", activity="gym", event_id="agent-4")
     card = register_card(conn, 1, name="Juan Niebla", kind="persona", event_id="agent-4")
     register_card(conn, 1, name="Juan Niebla", kind="persona", event_id="agent-4")  # re-avistada
     conn.execute(text("DELETE FROM relation_edges WHERE user_id = 1"))
-    stats = build_relations(conn, 1)
-    assert stats.same_event_reales == 1
+    n = weave_event(conn, 1, "agent-4")
+    assert n == 1
     edges = list_edges(conn, 1, producer="event")
     assert len(edges) == 1
     assert {(edges[0].src.slug, edges[0].src.id), (edges[0].dst.slug, edges[0].dst.id)} == {
         ("bienestar", int(reg["id"])),
         ("identidades:person", int(card["id"])),
     }
-    build_relations(conn, 1)  # re-correr no duplica
+    weave_event(conn, 1, "agent-4")  # re-correr no duplica
     assert len(list_edges(conn, 1, producer="event")) == 1

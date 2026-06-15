@@ -1,5 +1,7 @@
-"""Endpoint del grafo (Fase 2): POST /graph/build (paso determinista) + GET /graph (lectura de
-vértices + aristas, con filtro por status). inbox NO es vértice.
+"""Grafo vía API: GET /graph (lectura de vértices + aristas, con filtro por status) + POST
+/graph/reconcile (mantenimiento). inbox NO es vértice. El grafo se TEJE al escribir (paso 5) y la
+co-ocurrencia se genera en su fase (paso 7); estos tests seedean datos crudos y los pueblan
+server-side con `_build` (reemplaza al viejo POST /graph/build, ya inexistente).
 """
 
 from __future__ import annotations
@@ -12,6 +14,12 @@ from memex.db import connection
 from memex.modules.bienestar.habits import add_habit
 from memex.modules.bienestar.module import register
 from memex.relations.clustering import cluster_signature
+from memex.relations.cooccurrence import generate_cooccurrence
+from memex.relations.deterministic import (
+    _materialize_afiliacion,
+    _materialize_contraparte,
+    _materialize_cumple,
+)
 from memex.relations.edges import (
     PRODUCER_IDENTIDADES,
     PROVENANCE_EXTRACTED,
@@ -26,6 +34,18 @@ def _exec(sql: str, **p: Any) -> Any:
     with connection() as c:
         r = c.execute(text(sql), p)
         return r.scalar() if r.returns_rows else None
+
+
+def _build(cap: int = 8) -> dict[str, int]:
+    """Puebla el grafo server-side como el pipeline (paso 5 + 7): teje las aristas reales
+    (afiliación / contraparte / cumple) sobre lo seedeado y genera la co-ocurrencia. Reemplaza al
+    viejo POST /graph/build en los tests; devuelve los conteos que el endpoint exponía."""
+    with connection() as c:
+        afil = _materialize_afiliacion(c, 1)
+        _materialize_contraparte(c, 1)
+        cumple = _materialize_cumple(c, 1)
+        pistas, _, _ = generate_cooccurrence(c, 1, cap=cap)
+    return {"cooccurrence_pistas": pistas, "afiliacion_reales": afil, "cumple_reales": cumple}
 
 
 def _source(stype: str, name: str) -> int:
@@ -125,13 +145,9 @@ def test_graph_vacio(client: Any) -> None:
 def test_build_y_lectura(client: Any) -> None:
     _finance("Rappi", [5])
     _hack("HackBogota", [5])
-    built = client.post("/graph/build").json()
+    built = _build()
     assert built["cooccurrence_pistas"] == 1
     assert built["afiliacion_reales"] == 0
-    # los campos de canal/remitente siempre vienen (0 sin datos de chat)
-    assert built["participa_reales"] == 0
-    assert built["canales"] == 0
-    assert built["chat_senders"] == 0
 
     body = client.get("/graph").json()
     assert len(body["nodes"]) == 2
@@ -151,7 +167,7 @@ def test_edges_traen_source_inbox_ids(client: Any) -> None:
     aristas, espejo del de nodos."""
     _finance("Steam", [5, 7])
     _hack("HackSteam", [5, 7])
-    client.post("/graph/build")
+    _build()
     body = client.get("/graph").json()
     assert len(body["edges"]) == 1
     assert body["edges"][0]["source_inbox_ids"] == [5, 7]
@@ -160,8 +176,8 @@ def test_edges_traen_source_inbox_ids(client: Any) -> None:
 def test_build_idempotente(client: Any) -> None:
     _finance("Rappi", [5])
     _hack("Hack", [5])
-    client.post("/graph/build")
-    client.post("/graph/build")
+    _build()
+    _build()
     assert len(client.get("/graph").json()["edges"]) == 1
 
 
@@ -171,7 +187,7 @@ def test_source_inbox_id_enfoca_subgrafo(client: Any) -> None:
     _finance("Rappi", [5])
     _hack("HackBogota", [5])
     _finance("Netflix", [9])  # otro correo, sin relación con los del correo 5
-    client.post("/graph/build")
+    _build()
 
     focado = client.get("/graph?source_inbox_id=5").json()
     assert len(focado["nodes"]) == 2  # solo los 2 del correo 5 (Netflix del 9 queda fuera)
@@ -195,7 +211,7 @@ def test_inbox_kinds_por_medio(client: Any) -> None:
     _inbox(_source("imap", "mail2"), "m2")  # no referenciado por ningún vértice → omitido
     _finance("Rappi", [tg, im, wh])
     _hack("HackBogota", [tg])
-    client.post("/graph/build")
+    _build()
 
     body = client.get("/graph").json()
     assert body["inbox_kinds"] == {str(tg): "chat", str(im): "email"}
@@ -205,7 +221,7 @@ def test_inbox_kinds_en_foco(client: Any) -> None:
     tg = _inbox(_source("telegram", "tg"), "t1")
     _finance("Rappi", [tg])
     _hack("Hack", [tg])
-    client.post("/graph/build")
+    _build()
 
     body = client.get(f"/graph?source_inbox_id={tg}").json()
     assert body["inbox_kinds"] == {str(tg): "chat"}
@@ -232,7 +248,7 @@ def test_verdict_filtra_aristas(client: Any) -> None:
         p=p,
         o=o,
     )
-    client.post("/graph/build")
+    _build()
 
     confirmed = client.get("/graph?verdict=confirmed").json()["edges"]
     ambiguas = client.get("/graph?verdict=ambiguous").json()["edges"]
@@ -247,7 +263,7 @@ def test_get_graph_poda_aristas_huerfanas(client: Any) -> None:
     # arista colgante (aísla el filtro de get_graph del GC de build, que no corre acá).
     fin = _finance("Rappi", [5])
     _hack("HackBogota", [5])
-    client.post("/graph/build")
+    _build()
     assert len(client.get("/graph").json()["edges"]) == 1
     _exec("UPDATE mod_finance_consolidated SET deleted = TRUE WHERE id = :i", i=fin)
     body = client.get("/graph").json()
@@ -258,11 +274,36 @@ def test_get_graph_poda_aristas_huerfanas(client: Any) -> None:
     assert focado["edges"] == []
 
 
+def test_reconcile_endpoint_borra_real_stale(client: Any) -> None:
+    # afiliación persona↔org tejida; se borra el enlace del directorio → POST /graph/reconcile la
+    # reconcilia (ambos vértices vivos, la poda de huérfanas no la vería).
+    p = _person("Juan")
+    o = int(
+        _exec(
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'organizacion', 'Acme') RETURNING id"
+        )
+    )
+    _exec(
+        "INSERT INTO mod_identidades_person_orgs (user_id, person_id, org_id) VALUES (1, :p, :o)",
+        p=p,
+        o=o,
+    )
+    with connection() as c:
+        _materialize_afiliacion(c, 1)
+    assert len(client.get("/graph?verdict=confirmed").json()["edges"]) == 1
+    _exec("DELETE FROM mod_identidades_person_orgs WHERE user_id = 1")
+    res = client.post("/graph/reconcile").json()
+    assert res["stale_afiliacion"] == 1
+    assert res["orphans_pruned"] == 0
+    assert client.get("/graph?verdict=confirmed").json()["edges"] == []
+
+
 def test_cumple_por_actividad(client: Any) -> None:
     # registro "correr" ↔ hábito "Correr" (match de actividad, insensible a mayúsculas).
     _registro("correr", "ejercicio")
     _habito("Correr", activity="Correr")
-    built = client.post("/graph/build").json()
+    built = _build()
     assert built["cumple_reales"] == 1
 
     body = client.get("/graph").json()
@@ -281,14 +322,14 @@ def test_cumple_por_categoria(client: Any) -> None:
     # hábito sin actividad → matchea por categoría.
     _registro("", "ejercicio")
     _habito("Ejercicio", category="ejercicio")
-    built = client.post("/graph/build").json()
+    built = _build()
     assert built["cumple_reales"] == 1
 
 
 def test_cumple_sin_match(client: Any) -> None:
     _registro("nadar", "ejercicio")
     _habito("Correr", activity="correr")
-    built = client.post("/graph/build").json()
+    built = _build()
     assert built["cumple_reales"] == 0
     assert all(e["relation_type"] != "cumple" for e in client.get("/graph").json()["edges"])
 
@@ -296,8 +337,8 @@ def test_cumple_sin_match(client: Any) -> None:
 def test_cumple_idempotente(client: Any) -> None:
     _registro("correr", "ejercicio")
     _habito("Correr", activity="correr")
-    client.post("/graph/build")
-    client.post("/graph/build")  # 2da corrida: no duplica la arista
+    _build()
+    _build()  # 2da corrida: no duplica la arista
     edges = client.get("/graph?verdict=confirmed").json()["edges"]
     assert len([e for e in edges if e["relation_type"] == "cumple"]) == 1
 
@@ -307,7 +348,7 @@ def test_cumple_multiples_habitos(client: Any) -> None:
     _registro("correr", "ejercicio")
     _habito("Correr", activity="correr")
     _habito("Hacer ejercicio", category="ejercicio")
-    built = client.post("/graph/build").json()
+    built = _build()
     assert built["cumple_reales"] == 2
 
 

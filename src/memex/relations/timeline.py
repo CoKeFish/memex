@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from memex.relations.deterministic import vertex_inbox_ids
+from memex.relations.cooccurrence import vertex_inbox_ids
 from memex.relations.edges import Ref
 from memex.relations.vertices import list_vertices
 

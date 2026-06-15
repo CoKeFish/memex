@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from memex.modules.bienestar.habits import add_habit
 from memex.modules.bienestar.module import register
-from memex.relations.deterministic import build_relations, weave_event
+from memex.relations.deterministic import weave_event
 from memex.relations.edges import list_edges
 from memex.relations.vertices import list_vertices
 
@@ -49,8 +49,7 @@ def test_same_event_producer_connects(conn: Connection) -> None:
     c = register(conn, 1, category="higiene", activity="cepillado", event_id="E2")  # otro evento
     d = register(conn, 1, category="salud", activity="ibuprofeno")  # sin event
 
-    build_relations(conn, 1)
-
+    # `register` teje «mismo_evento» en el acto (paso 5): a↔b (E1) ya existe sin full-sweep.
     edges = list_edges(conn, 1, producer="event")
     pairs = {(e.src.id, e.dst.id) for e in edges}
     assert (int(a["id"]), int(b["id"])) in pairs  # mismo evento E1 → conectados
@@ -69,8 +68,8 @@ def test_same_event_idempotent(conn: Connection) -> None:
     _seed_habits(conn)
     register(conn, 1, category="comida", activity="almuerzo", event_id="E1")
     register(conn, 1, category="ejercicio", activity="caminata", event_id="E1")
-    build_relations(conn, 1)
-    build_relations(conn, 1)  # re-correr no duplica
+    weave_event(conn, 1, "E1")  # re-tejer el mismo evento no duplica
+    weave_event(conn, 1, "E1")
     assert len(list_edges(conn, 1, producer="event")) == 1
 
 

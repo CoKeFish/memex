@@ -312,6 +312,48 @@ def test_social_source_excluded(seed_source: dict[str, Any]) -> None:
     assert _count("mod_finance_transactions") == 0
 
 
+def test_chat_window_weaves_chat_structure() -> None:
+    """Un lote de chat → el orquestador teje (paso 5, ANTES del ruteo) canal + identidad del
+    remitente + participa_en, INDEPENDIENTE de la extracción LLM (el hook de `_process_window`).
+    identidades activa: es quien crea la identidad del remitente."""
+    from memex.relations.edges import RELTYPE_PARTICIPA_EN, list_edges
+
+    tg = _new_source("tg", "telegram")
+    payload = {
+        "chat_id": "-100777",
+        "chat_kind": "group",
+        "chat_title": "Parche",
+        "sender": {
+            "user_id": "424242",
+            "username": "juani",
+            "display_name": "Juani",
+            "is_bot": False,
+        },
+        "message_id": 1,
+        "text": "hola",
+        "date": "2026-05-28T12:00:00Z",
+    }
+    _seed(tg, "c1", "batch", payload)
+    _enable("identidades")
+
+    asyncio.run(run_extraction(1, client=FakeExtractLLM(empty=True)))
+
+    assert _count("mod_canales") == 1
+    with connection() as c:
+        idf = c.execute(
+            text(
+                "SELECT count(*) FROM mod_identidades_identifiers WHERE user_id = 1 "
+                "AND platform = 'telegram' AND kind = 'platform_id' AND value_norm = '424242'"
+            )
+        ).scalar()
+        edges = list_edges(c, 1, producer="canal")
+    assert idf == 1  # remitente creado con su platform_id (estructura de chat tejida)
+    assert len(edges) == 1
+    assert edges[0].relation_type == RELTYPE_PARTICIPA_EN
+    assert edges[0].src.slug == "identidades:person"  # dirigida: quién → dónde
+    assert edges[0].dst.slug == "canal"
+
+
 # ----- módulo deshabilitado ------------------------------------------------------ #
 
 

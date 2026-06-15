@@ -89,8 +89,8 @@ export * from "./hackathones"
 export * from "./identidades"
 
 // ---- Grafo de relaciones (vértices + aristas, datos reales: router /graph) ----
-// fetchGraph (vértices proyectados + aristas con productor y nivel pista/confirmed) + buildGraph
-// (corre el paso determinista on-demand).
+// fetchGraph (vértices proyectados + aristas con productor y nivel pista/confirmed) + reconcileGraph
+// (mantenimiento on-demand: poda huérfanas + reconcilia reales stale).
 export * from "./graph"
 
 // ---- Bienestar (datos reales contra la API: router /bienestar) ----------------
