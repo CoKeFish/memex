@@ -127,6 +127,11 @@ services:
       # cliente OAuth "Web application" con la URI {base}/api/oauth/google/callback y apuntar acá.
       MEMEX_GOOGLE_OAUTH_CLIENT_SECRET_JSON: ${MEMEX_GOOGLE_OAUTH_CLIENT_SECRET_JSON:-/secrets/google_client_secret.json}
       MEMEX_OAUTH_REDIRECT_BASE_URL: ${MEMEX_OAUTH_REDIRECT_BASE_URL:-http://localhost:5173}
+      # Llave maestra del vault (cifra los tokens) + firma del `state` de OAuth. HKDF tolera
+      # cualquier cadena → default de DEV (igual patrón que MINIO_SECRET_KEY). En prod overridear
+      # con un secreto real (Doppler: openssl rand -base64 48). Sin esto, "Conectar con Google"
+      # tira 500 al firmar el state.
+      MEMEX_SECRET_KEY: ${MEMEX_SECRET_KEY:-dev-only-master-key-no-usar-en-prod}
     ports:
       - "8787:8787"
     volumes:
