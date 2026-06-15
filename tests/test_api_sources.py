@@ -255,15 +255,15 @@ def test_patch_source_rejects_sub_minimum_schedule(
 # --- token_source: de dónde resuelve el token de Apify cada fuente social -------------------
 
 
-def test_token_source_env_and_missing(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_token_source_missing_without_vault(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # El token de Apify SOLO cuenta desde el vault: aunque esté en el env, sin cuenta/vault es
+    # "missing" (el `.env`/host ya no es fuente de credenciales).
     src = _make_social_source(client)
-    monkeypatch.delenv("MEMEX_APIFY_TOKEN", raising=False)
-    assert client.get(f"/sources/{src['id']}").json()["token_source"] == "missing"
     monkeypatch.setenv("MEMEX_APIFY_TOKEN", "tok-123")
-    assert client.get(f"/sources/{src['id']}").json()["token_source"] == "env"
+    assert client.get(f"/sources/{src['id']}").json()["token_source"] == "missing"
     # En la lista viene calculado igual.
     listed = {s["id"]: s for s in client.get("/sources").json()}
-    assert listed[src["id"]]["token_source"] == "env"
+    assert listed[src["id"]]["token_source"] == "missing"
 
 
 def test_token_source_none_for_non_social(client: Any, seed_source: dict[str, Any]) -> None:

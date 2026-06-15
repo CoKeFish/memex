@@ -211,23 +211,18 @@ def _seed_run(source_id: int, user_id: int, *, status: str, started_at: datetime
         )
 
 
-def test_credential_configured_via_env_not_falta(
+def test_credential_in_env_not_reported_configured(
     authed: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Un secreto que resuelve por env var (no en el vault) se reporta configurado 'vía env'."""
+    """El `.env`/host NO es fuente de credenciales: un secreto solo en env (no en el vault) NO se
+    reporta configurado — el panel lo muestra como faltante hasta cargarlo en el vault."""
     monkeypatch.setenv("TEST_IMAP_USER", "someone@x.io")
     aid = _new_account(authed, "env-acc")
     _link_source(authed, aid, "env-src", {"username_env": "TEST_IMAP_USER"})
 
     acc = next(a for a in authed.get("/accounts").json() if a["id"] == aid)
     by_name = {s["secret_name"]: s for s in acc["secrets"]}
-    assert by_name["username"] == {
-        "secret_name": "username",
-        "configured": True,
-        "last4": "",
-        "source": "env",
-    }
-    assert "password" not in by_name  # password_env sin setear → no satisfecho por env
+    assert "username" not in by_name  # env ya no satisface la credencial (solo el vault cuenta)
 
 
 def test_health_reflects_last_ingestion_run(authed: TestClient) -> None:
@@ -247,18 +242,18 @@ def test_health_reflects_last_ingestion_run(authed: TestClient) -> None:
     assert health() == "unhealthy"
 
 
-def test_source_token_source_vault_wins_over_env(
+def test_source_token_source_vault_only(
     authed: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """El reporte de `token_source` prioriza el vault: con secreto cifrado en la cuenta
-    vinculada reporta "vault" aunque el env también lo tenga (espeja build_resolved_env)."""
+    """`token_source` solo cuenta el vault: con el token solo en env reporta "missing"; con el
+    secreto cifrado en la cuenta vinculada, "vault" (el `.env`/host ya no es fuente)."""
     aid = _new_account(authed, "apify-x", provider="x", kind="social")
     r = authed.post("/sources", json={"name": "x-vault", "type": "x", "config": {"accounts": []}})
     assert r.status_code == 201, r.text
     sid = r.json()["id"]
 
     monkeypatch.setenv("MEMEX_APIFY_TOKEN", "env-tok")
-    assert authed.get(f"/sources/{sid}").json()["token_source"] == "env"
+    assert authed.get(f"/sources/{sid}").json()["token_source"] == "missing"
 
     assert _set_cred(authed, aid, "apify_token", "vault-tok").status_code == 200
     assert authed.patch(f"/sources/{sid}", json={"account_id": aid}).status_code == 200

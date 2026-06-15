@@ -2,6 +2,9 @@
 
 Integración con DB: inserta sources telegram y verifica qué registra
 `build_streaming_runner`. Más un smoke del lifespan vía TestClient context.
+
+Las credenciales de Telegram vienen del VAULT (el resolver ya no acepta env/.env), así que un
+source que deba registrarse necesita una cuenta vinculada con sus secretos cifrados.
 """
 
 from __future__ import annotations
@@ -13,50 +16,68 @@ import pytest
 from sqlalchemy import text
 
 from memex.api.streaming import build_streaming_runner
+from memex.config import settings
 from memex.db import connection
-
-_TG_ENV = {
-    "MEMEX_TG_API_ID": "12345",
-    "MEMEX_TG_API_HASH": "deadbeef",
-    "MEMEX_TG_PHONE": "+34999",
-}
+from memex.security import vault
 
 
-def _insert_telegram_source(name: str, config: dict[str, Any], *, enabled: bool = True) -> int:
+@pytest.fixture(autouse=True)
+def _master_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "secret_key", "test-master-key-de-alta-entropia-0123456789")
+
+
+def _provision_tg_account() -> int:
+    """Cuenta telegram con sus credenciales en el VAULT (el resolver ya no acepta env/.env)."""
+    with connection() as c:
+        vault.provision_user(c, 1, "p")
+        aid = c.execute(
+            text(
+                "INSERT INTO accounts (user_id, alias, provider, kind) "
+                "VALUES (1, 'tg-acct', 'telegram', 'chat') RETURNING id"
+            ),
+        ).scalar()
+        assert aid is not None
+        aid = int(aid)
+        vault.set_secret(c, aid, "api_id", "12345")
+        vault.set_secret(c, aid, "api_hash", "deadbeef")
+        vault.set_secret(c, aid, "phone", "+34999")
+    return aid
+
+
+def _insert_telegram_source(
+    name: str, config: dict[str, Any], *, enabled: bool = True, account_id: int | None = None
+) -> int:
     with connection() as c:
         sid = c.execute(
             text(
-                "INSERT INTO sources (user_id, name, type, config, enabled) "
-                "VALUES (1, :name, 'telegram', CAST(:cfg AS JSONB), :enabled) RETURNING id"
+                "INSERT INTO sources (user_id, name, type, config, enabled, account_id) "
+                "VALUES (1, :name, 'telegram', CAST(:cfg AS JSONB), :enabled, :aid) RETURNING id"
             ),
-            {"name": name, "cfg": json.dumps(config), "enabled": enabled},
+            {"name": name, "cfg": json.dumps(config), "enabled": enabled, "aid": account_id},
         ).scalar()
     assert sid is not None
     return int(sid)
 
 
-def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    for k, v in _TG_ENV.items():
-        monkeypatch.setenv(k, v)
-
-
-def test_runner_registers_source_with_streaming_chats(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_env(monkeypatch)
+def test_runner_registers_source_with_streaming_chats() -> None:
+    aid = _provision_tg_account()
     _insert_telegram_source(
         "tg-streaming",
         {"allowed_chats": [{"chat_id": -100, "streaming": True}, {"chat_id": -200}]},
+        account_id=aid,
     )
     runner = build_streaming_runner()
     assert len(runner._sources) == 1
     assert runner._sources[0].source.type == "telegram"
 
 
-def test_runner_skips_polling_only_telegram_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Un source telegram SIN chats streaming no genera listener (solo polling)."""
-    _set_env(monkeypatch)
+def test_runner_skips_polling_only_telegram_source() -> None:
+    """Un source telegram (con credenciales en el vault) SIN chats streaming no genera listener."""
+    aid = _provision_tg_account()
     _insert_telegram_source(
         "tg-polling-only",
         {"allowed_chats": [{"chat_id": -100, "streaming": False}]},
+        account_id=aid,
     )
     runner = build_streaming_runner()
     assert len(runner._sources) == 0
@@ -67,27 +88,25 @@ def test_runner_empty_when_no_telegram_sources() -> None:
     assert len(runner._sources) == 0
 
 
-def test_runner_skips_disabled_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_env(monkeypatch)
+def test_runner_skips_disabled_source() -> None:
+    aid = _provision_tg_account()
     _insert_telegram_source(
         "tg-disabled",
         {"allowed_chats": [{"chat_id": -100, "streaming": True}]},
         enabled=False,
+        account_id=aid,
     )
     runner = build_streaming_runner()
     assert len(runner._sources) == 0
 
 
-def test_runner_skips_source_with_invalid_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Config inválida (env vars faltantes) → log + skip, no crash."""
-    # NO seteamos las env vars → from_source_config lanza TelegramConfigError
-    monkeypatch.delenv("MEMEX_TG_API_ID", raising=False)
-    monkeypatch.delenv("MEMEX_TG_API_HASH", raising=False)
-    monkeypatch.delenv("MEMEX_TG_PHONE", raising=False)
+def test_runner_skips_source_without_vault_creds() -> None:
+    """Source telegram SIN credenciales en el vault (sin cuenta vinculada) → log + skip, no crash.
+    El `.env`/host ya no es fuente: aunque la env var exista, el resolver la quita."""
     _insert_telegram_source(
         "tg-bad",
         {"allowed_chats": [{"chat_id": -100, "streaming": True}]},
-    )
+    )  # sin account_id → sin credenciales resolubles
     runner = build_streaming_runner()
     assert len(runner._sources) == 0
 

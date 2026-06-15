@@ -24,7 +24,6 @@ from memex.ingestors.social.config import normalize_account
 from memex.logging import get_logger
 from memex.security import vault
 from memex.sources import fetch_mode_caveats_for_type, fetch_modes_for_type, kind_for_type
-from memex.sources.resolver import env_satisfied_secrets
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
@@ -60,10 +59,10 @@ _APIFY_TYPES = ("instagram", "facebook", "x")
 def _token_source(conn: Any, row: dict[str, Any]) -> str | None:
     """De dónde resuelve el token de Apify una fuente social (sin descifrar nada).
 
-    "vault" = la cuenta vinculada tiene el secreto cifrado (pisa al env en `build_resolved_env`);
-    "env" = la variable del contenedor (p. ej. inyectada por Doppler); "missing" = no resuelve →
-    el fetch fallará. None para tipos sin token reportable. Presencia en el vault ≈ resolverá:
-    si falta la master key el resolver cae a env y lo loguea, acá solo se reporta estado.
+    "vault" = la cuenta vinculada tiene el secreto cifrado; "missing" = no hay credencial en el
+    vault → el fetch fallará (el `.env` ya NO es fuente de credenciales). None para tipos sin token
+    reportable. Presencia en el vault ≈ resolverá: si falta la master key el resolver no inyecta y
+    lo loguea, acá solo se reporta estado.
     """
     if row.get("type") not in _APIFY_TYPES:
         return None
@@ -72,9 +71,6 @@ def _token_source(conn: Any, row: dict[str, Any]) -> str | None:
         names = {str(s["secret_name"]) for s in vault.list_secret_status(conn, account_id)}
         if "apify_token" in names:
             return "vault"
-    cfg = dict(row.get("config") or {})
-    if "apify_token" in env_satisfied_secrets(str(row["type"]), cfg):
-        return "env"
     return "missing"
 
 

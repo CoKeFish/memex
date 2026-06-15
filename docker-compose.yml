@@ -86,10 +86,9 @@ services:
       MEMEX_LOG_LEVEL: INFO
       # Telegram session files persistidos en volumen — sin esto cada reboot
       # del container exige correr `memex-telegram auth` interactivo de nuevo.
+      # Las credenciales (api_id/api_hash/phone) van al VAULT (/cuenta), NO al env: el resolver
+      # ya no acepta credenciales de ingestor desde env/.env.
       MEMEX_TG_SESSION_PATH: /var/lib/memex/telegram
-      MEMEX_TG_API_ID: ${MEMEX_TG_API_ID:-}
-      MEMEX_TG_API_HASH: ${MEMEX_TG_API_HASH:-}
-      MEMEX_TG_PHONE: ${MEMEX_TG_PHONE:-}
       # LLM (memex.llm) — sin prefijo MEMEX_; inyectada por Doppler. El consumidor
       # 'classifier' aún no existe, pero queda disponible desde ya.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
@@ -101,10 +100,8 @@ services:
       # el contenedor ES el sandbox → danger-full-access solo acá.
       CODEX_HOME: /secrets/codex
       MEMEX_CODEX_SANDBOX: danger-full-access
-      # Apify (memex.ingestors.social) — token para scrapear redes (instagram/facebook/x).
-      # La config social lo busca como MEMEX_APIFY_TOKEN; en Doppler el secreto canónico
-      # (sin prefijo MEMEX_, como DEEPSEEK/OPENAI) se llama APIFY → lo mapeamos acá.
-      MEMEX_APIFY_TOKEN: ${MEMEX_APIFY_TOKEN:-${APIFY:-}}
+      # Apify (memex.ingestors.social): el token va al VAULT (/cuenta) por cuenta social, NO al env.
+      # El resolver inyecta `MEMEX_APIFY_TOKEN` desde el vault al correr el ingestor.
       # Almacenamiento de imágenes (memex.storage). El endpoint apunta al servicio
       # minio del compose; las credenciales sin prefijo MEMEX_ (root user/password).
       MEMEX_MINIO_ENDPOINT: http://minio:9000
@@ -116,9 +113,8 @@ services:
       OCR_API_KEY: ${OCR_API_KEY:-}
       MEMEX_OCR_BASE_URL: ${MEMEX_OCR_BASE_URL:-}
       MEMEX_OCR_MODEL: ${MEMEX_OCR_MODEL:-}
-      # IMAP Gmail (OAuth2). El email viene del .env; los paths apuntan a los archivos
-      # montados desde ./secrets (client_secret.json + token.json del flujo authorize).
-      MEMEX_IMAP_GMAIL_USER: ${MEMEX_IMAP_GMAIL_USER:-}
+      # IMAP Gmail (OAuth2): el usuario/credencial va al VAULT (/cuenta vía OAuth), NO al env. Acá
+      # solo quedan las rutas de los archivos OAuth del cliente (identidad de la app, en ./secrets).
       MEMEX_IMAP_GMAIL_CLIENT_SECRET_JSON: /secrets/google_client_secret.json
       MEMEX_IMAP_GMAIL_TOKEN_JSON: /secrets/gmail_token.json
       # OAuth web "Conectar con Google" del dashboard (/cuenta). Reusa el client_secret montado en

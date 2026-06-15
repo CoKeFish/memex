@@ -1,15 +1,17 @@
 """Seam de resolución: inyecta los secretos del vault en el `env` de un ingestor.
 
-Server-side, antes de instanciar un `Source`, mergea `os.environ` con los secretos descifrados de
-la cuenta vinculada, exponiéndolos BAJO EL MISMO nombre de env var que el `cfg` referencia (o el
-default del ingestor). Así el ingestor los resuelve por su patrón env-var-by-name sin saber que
-vinieron de la DB → preserva el aislamiento de ADR-001 (el descifrado vive acá, NO en el ingestor).
+Server-side, antes de instanciar un `Source`, expone los secretos descifrados de la cuenta vinculada
+BAJO EL MISMO nombre de env var que el `cfg` referencia (o el default del ingestor). Así el ingestor
+los resuelve por su patrón env-var-by-name sin saber que vinieron de la DB → preserva el aislamiento
+de ADR-001 (el descifrado vive acá, NO en el ingestor).
 
 Como el descifrado usa la master key del servidor, esto funciona SIN sesión del usuario: la ingesta
 desatendida (fetch agendado, streaming) puede correr aunque nadie esté logueado.
 
-Fallback: si no hay cuenta vinculada, el vault no está provisionado, o falta la master key, devuelve
-`os.environ` tal cual → las sources con env-var-by-name siguen funcionando intactas.
+El vault es la ÚNICA fuente de las CREDENCIALES de ingestor (`_SECRET_ENV`): se QUITAN del
+`env` base aunque estén en `.env`/host, y solo se reinyectan si el vault de la cuenta las tiene.
+El `.env` NO es fuente de credenciales — sin la credencial en el vault la env var queda ausente y
+el ingestor falla con error claro. El resto de `os.environ` (infra: DB, MinIO, keys) pasa intacto.
 """
 
 from __future__ import annotations
@@ -49,6 +51,18 @@ _SECRET_ENV: dict[str, dict[str, tuple[str, str | None]]] = {
 }
 
 
+def _credential_env_vars(source_type: str, cfg: dict[str, Any]) -> set[str]:
+    """Nombres de env var bajo los que viven las CREDENCIALES de este `source_type` (override de
+    `cfg` o default de `_SECRET_ENV`). El vault es la única fuente: esto se quita del env base."""
+    mapping = _SECRET_ENV.get(source_type, {})
+    names = {
+        str(cfg.get(env_field) or default_env or "")
+        for _, (env_field, default_env) in mapping.items()
+    }
+    names.discard("")
+    return names
+
+
 def build_resolved_env(
     conn: Connection,
     *,
@@ -57,15 +71,28 @@ def build_resolved_env(
     cfg: dict[str, Any],
     account_id: int | None,
 ) -> Mapping[str, str]:
-    """Devuelve `os.environ` enriquecido con los secretos del vault de la cuenta (si hay)."""
+    """Devuelve `os.environ` con las credenciales de ingestor resueltas SOLO desde el vault.
+
+    Las env var de credenciales (`_SECRET_ENV`) se QUITAN del env base —aunque vengan del
+    `.env`/host— y solo se reinyectan si el vault de la cuenta las tiene. Sin la credencial en el
+    vault la env var queda ausente y el ingestor falla con error claro: el `.env` nunca es fuente de
+    credenciales. El resto de `os.environ` (infra: DB, MinIO, keys) pasa intacto.
+    """
     env = dict(os.environ)
     mapping = _SECRET_ENV.get(source_type)
-    if account_id is None or not mapping:
+    if not mapping:
+        return env
+
+    # El vault es la ÚNICA fuente: las credenciales no se heredan del `.env`/host.
+    for env_var in _credential_env_vars(source_type, cfg):
+        env.pop(env_var, None)
+
+    if account_id is None:
         return env
     try:
         secrets = vault.get_account_secrets(conn, account_id)
     except vault.UserVaultMissingError:
-        # Cuenta back-filled cuyo dueño aún no provisionó el vault → fallback env.
+        # Cuenta sin vault provisionado → sin credenciales (NO se cae al `.env`).
         return env
     except crypto.MasterKeyMissingError:
         _log.warning(
@@ -94,16 +121,3 @@ def build_resolved_env(
             count=injected,
         )
     return env
-
-
-def env_satisfied_secrets(source_type: str, cfg: dict[str, Any]) -> set[str]:
-    """Nombres de secreto (de `_SECRET_ENV`) que YA resuelven por variable de entorno para esta
-    source: la credencial existe en `os.environ` aunque no esté en el vault. Espeja qué env var mira
-    cada secreto (igual que `build_resolved_env`) sin descifrar nada — para reportar estado."""
-    mapping = _SECRET_ENV.get(source_type, {})
-    satisfied: set[str] = set()
-    for secret_name, (env_field, default_env) in mapping.items():
-        env_var = str(cfg.get(env_field) or default_env or "")
-        if env_var and os.environ.get(env_var, "").strip():
-            satisfied.add(secret_name)
-    return satisfied

@@ -28,7 +28,7 @@ from memex.core.source import HealthResult, SourceConfigError
 from memex.db import connection
 from memex.logging import get_logger
 from memex.security import crypto, vault
-from memex.sources.resolver import build_resolved_env, env_satisfied_secrets
+from memex.sources.resolver import build_resolved_env
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
@@ -100,20 +100,12 @@ def _account_row(conn: Any, account_id: int) -> dict[str, Any]:
     assert row is not None
     data = dict(row)
 
-    # Vault primero; luego suma los secretos que resuelven por entorno (no en el vault) como
-    # configurados "vía env" — así el panel no marca "FALTA" lo que funciona por env (H-11).
+    # Las credenciales de ingestor SOLO vienen del vault (el `.env` ya no es fuente): se reportan
+    # las que están cifradas en la cuenta; lo que falte se muestra como "falta" hasta cargarlo.
     secrets: list[dict[str, Any]] = [
         {**s, "source": "vault"} for s in vault.list_secret_status(conn, account_id)
     ]
-    linked = _linked_source(conn, account_id)
-    if linked is not None:
-        source_type, cfg = linked
-        have = {str(s["secret_name"]) for s in secrets}
-        for name in sorted(env_satisfied_secrets(source_type, cfg)):
-            if name not in have:
-                secrets.append(
-                    {"secret_name": name, "configured": True, "last4": "", "source": "env"}
-                )
+    if _linked_source(conn, account_id) is not None:
         data["health_status"] = _effective_health(conn, account_id, str(data["health_status"]))
     data["secrets"] = secrets
     return data
