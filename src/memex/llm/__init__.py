@@ -47,7 +47,7 @@ from memex.llm.pricing import (
     is_off_peak,
     load_pricing,
 )
-from memex.llm.registry import aclose_llm, build_llm_client
+from memex.llm.registry import aclose_llm, build_llm_client, build_provider_client
 
 __all__ = [
     "MODEL_PRICING",
@@ -73,6 +73,7 @@ __all__ = [
     "aclose_llm",
     "anthropic_config",
     "build_llm_client",
+    "build_provider_client",
     "compute_cost",
     "is_off_peak",
     "load_pricing",

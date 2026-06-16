@@ -28,6 +28,10 @@ Rediseño «un solo sistema de relevancia» (enmienda ADR-020). Esta migración 
 4. Extender `relevance_gate_settings`: `mining_interleave` (minar entre lotes, default TRUE) e
    `interest_suggest_min_marks` (umbral del lazo de intereses, default 5).
 
+5. `deepseek` como proveedor de PRIMERA CLASE del gate (API barata, el fallback natural si codex
+   se agota). El CHECK de `provider` lo creó 0067 con ('anthropic','codex'); se ensancha acá a
+   ('anthropic','codex','deepseek') — 0071 aún sin desplegar, así que no necesita migración aparte.
+
 Numeración (migration-numbering-worktrees): 0071 verificado libre — head lineal = 0070, solo `main`
 sin otros worktrees con número reservado.
 
@@ -122,6 +126,17 @@ def upgrade() -> None:
         """
     )
 
+    # 5. deepseek = proveedor de primera clase del gate (ensanchar el CHECK que creó 0067)
+    op.execute(
+        """
+        ALTER TABLE relevance_gate_settings
+            DROP CONSTRAINT IF EXISTS relevance_gate_settings_provider_check;
+        ALTER TABLE relevance_gate_settings
+            ADD CONSTRAINT relevance_gate_settings_provider_check
+            CHECK (provider IN ('anthropic','codex','deepseek'));
+        """
+    )
+
 
 def downgrade() -> None:
     op.execute(
@@ -129,6 +144,15 @@ def downgrade() -> None:
         ALTER TABLE relevance_gate_settings
             DROP COLUMN IF EXISTS interest_suggest_min_marks,
             DROP COLUMN IF EXISTS mining_interleave;
+
+        -- Re-estrechar el CHECK de provider: primero saco las filas deepseek (volverían inválidas)
+        -- para que el constraint vuelva a aplicar sin fallar (salida de emergencia, no round-trip).
+        UPDATE relevance_gate_settings SET provider = 'anthropic' WHERE provider = 'deepseek';
+        ALTER TABLE relevance_gate_settings
+            DROP CONSTRAINT IF EXISTS relevance_gate_settings_provider_check;
+        ALTER TABLE relevance_gate_settings
+            ADD CONSTRAINT relevance_gate_settings_provider_check
+            CHECK (provider IN ('anthropic','codex'));
 
         DROP TABLE IF EXISTS interest_suggestions CASCADE;
 

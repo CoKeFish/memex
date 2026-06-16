@@ -195,7 +195,10 @@ async def run_interest_mining(
     active: LLMClient = client if client is not None else build_gate_client(settings)
     try:
         result = await active.complete(
-            messages, model=settings.model, response_format="json_object", max_tokens=_MAX_TOKENS
+            messages,
+            model=settings.complete_model,
+            response_format="json_object",
+            max_tokens=_MAX_TOKENS,
         )
     finally:
         if owns_client and isinstance(active, AnthropicClient):

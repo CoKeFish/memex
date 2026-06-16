@@ -163,7 +163,7 @@ async def run_rule_mining(
     try:
         result = await active.complete(
             messages,
-            model=settings.model,
+            model=settings.complete_model,
             response_format="json_object",
             max_tokens=_MAX_TOKENS,
         )

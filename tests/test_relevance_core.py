@@ -18,6 +18,7 @@ from memex.modules.workset import load_module_workset
 from memex.relations.summary import _load_workset as load_summarize_workset
 from memex.relevance import (
     EMAIL_TYPES,
+    GateSettings,
     VerdictItem,
     apply_active_rules,
     clear_verdicts,
@@ -127,6 +128,8 @@ def test_settings_default_off_and_partial_upsert() -> None:
         s = get_settings(c, 1)
         assert (s.mining_interleave, s.interest_suggest_min_marks) == (False, 2)
         assert s.provider == "codex"  # el upsert parcial conservó lo previo
+        upsert_settings(c, 1, provider="deepseek")  # deepseek = proveedor de primera clase
+        assert get_settings(c, 1).provider == "deepseek"
         with pytest.raises(ValueError):
             upsert_settings(c, 1, mode="invalido")
         with pytest.raises(ValueError):
@@ -135,6 +138,16 @@ def test_settings_default_off_and_partial_upsert() -> None:
             upsert_settings(c, 1, provider="openai")
         with pytest.raises(ValueError):
             upsert_settings(c, 1, interest_suggest_min_marks=0)
+
+
+def test_complete_model_gates_to_anthropic() -> None:
+    # `model` (claude-opus-*) solo viaja al path Anthropic; codex/deepseek lo IGNORAN (None =
+    # default del cliente). Es lo que hace al proveedor intercambiable sin reescribir `model`.
+    assert GateSettings(provider="anthropic", model="claude-opus-4-8").complete_model == (
+        "claude-opus-4-8"
+    )
+    assert GateSettings(provider="codex", model="claude-opus-4-8").complete_model is None
+    assert GateSettings(provider="deepseek", model="claude-opus-4-8").complete_model is None
 
 
 def test_interests_crud_and_duplicate() -> None:

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from sqlalchemy import Connection, text
 
 GATE_MODES = ("per_window", "per_message")
-GATE_PROVIDERS = ("anthropic", "codex")
+GATE_PROVIDERS = ("anthropic", "codex", "deepseek")
 _DEFAULT_MODEL = "claude-opus-4-8"
 
 
@@ -42,6 +42,13 @@ class GateSettings:
     codex_model: str | None = None
     mining_interleave: bool = True
     interest_suggest_min_marks: int = 5
+
+    @property
+    def complete_model(self) -> str | None:
+        """Modelo a pasar a `complete()`: `model` pertenece a Anthropic. Codex lo IGNORA (usa su
+        `codex_model`) y DeepSeek usaría un nombre inválido (`claude-opus-*`) → None = el default
+        del cliente. Es lo que hace al proveedor intercambiable sin tocar `model`."""
+        return self.model if self.provider == "anthropic" else None
 
 
 def get_settings(conn: Connection, user_id: int) -> GateSettings:

@@ -77,6 +77,21 @@ def test_sender_tier_overrides_rejects_blacklist() -> None:
         )
 
 
+def test_gate_settings_accepts_deepseek_provider() -> None:
+    # 0067 creó el CHECK con ('anthropic','codex'); 0071 lo ensancha → deepseek de primera clase.
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO relevance_gate_settings (user_id, provider) VALUES (1, 'deepseek') "
+                "ON CONFLICT (user_id) DO UPDATE SET provider = 'deepseek'"
+            )
+        )
+    with pytest.raises(IntegrityError), connection() as c:
+        c.execute(
+            text("INSERT INTO relevance_gate_settings (user_id, provider) VALUES (2, 'openai')")
+        )
+
+
 def test_interest_suggestions_checks_and_pending_dedupe() -> None:
     with connection() as c:
         c.execute(

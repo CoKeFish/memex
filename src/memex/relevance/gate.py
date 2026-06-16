@@ -159,7 +159,7 @@ async def _judge_batch(
     ]
     result = await client.complete(
         messages,
-        model=settings.model,
+        model=settings.complete_model,
         response_format="json_object",
         max_tokens=_verdict_max_tokens(len(rows)),
     )

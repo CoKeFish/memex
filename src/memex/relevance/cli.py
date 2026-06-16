@@ -28,7 +28,7 @@ import sys
 from sqlalchemy.exc import IntegrityError
 
 from memex.db import connection
-from memex.llm import CodexClient, LLMClient, LLMError, LLMQuotaError
+from memex.llm import LLMClient, LLMError, LLMQuotaError, build_provider_client
 from memex.logging import setup_logging
 from memex.relevance.gate import run_relevance_gate
 from memex.relevance.interests import (
@@ -44,7 +44,13 @@ from memex.relevance.rules import (
     list_rules,
     set_rule_status,
 )
-from memex.relevance.settings import GATE_MODES, GateSettings, get_settings, upsert_settings
+from memex.relevance.settings import (
+    GATE_MODES,
+    GATE_PROVIDERS,
+    GateSettings,
+    get_settings,
+    upsert_settings,
+)
 from memex.relevance.verdicts import list_review_queue, resolve_insufficient
 
 
@@ -54,15 +60,13 @@ def _quota_msg(e: LLMQuotaError) -> str:
 
 def _build_client(args: argparse.Namespace) -> LLMClient | None:
     """None = lo decide `settings.provider` en el worker. El flag --provider es un OVERRIDE
-    por corrida. codex: sin metricas de tokens (llm_calls a costo 0) y solo host-side."""
+    por corrida (anthropic/codex/deepseek). codex: sin metricas de tokens (llm_calls a costo 0)
+    y solo host-side; deepseek: barato, necesita DEEPSEEK_API_KEY."""
+    if args.provider is None:
+        return None
     if args.provider == "codex":
         print("(proveedor codex: costo no medido en llm_calls, consume tu suscripcion)")
-        return CodexClient(model=args.codex_model)
-    if args.provider == "anthropic":
-        from memex.llm import AnthropicClient, anthropic_config
-
-        return AnthropicClient(anthropic_config())
-    return None
+    return build_provider_client(args.provider, codex_model=args.codex_model)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -124,7 +128,12 @@ def cmd_mine(args: argparse.Namespace) -> int:
 
 def _print_settings(s: GateSettings) -> None:
     estado = "ENCENDIDO" if s.enabled else "apagado"
-    modelo = s.model if s.provider == "anthropic" else f"codex/{s.codex_model or 'default'}"
+    if s.provider == "anthropic":
+        modelo = s.model
+    elif s.provider == "codex":
+        modelo = f"codex/{s.codex_model or 'default'}"
+    else:
+        modelo = f"{s.provider}/default"
     print(
         f"gate: {estado} — proveedor={s.provider} modo={s.mode} modelo={modelo} "
         f"umbral-minería={s.mining_min_messages}"
@@ -277,7 +286,7 @@ def cmd_review(args: argparse.Namespace) -> int:
 def _add_provider_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--provider",
-        choices=["anthropic", "codex"],
+        choices=["anthropic", "codex", "deepseek"],
         default=None,
         help="override por corrida (default: el provider de los settings del gate)",
     )
@@ -333,9 +342,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_setset.add_argument(
         "--provider",
-        choices=["anthropic", "codex"],
+        choices=list(GATE_PROVIDERS),
         default=None,
-        help="proveedor del gate (codex: suscripcion, solo host-side, sin metricas de costo)",
+        help="proveedor del gate (anthropic/codex/deepseek; codex: solo host-side, sin métricas; "
+        "deepseek: barato, necesita DEEPSEEK_API_KEY)",
     )
     p_setset.add_argument(
         "--codex-model",
