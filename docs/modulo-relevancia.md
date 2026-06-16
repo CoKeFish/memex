@@ -1,132 +1,184 @@
-# Módulo de relevancia — arquitectura
+# Sistema de relevancia — arquitectura
 
-El **portero del pipeline de correos**: antes de gastar LLM en resumir o extraer, un modelo
-superior (Opus) decide si cada correo **vale la pena para el archivo personal**, consultando los
-**intereses personales** del dueño. No relevante = no se procesa (el correo queda íntegro en
-/datos); duda = cola de revisión manual. **No borra nada, nunca.**
+**UN solo sistema** decide «qué procesar» en el pipeline de correos. Antes había **tres mecanismos
+solapados** (el clasificador de tiers que excluía `blacklist` con solo cabeceras; el gate de
+relevancia que accionaba; y la «calidad por remitente» que solo medía y tenía un **segundo** juez
+LLM). El rediseño los colapsó: la relevancia es el **filtro primario**, el filtro barato del frente
+lo **construye la IA** (minería de reglas), la medición ex-calidad es la **capa de señales** que
+alimenta al decisor, y hay **un solo motor de juicio** (un juez LLM + la MISMA lista de intereses)
+usado tanto al frente como en la re-evaluación. El tier queda solo como **dial de costo**.
 
-Su motivación, en una frase: el router de extracción descartaba promos «porque son publicidad»
-con varianza entre corridas (experimento 2026-06-12: 3 de 8 wishlists idénticos de Steam pasaron)
-— pero hay publicidad que al dueño **SÍ** le importa. Los intereses son la lista de rescate.
+> Esto **enmienda el ADR-020** (los ADR no son inmutables). Migración del esquema: `0071_unify_relevance`.
 
-La analogía: un asistente que abre tu correo cada mañana sabiendo qué te importa, tira los
-panfletos, te deja lo importante sobre el escritorio y pone en una bandeja aparte lo que no sabe
-dónde va — y además **aprende**: cuando ve que siempre tira lo del mismo remitente, escribe una
-regla para que ni llegue al escritorio.
+Su motivación, en una frase: el router de extracción descartaba promos «porque son publicidad» con
+varianza entre corridas (experimento 2026-06-12: 3 de 8 wishlists idénticos de Steam pasaron) —
+pero hay publicidad que al dueño **SÍ** le importa. Los intereses son la lista de rescate; y «ser
+masivo» (blacklist) no dice nada sobre relevancia, es **solo una señal más**, no un pre-filtro.
+
+La analogía: un asistente que abre tu correo sabiendo qué te importa, tira los panfletos, te deja
+lo importante sobre el escritorio y pone aparte lo que no sabe dónde va — y **aprende**: cuando ve
+que siempre tira lo del mismo remitente, escribe una regla para que ni llegue al escritorio; y
+cuando ve que vos rescatás a mano cierto tipo de correo, te **propone** ajustar tus intereses.
 
 ## Arquitectura
 
 ```mermaid
 flowchart TB
-  cls["Clasificación three-tier<br/>(blacklist ya filtró newsletters)"]
-  rules{"Reglas deterministas del gate<br/>(sin LLM)"}
-  llm{"Opus + intereses personales<br/>(per_window o per_message)"}
+  cls["Clasificación three-tier<br/>(cabeceras = SEÑAL de bulk, ya NO excluye)"]
+  mark{"¿Marca manual?<br/>(relevance_marks)"}
+  rules{"Reglas deterministas del gate<br/>(IA-minadas, sin LLM)"}
+  llm{"MOTOR ÚNICO: juez LLM + intereses<br/>(per_window o per_message)"}
   rel["relevant"]
   norel["not_relevant<br/>(queda en /datos, NO se procesa)"]
   insuf["insufficient<br/>→ cola de revisión manual"]
-  pipe["Resumen + ruteo + extracción<br/>(el pipeline normal)"]
-  mine["Minería de patrones (Opus)<br/>sobre los no-relevantes"]
+  tier["TIER batch/individual<br/>= dial de COSTO sobre lo relevante"]
+  pipe["Resumen + ruteo + extracción"]
+  mine["Minería de reglas (LLM)<br/>INTERCALADA entre lotes"]
   dry{"DRY RUN contra el histórico<br/>¿atraparía algún relevante?"}
 
-  cls --> rules
+  cls --> mark
+  mark -- "sí (gana siempre)" --> rel
+  mark -- "no" --> rules
   rules -- "matchea" --> norel
   rules -- "no matchea" --> llm
   llm --> rel & norel & insuf
-  rel --> pipe
+  rel --> tier --> pipe
   norel --> mine
   mine --> dry
-  dry -- "sí → rejected (con reporte)" --> x["regla rechazada<br/>(auditoría)"]
+  dry -- "sí → rejected (con reporte)" --> x["regla rechazada (auditoría)"]
   dry -- "no → auto-activa" --> rules
 
   classDef store fill:#fde68a,stroke:#b45309,color:#1f2937;
   class norel,insuf store;
 ```
 
-**De un vistazo:** las reglas deterministas (que el propio sistema minó y validó) filtran gratis;
-lo que ninguna regla cubre lo juzga Opus contra los intereses. El ciclo de automejora es cerrado
-y seguro: toda regla propuesta —por el LLM o a mano— pasa un **dry run determinista contra TODO
-el histórico**; si atraparía un solo correo de relevancia efectiva TRUE, queda `rejected` con su
-reporte persistido. Si pasa, se auto-activa, auditada y reversible.
+**Por LOTE** (incremental, de los más viejos hacia adelante, la pipeline espera a que termine uno
+antes del siguiente): classify → relevancia → tier → extract. **Entre lotes** corre la minería
+(si el gate está ON + `mining_interleave`): destila reglas a partir de los `not_relevant`
+acumulados, las valida con dry run y las auto-activa → el lote siguiente filtra esa clase **gratis**
+(comparación de strings, sin LLM). NO es «juzgar 750 y después minar».
 
-La minería trabaja sobre el **acumulado**, no reacciona a correos sueltos: solo los remitentes
-con `mining_min_messages`+ no-relevantes (setting del gate, default 5) entran al análisis — si
-ninguno llega al umbral, la corrida es no-op **sin llamada LLM**. Los correos ya cubiertos por
-una regla (`method='rule'`) no cuentan: esa clase está resuelta y no se vuelve a chequear con
-LLM (el gate solo les estampa el veredicto con una comparación de strings, la auditoría de qué
-regla los filtró).
+El ciclo de automejora es cerrado y seguro: toda regla propuesta —por el LLM o a mano— pasa un
+**dry run determinista contra TODO el histórico**; si atraparía un solo correo de relevancia
+efectiva TRUE, queda `rejected` con su reporte persistido. Si pasa, se auto-activa, auditada y
+reversible. La minería solo analiza remitentes con `mining_min_messages`+ no-relevantes acumulados
+(default 5); bajo el umbral, corrida no-op **sin llamada LLM**.
+
+## Capa de SEÑALES (procedimientos → candidatos → motor único)
+
+La medición ex-«calidad» dejó de tener su propio juez. Ahora son **procedimientos deterministas
+enchufables** (`relevance/procedures.py`) que arman la lista de **candidatos a (re)evaluar**; el
+motor único los evalúa (`reevaluate_candidate` → `run_relevance_gate(force=True)`), **no** un
+segundo prompt.
+
+- **Señales por remitente** (`relevance/signals.py`, SQL puro): por cada remitente cuenta mensajes,
+  cuántos produjeron un **hecho de dominio** (`module_extractions` de un módulo ≠ identidades con
+  `item_count>0`), cuántos **solo se resumieron** y cuántos quedaron **inertes**; la marca manual
+  (`relevance_marks`) es un override duro por-mensaje (`COALESCE(is_relevant, hecho)`). Ruido primero.
+- **Procedimiento `fact_count`** (el primero): remitentes EMAIL con volumen y poca relevancia
+  (procesados pero **sin hecho**), aún no accionados (sin override de tier). «Sin hecho» ≠ «sin
+  valor»: NO se corta solo, cae a la cola para que el motor único lo re-evalúe contra los intereses
+  o el humano confirme. Sumar otro procedimiento (volumen, %relevancia, solo-resumen, señal de
+  bulk) = una clase + una entrada en `CANDIDATE_PROCEDURES`; el motor no cambia.
+- **Category-agnostic**: cada candidato declara su `unit_type` (correo = `sender`; a futuro
+  `topic`/`group`/`post_class`). Solo correo está implementado.
+
+Desde la cola: **re-evaluar** (motor único sobre la muestra), **confirmar ruido → bloquear**
+(crea regla `sender_email`, con su dry run) o **sacar de la cola** (dismiss).
+
+## Dos lazos de feedback (proponen → el dueño acepta o ajusta; nunca auto-aplican sin auditoría)
+
+- **Rechazo LLM → reglas** (`relevance/mining.py`): la minería sobre los `not_relevant` propone
+  reglas deterministas; dry run → auto-activa. Ya descrito arriba.
+- **Rechazo MANUAL → sugerir intereses** (`relevance/interest_mining.py`, NUEVO): agrega las marcas
+  manuales (rescates TRUE → `add`; FALSE que matchea un interés activo → `remove`/afinar), umbral
+  `interest_suggest_min_marks`, **una** llamada LLM con la MISMA lista de intereses → persiste en
+  `interest_suggestions` (`proposed`). **Sin dry-run, sin auto-apply** (los intereses son contexto
+  difuso, no matchers): aceptar `add` → `create_interest`; `remove` → pausar el interés.
 
 ## Decisiones de diseño (y por qué)
 
-- **Rompe «advisory nunca acciona» a propósito.** El sistema de calidad existente (juez LLM,
-  candidatos) solo informa; este módulo SÍ acciona (bloquea procesamiento, crea reglas). Es una
-  excepción explícita y acotada, con tres garantías: dry run obligatorio, auditoría persistida
-  (reporte + proposed_by + modelo + timestamps) y reversibilidad (toggle, sin borrado).
-- **Automejora acotada al gate, NO a la extracción.** ADR-015 excluyó automejora/autofiltro de
-  los módulos de extracción; acá nace como módulo APARTE y PREVIO al pipeline. Los prompts de
-  extracción y los `interest` de los módulos no se tocan.
-- **Solo correos** (`SourceKind.EMAIL`: imap/outlook). Chat/social/calendar pasan sin gate.
-- **`relevance_marks` gana siempre.** El override manual existente (0049) es la palabra del
-  dueño: mark TRUE rescata un `not_relevant` del gate; mark FALSE bloquea un `relevant`.
-  Resolver un `insufficient` escribe mark + veredicto (method='manual') en una tx.
-- **Ausencia de veredicto = pendiente-de-gate.** Con el gate ENCENDIDO, un correo aún no juzgado
-  no entra a los worksets de resumen/extracción (no hay carrera entre gate y procesamiento: la
-  etapa `relevance` corre antes en la misma corrida). Con el gate APAGADO (default), los
-  worksets no filtran nada: comportamiento previo intacto.
+- **`blacklist` deja de ser pre-filtro.** «Ser masivo no dice nada sobre la relevancia.» El juez
+  ahora ve el bulk; el tier (batch/individual) queda solo como dial de costo sobre lo relevante.
+  Cost-safe en OFF: `workset_tier_clause` con el gate APAGADO mantiene la exclusión por cabeceras
+  (idéntico a antes); con el gate ENCENDIDO no excluye por tier (gatea la relevancia efectiva). El
+  bulk rescatado se procesa como `batch` barato (normalización `blacklist→batch` en los worksets,
+  por la trampa de `plan_windows`).
+- **UN solo motor de juicio.** El juez advisory del ex-`quality` (`judge_llm.py`, consumer
+  `quality_judge`, columna `llm_verdict`, endpoint `/candidates/judge`) se **borró**. La
+  re-evaluación corre el MISMO `run_relevance_gate`.
+- **Automejora acotada al gate, NO a la extracción** (ADR-015): nace como sistema APARTE y PREVIO
+  al pipeline; los prompts de extracción y los `interest` de los módulos no se tocan.
+- **Solo correos** (`SourceKind.EMAIL`: imap/outlook). Chat/social/calendar pasan sin gate, con
+  seams category-agnostic listos.
+- **`relevance_marks` gana siempre** (0049): mark TRUE rescata un `not_relevant`; mark FALSE bloquea
+  un `relevant`. Resolver un `insufficient` escribe mark + veredicto (`method='manual'`) en una tx.
+- **Ausencia de veredicto = pendiente-de-gate.** Con el gate ON, un correo no juzgado no entra a los
+  worksets (la etapa `relevance` corre antes en la misma corrida; sin carrera). Con el gate OFF
+  (default), los worksets no filtran por relevancia: comportamiento previo intacto.
 - **Bypass per-mensaje.** `summarize_inbox`/`extract_inbox` (click explícito en /datos/:id) NO
-  filtran — paridad con blacklist, que ese camino también procesa a pedido.
-- **Dos modos conmutables** (experimento del dueño): `per_window` (1 llamada por ventana,
-  veredictos por mensaje — default) y `per_message` (1 llamada por correo). La columna
-  `relevance_verdicts.mode` registra con qué modo se emitió cada veredicto para comparar.
-- **Proveedor nuevo: Anthropic** (`memex.llm.anthropic`, httpx sin SDK, mismo Protocol
-  `LLMClient`). `ANTHROPIC_API_KEY` por Doppler; pricing local `claude-opus-4-8`
-  (0.50/5.00/25.00 USD por 1M); saldo agotado llega como 400 «credit balance» → `LLMQuotaError`.
-  El gate NUNCA usa el cliente DeepSeek compartido del pipeline.
+  filtran — paridad con el procesamiento a pedido.
+- **Dos modos** (`per_window` default / `per_message`); `relevance_verdicts.mode` registra con cuál
+  se emitió cada veredicto.
+- **Proveedor intercambiable** (codex / deepseek / anthropic) — ver abajo.
 
-## Tablas (migración 0065)
+## Tablas (base `0065`, unificación `0071_unify_relevance`)
 
 | Tabla | Qué guarda |
 |---|---|
-| `personal_interests` | Intereses en texto libre (UNIQUE por user+texto, `enabled`). |
-| `relevance_gate_rules` | Reglas deterministas (`sender_email`/`sender_domain`/`subject_contains`/`list_id`), status `active/disabled/rejected`, `proposed_by`, `dry_run_report` JSONB (auditoría), modelo. |
+| `personal_interests` | Intereses en texto libre (UNIQUE por user+texto, `enabled`). La lista de rescate del motor único. |
+| `relevance_gate_rules` | Reglas deterministas (`sender_email`/`sender_domain`/`subject_contains`/`list_id`), status `active/disabled/rejected`, `proposed_by` (`llm`/`manual`), `dry_run_report` JSONB (auditoría), modelo. |
 | `relevance_verdicts` | El cursor del gate: una fila por mensaje (UNIQUE inbox_id), `verdict`, `method` (`rule/llm/manual`), `rule_id`, `mode`. |
-| `relevance_gate_settings` | Una fila por user: `enabled` (default **FALSE**), `mode`, `model`. Tabla propia (no `module_settings`: el gate no es un InterestModule). |
+| `relevance_marks` | Override manual por-mensaje (gana sobre la heurística y el veredicto). |
+| `relevance_candidates` | **Reframe (0071)**: salida de los PROCEDIMIENTOS. `+ procedure`, `+ unit_type`; UNIQUE `(user_id, procedure, sender_key)`; `- llm_verdict`. `status` open/confirmed/dismissed; `snapshot` JSONB (métricas + `sample_inbox_ids`). |
+| `interest_suggestions` | **Nueva (0071)**: segundo lazo. `action(add/remove)`, `text`, `interest_id?`, `rationale`, `status(proposed/accepted/rejected)`, `proposed_by`, `model`, `evidence`. UNIQUE parcial `(user, action, lower(text)) WHERE proposed` (re-minar no duplica). |
+| `relevance_gate_settings` | Una fila por user: `enabled` (default **FALSE**), `mode`, `model`, `mining_min_messages`, `provider`, `codex_model`, **`mining_interleave`** (default TRUE), **`interest_suggest_min_marks`** (default 5). `provider` CHECK ensanchado a `('anthropic','codex','deepseek')`. |
 
-`work_item_failures.stage` ganó `'relevance'`: una ventana cuyo JSON nunca parsea va a
-dead-letter a los 3 intentos, como summarize/extract.
+`sender_tier_overrides`: la mitad `blacklist` se **migró** a reglas `sender_email` activas (0071);
+el CHECK se estrechó a `('batch','individual')` — ahora SOLO dial de costo. `work_item_failures.stage`
+incluye `'relevance'` (dead-letter de la ventana a los 3 intentos).
+
+## Proveedor (intercambiable, codex ≈ gratis para el backfill)
+
+`settings.provider` ∈ `anthropic` (API por token, `claude-opus-4-8`, métricas completas) ·
+`codex` (`codex exec` con la suscripción del dueño, llm_calls a costo 0, ~8x más lento) ·
+`deepseek` (API barata, el **fallback natural** si codex se agota). `complete_model` gatea `model`
+a Anthropic: codex usa `codex_model`, deepseek/codex reciben `None` (el default del cliente) — eso
+hace al proveedor intercambiable **sin tocar `model`**. `--provider` en el CLI = override por
+corrida. Codex corre en el host (`codex login`) y en el contenedor (binario en la imagen + sesión
+en `/secrets/codex`; `MEMEX_CODEX_SANDBOX=danger-full-access` solo en docker).
 
 ## Dónde corre
 
-- **Corridas de procesamiento**: etapa `relevance` en `STAGE_ORDER` (entre classify y
-  extract) → la heredan `/procesamiento` (de una y por ventanas), `memex-reprocess` y
-  `POST /inbox/{id}/reprocess`. También al inicio de `run_combined` (`memex-process`).
-- **Jobs del scheduler**: `relevance_gate` (PT1H) y `relevance_rules` (P1D), fuera de
-  `enabled_jobs` por default.
-- **CLI**: `memex-relevance run|mine|settings|interests|rules|review`; `--provider` =
-  override por corrida (el proveedor vive en settings).
-- **Proveedor codex** (`settings.provider='codex'`): juzga vía `codex exec` con la
-  suscripción del dueño — sin métricas de tokens (llm_calls a costo 0); acuerdo 30/30 con
-  Opus en la comparación real, ~8x más lento. Funciona en el host (`codex login`) Y en el
-  contenedor: el binario viene en la imagen (Dockerfile, `CODEX_VERSION`) y la sesión se
-  monta en `/secrets/codex` (auth.json + config.toml copiados del host; re-copiar si la
-  sesión muere). `MEMEX_CODEX_SANDBOX=danger-full-access` solo en el contenedor (landlock
-  no funciona en docker; el contenedor ES el sandbox).
-- **API**: `/relevance/*` (settings, interests, rules + mine, review). La corrida del gate no se
-  dispara por API propia: va por las corridas de procesamiento.
-- **UI**: /filtros → «Intereses personales» (toggle + modo + CRUD) y «Reglas automáticas y
-  revisión» (reglas con reporte de dry run expandible, minar, cola de revisión).
+- **Corridas de procesamiento**: etapa `relevance` en `STAGE_ORDER` (entre classify y extract) →
+  `/procesamiento` (de una y por ventanas), `memex-reprocess`, `POST /inbox/{id}/reprocess`,
+  `run_combined` (`memex-process`). La minería se **intercala entre ventanas** en `run_advance`.
+- **Jobs del scheduler**: `relevance_gate` (PT1H), `relevance_rules` (P1D) y `relevance` (detección
+  de candidatos), fuera de `enabled_jobs` por default.
+- **CLI** `memex-relevance`: `run | mine | settings | interests | rules | review | detect |
+  candidates`. `--provider` = override por corrida.
+- **API** `/relevance/*`: settings; interests (+ `suggestions`, `mine`, `suggestions/{id}/resolve`);
+  rules (+ `mine`); review (+ `{id}/resolve`); **senders** (+ `tier`, `tiers`); **candidates**
+  (+ `status`, `reevaluate`). La corrida del gate no se dispara por API: va por procesamiento.
+- **UI**: `/relevancia` = capa de SEÑALES (remitentes ruido-primero, filtro por procedimiento,
+  **Re-evaluar**, **Bloquear remitente**, **Descartar**). `/filtros` = tier (dial de costo
+  batch/individual), reglas del gate (+ **Bloquear remitente**, minar, cola de revisión), intereses
+  (+ **panel de sugerencias**, minar/aplicar/descartar). **`/calidad` (inbox_feedback) es un eje
+  distinto** (precisión de procesamiento) y NO se toca.
 
 ## Trazabilidad y costo
 
 Sin `trace_nodes` (crear roots pisaría la traza de extracción): la traza de la decisión es el
 veredicto persistido (`reason`, `rule_id`, `model`, `mode`) + la llm_call correlacionada.
-`llm_calls.purpose`: `relevance_gate` (veredictos) y `relevance_rules` (minería), con
-`source_id`, conteos por veredicto en metadata y `response_text` crudo.
+`llm_calls.purpose`: `relevance_gate` (veredictos), `relevance_rules` (minería de reglas) y
+`relevance_interests` (sugerencias), con `source_id`, conteos por veredicto en metadata y
+`response_text` crudo. Codex no mide tokens → costo 0 en esas filas (esperado).
 
 ## Qué NO hace (a propósito)
 
-- No borra ni purga mensajes (el dueño lo definió: no hay «eliminar»).
-- No toca el código del clasificador three-tier ni `sender_tier_overrides` (sus reglas son
-  PROPIAS, en su tabla, con su dry run).
+- No borra ni purga mensajes (no hay «eliminar»; `not_relevant` queda íntegro en /datos).
+- No corre solo: apagado por default; encenderlo es decisión del dueño (`memex-relevance settings
+  set --enabled true` o el toggle en /filtros).
 - No gatea chat/social ni los caminos per-mensaje explícitos.
-- No corre solo: apagado por default; encenderlo es decisión del dueño
-  (`memex-relevance settings set --enabled true` o el toggle en /filtros).
+- No auto-aplica intereses: el segundo lazo **propone**, el dueño acepta o ajusta.
+- No toca `/calidad`/`inbox_feedback` (eje de precisión, no de relevancia).
