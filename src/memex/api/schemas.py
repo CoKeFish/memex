@@ -2356,6 +2356,37 @@ class MineRulesResponse(BaseModel):
     cost_usd: float
 
 
+class InterestSuggestion(BaseModel):
+    """Sugerencia de editar la lista de intereses (segundo lazo: rechazo manual → intereses)."""
+
+    id: int
+    action: Literal["add", "remove"]
+    text: str
+    interest_id: int | None = None
+    rationale: str
+    status: str
+    model: str | None = None
+    created_at: datetime
+    resolved_at: datetime | None = None
+
+
+class InterestSuggestionList(BaseModel):
+    items: list[InterestSuggestion] = Field(default_factory=list)
+
+
+class MineInterestsResponse(BaseModel):
+    """Resultado de una corrida del lazo de intereses (LLM sobre las marcas manuales)."""
+
+    marks: int
+    proposed: int
+    inserted: int
+    cost_usd: float
+
+
+class ResolveSuggestionRequest(BaseModel):
+    accept: bool
+
+
 class RelevanceReviewItem(BaseModel):
     """Un correo en la cola de revisión manual (veredicto `insufficient`)."""
 

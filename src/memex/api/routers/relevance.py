@@ -23,15 +23,24 @@ from memex.api.schemas import (
     InterestInfo,
     InterestList,
     InterestPatch,
+    InterestSuggestion,
+    InterestSuggestionList,
+    MineInterestsResponse,
     MineRulesResponse,
     RelevanceGateSettings,
     RelevanceGateSettingsPatch,
     RelevanceReviewList,
     RelevanceReviewResolveRequest,
+    ResolveSuggestionRequest,
 )
 from memex.db import connection
 from memex.llm import LLMConfigError, LLMQuotaError
 from memex.logging import get_logger
+from memex.relevance.interest_mining import (
+    list_suggestions,
+    resolve_suggestion,
+    run_interest_mining,
+)
 from memex.relevance.interests import (
     create_interest,
     delete_interest,
@@ -246,3 +255,61 @@ async def resolve_review_endpoint(
         inbox_id=inbox_id,
         is_relevant=body.is_relevant,
     )
+
+
+# --- Lazo de intereses (rechazo manual → sugerir editar intereses) ----------------- #
+
+
+@router.get("/interests/suggestions", response_model=InterestSuggestionList)
+async def list_interest_suggestions_endpoint(
+    user_id: UserID,
+    status: Annotated[Literal["proposed", "accepted", "rejected", "all"], Query()] = "proposed",
+) -> dict[str, Any]:
+    """Sugerencias de editar intereses (pendientes por default). `all` = todos los estados."""
+    with connection() as conn:
+        items = list_suggestions(conn, user_id=user_id, status=None if status == "all" else status)
+    return {"items": items}
+
+
+@router.post("/interests/mine", response_model=MineInterestsResponse)
+async def mine_interests_endpoint(user_id: UserID) -> dict[str, Any]:
+    """Mina sugerencias de interés on-demand desde las marcas manuales (1 llamada LLM).
+
+    422 si el gate está apagado o el LLM no está configurado; 402 sin saldo. Umbral-gated: con
+    pocas marcas devuelve `proposed=0` sin llamar al LLM.
+    """
+    with connection() as conn:
+        if not get_settings(conn, user_id).enabled:
+            raise HTTPException(status_code=422, detail="el gate de relevancia está apagado")
+    try:
+        stats = await run_interest_mining(user_id)
+    except LLMConfigError as e:
+        raise HTTPException(status_code=422, detail="LLM no configurado (ANTHROPIC_API_KEY)") from e
+    except LLMQuotaError as e:
+        raise HTTPException(status_code=402, detail="saldo LLM agotado") from e
+    return {
+        "marks": stats.marks,
+        "proposed": stats.proposed,
+        "inserted": stats.inserted,
+        "cost_usd": float(stats.cost.total.cost_usd),
+    }
+
+
+@router.post("/interests/suggestions/{suggestion_id}/resolve", response_model=InterestSuggestion)
+async def resolve_interest_suggestion_endpoint(
+    suggestion_id: int, user_id: UserID, body: ResolveSuggestionRequest
+) -> dict[str, Any]:
+    """Acepta (aplica el alta/baja del interés) o descarta una sugerencia. 404 si ya no está."""
+    with connection() as conn:
+        row = resolve_suggestion(
+            conn, user_id=user_id, suggestion_id=suggestion_id, accept=body.accept
+        )
+    if row is None:
+        raise HTTPException(status_code=404, detail="sugerencia no encontrada o ya resuelta")
+    _log.info(
+        "relevance.interest_suggestion.resolved",
+        user_id=user_id,
+        suggestion_id=suggestion_id,
+        accept=body.accept,
+    )
+    return row
