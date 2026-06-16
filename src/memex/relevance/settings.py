@@ -28,6 +28,10 @@ class GateSettings:
     `provider`: quién juzga — 'anthropic' (API, default) o 'codex' (`codex exec` con la
     suscripción del dueño; SOLO host-side, sin métricas de tokens). `model` pertenece al path
     Anthropic; `codex_model` al de codex (None = el default del CLI).
+
+    `mining_interleave`: minar reglas ENTRE lotes (procesamiento incremental) — cada lote
+    aprovecha las reglas que destiló el anterior. `interest_suggest_min_marks`: umbral del
+    segundo lazo (rechazos manuales acumulados antes de sugerir editar intereses).
     """
 
     enabled: bool = False
@@ -36,6 +40,8 @@ class GateSettings:
     mining_min_messages: int = 5
     provider: str = "anthropic"
     codex_model: str | None = None
+    mining_interleave: bool = True
+    interest_suggest_min_marks: int = 5
 
 
 def get_settings(conn: Connection, user_id: int) -> GateSettings:
@@ -43,7 +49,8 @@ def get_settings(conn: Connection, user_id: int) -> GateSettings:
     row = (
         conn.execute(
             text(
-                "SELECT enabled, mode, model, mining_min_messages, provider, codex_model "
+                "SELECT enabled, mode, model, mining_min_messages, provider, codex_model, "
+                "mining_interleave, interest_suggest_min_marks "
                 "FROM relevance_gate_settings WHERE user_id = :uid"
             ),
             {"uid": user_id},
@@ -60,6 +67,8 @@ def get_settings(conn: Connection, user_id: int) -> GateSettings:
         mining_min_messages=int(row["mining_min_messages"]),
         provider=str(row["provider"]),
         codex_model=str(row["codex_model"]) if row["codex_model"] is not None else None,
+        mining_interleave=bool(row["mining_interleave"]),
+        interest_suggest_min_marks=int(row["interest_suggest_min_marks"]),
     )
 
 
@@ -73,12 +82,14 @@ def upsert_settings(
     mining_min_messages: int | None = None,
     provider: str | None = None,
     codex_model: str | None = None,
+    mining_interleave: bool | None = None,
+    interest_suggest_min_marks: int | None = None,
 ) -> GateSettings:
     """Upsert PARCIAL (solo los campos pasados); devuelve los settings resultantes.
 
-    `mode`/`mining_min_messages`/`provider` inválidos → ValueError (el CHECK de la DB también
-    los rechazaría, pero el error de capa de aplicación es accionable para API/CLI).
-    `codex_model=""` limpia el override (vuelve al default del CLI de codex).
+    `mode`/`mining_min_messages`/`provider`/`interest_suggest_min_marks` inválidos → ValueError
+    (el CHECK de la DB también los rechazaría, pero el error de capa de aplicación es accionable
+    para API/CLI). `codex_model=""` limpia el override (vuelve al default del CLI de codex).
     """
     if mode is not None and mode not in GATE_MODES:
         raise ValueError(f"mode inválido: {mode!r}; válidos: {GATE_MODES}")
@@ -86,6 +97,10 @@ def upsert_settings(
         raise ValueError(f"mining_min_messages inválido: {mining_min_messages} (mínimo 1)")
     if provider is not None and provider not in GATE_PROVIDERS:
         raise ValueError(f"provider inválido: {provider!r}; válidos: {GATE_PROVIDERS}")
+    if interest_suggest_min_marks is not None and interest_suggest_min_marks < 1:
+        raise ValueError(
+            f"interest_suggest_min_marks inválido: {interest_suggest_min_marks} (mínimo 1)"
+        )
     current = get_settings(conn, user_id)
     resolved_codex_model = current.codex_model
     if codex_model is not None:
@@ -99,17 +114,29 @@ def upsert_settings(
         ),
         provider=current.provider if provider is None else provider,
         codex_model=resolved_codex_model,
+        mining_interleave=(
+            current.mining_interleave if mining_interleave is None else mining_interleave
+        ),
+        interest_suggest_min_marks=(
+            current.interest_suggest_min_marks
+            if interest_suggest_min_marks is None
+            else interest_suggest_min_marks
+        ),
     )
     conn.execute(
         text(
             """
             INSERT INTO relevance_gate_settings (user_id, enabled, mode, model,
-                                                 mining_min_messages, provider, codex_model)
-            VALUES (:uid, :enabled, :mode, :model, :mining_min, :provider, :codex_model)
+                                                 mining_min_messages, provider, codex_model,
+                                                 mining_interleave, interest_suggest_min_marks)
+            VALUES (:uid, :enabled, :mode, :model, :mining_min, :provider, :codex_model,
+                    :mining_interleave, :interest_min)
             ON CONFLICT (user_id) DO UPDATE
                 SET enabled = EXCLUDED.enabled, mode = EXCLUDED.mode, model = EXCLUDED.model,
                     mining_min_messages = EXCLUDED.mining_min_messages,
                     provider = EXCLUDED.provider, codex_model = EXCLUDED.codex_model,
+                    mining_interleave = EXCLUDED.mining_interleave,
+                    interest_suggest_min_marks = EXCLUDED.interest_suggest_min_marks,
                     updated_at = NOW()
             """
         ),
@@ -121,6 +148,8 @@ def upsert_settings(
             "mining_min": resolved.mining_min_messages,
             "provider": resolved.provider,
             "codex_model": resolved.codex_model,
+            "mining_interleave": resolved.mining_interleave,
+            "interest_min": resolved.interest_suggest_min_marks,
         },
     )
     return resolved

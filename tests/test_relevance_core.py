@@ -110,6 +110,8 @@ def test_settings_default_off_and_partial_upsert() -> None:
         assert (s.enabled, s.mode, s.model) == (False, "per_window", "claude-opus-4-8")
         assert s.mining_min_messages == 5
         assert (s.provider, s.codex_model) == ("anthropic", None)
+        # Sistema unificado: minería intercalada ON por default; umbral del lazo de intereses.
+        assert (s.mining_interleave, s.interest_suggest_min_marks) == (True, 5)
         upsert_settings(c, 1, enabled=True)
         upsert_settings(c, 1, mode="per_message")  # parcial: no toca enabled
         upsert_settings(c, 1, mining_min_messages=3)  # parcial: no toca mode
@@ -120,12 +122,19 @@ def test_settings_default_off_and_partial_upsert() -> None:
         assert (s.provider, s.codex_model) == ("codex", "gpt-5.1-codex")
         upsert_settings(c, 1, codex_model="")  # "" limpia el override
         assert get_settings(c, 1).codex_model is None
+        upsert_settings(c, 1, mining_interleave=False)  # parcial: no toca el resto
+        upsert_settings(c, 1, interest_suggest_min_marks=2)
+        s = get_settings(c, 1)
+        assert (s.mining_interleave, s.interest_suggest_min_marks) == (False, 2)
+        assert s.provider == "codex"  # el upsert parcial conservó lo previo
         with pytest.raises(ValueError):
             upsert_settings(c, 1, mode="invalido")
         with pytest.raises(ValueError):
             upsert_settings(c, 1, mining_min_messages=0)
         with pytest.raises(ValueError):
             upsert_settings(c, 1, provider="openai")
+        with pytest.raises(ValueError):
+            upsert_settings(c, 1, interest_suggest_min_marks=0)
 
 
 def test_interests_crud_and_duplicate() -> None:
