@@ -3,10 +3,11 @@
 // que Opus consulta para no descartar promos que al dueño SÍ le importan.
 
 import { useState } from "react"
-import { Loader2, Plus, Trash2 } from "lucide-react"
+import { Check, Loader2, Pickaxe, Plus, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -16,10 +17,19 @@ import {
   deleteInterest,
   fetchGateSettings,
   fetchInterests,
+  fetchInterestSuggestions,
+  mineInterests,
   patchGateSettings,
   patchInterest,
+  resolveInterestSuggestion,
 } from "@/data"
-import type { GateMode, GateProvider, GateSettings, PersonalInterest } from "@/data"
+import type {
+  GateMode,
+  GateProvider,
+  GateSettings,
+  InterestSuggestion,
+  PersonalInterest,
+} from "@/data"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
 
@@ -40,6 +50,7 @@ function errMsg(e: unknown): string {
 export function RelevanceGateManager() {
   const settings = useAsync<GateSettings>(() => fetchGateSettings(), [])
   const interests = useAsync<PersonalInterest[]>(() => fetchInterests(), [])
+  const suggestions = useAsync<InterestSuggestion[]>(() => fetchInterestSuggestions("proposed"), [])
   const [busy, setBusy] = useState(false)
   const [text, setText] = useState("")
 
@@ -55,6 +66,30 @@ export function RelevanceGateManager() {
       setBusy(false)
     }
   }
+
+  /** Mina sugerencias de interés a partir de las marcas manuales (1 llamada LLM, gate ON). */
+  const mineInterestsRun = () =>
+    void mutate(
+      async () => {
+        const r = await mineInterests()
+        toast.info(`Intereses: ${r.proposed} propuesta(s) de ${r.marks} marca(s)`)
+      },
+      "Minería de intereses corrida",
+      suggestions.reload,
+    )
+
+  /** Acepta (aplica el alta/baja del interés) o descarta una sugerencia; refresca ambas listas. */
+  const resolveSuggestion = (id: number, accept: boolean) =>
+    void mutate(
+      async () => {
+        await resolveInterestSuggestion(id, accept)
+      },
+      accept ? "Sugerencia aplicada" : "Sugerencia descartada",
+      () => {
+        suggestions.reload()
+        interests.reload()
+      },
+    )
 
   const s = settings.data
 
@@ -270,6 +305,68 @@ export function RelevanceGateManager() {
             ))}
           </div>
         )}
+
+        {/* Sugerencias de intereses (lazo: rechazo MANUAL → proponer editar intereses) */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Sugerencias de intereses ({suggestions.data?.length ?? 0})
+            </div>
+            <Button size="sm" variant="outline" disabled={busy} onClick={mineInterestsRun}>
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Pickaxe className="size-3.5" />}
+              Minar intereses (LLM)
+            </Button>
+          </div>
+          {suggestions.error ? (
+            <ErrorState detail={suggestions.error} onRetry={suggestions.reload} />
+          ) : !suggestions.data ? (
+            <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" /> Cargando sugerencias…
+            </div>
+          ) : suggestions.data.length === 0 ? (
+            <EmptyState
+              title="Sin sugerencias"
+              hint="Cuando marcás correos a mano (rescatás o descartás), el sistema propone agregar o quitar intereses. Corré la minería para generarlas (gate encendido)."
+            />
+          ) : (
+            <div className="divide-y divide-border rounded-md border border-border">
+              {suggestions.data.map((sg) => (
+                <div key={sg.id} className="flex flex-wrap items-center gap-2 px-3 py-2">
+                  <Badge variant={sg.action === "add" ? "default" : "secondary"}>
+                    {sg.action === "add" ? "agregar" : "quitar"}
+                  </Badge>
+                  <span className="min-w-0 text-sm font-medium">{sg.text}</span>
+                  {sg.rationale && (
+                    <span
+                      className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground"
+                      title={sg.rationale}
+                    >
+                      {sg.rationale}
+                    </span>
+                  )}
+                  <div className="ml-auto flex gap-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => resolveSuggestion(sg.id, true)}
+                    >
+                      <Check className="size-3.5 text-status-ok" /> Aplicar
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => resolveSuggestion(sg.id, false)}
+                    >
+                      <X className="size-3.5 text-status-error" /> Descartar
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </PanelBody>
     </Panel>
   )

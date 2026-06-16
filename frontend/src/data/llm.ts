@@ -154,11 +154,6 @@ export const LLM_OPERATIONS: LlmOperation[] = [
     hint: "confirmación de co-ocurrencia por-mensaje",
     steps: [{ key: "relations_confirm", label: "confirmar" }],
   },
-  {
-    label: "Juez de calidad",
-    hint: "juez LLM de relevancia por remitente (a demanda)",
-    steps: [{ key: "quality_judge", label: "juez" }],
-  },
 ]
 
 // ---- Catálogo: modelos por proveedor ------------------------------------------------------------

@@ -11,11 +11,12 @@ export * from "./email"
 // fetchFeedback (lista por estado) + setFeedbackStatus (revisado/descartado/reabrir) para /calidad.
 export * from "./feedback"
 
-// ---- Calidad: relevancia por remitente (datos reales: router /quality) ---------
-// fetchSenderRelevance: remitentes rankeados por relevancia (ruido primero) para /relevancia.
-export * from "./quality-senders"
+// ---- Relevancia · capa de SEÑALES (datos reales: router /relevance) -------------
+// fetchSenderRelevance (remitentes rankeados, ruido primero), dial de costo por tier y la cola de
+// candidatos por procedimiento + re-evaluación por el motor único, para /relevancia.
+export * from "./relevance-signals"
 
-// Gate de relevancia por intereses personales (correos): /relevance.
+// Gate de relevancia por intereses personales (correos) + lazo de sugerencias: /relevance.
 export * from "./relevance"
 
 // ---- Media / OCR (datos reales: router /media) --------------------------------

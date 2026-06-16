@@ -1,9 +1,14 @@
-// Relevancia por remitente contra la API real: GET /quality/senders. Lectura determinista del
-// sistema de calidad (ruido primero), sin LLM. La marca manual y las acciones llegan en fases
-// posteriores.
+// Capa de SEÑALES del sistema UNIFICADO de relevancia (router `/relevance`): lectura agregada por
+// remitente (ruido primero, determinista, sin LLM), el dial de COSTO por tier (batch/individual) y
+// la cola de candidatos por PROCEDIMIENTO + la re-evaluación por el MOTOR ÚNICO (el juez del gate,
+// no un segundo juez). Fusionada desde el ex-`/quality`. La marca manual por-mensaje vive en /datos.
 
 import { apiDelete, apiGet, apiPost } from "@/lib/api"
 import type { Tier } from "@/types/domain"
+
+/** Tier como dial de COSTO sobre lo relevante. «No procesar» ya NO es un tier: es una regla del
+ *  gate (Bloquear remitente = `createGateRule("sender_email", …)`). */
+export type CostTier = "batch" | "individual"
 
 /**
  * Relevancia agregada de un remitente. `relevancePct` cuenta SOLO los mensajes que produjeron un
@@ -20,7 +25,7 @@ export interface SenderRelevance {
   marked: number
   /** Email del remitente si es accionable (sender→tier es email-only en v1); null para chat/social. */
   email: string | null
-  /** Tier forzado activo ("no procesar"/"muted") o null. */
+  /** Tier forzado activo (batch/individual) o null. */
   overrideTier: string | null
   /** Fuente del remitente: email | chat | social | other (para filtrar la vista). */
   kind: string
@@ -70,24 +75,24 @@ function toSender(it: SenderRelevanceApi): SenderRelevance {
   }
 }
 
-/** Remitentes rankeados por relevancia (ruido primero) — GET /quality/senders. */
+/** Remitentes rankeados por relevancia (ruido primero) — GET /relevance/senders. */
 export async function fetchSenderRelevance(limit = 200): Promise<SenderRelevance[]> {
-  const data = await apiGet<SenderRelevanceListApi>(`/quality/senders?limit=${limit}`)
+  const data = await apiGet<SenderRelevanceListApi>(`/relevance/senders?limit=${limit}`)
   return data.items.map(toSender)
 }
 
-/** "No procesar" un remitente: fuerza el tier de sus mensajes futuros — POST /quality/senders/tier. */
+/** Dial de COSTO: fuerza el tier (batch/individual) de los mensajes futuros — POST /relevance/senders/tier. */
 export async function setSenderTier(
   email: string,
-  tier: Tier = "blacklist",
+  tier: CostTier = "batch",
   reason: string | null = null,
 ): Promise<void> {
-  await apiPost("/quality/senders/tier", { sender_email: email, tier, reason })
+  await apiPost("/relevance/senders/tier", { sender_email: email, tier, reason })
 }
 
-/** Quita el override de tier de un remitente — DELETE /quality/senders/tier. */
+/** Quita el override de tier de un remitente — DELETE /relevance/senders/tier. */
 export async function clearSenderTier(email: string): Promise<void> {
-  await apiDelete<void>(`/quality/senders/tier?sender_email=${encodeURIComponent(email)}`)
+  await apiDelete<void>(`/relevance/senders/tier?sender_email=${encodeURIComponent(email)}`)
 }
 
 /** Override de tier por remitente (fila de sender_tier_overrides). */
@@ -107,9 +112,9 @@ interface SenderTierOverrideApi {
   updated_at: string | null
 }
 
-/** Overrides de tier del usuario (recientes primero) — GET /quality/senders/tiers. */
+/** Overrides de tier del usuario (recientes primero) — GET /relevance/senders/tiers. */
 export async function fetchSenderTiers(): Promise<SenderTierOverride[]> {
-  const data = await apiGet<{ items: SenderTierOverrideApi[] }>("/quality/senders/tiers")
+  const data = await apiGet<{ items: SenderTierOverrideApi[] }>("/relevance/senders/tiers")
   return data.items.map((it) => ({
     senderEmail: it.sender_email,
     tier: it.tier as Tier,
@@ -119,8 +124,12 @@ export async function fetchSenderTiers(): Promise<SenderTierOverride[]> {
   }))
 }
 
-/** Candidato a filtrar detectado por el job (remitente email ruidoso). */
+/** Candidato a (re)evaluar que armó un PROCEDIMIENTO determinista (no acciona solo). */
 export interface RelevanceCandidate {
+  /** Qué procedimiento lo detectó (ej. `fact_count` = procesado sin hecho). */
+  procedure: string
+  /** Unidad del seam por-ingestor (hoy `sender`). */
+  unitType: string
   senderKey: string
   senderLabel: string
   email: string | null
@@ -131,10 +140,11 @@ export interface RelevanceCandidate {
   score: number
   status: string
   sampleInboxIds: number[]
-  llmVerdict: { isRelevant: boolean; confidence: number; reason: string } | null
 }
 
 interface RelevanceCandidateApi {
+  procedure: string
+  unit_type: string
   sender_key: string
   sender_label: string
   email: string | null
@@ -145,11 +155,12 @@ interface RelevanceCandidateApi {
   score: number
   status: string
   snapshot: { sample_inbox_ids?: number[] }
-  llm_verdict: { is_relevant: boolean; confidence: number; reason: string } | null
 }
 
 function toCandidate(c: RelevanceCandidateApi): RelevanceCandidate {
   return {
+    procedure: c.procedure,
+    unitType: c.unit_type,
     senderKey: c.sender_key,
     senderLabel: c.sender_label,
     email: c.email,
@@ -160,36 +171,53 @@ function toCandidate(c: RelevanceCandidateApi): RelevanceCandidate {
     score: c.score,
     status: c.status,
     sampleInboxIds: c.snapshot?.sample_inbox_ids ?? [],
-    llmVerdict: c.llm_verdict
-      ? {
-          isRelevant: c.llm_verdict.is_relevant,
-          confidence: c.llm_verdict.confidence,
-          reason: c.llm_verdict.reason,
-        }
-      : null,
   }
 }
 
-/** Candidatos a filtrar detectados por el job — GET /quality/candidates. */
-export async function fetchCandidates(status = "open"): Promise<RelevanceCandidate[]> {
-  const data = await apiGet<{ items: RelevanceCandidateApi[] }>(
-    `/quality/candidates?status=${status}`,
-  )
+/** Candidatos por procedimiento (ruido primero) — GET /relevance/candidates. `procedure` filtra. */
+export async function fetchCandidates(
+  status = "open",
+  procedure?: string,
+): Promise<RelevanceCandidate[]> {
+  const qs = new URLSearchParams({ status })
+  if (procedure) qs.set("procedure", procedure)
+  const data = await apiGet<{ items: RelevanceCandidateApi[] }>(`/relevance/candidates?${qs}`)
   return data.items.map(toCandidate)
 }
 
-/** Mueve el estado de un candidato (confirmed/dismissed) — POST /quality/candidates/status. */
-export async function setCandidateStatus(senderKey: string, status: string): Promise<void> {
-  await apiPost("/quality/candidates/status", { sender_key: senderKey, status })
+/** Mueve el estado de un candidato (confirmed/dismissed) — POST /relevance/candidates/status. */
+export async function setCandidateStatus(
+  senderKey: string,
+  status: string,
+  procedure?: string,
+): Promise<void> {
+  await apiPost("/relevance/candidates/status", { sender_key: senderKey, status, procedure })
 }
 
-/** Juez LLM de relevancia (zona gris) para un candidato — POST /quality/candidates/judge. */
-export async function judgeSender(
+/** Conteo de veredictos al re-evaluar la muestra de un candidato por el motor único. */
+export interface ReevaluateResult {
+  messages: number
+  relevant: number
+  notRelevant: number
+  insufficient: number
+}
+
+/** Re-evalúa la muestra de un candidato por el MOTOR ÚNICO (el juez del gate + intereses; corre el
+ *  gate sobre la muestra con force) — POST /relevance/candidates/reevaluate. */
+export async function reevaluateCandidate(
   senderKey: string,
-): Promise<{ isRelevant: boolean; confidence: number; reason: string }> {
-  const r = await apiPost<{ is_relevant: boolean; confidence: number; reason: string }>(
-    "/quality/candidates/judge",
-    { sender_key: senderKey },
-  )
-  return { isRelevant: r.is_relevant, confidence: r.confidence, reason: r.reason }
+  procedure?: string,
+): Promise<ReevaluateResult> {
+  const r = await apiPost<{
+    messages: number
+    relevant: number
+    not_relevant: number
+    insufficient: number
+  }>("/relevance/candidates/reevaluate", { sender_key: senderKey, procedure })
+  return {
+    messages: r.messages,
+    relevant: r.relevant,
+    notRelevant: r.not_relevant,
+    insufficient: r.insufficient,
+  }
 }

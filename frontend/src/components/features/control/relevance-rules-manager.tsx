@@ -4,14 +4,22 @@
 // (auditoría) y el toggle es reversible. La cola junta los `insufficient` (el gate no adivina).
 
 import { useState } from "react"
-import { Check, ChevronDown, ChevronRight, Loader2, Pickaxe, X } from "lucide-react"
+import { Ban, Check, ChevronDown, ChevronRight, Loader2, Pickaxe, X } from "lucide-react"
 import { toast } from "sonner"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
-import { fetchGateRules, fetchReviewQueue, mineGateRules, patchGateRule, resolveReview } from "@/data"
+import {
+  createGateRule,
+  fetchGateRules,
+  fetchReviewQueue,
+  mineGateRules,
+  patchGateRule,
+  resolveReview,
+} from "@/data"
 import type { GateRule, ReviewItem } from "@/data"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
@@ -99,6 +107,7 @@ export function RelevanceRulesManager() {
   const rules = useAsync<GateRule[]>(() => fetchGateRules("all"), [])
   const review = useAsync<ReviewItem[]>(() => fetchReviewQueue(), [])
   const [busy, setBusy] = useState(false)
+  const [blockEmail, setBlockEmail] = useState("")
 
   async function mutate(fn: () => Promise<void>, ok: string, reload: () => void) {
     setBusy(true)
@@ -112,6 +121,22 @@ export function RelevanceRulesManager() {
       setBusy(false)
     }
   }
+
+  /** Bloquear un remitente = regla `sender_email` (corre el dry run; se rechaza si atrapa un
+   *  relevante). Reemplaza al viejo tier `blacklist`: el gate la marca no-relevante, gratis. */
+  const block = () =>
+    void mutate(
+      async () => {
+        await createGateRule(
+          "sender_email",
+          blockEmail.trim().toLowerCase(),
+          "bloqueo manual desde /filtros",
+        )
+        setBlockEmail("")
+      },
+      "Remitente bloqueado (regla del gate)",
+      rules.reload,
+    )
 
   const mine = () =>
     void mutate(
@@ -161,6 +186,23 @@ export function RelevanceRulesManager() {
         }
       />
       <PanelBody className="space-y-4">
+        {/* Bloquear remitente (reemplaza al viejo tier blacklist) */}
+        <div className="flex gap-2">
+          <Input
+            placeholder="bloquear remitente (email exacto; crea una regla del gate)"
+            value={blockEmail}
+            onChange={(e) => setBlockEmail(e.target.value)}
+            className="h-8"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && blockEmail.trim()) block()
+            }}
+          />
+          <Button size="sm" variant="outline" disabled={busy || !blockEmail.trim()} onClick={block}>
+            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Ban className="size-3.5" />}
+            Bloquear
+          </Button>
+        </div>
+
         {/* Reglas */}
         {rules.error ? (
           <ErrorState detail={rules.error} onRetry={rules.reload} />

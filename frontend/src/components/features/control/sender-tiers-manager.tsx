@@ -1,6 +1,8 @@
-// Gestión de overrides de tier por remitente (sender_tier_overrides): el filtro de PROCESAMIENTO.
-// Fuerza el tier de los mensajes FUTUROS de un remitente — blacklist = se guarda sin gasto LLM,
+// Gestión de overrides de tier por remitente (sender_tier_overrides): el DIAL DE COSTO sobre lo
+// relevante. Fuerza el tier de los mensajes FUTUROS de un remitente — batch = resumen en lote,
 // individual = atención 1 a 1. Prospectivo: el classifier lo consulta antes de la heurística.
+// «No procesar un remitente» ya NO es un tier: es una regla del gate (Bloquear remitente, en
+// Relevancia o en Reglas del gate).
 
 import { useState } from "react"
 import { Loader2, Plus, Trash2 } from "lucide-react"
@@ -12,14 +14,12 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { clearSenderTier, fetchSenderTiers, setSenderTier } from "@/data"
-import type { SenderTierOverride } from "@/data"
+import type { CostTier, SenderTierOverride } from "@/data"
 import { ApiError } from "@/lib/api"
 import { tierLabel } from "@/lib/status"
 import { useAsync } from "@/lib/use-async"
-import type { Tier } from "@/types/domain"
 
-const TIER_OPTIONS: { value: Tier; hint: string }[] = [
-  { value: "blacklist", hint: "se guarda, sin gasto LLM" },
+const TIER_OPTIONS: { value: CostTier; hint: string }[] = [
   { value: "batch", hint: "resumen en lote (default de la heurística)" },
   { value: "individual", hint: "atención 1 a 1" },
 ]
@@ -42,7 +42,7 @@ export function SenderTiersManager() {
 
   // Form de alta.
   const [email, setEmail] = useState("")
-  const [tier, setTier] = useState<Tier>("blacklist")
+  const [tier, setTier] = useState<CostTier>("batch")
   const [reason, setReason] = useState("")
 
   async function mutate(fn: () => Promise<void>, ok: string, okDetail?: string) {
@@ -74,7 +74,7 @@ export function SenderTiersManager() {
       <PanelHeader
         eyebrow="filtros · post-ingest"
         title="Tier por remitente"
-        sub="fuerza el tier de los mensajes futuros (blacklist = se guarda sin gasto LLM); gana a la heurística, no re-clasifica lo recibido"
+        sub="dial de costo: fuerza el tier (batch/individual) de los mensajes futuros; gana a la heurística, no re-clasifica lo recibido. Para no procesar un remitente, bloquéalo (regla del gate)."
       />
       <PanelBody className="space-y-4">
         {/* Nuevo override */}
@@ -93,7 +93,7 @@ export function SenderTiersManager() {
               className="h-8"
             />
           </div>
-          <Select value={tier} onValueChange={(v) => setTier(v as Tier)}>
+          <Select value={tier} onValueChange={(v) => setTier(v as CostTier)}>
             <SelectTrigger className="h-8 w-44">
               <SelectValue />
             </SelectTrigger>
@@ -141,8 +141,8 @@ export function SenderTiersManager() {
                   value={r.tier}
                   onValueChange={(v) =>
                     void mutate(
-                      () => setSenderTier(r.senderEmail, v as Tier, r.reason),
-                      `Tier → ${tierLabel[v as Tier]}`,
+                      () => setSenderTier(r.senderEmail, v as CostTier, r.reason),
+                      `Tier → ${tierLabel[v as CostTier]}`,
                     )
                   }
                 >

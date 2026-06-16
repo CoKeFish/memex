@@ -15,13 +15,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import {
-  clearSenderTier,
   createFilter,
+  createGateRule,
   fetchCandidates,
   fetchSenderRelevance,
-  judgeSender,
+  reevaluateCandidate,
   setCandidateStatus,
-  setSenderTier,
 } from "@/data"
 import type { RelevanceCandidate, SenderRelevance } from "@/data"
 import { ApiError } from "@/lib/api"
@@ -53,6 +52,15 @@ function tierMixLabel(mix: Record<string, number>): string {
   return parts.join(" · ") || "—"
 }
 
+/** Etiqueta legible del procedimiento que detectó al candidato. */
+const PROC_LABELS: Record<string, string> = {
+  fact_count: "procesado sin hecho",
+  sender_relevance: "remitente ruidoso",
+}
+function procLabel(p: string): string {
+  return PROC_LABELS[p] ?? p
+}
+
 function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
 }
@@ -65,7 +73,12 @@ const KIND_FILTERS: { value: KindFilter; label: string }[] = [
   { value: "social", label: "Redes" },
 ]
 
-type PendingAction = { email: string; kind: "no_procesar" | "descartar"; candidateKey?: string }
+type PendingAction = {
+  email: string
+  kind: "bloquear" | "descartar"
+  candidateKey?: string
+  procedure?: string
+}
 
 export function SenderRelevancePage() {
   const { data, loading, error, reload } = useAsync<SenderRelevance[]>(
@@ -81,13 +94,18 @@ export function SenderRelevancePage() {
   const [pending, setPending] = useState<PendingAction | null>(null)
   const [busy, setBusy] = useState(false)
   const [kindFilter, setKindFilter] = useState<KindFilter>("all")
+  const [procFilter, setProcFilter] = useState<string>("all")
   const visible = kindFilter === "all" ? rows : rows.filter((r) => r.kind === kindFilter)
+  const procedures = Array.from(new Set(candidates.map((c) => c.procedure)))
+  const visibleCandidates =
+    procFilter === "all" ? candidates : candidates.filter((c) => c.procedure === procFilter)
 
-  async function runAction(fn: () => Promise<unknown>, msg: string) {
+  /** Corre una mutación; si `fn` devuelve un string lo usa como detalle del toast de éxito. */
+  async function runAction(fn: () => Promise<string | void>, msg: string) {
     setBusy(true)
     try {
-      await fn()
-      toast.success(msg)
+      const detail = await fn()
+      toast.success(msg, typeof detail === "string" ? { description: detail } : undefined)
       setPending(null)
       reload()
       reloadCandidates()
@@ -101,28 +119,36 @@ export function SenderRelevancePage() {
   function confirmPending() {
     if (!pending) return
     const p = pending
-    const msg = p.kind === "no_procesar" ? `No se procesarán: ${p.email}` : `Descartado: ${p.email}`
+    const msg = p.kind === "bloquear" ? `Remitente bloqueado: ${p.email}` : `Descartado: ${p.email}`
     void runAction(async () => {
-      if (p.kind === "no_procesar") await setSenderTier(p.email)
+      if (p.kind === "bloquear")
+        await createGateRule("sender_email", p.email, "confirmado ruido desde /relevancia")
       else await createFilter({ scope: { "from.email": { equals: p.email } }, action: "ignore" })
-      if (p.candidateKey) await setCandidateStatus(p.candidateKey, "confirmed")
+      if (p.candidateKey) await setCandidateStatus(p.candidateKey, "confirmed", p.procedure)
     }, msg)
   }
 
-  function dismissCandidate(key: string, label: string) {
-    void runAction(() => setCandidateStatus(key, "dismissed"), `Sacado de la cola: ${label}`)
+  function dismissCandidate(c: RelevanceCandidate) {
+    void runAction(
+      () => setCandidateStatus(c.senderKey, "dismissed", c.procedure),
+      `Sacado de la cola: ${c.senderLabel}`,
+    )
   }
 
-  function judge(key: string) {
-    void runAction(() => judgeSender(key), "Juez LLM consultado")
+  /** Re-evalúa la muestra del candidato por el MOTOR ÚNICO (el juez del gate + intereses). */
+  function reevaluate(c: RelevanceCandidate) {
+    void runAction(async () => {
+      const r = await reevaluateCandidate(c.senderKey, c.procedure)
+      return `${r.relevant} relevante(s), ${r.notRelevant} no relevante(s), ${r.insufficient} en duda (de ${r.messages})`
+    }, "Re-evaluado por el motor único")
   }
 
   return (
     <div className="space-y-5">
       <PageHeader
-        eyebrow="categoría · calidad"
+        eyebrow="vista · relevancia"
         title="Relevancia por remitente"
-        description="Qué tan seguido cada remitente produjo un hecho de dominio (relevante) frente a solo leerse o quedar inerte (ruido). Determinista, sin LLM, con el ruido primero. Desde acá podés mandar un remitente a 'no procesar' (se guarda, sin gasto LLM) o descartarlo (drop puro). El % cuenta solo los mensajes con un hecho extraído; 'solo lectura' e 'inertes' van aparte."
+        description="Capa de SEÑALES del sistema de relevancia: qué tan seguido cada remitente produjo un hecho de dominio (relevante) frente a solo leerse o quedar inerte (ruido). Determinista, sin LLM, ruido primero. Desde acá podés re-evaluar un candidato por el motor único (el juez del gate + tus intereses), bloquear un remitente (crea una regla del gate) o descartarlo (drop pre-ingest). El % cuenta solo los mensajes con un hecho extraído; 'solo lectura' e 'inertes' van aparte."
         actions={
           <div className="flex items-center gap-0.5 rounded-md border border-border p-0.5">
             {KIND_FILTERS.map((k) => (
@@ -146,21 +172,44 @@ export function SenderRelevancePage() {
       {candidates.length > 0 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
           <div className="mb-1 flex items-center gap-2 text-sm font-medium">
-            Candidatos detectados (auto) <Badge variant="secondary">{candidates.length}</Badge>
+            Candidatos a (re)evaluar <Badge variant="secondary">{candidates.length}</Badge>
           </div>
           <p className="mb-2 text-xs text-muted-foreground">
-            Remitentes que el sistema marcó como ruidosos (volumen alto, poca relevancia). Confirmá
-            la acción o sacalos de la cola.
+            Remitentes que un procedimiento determinista marcó para revisar (ej. procesado sin un
+            hecho de dominio). Re-evaluá la muestra por el motor único, bloqueá el remitente (regla
+            del gate) o sacalo de la cola.
           </p>
+          {procedures.length > 1 && (
+            <div className="mb-2 flex flex-wrap items-center gap-1">
+              {["all", ...procedures].map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setProcFilter(p)}
+                  className={cn(
+                    "rounded border px-2 py-0.5 text-[11px] transition-colors",
+                    procFilter === p
+                      ? "border-amber-500/50 bg-amber-500/10 text-foreground"
+                      : "border-border text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {p === "all" ? "Todos" : procLabel(p)}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="space-y-1.5">
-            {candidates.map((c) => {
+            {visibleCandidates.map((c) => {
               const cemail = c.email
               return (
                 <div
-                  key={c.senderKey}
+                  key={`${c.procedure}:${c.senderKey}`}
                   className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border bg-card/40 px-3 py-2 text-sm"
                 >
                   <div className="min-w-0 flex-1">
+                    <Badge variant="outline" className="mr-2 align-middle text-[10px]">
+                      {procLabel(c.procedure)}
+                    </Badge>
                     <span className="font-medium">{c.senderLabel}</span>
                     <span className="ml-2 text-xs text-muted-foreground">
                       {c.messages} msj · {c.relevancePct === null ? "—" : `${c.relevancePct}%`}{" "}
@@ -179,52 +228,38 @@ export function SenderRelevancePage() {
                         ))}
                       </span>
                     )}
-                    {c.llmVerdict && (
-                      <span
-                        className={`ml-2 text-xs ${c.llmVerdict.isRelevant ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}
-                      >
-                        · LLM: {c.llmVerdict.isRelevant ? "relevante" : "ruido"}
-                        {c.llmVerdict.reason ? ` — ${c.llmVerdict.reason}` : ""}
-                      </span>
-                    )}
                   </div>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => reevaluate(c)}
+                    title="Corre el gate sobre la muestra (motor único)"
+                  >
+                    Re-evaluar
+                  </Button>
                   {cemail && (
-                    <div className="flex gap-1">
-                      <Button
-                        size="xs"
-                        variant="outline"
-                        disabled={busy}
-                        onClick={() =>
-                          setPending({ email: cemail, kind: "no_procesar", candidateKey: c.senderKey })
-                        }
-                      >
-                        No procesar
-                      </Button>
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        disabled={busy}
-                        onClick={() =>
-                          setPending({ email: cemail, kind: "descartar", candidateKey: c.senderKey })
-                        }
-                      >
-                        Descartar
-                      </Button>
-                    </div>
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() =>
+                        setPending({
+                          email: cemail,
+                          kind: "bloquear",
+                          candidateKey: c.senderKey,
+                          procedure: c.procedure,
+                        })
+                      }
+                    >
+                      Bloquear
+                    </Button>
                   )}
                   <Button
                     size="xs"
                     variant="ghost"
                     disabled={busy}
-                    onClick={() => judge(c.senderKey)}
-                  >
-                    Juzgar (LLM)
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => dismissCandidate(c.senderKey, c.senderLabel)}
+                    onClick={() => dismissCandidate(c)}
                   >
                     No es ruido
                   </Button>
@@ -316,29 +351,23 @@ export function SenderRelevancePage() {
                         >
                           —
                         </span>
-                      ) : r.overrideTier ? (
-                        <div className="flex items-center gap-1.5">
-                          <Badge variant="secondary" title="No se procesa (tier forzado)">
-                            no procesar
-                          </Badge>
-                          <Button
-                            size="xs"
-                            variant="ghost"
-                            disabled={busy}
-                            onClick={() => void runAction(() => clearSenderTier(email), `Reactivado: ${email}`)}
-                          >
-                            Reactivar
-                          </Button>
-                        </div>
                       ) : (
-                        <div className="flex gap-1">
+                        <div className="flex items-center gap-1.5">
+                          {r.overrideTier && (
+                            <Badge
+                              variant="secondary"
+                              title="tier forzado (dial de costo; se gestiona en Filtros)"
+                            >
+                              {r.overrideTier}
+                            </Badge>
+                          )}
                           <Button
                             size="xs"
                             variant="outline"
                             disabled={busy}
-                            onClick={() => setPending({ email, kind: "no_procesar" })}
+                            onClick={() => setPending({ email, kind: "bloquear" })}
                           >
-                            No procesar
+                            Bloquear
                           </Button>
                           <Button
                             size="xs"
@@ -363,12 +392,12 @@ export function SenderRelevancePage() {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
-              {pending?.kind === "descartar" ? "Descartar remitente" : "No procesar remitente"}
+              {pending?.kind === "descartar" ? "Descartar remitente" : "Bloquear remitente"}
             </DialogTitle>
             <DialogDescription>
               {pending?.kind === "descartar"
                 ? `Los próximos mensajes de ${pending?.email} se filtrarán antes de guardarse (drop puro: se olvidan). Reversible en Filtros.`
-                : `Los próximos mensajes de ${pending?.email} se guardarán pero no se procesarán (tier blacklist: sin gasto LLM). No se borran; reversible acá mismo.`}
+                : `Se creará una regla del gate (remitente = ${pending?.email}) que marca no-relevante sus próximos correos. Solo actúa con el gate encendido; reversible en Filtros → Reglas. Si su histórico tiene correos relevantes, la regla se rechaza.`}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

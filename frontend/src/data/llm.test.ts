@@ -24,7 +24,6 @@ const BACKEND_CONSUMERS = [
   "identidades_hierarchy",
   "relations_confirm",
   "relations_clusters",
-  "quality_judge",
 ]
 
 function cfg(over: Partial<LlmConsumerConfig> = {}): LlmConsumerConfig {
