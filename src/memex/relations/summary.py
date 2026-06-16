@@ -48,7 +48,7 @@ from memex.processing.windows import (
     WorkRow,
     plan_windows,
 )
-from memex.relevance.verdicts import workset_gate_clause
+from memex.relevance.verdicts import workset_gate_clause, workset_tier_clause
 
 _log = get_logger("memex.relations.summary")
 
@@ -176,6 +176,8 @@ def _load_workset(
         # o veredicto `relevant`) no entra al workset; apagado → cláusula vacía.
         gate_clause, gate_params = workset_gate_clause(conn, user_id)
         params.update(gate_params)
+        # Tier = dial de costo: apagado excluye blacklist; encendido lo decide la relevancia.
+        tier_clause, _ = workset_tier_clause(conn, user_id)
         rows = (
             conn.execute(
                 text(
@@ -193,7 +195,7 @@ def _load_workset(
                         GROUP BY inbox_id
                     ) ma ON ma.inbox_id = i.id
                     WHERE c.user_id = :uid
-                      AND c.tier IN ('batch', 'individual')
+                      {tier_clause}
                       AND sl.summary_id IS NULL
                       AND NOT EXISTS (
                           SELECT 1 FROM media_assets m

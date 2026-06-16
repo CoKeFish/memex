@@ -1,9 +1,8 @@
 """CLI `memex-quality` — sistema de calidad/relevancia contra la DB de memex (sin HTTP).
 
 Subcomandos:
-  detect          — corre la detección de candidatos a filtrar (job manual, sin LLM).
+  detect          — corre la detección de candidatos (procedimientos deterministas, sin LLM).
   candidates      — lista los candidatos (filtro opcional por estado).
-  judge           — juez LLM de relevancia (zona gris) para un candidato (opcional, gateado).
 
 Conecta directo a Postgres (`memex.db.connection`); pensado para el server (mismo host que la DB).
 
@@ -15,7 +14,6 @@ Ejemplos:
 from __future__ import annotations
 
 import argparse
-import sys
 
 from memex.db import connection
 from memex.logging import setup_logging
@@ -24,7 +22,7 @@ from memex.quality.candidates import list_candidates, run_relevance_detection
 
 def cmd_detect(args: argparse.Namespace) -> int:
     stats = run_relevance_detection(args.user_id)
-    print(f"detección: {stats.scanned} remitentes evaluados, {stats.candidates} candidatos")
+    print(f"detección: {stats.procedures} procedimientos, {stats.candidates} candidatos")
     return 0
 
 
@@ -45,24 +43,6 @@ def cmd_candidates(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_judge(args: argparse.Namespace) -> int:
-    import asyncio
-
-    from memex.quality.judge_llm import JudgeUnavailableError, judge_sender
-
-    try:
-        verdict = asyncio.run(judge_sender(args.user_id, args.sender_key))
-    except JudgeUnavailableError as e:
-        print(f"juez apagado: {e}", file=sys.stderr)
-        return 1
-    if verdict is None:
-        print("(candidato sin muestra o inexistente)", file=sys.stderr)
-        return 1
-    veredicto = "relevante" if verdict.is_relevant else "ruido"
-    print(f"veredicto: {veredicto} (conf {verdict.confidence}) — {verdict.reason}")
-    return 0
-
-
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="memex-quality")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -77,11 +57,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--status", default="open", choices=["open", "confirmed", "dismissed", "all"]
     )
     p_cand.set_defaults(func=cmd_candidates)
-
-    p_judge = sub.add_parser("judge", help="juez LLM de relevancia para un candidato (opcional)")
-    p_judge.add_argument("--user-id", type=int, default=1)
-    p_judge.add_argument("--sender-key", required=True)
-    p_judge.set_defaults(func=cmd_judge)
 
     return p
 

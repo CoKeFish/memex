@@ -291,10 +291,14 @@ class SenderRelevanceList(BaseModel):
 
 
 class SenderTierRequest(BaseModel):
-    """No procesar: fuerza el tier de los mensajes futuros de un remitente (típico: blacklist)."""
+    """Dial de COSTO: fuerza el tier de los mensajes futuros de un remitente (batch/individual).
+
+    «No procesar un remitente» ya NO es un tier: es una regla del gate (`POST /relevance/rules`
+    kind=sender_email). El override de tier quedó solo como dial de costo sobre lo relevante.
+    """
 
     sender_email: str
-    tier: Literal["blacklist", "batch", "individual"] = "blacklist"
+    tier: Literal["batch", "individual"] = "batch"
     reason: str | None = None
 
 
@@ -311,8 +315,10 @@ class SenderTierList(BaseModel):
 
 
 class RelevanceCandidate(BaseModel):
-    """Candidato a filtrar detectado por el job (remitente email ruidoso, sin accionar)."""
+    """Candidato a (re)evaluar que armó un PROCEDIMIENTO determinista (sin accionar solo)."""
 
+    procedure: str
+    unit_type: str
     sender_key: str
     sender_label: str
     email: str | None = None
@@ -323,8 +329,6 @@ class RelevanceCandidate(BaseModel):
     score: int
     status: str
     snapshot: dict[str, Any] = Field(default_factory=dict)
-    # Veredicto ADVISORY del juez LLM (zona gris) o null si no se juzgó.
-    llm_verdict: dict[str, Any] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -336,18 +340,21 @@ class RelevanceCandidateList(BaseModel):
 class CandidateStatusRequest(BaseModel):
     sender_key: str
     status: Literal["open", "confirmed", "dismissed"]
+    procedure: str | None = None
 
 
-class JudgeRequest(BaseModel):
+class ReevaluateRequest(BaseModel):
     sender_key: str
+    procedure: str | None = None
 
 
-class JudgeResponse(BaseModel):
-    """Veredicto ADVISORY del juez LLM (no acciona; informa la cola)."""
+class ReevaluateResponse(BaseModel):
+    """Conteo de veredictos al re-evaluar la muestra de un candidato por el motor único."""
 
-    is_relevant: bool
-    confidence: float
-    reason: str
+    messages: int
+    relevant: int
+    not_relevant: int
+    insufficient: int
 
 
 class RelevanceMarkRequest(BaseModel):

@@ -12,8 +12,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
     CandidateStatusRequest,
-    JudgeRequest,
-    JudgeResponse,
+    ReevaluateRequest,
+    ReevaluateResponse,
     RelevanceCandidate,
     RelevanceCandidateList,
     SenderRelevanceList,
@@ -23,10 +23,14 @@ from memex.api.schemas import (
 )
 from memex.core.sender_tiers import clear_override, list_overrides, set_override
 from memex.db import connection
-from memex.llm import LLMConfigError, LLMQuotaError
+from memex.llm import LLMQuotaError
 from memex.logging import get_logger
-from memex.quality.candidates import InvalidStatusError, list_candidates, set_candidate_status
-from memex.quality.judge_llm import JudgeUnavailableError, judge_sender
+from memex.quality.candidates import (
+    InvalidStatusError,
+    list_candidates,
+    reevaluate_candidate,
+    set_candidate_status,
+)
 from memex.quality.relevance import senders_by_relevance
 
 router = APIRouter(prefix="/quality", tags=["quality"])
@@ -51,10 +55,10 @@ async def list_sender_relevance(
 
 @router.post("/senders/tier", response_model=SenderTierInfo)
 async def set_sender_tier_endpoint(user_id: UserID, body: SenderTierRequest) -> dict[str, Any]:
-    """No procesar: fuerza el tier de los mensajes futuros de un remitente (típico: blacklist).
+    """Dial de COSTO: fuerza el tier (batch/individual) de los mensajes futuros de un remitente.
 
-    Conserva los mensajes en inbox (no borra); el classifier usa este tier en vez de la heurística.
-    Prospectivo (no re-clasifica lo ya clasificado). Acción asistida: la confirma el usuario.
+    Prospectivo (no re-clasifica lo ya clasificado). «No procesar un remitente» ya no es un tier:
+    es una regla del gate (`POST /relevance/rules` kind=sender_email).
     """
     with connection() as conn:
         row = set_override(
@@ -108,7 +112,11 @@ async def set_candidate_status_endpoint(
     try:
         with connection() as conn:
             row = set_candidate_status(
-                conn, user_id=user_id, sender_key=body.sender_key, status=body.status
+                conn,
+                user_id=user_id,
+                sender_key=body.sender_key,
+                status=body.status,
+                procedure=body.procedure,
             )
     except InvalidStatusError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -117,22 +125,20 @@ async def set_candidate_status_endpoint(
     return row
 
 
-@router.post("/candidates/judge", response_model=JudgeResponse)
-async def judge_candidate_endpoint(user_id: UserID, body: JudgeRequest) -> dict[str, Any]:
-    """Juez LLM de relevancia (zona gris) para un candidato — ADVISORY, no acciona. Gateado por
-    MEMEX_QUALITY_LLM; 422 si está apagado, 404 si el candidato no existe o no tiene muestra."""
+@router.post("/candidates/reevaluate", response_model=ReevaluateResponse)
+async def reevaluate_candidate_endpoint(user_id: UserID, body: ReevaluateRequest) -> dict[str, int]:
+    """Re-evalúa la muestra de un candidato por el MOTOR ÚNICO (el juez del gate + los intereses).
+
+    No es un segundo juez: corre el gate sobre la muestra (force). 404 si el candidato no existe o
+    no tiene muestra; 402 si se agotó el saldo LLM. Con el gate apagado devuelve ceros (no hay
+    juez que correr).
+    """
     try:
-        verdict = await judge_sender(user_id, body.sender_key)
-    except JudgeUnavailableError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
-    except LLMConfigError as e:
-        raise HTTPException(status_code=422, detail="LLM no configurado (DEEPSEEK_API_KEY)") from e
+        result = await reevaluate_candidate(
+            user_id, sender_key=body.sender_key, procedure=body.procedure
+        )
     except LLMQuotaError as e:
         raise HTTPException(status_code=402, detail="saldo LLM agotado") from e
-    if verdict is None:
+    if result is None:
         raise HTTPException(status_code=404, detail="candidato sin muestra o inexistente")
-    return {
-        "is_relevant": verdict.is_relevant,
-        "confidence": verdict.confidence,
-        "reason": verdict.reason,
-    }
+    return result

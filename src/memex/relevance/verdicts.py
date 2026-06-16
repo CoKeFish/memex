@@ -181,6 +181,20 @@ def workset_gate_clause(conn: Connection, user_id: int) -> tuple[str, dict[str, 
     return clause, {"gate_email_types": EMAIL_TYPES}
 
 
+def workset_tier_clause(conn: Connection, user_id: int) -> tuple[str, dict[str, Any]]:
+    """Cláusula AND de TIER para los worksets de summarize/extract (requiere alias `c`).
+
+    Gate APAGADO (default) → excluye `blacklist` como siempre: las cabeceras de bulk son un
+    corte barato y el comportamiento previo queda intacto (cost-safe: apagar el gate NO inunda
+    el procesamiento de newsletters). Gate ENCENDIDO → ("", {}): el tier deja de excluir («ser
+    masivo no dice nada sobre la relevancia, es solo una señal»); quién entra lo decide la
+    relevancia efectiva (`workset_gate_clause`), y el tier queda solo como dial de costo.
+    """
+    if get_settings(conn, user_id).enabled:
+        return "", {}
+    return "AND c.tier IN ('batch', 'individual')", {}
+
+
 def _coerce_payload(raw: Any) -> dict[str, Any]:
     if isinstance(raw, dict):
         return raw
@@ -202,10 +216,13 @@ def load_gate_workset(
 ) -> list[WorkRow]:
     """Correos clasificados PENDIENTES de gate: sin veredicto y sin mark manual.
 
-    Misma forma que `relations.summary._load_workset`: tier batch/individual (blacklist ni se mira),
-    gates de media (no juzgar antes de que el OCR esté terminal — el texto de las imágenes
-    puede ser la señal) y dead-letter propio (`stage='relevance'`). `inbox_ids` acota a un
-    set explícito (etapa de reproceso).
+    El gate juzga TODOS los correos clasificados, incluido el tier `blacklist`: «ser masivo no
+    dice nada sobre la relevancia, es solo una señal» — un newsletter que toca un interés se
+    rescata acá (antes ni llegaba). Solo corre con el gate encendido (`run_relevance_gate`
+    early-returns apagado), así que no hay costo en frío salvo cuando el dueño lo prende.
+    Gates de media (no juzgar antes de que el OCR esté terminal — el texto de las imágenes puede
+    ser la señal) y dead-letter propio (`stage='relevance'`). `inbox_ids` acota a un set
+    explícito (etapa de reproceso).
     """
     params: dict[str, Any] = {
         "uid": user_id,
@@ -239,7 +256,6 @@ def load_gate_workset(
                         GROUP BY inbox_id
                     ) ma ON ma.inbox_id = i.id
                     WHERE c.user_id = :uid
-                      AND c.tier IN ('batch', 'individual')
                       AND s.type = ANY(:email_types)
                       AND NOT EXISTS (
                           SELECT 1 FROM relevance_verdicts rv WHERE rv.inbox_id = i.id

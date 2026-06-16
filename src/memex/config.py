@@ -91,9 +91,6 @@ class Settings(BaseSettings):
     # a veces importa); son LA perilla de calibración — no hay umbral hardcodeado en el código.
     quality_min_messages: int = 5
     quality_max_relevance_pct: float = 10.0
-    # Juez LLM de zona gris (Fase 5): apagado por default; on-demand (cuesta). Advisory: emite un
-    # veredicto de relevancia para informar la cola, NUNCA acciona.
-    quality_llm: bool = False
 
     # --- Vault de credenciales (ver credentials-vault-architecture / ADR auth+vault) ---
     # Llave maestra ÚNICA del servidor, global, configurada una sola vez (Doppler:

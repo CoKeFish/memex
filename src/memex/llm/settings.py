@@ -42,7 +42,6 @@ LLM_CONSUMERS = (
     "identidades_hierarchy",
     "relations_confirm",
     "relations_clusters",
-    "quality_judge",
 )
 
 

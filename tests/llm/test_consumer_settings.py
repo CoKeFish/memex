@@ -60,9 +60,9 @@ def test_fallback_chain_roundtrips(conn: Any) -> None:
 
 def test_list_only_configured_rows(conn: Any) -> None:
     upsert_consumer_settings(conn, 1, "summarizer", provider="codex")
-    upsert_consumer_settings(conn, 1, "quality_judge", provider="anthropic")
+    upsert_consumer_settings(conn, 1, "relations_confirm", provider="anthropic")
     rows = list_consumer_settings(conn, 1)
-    assert set(rows) == {"summarizer", "quality_judge"}
+    assert set(rows) == {"summarizer", "relations_confirm"}
 
 
 @pytest.mark.parametrize(

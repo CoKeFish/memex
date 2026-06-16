@@ -24,7 +24,7 @@ from memex.core.media import MAX_OCR_ATTEMPTS, MEDIA_NOT_TERMINAL_SQL
 from memex.logging import get_logger
 from memex.modules.contract import InterestModule
 from memex.processing.windows import WorkRow
-from memex.relevance.verdicts import workset_gate_clause
+from memex.relevance.verdicts import workset_gate_clause, workset_tier_clause
 from memex.sources import kind_for_type, kind_types
 
 _log = get_logger("memex.modules.workset")
@@ -99,6 +99,9 @@ def load_module_workset(
     # o veredicto `relevant`) no entra al workset; apagado → cláusula vacía.
     gate_clause, gate_params = workset_gate_clause(conn, user_id)
     params.update(gate_params)
+    # Tier como dial de costo: apagado excluye blacklist (como siempre); encendido no excluye
+    # por tier (lo decide la relevancia). Ver `workset_tier_clause`.
+    tier_clause, _ = workset_tier_clause(conn, user_id)
 
     pending_or = " OR ".join(clauses)
     rows = (
@@ -117,7 +120,7 @@ def load_module_workset(
                     GROUP BY inbox_id
                 ) ma ON ma.inbox_id = i.id
                 WHERE c.user_id = :uid
-                  AND c.tier IN ('batch', 'individual')
+                  {tier_clause}
                   AND NOT EXISTS (
                       SELECT 1 FROM media_assets m
                       WHERE m.inbox_id = i.id AND {MEDIA_NOT_TERMINAL_SQL}

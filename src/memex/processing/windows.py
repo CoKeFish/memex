@@ -57,8 +57,13 @@ def plan_windows(
     max_window_size: int = MAX_WINDOW_SIZE,
     max_gap_seconds: int = MAX_GAP_SECONDS,
 ) -> list[Window]:
-    """Agrupa el work-set en ventanas. `individual` → 1 por mensaje; `batch` → por
+    """Agrupa el work-set en ventanas. `individual` → 1 por mensaje; todo lo demás → batch por
     source + gap (>`max_gap_seconds`) + tope (`max_window_size`).
+
+    Batch = «todo lo que NO es individual», no solo el tier `batch`: con el gate de relevancia
+    encendido, un correo `blacklist` (bulk) puede llegar al juez o, si se rescató, a la
+    extracción — se procesa agrupado (barato), igual que un batch. `WorkRow.tier` conserva el
+    valor crudo (la señal de bulk no se pierde); solo el AGRUPADO lo trata como batch.
 
     `max_window_size`/`max_gap_seconds` son las perillas de costo/granularidad (defaults =
     `MAX_WINDOW_SIZE`/`MAX_GAP_SECONDS`); se exponen como flags de CLI para experimentar. El tope
@@ -68,7 +73,7 @@ def plan_windows(
     ]
 
     batch = sorted(
-        (r for r in rows if r.tier == "batch"),
+        (r for r in rows if r.tier != "individual"),
         key=lambda r: (r.source_id, r.occurred_at),
     )
     current: list[WorkRow] = []

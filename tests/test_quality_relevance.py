@@ -15,7 +15,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
-import pytest
 from sqlalchemy import text
 
 from memex.classifier.worker import run_classification
@@ -25,12 +24,14 @@ from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.orchestrator import run_extraction
 from memex.quality.candidates import (
-    detect_candidates,
     list_candidates,
+    reevaluate_candidate,
     run_relevance_detection,
     set_candidate_status,
 )
+from memex.quality.procedures import run_candidate_detection
 from memex.quality.relevance import senders_by_relevance
+from memex.relevance.settings import upsert_settings
 
 _MESSAGES_MARKER = "Mensajes (JSON):\n"
 
@@ -393,7 +394,7 @@ def test_relevance_mark_unknown_inbox_is_404(client: Any) -> None:
     assert client.post("/inbox/999999/relevance", json={"is_relevant": False}).status_code == 404
 
 
-# --- (5) acción asistida: sender→tier ("no procesar") + descartar ---------------- #
+# --- (5) dial de costo: sender→tier (batch/individual; «no procesar» = regla del gate) --- #
 
 
 def _sender_row(client: Any, key: str) -> dict[str, Any]:
@@ -404,7 +405,7 @@ def _sender_row(client: Any, key: str) -> dict[str, Any]:
 def test_sender_tier_override_applies_in_classification(seed_source: dict[str, Any]) -> None:
     sid = seed_source["id"]
     with connection() as c:
-        set_override(c, user_id=1, sender_email="a@x.com", tier="blacklist")
+        set_override(c, user_id=1, sender_email="a@x.com", tier="individual")
     a = _seed_msg(sid, "a1", email="a@x.com", tier=None)  # sin clasificar aún
     b = _seed_msg(sid, "b1", email="b@x.com", tier=None)
     run_classification(1)
@@ -414,7 +415,7 @@ def test_sender_tier_override_applies_in_classification(seed_source: dict[str, A
             {"ids": [a, b]},
         ).all()
     tiers: dict[int, str] = {int(iid): str(tier) for iid, tier in result}
-    assert tiers[a] == "blacklist"  # el override del remitente gana
+    assert tiers[a] == "individual"  # el dial de costo del remitente gana
     assert tiers[b] == "batch"  # heurística normal (sin marcadores de bulk)
 
 
@@ -422,13 +423,19 @@ def test_sender_tier_endpoints(client: Any, seed_source: dict[str, Any]) -> None
     sid = seed_source["id"]
     _seed_msg(sid, "m1", email="c@x.com", tier="batch")
 
-    r = client.post("/quality/senders/tier", json={"sender_email": "c@x.com", "tier": "blacklist"})
+    r = client.post("/quality/senders/tier", json={"sender_email": "c@x.com", "tier": "individual"})
     assert r.status_code == 200
-    assert r.json()["tier"] == "blacklist"
+    assert r.json()["tier"] == "individual"
 
     row = _sender_row(client, "c@x.com")
     assert row["email"] == "c@x.com"
-    assert row["override_tier"] == "blacklist"
+    assert row["override_tier"] == "individual"
+
+    # «blacklist» ya no es un tier válido (no procesar = regla del gate) → 422.
+    bad = client.post(
+        "/quality/senders/tier", json={"sender_email": "c@x.com", "tier": "blacklist"}
+    )
+    assert bad.status_code == 422
 
     assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 204
     assert _sender_row(client, "c@x.com")["override_tier"] is None
@@ -441,15 +448,15 @@ def test_sender_tier_list_endpoint(client: Any) -> None:
     client.post("/quality/senders/tier", json={"sender_email": "b@x.com", "tier": "individual"})
     client.post(
         "/quality/senders/tier",
-        json={"sender_email": "c@x.com", "tier": "blacklist", "reason": "spam"},
+        json={"sender_email": "c@x.com", "tier": "batch", "reason": "agrupar barato"},
     )
     items = client.get("/quality/senders/tiers").json()["items"]
     by_email = {i["sender_email"]: i for i in items}
     assert set(by_email) == {"b@x.com", "c@x.com"}
     assert by_email["b@x.com"]["tier"] == "individual"
     assert by_email["b@x.com"]["reason"] is None
-    assert by_email["c@x.com"]["tier"] == "blacklist"
-    assert by_email["c@x.com"]["reason"] == "spam"
+    assert by_email["c@x.com"]["tier"] == "batch"
+    assert by_email["c@x.com"]["reason"] == "agrupar barato"
     assert all(i["created_at"] and i["updated_at"] for i in items)
 
     # Upsert: re-POST no duplica y reordena (updated_at DESC → el recién tocado primero).
@@ -467,8 +474,8 @@ def test_sender_tier_list_endpoint(client: Any) -> None:
 def test_sender_tier_list_scoped_to_owner(client: Any) -> None:
     with connection() as c:
         c.execute(text("INSERT INTO users (id, email, display_name) VALUES (2, 'u2@local', 'u2')"))
-        set_override(c, user_id=1, sender_email="mine@x.com", tier="blacklist")
-        set_override(c, user_id=2, sender_email="theirs@x.com", tier="blacklist")
+        set_override(c, user_id=1, sender_email="mine@x.com", tier="individual")
+        set_override(c, user_id=2, sender_email="theirs@x.com", tier="individual")
     items = client.get("/quality/senders/tiers").json()["items"]  # client = user 1
     assert [i["sender_email"] for i in items] == ["mine@x.com"]
     with connection() as c:
@@ -490,8 +497,8 @@ def test_detect_candidates_flags_noisy_email_senders(seed_source: dict[str, Any]
     _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)  # 0% relevancia → candidato
     _noisy_sender(seed_source, "boss@x.com", 6, with_fact=6)  # 100% → NO
     _noisy_sender(seed_source, "rare@x.com", 2, with_fact=0)  # bajo volumen → NO
+    stats = run_candidate_detection(1)  # procedimiento fact_count; defaults min 5, max 10%
     with connection() as c:
-        stats = detect_candidates(c, user_id=1, min_messages=5, max_relevance_pct=10.0)
         keys = {r["sender_key"] for r in list_candidates(c, user_id=1)}
     assert stats.candidates == 1
     assert "spam@x.com" in keys
@@ -503,14 +510,16 @@ def test_detect_preserves_dismissed_and_skips_overridden(seed_source: dict[str, 
     _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)
     _noisy_sender(seed_source, "bulk@x.com", 6, with_fact=0)
     with connection() as c:
-        set_override(c, user_id=1, sender_email="spam@x.com", tier="blacklist")  # ya accionado
-        detect_candidates(c, user_id=1, min_messages=5, max_relevance_pct=10.0)
+        set_override(c, user_id=1, sender_email="spam@x.com", tier="individual")  # tiene override
+    run_candidate_detection(1)
+    with connection() as c:
         keys = {r["sender_key"] for r in list_candidates(c, user_id=1, status=None)}
-    assert "spam@x.com" not in keys  # accionado → no es candidato
+    assert "spam@x.com" not in keys  # con override de tier → no es candidato
     assert "bulk@x.com" in keys
     with connection() as c:
         set_candidate_status(c, user_id=1, sender_key="bulk@x.com", status="dismissed")
-        detect_candidates(c, user_id=1, min_messages=5, max_relevance_pct=10.0)  # re-detecta
+    run_candidate_detection(1)  # re-detecta
+    with connection() as c:
         status = {r["sender_key"]: r["status"] for r in list_candidates(c, user_id=1, status=None)}
     assert status["bulk@x.com"] == "dismissed"  # no re-abre
 
@@ -533,11 +542,11 @@ def test_candidates_endpoints(client: Any, seed_source: dict[str, Any]) -> None:
     assert bad.status_code == 404
 
 
-# --- (7) juez LLM de zona gris (opcional, default-off) --------------------------- #
+# --- (7) motor único: re-evaluar un candidato por el juez del gate --------------- #
 
 
-class _JudgeLLM:
-    """LLM falso: emite un veredicto de ruido (sin red)."""
+class _GateLLM:
+    """LLM falso del gate: marca relevant cada correo de la ventana (parsea los ids del prompt)."""
 
     async def complete(
         self,
@@ -548,8 +557,10 @@ class _JudgeLLM:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> LLMResult:
+        msgs = json.loads(messages[-1].content.split("Mensajes (JSON):\n", 1)[1])
+        verdicts = [{"id": m["id"], "verdict": "relevant", "reason": "test"} for m in msgs]
         return LLMResult(
-            content='{"is_relevant": false, "confidence": 0.9, "reason": "promociones"}',
+            content=json.dumps({"verdicts": verdicts}),
             model="fake",
             usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
             cost_usd=Decimal("0"),
@@ -558,27 +569,25 @@ class _JudgeLLM:
         )
 
 
-def test_judge_sender_stores_verdict(
-    seed_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from memex.config import settings
-    from memex.quality.judge_llm import judge_sender
-
-    monkeypatch.setattr(settings, "quality_llm", True)
+def test_reevaluate_candidate_runs_the_gate_engine(seed_source: dict[str, Any]) -> None:
+    """La re-evaluación pasa por el MOTOR ÚNICO (el gate), no por un segundo juez: corre el gate
+    sobre la muestra del candidato y persiste veredictos en `relevance_verdicts`."""
     _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)
+    run_candidate_detection(1)  # crea el candidato con su muestra (sample_inbox_ids)
     with connection() as c:
-        detect_candidates(c, user_id=1, min_messages=5, max_relevance_pct=10.0)
-    verdict = asyncio.run(judge_sender(1, "spam@x.com", client=_JudgeLLM()))
-    assert verdict is not None
-    assert verdict.is_relevant is False
+        upsert_settings(c, 1, enabled=True)  # el motor (gate) tiene que estar encendido
+    result = asyncio.run(reevaluate_candidate(1, sender_key="spam@x.com", client=_GateLLM()))
+    assert result is not None
+    assert result["relevant"] >= 1  # el motor juzgó la muestra
     with connection() as c:
-        cand = next(r for r in list_candidates(c, user_id=1) if r["sender_key"] == "spam@x.com")
-    assert cand["llm_verdict"]["is_relevant"] is False
+        n = c.execute(
+            text(
+                "SELECT count(*) FROM relevance_verdicts v JOIN inbox i ON i.id = v.inbox_id "
+                "WHERE lower(i.payload->'from'->>'email') = 'spam@x.com' AND v.verdict = 'relevant'"
+            )
+        ).scalar()
+    assert n is not None and int(n) >= 1
 
 
-def test_judge_endpoint_gated_off(client: Any, seed_source: dict[str, Any]) -> None:
-    _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)
-    run_relevance_detection(1)
-    # MEMEX_QUALITY_LLM default False → 422 (apagado), sin tocar el LLM real.
-    r = client.post("/quality/candidates/judge", json={"sender_key": "spam@x.com"})
-    assert r.status_code == 422
+def test_reevaluate_unknown_candidate_is_none() -> None:
+    assert asyncio.run(reevaluate_candidate(1, sender_key="nope@x.com")) is None

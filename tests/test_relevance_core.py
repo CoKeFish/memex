@@ -434,6 +434,22 @@ def test_gate_on_only_applies_to_email_kinds() -> None:
     assert chat_msg in _extract_ids()
 
 
+def test_blacklist_excluded_off_but_rescued_on() -> None:
+    """El tier deja de ser pre-filtro: apagado excluye blacklist (cost-safe, como hoy);
+    encendido lo decide la relevancia → un bulk rescatado (veredicto relevant) entra y se
+    procesa (ventaneado como batch por `plan_windows`)."""
+    sid = _seed_source()
+    bulk = _seed_msg(sid, "b1", tier="blacklist")
+    # Gate APAGADO (default): el bulk NO entra a los worksets (corte barato por cabeceras).
+    assert bulk not in _summarize_ids()
+    assert bulk not in _extract_ids()
+    # Gate ENCENDIDO + veredicto relevant (rescatado): el bulk SÍ entra.
+    _enable_gate()
+    _verdict(bulk, "relevant")
+    assert bulk in _summarize_ids()
+    assert bulk in _extract_ids()
+
+
 # ---------------------------------------------------------------- workset del gate
 
 
@@ -453,7 +469,8 @@ def test_load_gate_workset_only_pending_emails() -> None:
     assert pending in ids
     assert judged not in ids
     assert marked not in ids
-    assert blacklisted not in ids
+    # El gate JUZGA el bulk también: ser blacklist es una señal, no un veredicto de relevancia.
+    assert blacklisted in ids
     assert chat_msg not in ids
 
     scoped = {r.inbox_id for r in load_gate_workset(1, inbox_ids=[judged])}

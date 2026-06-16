@@ -13,7 +13,7 @@ Ejemplos:
   memex-llm consumers
   memex-llm settings set --consumer summarizer --provider codex --codex-model gpt-5.1
   memex-llm settings set --consumer orchestrator --provider deepseek --fallback anthropic
-  memex-llm settings set --consumer quality_judge --model ''   # limpia el override de modelo
+  memex-llm settings set --consumer summarizer --model ''   # limpia el override de modelo
   memex-llm settings show
 """
 
