@@ -31,7 +31,10 @@ from sqlalchemy import Connection, text
 
 from memex.core.source import SourceKind
 from memex.db import connection
+from memex.llm import LLMQuotaError
 from memex.logging import bound_log_context, get_logger
+from memex.relevance.mining import run_rule_mining
+from memex.relevance.settings import get_settings
 from memex.reprocess import reprocess
 from memex.scheduler import runs
 
@@ -313,6 +316,43 @@ def _persist_advance(
     return lot
 
 
+async def _mine_between_windows(user_id: int, lot: ProcessingLot) -> dict[str, Any] | None:
+    """Minería de reglas INTERCALADA entre ventanas del lote (procesamiento incremental).
+
+    El corazón del modelo incremental: tras juzgar una ventana, se mina sobre el ACUMULADO de
+    no-relevantes — cuando una clase (dominio) cruza el umbral, se proponen reglas (dry-run →
+    auto-activa) y la ventana SIGUIENTE corto-circuita esa clase GRATIS, sin volver al juez. NO
+    es "juzgar todo y después minar": el sistema aprende sobre la marcha y cada ventana sale más
+    barata.
+
+    Solo con el gate encendido, `relevance` en las etapas del lote y `mining_interleave` ON. La
+    minería es umbral-gated (no-op barato sin LLM hasta acumular). Best-effort salvo quota: una
+    falla de minería NO frena el lote; `LLMQuotaError` sí (saldo agotado).
+    """
+    if "relevance" not in lot.stages:
+        return None
+    with connection() as conn:
+        settings = get_settings(conn, user_id)
+    if not settings.enabled or not settings.mining_interleave:
+        return None
+    try:
+        stats = await run_rule_mining(user_id)
+    except LLMQuotaError:
+        raise
+    except Exception as e:  # best-effort: minar no debe tumbar el avance del lote
+        _log.warning("processing.lot.mining_failed", error=str(e), exc_type=type(e).__name__)
+        return None
+    if stats.proposed == 0 and stats.activated == 0:
+        return None  # por debajo del umbral / sin patrones → sin ruido en el history
+    return {
+        "senders": stats.senders,
+        "proposed": stats.proposed,
+        "activated": stats.activated,
+        "rejected": stats.rejected,
+        "cost_usd": float(stats.cost.total.cost_usd),
+    }
+
+
 async def run_advance(
     user_id: int, run_id: int, *, rest: bool, window_size: int | None = None
 ) -> None:
@@ -370,6 +410,12 @@ async def run_advance(
                     )
                     return
 
+                # Minería intercalada: tras juzgar la ventana, destila reglas del acumulado para
+                # que la SIGUIENTE corto-circuite gratis (incremental). Corre antes de persistir
+                # para que su resultado quede en el history de la ventana.
+                mining = await _mine_between_windows(user_id, lot)
+                mining_cost = float(mining["cost_usd"]) if mining else 0.0
+
                 entry: dict[str, Any] = {
                     "start_idx": lot.frontier,
                     "end_idx": lot.frontier + len(ids),
@@ -381,6 +427,7 @@ async def run_advance(
                         if isinstance(slot, dict)
                     ),
                     "cost_usd": float(result.get("cost_usd", 0) or 0),
+                    "mining": mining,
                     "ms_elapsed": ms,
                     "at": datetime.now(UTC).isoformat(),
                 }
@@ -394,7 +441,7 @@ async def run_advance(
                     )
                 totals["windows"] += 1
                 totals["targets"] += len(ids)
-                totals["cost_usd"] = round(totals["cost_usd"] + entry["cost_usd"], 6)
+                totals["cost_usd"] = round(totals["cost_usd"] + entry["cost_usd"] + mining_cost, 6)
                 _log.info(
                     "processing.lot.window_done",
                     start_idx=entry["start_idx"],
