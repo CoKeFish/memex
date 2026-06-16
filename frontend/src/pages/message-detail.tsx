@@ -55,6 +55,7 @@ import type {
   InboxRow,
   InternalLlmCall,
   MessageJourney,
+  RelevanceVerdict,
   Source,
 } from "@/types/domain"
 
@@ -64,8 +65,57 @@ const TIER_META: Record<string, { label: string; tone: Tone }> = {
   individual: { label: "Individual", tone: "review" },
 }
 
+// Veredicto del gate de relevancia (la conclusión, distinta del tier de arriba).
+const VERDICT_META: Record<string, { label: string; tone: Tone }> = {
+  relevant: { label: "Relevante", tone: "ok" },
+  not_relevant: { label: "No relevante", tone: "filtered" },
+  insufficient: { label: "Relevancia en duda", tone: "review" },
+}
+const METHOD_LABEL: Record<string, string> = {
+  rule: "regla determinista",
+  llm: "juez LLM",
+  manual: "manual",
+}
+const RULE_KIND_LABEL: Record<string, string> = {
+  sender_email: "remitente",
+  sender_domain: "dominio",
+  subject_contains: "asunto contiene",
+  list_id: "list-id",
+}
+
 function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
+}
+
+/** Línea de detalle del veredicto del gate: la conclusión (¿se procesa?) + cómo se decidió + por qué.
+ *  Distinta del tier (badge de arriba) y de la marca manual (botón de acciones). */
+function VerdictLine({ v }: { v: RelevanceVerdict }) {
+  const meta = VERDICT_META[v.verdict]
+  const method = METHOD_LABEL[v.method] ?? v.method
+  const ruleTxt =
+    v.method === "rule" && v.rulePattern
+      ? `${RULE_KIND_LABEL[v.ruleKind ?? ""] ?? v.ruleKind ?? "regla"}: ${v.rulePattern}`
+      : null
+  return (
+    <div className="mt-1.5 text-[11px] text-muted-foreground">
+      <span className="font-medium text-foreground">Gate de relevancia:</span>{" "}
+      {meta?.label ?? v.verdict} · {method}
+      {ruleTxt && (
+        <>
+          {" · "}
+          <Link
+            to="/filtros"
+            className="underline underline-offset-2 hover:text-primary"
+            title="Ver en Filtros → Reglas del gate"
+          >
+            {ruleTxt}
+          </Link>
+        </>
+      )}
+      {v.mode && ` · ${v.mode}`}
+      {v.reason && <span className="mt-0.5 block italic">«{v.reason}»</span>}
+    </div>
+  )
 }
 
 function str(v: unknown): string {
@@ -190,12 +240,19 @@ function RealDetail({ row, onProcessed }: { row: InboxRow; onProcessed: () => vo
                 <SrcIcon className="size-3.5" /> {meta.label}
               </span>
               {cls && <StatusBadge tone={TIER_META[cls.tier]?.tone ?? "neutral"} label={TIER_META[cls.tier]?.label ?? cls.tier} />}
+              {row.relevanceVerdict && (
+                <StatusBadge
+                  tone={VERDICT_META[row.relevanceVerdict.verdict]?.tone ?? "neutral"}
+                  label={VERDICT_META[row.relevanceVerdict.verdict]?.label ?? row.relevanceVerdict.verdict}
+                />
+              )}
             </div>
             <div className="num mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-muted-foreground">
               <span>{row.externalId}</span>
               <span>occurred <RelativeTime date={row.occurredAt} /></span>
               <span>received <RelativeTime date={row.receivedAt} /></span>
             </div>
+            {row.relevanceVerdict && <VerdictLine v={row.relevanceVerdict} />}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <MessageFilterMenu row={row} sourceType={source?.type ?? null} onDone={onProcessed} />

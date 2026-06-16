@@ -14,6 +14,7 @@ import type {
   MediaAsset,
   OcrStatus,
   RelevanceMark,
+  RelevanceVerdict,
   Source,
   SourceType,
   TraceNodeDto,
@@ -52,6 +53,32 @@ function toRelevanceMark(m: RelevanceMarkApi): RelevanceMark {
     reason: m.reason ?? null,
     createdAt: m.created_at ?? null,
     updatedAt: m.updated_at ?? null,
+  }
+}
+
+interface RelevanceVerdictApi {
+  verdict: string
+  method: string
+  reason?: string | null
+  mode?: string | null
+  model?: string | null
+  rule_id?: number | null
+  rule_kind?: string | null
+  rule_pattern?: string | null
+  created_at?: string | null
+}
+
+function toRelevanceVerdict(v: RelevanceVerdictApi): RelevanceVerdict {
+  return {
+    verdict: v.verdict as RelevanceVerdict["verdict"],
+    method: v.method as RelevanceVerdict["method"],
+    reason: v.reason ?? null,
+    mode: v.mode ?? null,
+    model: v.model ?? null,
+    ruleId: v.rule_id ?? null,
+    ruleKind: v.rule_kind ?? null,
+    rulePattern: v.rule_pattern ?? null,
+    createdAt: v.created_at ?? null,
   }
 }
 
@@ -254,6 +281,7 @@ interface InboxApiRow {
   }[]
   feedback?: FeedbackApi | null
   relevance?: RelevanceMarkApi | null
+  relevance_verdict?: RelevanceVerdictApi | null
 }
 
 function toMediaAsset(m: NonNullable<InboxApiRow["media"]>[number]): MediaAsset {
@@ -335,6 +363,7 @@ function toInboxRow(r: InboxApiRow): InboxRow {
     media,
     feedback: r.feedback ? toFeedback(r.feedback) : null,
     relevance: r.relevance ? toRelevanceMark(r.relevance) : null,
+    relevanceVerdict: r.relevance_verdict ? toRelevanceVerdict(r.relevance_verdict) : null,
   }
 }
 

@@ -371,6 +371,24 @@ class RelevanceMarkInfo(BaseModel):
     updated_at: datetime | None = None
 
 
+class RelevanceVerdictInfo(BaseModel):
+    """Veredicto del gate de relevancia para un mensaje (`relevance_verdicts`). Es la CONCLUSIÓN del
+    gate —distinta del tier (dial de costo) y de la marca manual (override)—: relevant /
+    not_relevant / insufficient, CÓMO se decidió (`method` rule/llm/manual), por qué (`reason`), con
+    qué `mode` (per_window/per_message) y, si fue por regla, qué regla (`rule_kind`+`rule_pattern`).
+    Solo en el detalle (GET /inbox/{id})."""
+
+    verdict: str  # relevant | not_relevant | insufficient
+    method: str  # rule | llm | manual
+    reason: str | None = None
+    mode: str | None = None
+    model: str | None = None
+    rule_id: int | None = None
+    rule_kind: str | None = None
+    rule_pattern: str | None = None
+    created_at: datetime | None = None
+
+
 class InboxRow(BaseModel):
     id: int
     source_id: int
@@ -401,6 +419,8 @@ class InboxRow(BaseModel):
     feedback: FeedbackInfo | None = None
     # Marca manual de relevancia (override por-mensaje del sistema de calidad) — solo en el detalle.
     relevance: RelevanceMarkInfo | None = None
+    # Veredicto del gate de relevancia (la conclusión: ¿se procesa?) — solo en el detalle.
+    relevance_verdict: RelevanceVerdictInfo | None = None
 
 
 class ProcessResponse(BaseModel):

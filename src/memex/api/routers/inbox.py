@@ -408,6 +408,24 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
         )
         feedback = get_feedback(conn, inbox_id)
         mark = get_mark(conn, inbox_id)
+        # Veredicto del gate (la conclusión de relevancia): join a la regla para mostrar/linkear
+        # qué la filtró cuando method='rule'. NULL = pendiente-de-gate (o gate apagado).
+        verdict = (
+            conn.execute(
+                text(
+                    """
+                    SELECT rv.verdict, rv.method, rv.reason, rv.mode, rv.model, rv.rule_id,
+                           rv.created_at, r.kind AS rule_kind, r.pattern AS rule_pattern
+                    FROM relevance_verdicts rv
+                    LEFT JOIN relevance_gate_rules r ON r.id = rv.rule_id
+                    WHERE rv.inbox_id = :id AND rv.user_id = :uid
+                    """
+                ),
+                {"id": inbox_id, "uid": user_id},
+            )
+            .mappings()
+            .first()
+        )
     # Extracciones: única fuente = read_extractions (de-hardcodeado, itera el registry). Antes este
     # router duplicaba el SQL por módulo y ya había divergido (le faltaba identidades).
     from memex.modules.orchestrator import read_extractions, read_extractions_debug
@@ -433,6 +451,7 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
     data["media"] = [dict(m) for m in media]
     data["feedback"] = feedback
     data["relevance"] = mark
+    data["relevance_verdict"] = dict(verdict) if verdict else None
     data["summarized"] = summary is not None
     data["extracted"] = bool(data["extraction"]["done"])
     return data

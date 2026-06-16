@@ -173,3 +173,55 @@ def test_get_inbox_trace_null_without_nodes(client: Any, seed_source: dict[str, 
     _seed_n(seed_source["id"], 1, 1)
     rid = client.get("/inbox").json()["items"][0]["id"]
     assert client.get(f"/inbox/{rid}").json()["trace"] is None
+
+
+def test_get_inbox_returns_relevance_verdict(client: Any, seed_source: dict[str, Any]) -> None:
+    """GET /inbox/{id} surfacea el veredicto del gate (relevance_verdicts): conclusión + método +
+    razón + modo. Para method='rule' trae kind/pattern de la regla (join a relevance_gate_rules)."""
+    _seed_n(seed_source["id"], 1, 2)
+    ids = [it["id"] for it in client.get("/inbox").json()["items"]]
+    rid_llm, rid_rule = ids[0], ids[1]
+    with connection() as c:
+        rule_id = c.execute(
+            text(
+                "INSERT INTO relevance_gate_rules (user_id, kind, pattern, status, proposed_by) "
+                "VALUES (1, 'sender_email', 'promos@x.com', 'active', 'manual') RETURNING id"
+            )
+        ).scalar_one()
+        c.execute(
+            text(
+                "INSERT INTO relevance_verdicts (user_id, inbox_id, verdict, method, reason, mode) "
+                "VALUES (1, :i, 'relevant', 'llm', 'toca un interes', 'per_window')"
+            ),
+            {"i": rid_llm},
+        )
+        c.execute(
+            text(
+                "INSERT INTO relevance_verdicts (user_id, inbox_id, verdict, method, rule_id) "
+                "VALUES (1, :i, 'not_relevant', 'rule', :r)"
+            ),
+            {"i": rid_rule, "r": rule_id},
+        )
+
+    v = client.get(f"/inbox/{rid_llm}").json()["relevance_verdict"]
+    assert v["verdict"] == "relevant"
+    assert v["method"] == "llm"
+    assert v["reason"] == "toca un interes"
+    assert v["mode"] == "per_window"
+    assert v["rule_id"] is None and v["rule_kind"] is None
+
+    vr = client.get(f"/inbox/{rid_rule}").json()["relevance_verdict"]
+    assert vr["verdict"] == "not_relevant"
+    assert vr["method"] == "rule"
+    assert vr["rule_id"] == rule_id
+    assert vr["rule_kind"] == "sender_email"
+    assert vr["rule_pattern"] == "promos@x.com"
+
+
+def test_get_inbox_relevance_verdict_null_without_row(
+    client: Any, seed_source: dict[str, Any]
+) -> None:
+    """Sin veredicto persistido → relevance_verdict=None (pendiente-de-gate o gate apagado)."""
+    _seed_n(seed_source["id"], 1, 1)
+    rid = client.get("/inbox").json()["items"][0]["id"]
+    assert client.get(f"/inbox/{rid}").json()["relevance_verdict"] is None

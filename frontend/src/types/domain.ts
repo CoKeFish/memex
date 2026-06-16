@@ -280,6 +280,21 @@ export interface RelevanceMark {
   updatedAt: string | null
 }
 
+/** Veredicto del gate de relevancia para un mensaje (`relevance_verdicts`): la CONCLUSIÓN del gate
+ *  (¿se procesa?), distinta del tier (dial de costo) y de la marca manual (override). `method` = cómo
+ *  se decidió; si fue por regla, `ruleKind`+`rulePattern` la identifican. Solo en el detalle. */
+export interface RelevanceVerdict {
+  verdict: "relevant" | "not_relevant" | "insufficient"
+  method: "rule" | "llm" | "manual"
+  reason: string | null
+  mode: string | null
+  model: string | null
+  ruleId: number | null
+  ruleKind: string | null
+  rulePattern: string | null
+  createdAt: string | null
+}
+
 export interface InboxRow {
   id: number
   sourceId: number
@@ -315,6 +330,8 @@ export interface InboxRow {
   feedback?: InboxFeedback | null
   /** Marca manual de relevancia (override por-mensaje del sistema de calidad) — solo en el detalle. */
   relevance?: RelevanceMark | null
+  /** Veredicto del gate de relevancia (la conclusión: ¿se procesa?) — solo en el detalle. */
+  relevanceVerdict?: RelevanceVerdict | null
 }
 
 export type Tier = "blacklist" | "batch" | "individual"
