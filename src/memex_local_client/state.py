@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at     TEXT NOT NULL,
     finished_at    TEXT,
     status         TEXT NOT NULL,
+    mode           TEXT NOT NULL DEFAULT 'incremental',
     posted         INTEGER NOT NULL DEFAULT 0,
     inserted       INTEGER NOT NULL DEFAULT 0,
     duplicates     INTEGER NOT NULL DEFAULT 0,
@@ -78,6 +79,7 @@ class RunRow:
     started_at: str
     finished_at: str | None
     status: str
+    mode: str
     posted: int
     inserted: int
     duplicates: int
@@ -110,6 +112,10 @@ class State:
         run_cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(runs)")}
         if "filtered" not in run_cols:
             self._conn.execute("ALTER TABLE runs ADD COLUMN filtered INTEGER NOT NULL DEFAULT 0")
+        if "mode" not in run_cols:
+            self._conn.execute(
+                "ALTER TABLE runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'incremental'"
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -177,8 +183,10 @@ class State:
     # ---------- runs ---------- #
 
     @contextmanager
-    def start_run(self, plugin_name: str) -> Iterator[int]:
+    def start_run(self, plugin_name: str, *, mode: str = "incremental") -> Iterator[int]:
         """Crea una fila de run en estado 'running' y la cierra al salir.
+
+        `mode` distingue corridas incrementales (agendadas) de un `backfill` histórico.
 
         Si el bloque termina sin excepción y `finalize_run` no fue llamado,
         marca como 'unknown' (regression check). El uso normal es:
@@ -188,8 +196,8 @@ class State:
                 state.finalize_run(run_id, stats=..., status="ok")
         """
         cur = self._conn.execute(
-            "INSERT INTO runs (plugin_name, started_at, status) VALUES (?, ?, 'running')",
-            (plugin_name, _now()),
+            "INSERT INTO runs (plugin_name, started_at, status, mode) VALUES (?, ?, 'running', ?)",
+            (plugin_name, _now(), mode),
         )
         run_id = int(cur.lastrowid or 0)
         try:
@@ -268,6 +276,7 @@ def _row_to_run(r: sqlite3.Row) -> RunRow:
         started_at=r["started_at"],
         finished_at=r["finished_at"],
         status=r["status"],
+        mode=r["mode"],
         posted=r["posted"],
         inserted=r["inserted"],
         duplicates=r["duplicates"],

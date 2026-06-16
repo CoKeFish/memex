@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -47,6 +48,7 @@ def run_ingestor(
     *,
     chunk_size: int = 20,
     chunk_sleep_ms: int = 100,
+    on_chunk: Callable[[RunStats], None] | None = None,
 ) -> RunStats:
     """Drive a Source through memex's API.
 
@@ -109,6 +111,10 @@ def run_ingestor(
         )
         chunk_index += 1
         chunk.clear()
+        # Hook de progreso (opcional): el caller observa los stats ACUMULADOS por chunk
+        # flusheado — p.ej. el backfill del cliente local imprime "posteados N…" en vivo.
+        if on_chunk is not None:
+            on_chunk(stats)
         if chunk_sleep_ms > 0:
             time.sleep(chunk_sleep_ms / 1000.0)
 

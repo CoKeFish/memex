@@ -75,6 +75,22 @@ export function LocalClientPanel() {
         </p>
 
         <div className="border-t border-border pt-3">
+          <div className="eyebrow mb-1.5">backfill histórico</div>
+          <p className="text-xs text-muted-foreground">
+            Traé meses de historia de una (no pisa el incremental; idempotente):
+          </p>
+          <CopyableCommand cmd="uv run memex-local-client backfill outlook-desktop --months 6" />
+          <p className="mt-2 text-xs text-muted-foreground">
+            Probá con <code className="num">--dry-run</code> primero para ver el volumen. El avance se
+            ve en{" "}
+            <a className="underline hover:text-foreground" href="/carga">
+              Carga → cobertura
+            </a>
+            .
+          </p>
+        </div>
+
+        <div className="border-t border-border pt-3">
           <div className="eyebrow mb-1.5">clientes detectados</div>
           {loading ? (
             <div className="flex items-center gap-2 text-xs text-muted-foreground">

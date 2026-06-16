@@ -30,8 +30,18 @@ default_schedule = "PT5M"
 
 
 def build_source(local_config: Mapping[str, Any]) -> Source:
-    cfg = ImapConfig.from_source_config(dict(local_config))
-    return ImapSource(cfg)
+    cfg = dict(local_config)
+    # Contrato de backfill del cliente local: `backfill_since`/`backfill_until` (ISO) → el modo
+    # `range` que ImapSource ya soporta (SINCE/BEFORE, NO toca el checkpoint). Tomamos la parte
+    # fecha del ISO porque IMAP filtra por día.
+    bsince = cfg.pop("backfill_since", None)
+    buntil = cfg.pop("backfill_until", None)
+    if bsince:
+        cfg["fetch_mode"] = "range"
+        cfg["fetch_since"] = str(bsince)[:10]
+        if buntil:
+            cfg["fetch_until"] = str(buntil)[:10]
+    return ImapSource(ImapConfig.from_source_config(cfg))
 
 
 def validate_requirements(local_config: Mapping[str, Any]) -> list:

@@ -74,6 +74,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="Diagnóstico: conexión + plugins listos.")
 
+    backfill_p = sub.add_parser(
+        "backfill", help="Trae una ventana histórica de un plugin (no toca el incremental)."
+    )
+    backfill_p.add_argument(
+        "plugin", help="Nombre del plugin (outlook-desktop, imap-university, …)."
+    )
+    when = backfill_p.add_mutually_exclusive_group(required=True)
+    when.add_argument("--months", type=int, help="Últimos N meses.")
+    when.add_argument("--days", type=int, help="Últimos N días.")
+    when.add_argument("--since", help="Fecha de inicio YYYY-MM-DD.")
+    backfill_p.add_argument(
+        "--until", default=None, help="Fecha de fin YYYY-MM-DD (default: ahora)."
+    )
+    backfill_p.add_argument(
+        "--dry-run", action="store_true", help="Cuenta sin ingerir (previsualiza el volumen)."
+    )
+
     autostart_p = sub.add_parser("autostart", help="Auto-arranque del daemon (Windows).")
     asub = autostart_p.add_subparsers(dest="cmd", required=True)
     asub.add_parser("enable", help="Registra la tarea (corre al iniciar sesión).")
@@ -125,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_setup(args, log)
         if args.group == "doctor":
             return _cmd_doctor_top(log)
+        if args.group == "backfill":
+            return _cmd_backfill(args, log)
         if args.group == "autostart":
             return _cmd_autostart(args, log)
         if args.group == "daemon" and args.cmd == "start":
@@ -268,6 +287,58 @@ def _cmd_doctor_top(log: Any) -> int:
                     print(f"      [{prob.severity}] {prob.code}: {prob.message}")
     for err in disc.errors:
         print(f"  ! {err.plugin_dir.name}: {err.reason}")
+    return 0
+
+
+def _cmd_backfill(args: argparse.Namespace, log: Any) -> int:
+    from memex.ingestors.runner import RunStats
+    from memex_local_client.backfill import BackfillError, resolve_window, run_backfill
+
+    disc = discover_plugins(plugins_dir())
+    if args.plugin not in disc.plugins:
+        print(f"[x] plugin {args.plugin!r} no instalado. Instalados: {sorted(disc.plugins)}")
+        return 1
+    plugin = disc.plugins[args.plugin]
+    try:
+        window = resolve_window(
+            months=args.months, days=args.days, since=args.since, until=args.until
+        )
+    except BackfillError as e:
+        print(f"[x] {e}")
+        return 1
+
+    cfg = LocalConfig.load()
+    tag = " (dry-run)" if args.dry_run else ""
+    print(f"backfill {args.plugin}: {window.since.date()} -> {window.until.date()}{tag}")
+
+    def progress(stats: RunStats) -> None:
+        verb = "escaneados" if args.dry_run else "posteados"
+        print(f"  ...{verb} {stats.posted} (nuevos {stats.inserted}, dup {stats.duplicates})")
+
+    with open_state() as state:
+        try:
+            stats = run_backfill(
+                plugin,
+                gateway_url=cfg.gateway_url,
+                api_token=cfg.api_token or None,
+                plugins_root=plugins_dir(),
+                window=window,
+                state=state,
+                dry_run=args.dry_run,
+                on_chunk=progress,
+            )
+        except Exception as e:
+            log.exception("memex_local_client.cli.backfill_failed", plugin=args.plugin, exc=str(e))
+            print(f"[x] backfill falló: {e}")
+            return 1
+
+    if args.dry_run:
+        print(f"[ok] dry-run: {stats.posted} correos en la ventana (no se ingirió nada).")
+    else:
+        print(
+            f"[ok] backfill: {stats.inserted} nuevos, {stats.duplicates} ya estaban, "
+            f"{stats.filtered} filtrados ({stats.posted} escaneados)."
+        )
     return 0
 
 
@@ -415,7 +486,7 @@ def _cmd_runs(args: argparse.Namespace) -> int:
         rows = state.recent_runs(args.plugin, limit=args.limit)
         for r in rows:
             print(
-                f"  #{r.id:5d} {r.plugin_name:25s} {r.status:8s} "
+                f"  #{r.id:5d} {r.plugin_name:25s} {r.status:8s} {r.mode:11s} "
                 f"started={r.started_at} finished={r.finished_at or '-'} "
                 f"ins={r.inserted} dup={r.duplicates} err={r.errors} flt={r.filtered}"
                 + (f" reason={r.error_msg}" if r.error_msg else "")

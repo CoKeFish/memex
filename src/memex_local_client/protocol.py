@@ -47,6 +47,13 @@ class LocalPlugin(Protocol):
 
         `local_config` es el dict deserializado del TOML del plugin
         (ej. `~/.memex-local-client/plugins/<nombre>/config.toml`).
+
+        Contrato de BACKFILL (opcional): si el `local_config` trae las claves
+        `backfill_since`/`backfill_until` (ISO-8601), el plugin debe construir un Source
+        que rinda SOLO la ventana `[since, until)` histórica, IGNORANDO el checkpoint
+        incremental (espeja el `mode=range` server-side: el driver de backfill no persiste
+        el cursor, así que el incremental no se pisa). Un plugin que no soporta backfill
+        simplemente ignora esas claves.
         """
         ...
 

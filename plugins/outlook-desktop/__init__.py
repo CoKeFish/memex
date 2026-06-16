@@ -35,12 +35,27 @@ source_type = "outlook"
 default_schedule = "PT5M"
 
 
+def _parse_iso_dt(val: Any) -> datetime | None:
+    """Parsea un ISO-8601 (date o datetime) a datetime UTC-aware. None si vacío."""
+    if not val:
+        return None
+    dt = datetime.fromisoformat(str(val))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 def build_source(local_config: Mapping[str, Any]) -> Source:
+    # `backfill_since`/`backfill_until` (contrato de backfill del cliente local): si vienen, la
+    # corrida es un BACKFILL de la ventana [since, until) — ignora el checkpoint incremental y NO
+    # aplica el cap por-corrida (rinde toda la ventana).
     return _OutlookSource(
         account=local_config.get("account"),
         max_items_per_run=int(local_config.get("max_items_per_run", 100)),
         since_days=int(local_config.get("since_days", 7)),
         max_body_bytes=int(local_config.get("max_body_bytes", 524288)),
+        backfill_since=_parse_iso_dt(local_config.get("backfill_since")),
+        backfill_until=_parse_iso_dt(local_config.get("backfill_until")),
     )
 
 
@@ -247,6 +262,8 @@ class _OutlookSource:
     max_items_per_run: int
     since_days: int
     max_body_bytes: int
+    backfill_since: datetime | None = None
+    backfill_until: datetime | None = None
 
     type: ClassVar[str] = "outlook"
     kind: ClassVar[SourceKind] = SourceKind.EMAIL
@@ -298,8 +315,14 @@ class _OutlookSource:
             inbox = self._resolve_inbox(ns)
 
             since = self._compute_since(checkpoint)
+            backfill = self.backfill_since is not None
+            until = self.backfill_until
             log.info(
-                "outlook.fetch_start", since=since.isoformat(), max_items=self.max_items_per_run
+                "outlook.fetch_start",
+                since=since.isoformat(),
+                until=until.isoformat() if until else None,
+                backfill=backfill,
+                max_items=self.max_items_per_run,
             )
 
             items = inbox.Items
@@ -310,9 +333,24 @@ class _OutlookSource:
 
             count = 0
             skipped_old = 0
+            skipped_new = 0
             for item in items:
-                if count >= self.max_items_per_run:
+                # En backfill rendimos TODA la ventana (sin cap por-corrida); en incremental, cap.
+                if not backfill and count >= self.max_items_per_run:
                     break
+                if _safe_get(item, "Class") != OL_MAIL_ITEM_CLASS:
+                    continue
+                # Filtramos por la hora de recepción ANTES de construir el record (leer el body por
+                # COM es caro). Comparamos con la ventana y SKIP fuera de ella — NO break: el orden
+                # de `items` no está garantizado (el Sort de COM puede fallar), así que romper
+                # truncaría el barrido (fue el bug: 5 en vez de cientos).
+                received = _received_dt(item)
+                if received <= since:
+                    skipped_old += 1
+                    continue
+                if until is not None and received >= until:
+                    skipped_new += 1
+                    continue
                 try:
                     rec = self._to_record(item, inbox.Name)
                 except Exception as e:
@@ -320,12 +358,14 @@ class _OutlookSource:
                     continue
                 if rec is None:
                     continue
-                if rec.occurred_at <= since:
-                    skipped_old += 1
-                    continue
                 yield rec
                 count += 1
-            log.info("outlook.fetch_done", yielded=count, skipped_old=skipped_old)
+            log.info(
+                "outlook.fetch_done",
+                yielded=count,
+                skipped_old=skipped_old,
+                skipped_new=skipped_new,
+            )
         finally:
             with suppress(Exception):
                 pythoncom.CoUninitialize()
@@ -344,6 +384,9 @@ class _OutlookSource:
         raise RuntimeError(f"outlook account not found: {self.account!r}")
 
     def _compute_since(self, checkpoint: OutlookCursor) -> datetime:
+        # En backfill el piso es la ventana pedida, NO el checkpoint incremental (lo ignora).
+        if self.backfill_since is not None:
+            return self.backfill_since
         if checkpoint.last_received_at is not None:
             dt = checkpoint.last_received_at
             if dt.tzinfo is None:
