@@ -32,7 +32,6 @@ from memex.api.routers import (
     modules,
     oauth,
     processing,
-    quality,
     relevance,
     review,
     sources,
@@ -130,6 +129,5 @@ app.include_router(logs.router)
 app.include_router(stats.router)
 app.include_router(modules.router)
 app.include_router(processing.router)
-app.include_router(quality.router)
 app.include_router(relevance.router)
 app.include_router(review.router)

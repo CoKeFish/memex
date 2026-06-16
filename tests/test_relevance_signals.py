@@ -1,9 +1,10 @@
-"""Sistema de calidad: relevancia por remitente.
+"""Capa de SEÑALES del sistema de relevancia: relevancia por remitente + candidatos.
 
 Cubre (1) la agregación SQL — señal núcleo (hecho no-identidad con `item_count>0` → relevante;
 solo-identidad o `item_count=0` → no relevante), el bucket `summarized_only` (se resumió sin hecho),
 el `%`/volumen/orden y la `tier_mix`; (2) que el orquestador atribuye el `item_count` POR MENSAJE
-(sin sobre-atribuir el total de la ventana en batch); y (3) el endpoint GET /quality/senders.
+(sin sobre-atribuir el total de la ventana en batch); y (3) los procedimientos/candidatos
+(`fact_count`, re-evaluación por el motor único) que alimentan `GET /relevance/senders`.
 """
 
 from __future__ import annotations
@@ -23,15 +24,15 @@ from memex.core.sender_tiers import list_overrides, set_override
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.orchestrator import run_extraction
-from memex.quality.candidates import (
+from memex.relevance.candidates import (
     list_candidates,
     reevaluate_candidate,
     run_relevance_detection,
     set_candidate_status,
 )
-from memex.quality.procedures import run_candidate_detection
-from memex.quality.relevance import senders_by_relevance
+from memex.relevance.procedures import run_candidate_detection
 from memex.relevance.settings import upsert_settings
+from memex.relevance.signals import senders_by_relevance
 
 _MESSAGES_MARKER = "Mensajes (JSON):\n"
 
@@ -339,7 +340,7 @@ def test_quality_senders_endpoint(client: Any, seed_source: dict[str, Any]) -> N
     iid = _seed_msg(sid, "e1", email="c@x.com", tier="batch", minute=0)
     _extraction(iid, "finance", 1)
 
-    r = client.get("/quality/senders")
+    r = client.get("/relevance/senders")
     assert r.status_code == 200
     items = r.json()["items"]
     row = next(it for it in items if it["sender_key"] == "c@x.com")
@@ -398,7 +399,7 @@ def test_relevance_mark_unknown_inbox_is_404(client: Any) -> None:
 
 
 def _sender_row(client: Any, key: str) -> dict[str, Any]:
-    items = client.get("/quality/senders").json()["items"]
+    items = client.get("/relevance/senders").json()["items"]
     return next(s for s in items if s["sender_key"] == key)
 
 
@@ -423,7 +424,9 @@ def test_sender_tier_endpoints(client: Any, seed_source: dict[str, Any]) -> None
     sid = seed_source["id"]
     _seed_msg(sid, "m1", email="c@x.com", tier="batch")
 
-    r = client.post("/quality/senders/tier", json={"sender_email": "c@x.com", "tier": "individual"})
+    r = client.post(
+        "/relevance/senders/tier", json={"sender_email": "c@x.com", "tier": "individual"}
+    )
     assert r.status_code == 200
     assert r.json()["tier"] == "individual"
 
@@ -433,24 +436,24 @@ def test_sender_tier_endpoints(client: Any, seed_source: dict[str, Any]) -> None
 
     # «blacklist» ya no es un tier válido (no procesar = regla del gate) → 422.
     bad = client.post(
-        "/quality/senders/tier", json={"sender_email": "c@x.com", "tier": "blacklist"}
+        "/relevance/senders/tier", json={"sender_email": "c@x.com", "tier": "blacklist"}
     )
     assert bad.status_code == 422
 
-    assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 204
+    assert client.delete("/relevance/senders/tier?sender_email=c@x.com").status_code == 204
     assert _sender_row(client, "c@x.com")["override_tier"] is None
-    assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 404
+    assert client.delete("/relevance/senders/tier?sender_email=c@x.com").status_code == 404
 
 
 def test_sender_tier_list_endpoint(client: Any) -> None:
-    assert client.get("/quality/senders/tiers").json()["items"] == []
+    assert client.get("/relevance/senders/tiers").json()["items"] == []
 
-    client.post("/quality/senders/tier", json={"sender_email": "b@x.com", "tier": "individual"})
+    client.post("/relevance/senders/tier", json={"sender_email": "b@x.com", "tier": "individual"})
     client.post(
-        "/quality/senders/tier",
+        "/relevance/senders/tier",
         json={"sender_email": "c@x.com", "tier": "batch", "reason": "agrupar barato"},
     )
-    items = client.get("/quality/senders/tiers").json()["items"]
+    items = client.get("/relevance/senders/tiers").json()["items"]
     by_email = {i["sender_email"]: i for i in items}
     assert set(by_email) == {"b@x.com", "c@x.com"}
     assert by_email["b@x.com"]["tier"] == "individual"
@@ -460,14 +463,14 @@ def test_sender_tier_list_endpoint(client: Any) -> None:
     assert all(i["created_at"] and i["updated_at"] for i in items)
 
     # Upsert: re-POST no duplica y reordena (updated_at DESC → el recién tocado primero).
-    client.post("/quality/senders/tier", json={"sender_email": "b@x.com", "tier": "batch"})
-    items = client.get("/quality/senders/tiers").json()["items"]
+    client.post("/relevance/senders/tier", json={"sender_email": "b@x.com", "tier": "batch"})
+    items = client.get("/relevance/senders/tiers").json()["items"]
     assert len(items) == 2
     assert items[0]["sender_email"] == "b@x.com"
     assert items[0]["tier"] == "batch"
 
-    assert client.delete("/quality/senders/tier?sender_email=c@x.com").status_code == 204
-    items = client.get("/quality/senders/tiers").json()["items"]
+    assert client.delete("/relevance/senders/tier?sender_email=c@x.com").status_code == 204
+    items = client.get("/relevance/senders/tiers").json()["items"]
     assert [i["sender_email"] for i in items] == ["b@x.com"]
 
 
@@ -476,7 +479,7 @@ def test_sender_tier_list_scoped_to_owner(client: Any) -> None:
         c.execute(text("INSERT INTO users (id, email, display_name) VALUES (2, 'u2@local', 'u2')"))
         set_override(c, user_id=1, sender_email="mine@x.com", tier="individual")
         set_override(c, user_id=2, sender_email="theirs@x.com", tier="individual")
-    items = client.get("/quality/senders/tiers").json()["items"]  # client = user 1
+    items = client.get("/relevance/senders/tiers").json()["items"]  # client = user 1
     assert [i["sender_email"] for i in items] == ["mine@x.com"]
     with connection() as c:
         assert [r["sender_email"] for r in list_overrides(c, user_id=2)] == ["theirs@x.com"]
@@ -527,18 +530,18 @@ def test_detect_preserves_dismissed_and_skips_overridden(seed_source: dict[str, 
 def test_candidates_endpoints(client: Any, seed_source: dict[str, Any]) -> None:
     _noisy_sender(seed_source, "spam@x.com", 6, with_fact=0)
     run_relevance_detection(1)  # defaults de settings (min 5, max 10%)
-    items = client.get("/quality/candidates").json()["items"]
+    items = client.get("/relevance/candidates").json()["items"]
     assert any(i["sender_key"] == "spam@x.com" for i in items)
 
     r = client.post(
-        "/quality/candidates/status", json={"sender_key": "spam@x.com", "status": "dismissed"}
+        "/relevance/candidates/status", json={"sender_key": "spam@x.com", "status": "dismissed"}
     )
     assert r.status_code == 200
     assert r.json()["status"] == "dismissed"
 
-    open_items = client.get("/quality/candidates?status=open").json()["items"]
+    open_items = client.get("/relevance/candidates?status=open").json()["items"]
     assert all(i["sender_key"] != "spam@x.com" for i in open_items)
-    bad = client.post("/quality/candidates/status", json={"sender_key": "nope", "status": "open"})
+    bad = client.post("/relevance/candidates/status", json={"sender_key": "nope", "status": "open"})
     assert bad.status_code == 404
 
 

@@ -7,6 +7,8 @@ Subcomandos:
   interests  — CRUD de intereses personales.
   rules      — listar/activar/desactivar reglas; alta manual (corre dry run).
   review     — cola de revisión manual (insufficient) + resolver.
+  detect     — corre los procedimientos que arman candidatos a (re)evaluar (sin LLM).
+  candidates — lista los candidatos detectados (filtro por estado).
 
 Conecta directo a Postgres (`memex.db.connection`). El gate está APAGADO por default:
 `memex-relevance settings set --enabled true` lo enciende.
@@ -30,6 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from memex.db import connection
 from memex.llm import LLMClient, LLMError, LLMQuotaError, build_provider_client
 from memex.logging import setup_logging
+from memex.relevance.candidates import list_candidates, run_relevance_detection
 from memex.relevance.gate import run_relevance_gate
 from memex.relevance.interests import (
     create_interest,
@@ -283,6 +286,29 @@ def cmd_review(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_detect(args: argparse.Namespace) -> int:
+    stats = run_relevance_detection(args.user_id)
+    print(f"detección: {stats.procedures} procedimientos, {stats.candidates} candidatos")
+    return 0
+
+
+def cmd_candidates(args: argparse.Namespace) -> int:
+    status = None if args.status == "all" else args.status
+    with connection() as conn:
+        rows = list_candidates(conn, user_id=args.user_id, status=status)
+    if not rows:
+        print("(sin candidatos)")
+        return 0
+    for r in rows:
+        pct = r["relevance_pct"]
+        pct_s = f"{pct}%" if pct is not None else "—"
+        print(
+            f"[{r['status']}] {r['procedure']} {r['sender_label']} <{r['email'] or '—'}> "
+            f"msgs={r['messages']} rel={pct_s} inertes={r['inert']} score={r['score']}"
+        )
+    return 0
+
+
 def _add_provider_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--provider",
@@ -401,6 +427,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_resolve.add_argument("--user-id", type=int, default=1)
     for sp in rev_sub.choices.values():
         sp.set_defaults(func=cmd_review)
+
+    p_detect = sub.add_parser("detect", help="corre los procedimientos de candidatos (sin LLM)")
+    p_detect.add_argument("--user-id", type=int, default=1)
+    p_detect.set_defaults(func=cmd_detect)
+
+    p_cand = sub.add_parser("candidates", help="lista los candidatos a (re)evaluar")
+    p_cand.add_argument("--user-id", type=int, default=1)
+    p_cand.add_argument(
+        "--status", default="open", choices=["open", "confirmed", "dismissed", "all"]
+    )
+    p_cand.set_defaults(func=cmd_candidates)
 
     return p
 

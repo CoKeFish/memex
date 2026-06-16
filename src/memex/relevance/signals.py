@@ -1,4 +1,4 @@
-"""Relevancia por remitente — lectura agregada determinista (sistema de calidad).
+"""Relevancia por remitente — lectura agregada determinista (capa de señales del gate).
 
 Sin LLM, SQL puro (patrón `core/feedback.py` / `api/routers/metrics.py`). Por cada remitente agrega:
 cuántos mensajes, cuántos produjeron un hecho de dominio (señal núcleo: existe fila en

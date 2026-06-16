@@ -33,12 +33,12 @@ from memex.modules.identidades.relations_llm import run_cooccurrence_llm
 from memex.modules.identidades.sync import run_sync as run_identidades_sync
 from memex.modules.orchestrator import run_extraction
 from memex.ocr.worker import run_ocr
-from memex.quality.candidates import run_relevance_detection
 from memex.relations.clusters_llm import run_cluster_partition
 from memex.relations.cooccurrence import generate_cooccurrence
 from memex.relations.maintenance import reconcile_graph
 from memex.relations.per_message import ConfirmStats, run_per_message_confirm
 from memex.relations.reconcile import detect_and_reconcile
+from memex.relevance.candidates import run_relevance_detection
 from memex.relevance.gate import run_relevance_gate
 from memex.relevance.mining import run_rule_mining
 

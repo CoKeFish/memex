@@ -3,7 +3,7 @@
 El ex-«juez advisory» del sistema de calidad se reemplaza por esto: reglas DETERMINISTAS que
 eligen QUÉ remitentes (a futuro: tópicos/grupos/clases-de-post) vale la pena (re)evaluar. El
 MOTOR ÚNICO —el juez del gate + la MISMA lista de intereses— los evalúa después
-(`quality.candidates.reevaluate_candidate`), no un segundo prompt. Sumar un procedimiento = una
+(`relevance.candidates.reevaluate_candidate`), no un segundo prompt. Sumar un procedimiento = una
 clase nueva + una entrada en `CANDIDATE_PROCEDURES`, sin tocar el motor.
 
 Category-agnostic: cada `Candidate` declara su `unit_type` (correo = 'sender'). Hoy el único
@@ -24,9 +24,9 @@ from sqlalchemy import Connection, text
 from memex.config import settings
 from memex.db import connection
 from memex.logging import get_logger
-from memex.quality.relevance import senders_by_relevance
+from memex.relevance.signals import senders_by_relevance
 
-_log = get_logger("memex.quality.procedures")
+_log = get_logger("memex.relevance.procedures")
 
 
 @dataclass(frozen=True)

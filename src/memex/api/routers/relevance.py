@@ -1,11 +1,12 @@
-"""Gate de relevancia por intereses personales: settings, intereses, reglas y revisión manual.
+"""Superficie API del sistema UNIFICADO de relevancia (`memex.relevance`): el portero que corre
+ANTES de resumen/extracción (solo correos).
 
-Superficie API del módulo `memex.relevance` (el portero que corre ANTES de resumen/extracción,
-solo correos). A diferencia del sistema de calidad advisory (`/quality`), este módulo SÍ
-acciona: sus reglas bloquean procesamiento — siempre con dry run previo, auditadas (reporte
-persistido) y reversibles (PATCH status). La corrida del gate NO se dispara desde acá: va por
-las corridas de procesamiento (/processing) o el CLI; `/relevance/rules/mine` sí es on-demand
-(1 llamada LLM, barata y acotada).
+Acá vive todo el sistema: el GATE (settings, intereses, reglas con dry-run auditado + reversible,
+cola de revisión manual, lazo de sugerencia de intereses) Y la capa de SEÑALES fusionada desde el
+ex-`/quality` (remitentes rankeados por relevancia, dial de costo por tier batch/individual, y la
+cola de candidatos por procedimiento + re-evaluación por el MOTOR ÚNICO — el juez del gate, no un
+segundo juez). La corrida del gate NO se dispara desde acá: va por /processing o el CLI;
+`/relevance/rules/mine` e `/relevance/interests/mine` sí son on-demand (1 llamada LLM acotada).
 """
 
 from typing import Annotated, Any, Literal
@@ -15,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
+    CandidateStatusRequest,
     GateRuleCreateRequest,
     GateRuleInfo,
     GateRuleList,
@@ -27,15 +29,30 @@ from memex.api.schemas import (
     InterestSuggestionList,
     MineInterestsResponse,
     MineRulesResponse,
+    ReevaluateRequest,
+    ReevaluateResponse,
+    RelevanceCandidate,
+    RelevanceCandidateList,
     RelevanceGateSettings,
     RelevanceGateSettingsPatch,
     RelevanceReviewList,
     RelevanceReviewResolveRequest,
     ResolveSuggestionRequest,
+    SenderRelevanceList,
+    SenderTierInfo,
+    SenderTierList,
+    SenderTierRequest,
 )
+from memex.core.sender_tiers import clear_override, list_overrides, set_override
 from memex.db import connection
 from memex.llm import LLMConfigError, LLMQuotaError
 from memex.logging import get_logger
+from memex.relevance.candidates import (
+    InvalidStatusError,
+    list_candidates,
+    reevaluate_candidate,
+    set_candidate_status,
+)
 from memex.relevance.interest_mining import (
     list_suggestions,
     resolve_suggestion,
@@ -50,6 +67,7 @@ from memex.relevance.interests import (
 from memex.relevance.mining import run_rule_mining
 from memex.relevance.rules import create_rule, dry_run_rule, list_rules, set_rule_status
 from memex.relevance.settings import GateSettings, get_settings, upsert_settings
+from memex.relevance.signals import senders_by_relevance
 from memex.relevance.verdicts import list_review_queue, resolve_insufficient
 
 router = APIRouter(prefix="/relevance", tags=["relevance"])
@@ -313,3 +331,119 @@ async def resolve_interest_suggestion_endpoint(
         accept=body.accept,
     )
     return row
+
+
+# --- Señales: remitentes y candidatos (capa ex-/quality, fusionada acá) ------------ #
+
+
+@router.get("/senders", response_model=SenderRelevanceList)
+async def list_sender_relevance(
+    user_id: UserID,
+    source_id: Annotated[int | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 200,
+) -> dict[str, Any]:
+    """Remitentes rankeados por relevancia (ruido primero). `source_id` acota a una fuente."""
+    with connection() as conn:
+        items = senders_by_relevance(conn, user_id=user_id, limit=limit, source_id=source_id)
+    _log.info("relevance.senders", user_id=user_id, rows=len(items), source_id=source_id)
+    return {"items": items}
+
+
+@router.post("/senders/tier", response_model=SenderTierInfo)
+async def set_sender_tier_endpoint(user_id: UserID, body: SenderTierRequest) -> dict[str, Any]:
+    """Dial de COSTO: fuerza el tier (batch/individual) de los mensajes futuros de un remitente.
+
+    Prospectivo (no re-clasifica lo ya clasificado). «No procesar un remitente» ya no es un tier:
+    es una regla del gate (`POST /relevance/rules` kind=sender_email).
+    """
+    with connection() as conn:
+        row = set_override(
+            conn,
+            user_id=user_id,
+            sender_email=body.sender_email,
+            tier=body.tier,
+            reason=body.reason,
+        )
+    _log.info("relevance.sender_tier.set", user_id=user_id, tier=body.tier, email=body.sender_email)
+    return row
+
+
+@router.delete("/senders/tier", status_code=204)
+async def clear_sender_tier_endpoint(
+    user_id: UserID, sender_email: Annotated[str, Query()]
+) -> None:
+    """Quita el override de tier de un remitente (vuelve a la heurística). 404 si no existía."""
+    with connection() as conn:
+        ok = clear_override(conn, user_id=user_id, sender_email=sender_email)
+    if not ok:
+        raise HTTPException(status_code=404, detail="sin override")
+
+
+# Path estático: si algún día se agrega GET /senders/{key}, registrarla DESPUÉS de esta ruta.
+@router.get("/senders/tiers", response_model=SenderTierList)
+async def list_sender_tiers_endpoint(user_id: UserID) -> dict[str, Any]:
+    """Overrides de tier por remitente del usuario (gestión en /filtros). Recientes primero."""
+    with connection() as conn:
+        items = list_overrides(conn, user_id=user_id)
+    _log.info("relevance.sender_tiers.list", user_id=user_id, rows=len(items))
+    return {"items": items}
+
+
+@router.get("/candidates", response_model=RelevanceCandidateList)
+async def list_candidates_endpoint(
+    user_id: UserID,
+    status: Annotated[Literal["open", "confirmed", "dismissed", "all"], Query()] = "open",
+    procedure: Annotated[str | None, Query()] = None,
+) -> dict[str, Any]:
+    """Candidatos a (re)evaluar detectados por los procedimientos (ruido primero).
+
+    `all` = todos los estados; `procedure` filtra por procedimiento (ej. `fact_count`).
+    """
+    with connection() as conn:
+        items = list_candidates(
+            conn,
+            user_id=user_id,
+            status=None if status == "all" else status,
+            procedure=procedure,
+        )
+    return {"items": items}
+
+
+@router.post("/candidates/status", response_model=RelevanceCandidate)
+async def set_candidate_status_endpoint(
+    user_id: UserID, body: CandidateStatusRequest
+) -> dict[str, Any]:
+    """Mueve el estado de un candidato (confirmed/dismissed). 404 si no existe."""
+    try:
+        with connection() as conn:
+            row = set_candidate_status(
+                conn,
+                user_id=user_id,
+                sender_key=body.sender_key,
+                status=body.status,
+                procedure=body.procedure,
+            )
+    except InvalidStatusError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    if row is None:
+        raise HTTPException(status_code=404, detail="candidato no encontrado")
+    return row
+
+
+@router.post("/candidates/reevaluate", response_model=ReevaluateResponse)
+async def reevaluate_candidate_endpoint(user_id: UserID, body: ReevaluateRequest) -> dict[str, int]:
+    """Re-evalúa la muestra de un candidato por el MOTOR ÚNICO (el juez del gate + los intereses).
+
+    No es un segundo juez: corre el gate sobre la muestra (force). 404 si el candidato no existe o
+    no tiene muestra; 402 si se agotó el saldo LLM. Con el gate apagado devuelve ceros (no hay
+    juez que correr).
+    """
+    try:
+        result = await reevaluate_candidate(
+            user_id, sender_key=body.sender_key, procedure=body.procedure
+        )
+    except LLMQuotaError as e:
+        raise HTTPException(status_code=402, detail="saldo LLM agotado") from e
+    if result is None:
+        raise HTTPException(status_code=404, detail="candidato sin muestra o inexistente")
+    return result

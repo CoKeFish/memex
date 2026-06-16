@@ -2,8 +2,8 @@
 
 Este módulo es la cara de lectura/acción de la cola `relevance_candidates`: listar, mover estado y
 RE-EVALUAR un candidato por el MOTOR ÚNICO (el juez del gate + los intereses), no un segundo juez
-advisory. La detección (qué entra a la cola) vive en `quality.procedures`; `run_relevance_detection`
-acá la delega para conservar el contrato del job `relevance` del scheduler.
+advisory. La detección (qué entra a la cola) vive en `relevance.procedures`;
+`run_relevance_detection` acá la delega para conservar el contrato del job `relevance`.
 """
 
 from __future__ import annotations
@@ -15,10 +15,10 @@ from sqlalchemy import Connection, text
 from memex.db import connection
 from memex.llm import LLMClient
 from memex.logging import get_logger
-from memex.quality.procedures import RelevanceDetectStats, run_candidate_detection
 from memex.relevance.gate import run_relevance_gate
+from memex.relevance.procedures import RelevanceDetectStats, run_candidate_detection
 
-_log = get_logger("memex.quality.candidates")
+_log = get_logger("memex.relevance.candidates")
 
 VALID_STATUS: frozenset[str] = frozenset({"open", "confirmed", "dismissed"})
 
