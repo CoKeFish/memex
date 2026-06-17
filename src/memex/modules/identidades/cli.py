@@ -71,10 +71,8 @@ from memex.relations.edges import (
     VERDICT_CONFIRMED,
     Ref,
     edges_touching,
-    propose_edge,
-    resolve_edge,
 )
-from memex.relations.graph_writer import delete_vertex, reject_override
+from memex.relations.graph_writer import add_edge, delete_vertex, reject_override, update_verdict
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 
@@ -1171,7 +1169,7 @@ def _cmd_relate(args: argparse.Namespace) -> int:
             _say("\nLa identidad origen y/o destino no existen para este user.\n", err=True)
             return 1
         (src_ref, a_name), (dst_ref, b_name) = a, b
-        edge_id = propose_edge(
+        edge_id = add_edge(
             conn,
             args.user,
             src_ref,
@@ -1227,8 +1225,9 @@ def _cmd_confirm_relation(args: argparse.Namespace) -> int:
                 err=True,
             )
             return 1
-        changed = resolve_edge(
+        changed = update_verdict(
             conn,
+            args.user,
             args.edge,
             verdict=VERDICT_CONFIRMED,
             provenance=PROVENANCE_EXTRACTED,
