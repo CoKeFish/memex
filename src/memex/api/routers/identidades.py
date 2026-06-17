@@ -520,7 +520,9 @@ async def update_identity(
 
 
 @router.delete("/{identity_id:int}")
-async def delete_identity(identity_id: int, user_id: UserID) -> dict[str, bool]:
+async def delete_identity(
+    identity_id: int, user_id: UserID, force: bool = False
+) -> dict[str, bool]:
     with connection() as conn:
         row = conn.execute(
             text("SELECT kind FROM mod_identidades WHERE id = :id AND user_id = :uid"),
@@ -528,6 +530,41 @@ async def delete_identity(identity_id: int, user_id: UserID) -> dict[str, bool]:
         ).first()
         if row is None:
             raise HTTPException(status_code=404, detail="identidad no encontrada")
+        # Guard (M7): el DELETE deja menciones HUÉRFANAS (FK SET NULL) y cascadea identificadores
+        # sin el re-apuntado del merge. Si la identidad participa de algo, se bloquea salvo `force`:
+        # el camino seguro es FUNDIRLA en otra (POST /merge), que re-apunta todo.
+        if not force:
+            refs = (
+                conn.execute(
+                    text(
+                        """
+                        SELECT
+                          (SELECT count(*) FROM mod_identidades_mentions
+                             WHERE resolved_identity_id = :id) AS mentions,
+                          (SELECT count(*) FROM mod_identidades
+                             WHERE parent_identity_id = :id) AS children,
+                          (SELECT count(*) FROM mod_identidades_person_orgs
+                             WHERE person_id = :id OR org_id = :id) AS affiliations,
+                          (SELECT count(*) FROM mod_finance_consolidated
+                             WHERE counterparty_identity_id = :id) AS finance
+                        """
+                    ),
+                    {"id": identity_id},
+                )
+                .mappings()
+                .one()
+            )
+            cols = ("mentions", "children", "affiliations", "finance")
+            if sum(int(refs[c]) for c in cols) > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"la identidad participa de {refs['mentions']} menciones, "
+                        f"{refs['children']} sub-entidades, {refs['affiliations']} afiliaciones y "
+                        f"{refs['finance']} contrapartes; borrarla las dejaría huérfanas. "
+                        "Fundila en otra (POST /merge) o pasá ?force=true para borrar igual."
+                    ),
+                )
         # Saca el vértice del grafo (aristas/membresía + dirty a vecinos) ANTES de borrar la fila,
         # en el mismo tx (el GraphWriter es el único punto de mutación del grafo).
         delete_vertex(conn, user_id, Ref(IDENTITY_SLUG_BY_KIND[str(row[0])], identity_id))
