@@ -33,6 +33,8 @@ export interface SenderRelevance {
   lastAt: string | null
   tierMix: Record<string, number>
   volumeRatio: number | null
+  /** Costo LLM atribuido al remitente (reparto cost/N de lotes vía trace_nodes). */
+  costUsd: number | null
 }
 
 interface SenderRelevanceApi {
@@ -50,6 +52,7 @@ interface SenderRelevanceApi {
   last_at: string | null
   tier_mix: Record<string, number>
   volume_ratio: number | null
+  cost_usd: number | null
 }
 
 interface SenderRelevanceListApi {
@@ -72,6 +75,7 @@ function toSender(it: SenderRelevanceApi): SenderRelevance {
     lastAt: it.last_at,
     tierMix: it.tier_mix ?? {},
     volumeRatio: it.volume_ratio,
+    costUsd: it.cost_usd,
   }
 }
 
