@@ -6,10 +6,10 @@ viven en `fuzzy.py` / `dedup_llm.py`). El remitente del mensaje NO se usa como s
 venga de una identidad conocida no implica que las otras entidades mencionadas sean ese remitente.
 
   1. email exacto del item                → identidad
-  2. dominio del email                     → org
+  2. dominio del email                     → ORG dueña del dominio (NUNCA una persona)
   3. handle exacto ACOTADO POR PLATAFORMA  → identidad   (el handle de X ≠ Instagram ≠ ...)
-  4. nombre normalizado exacto             → identidad
-  5. alias normalizado                     → identidad
+  4. nombre normalizado exacto             → identidad del MISMO grupo (persona ∥ org+producto)
+  5. alias normalizado                     → ídem (kind desconocido: cross-grupo solo si es único)
   6. nada matchea                          → unresolved
 
 `KnownIndex` es puro (se arma desde una lista de `KnownIdentity` en memoria) → testeable sin DB. El
@@ -30,6 +30,16 @@ from memex.modules.identidades.schema import IdentityItem
 KIND_PERSONA = "persona"
 KIND_ORG = "organizacion"
 KIND_PRODUCTO = "producto"
+#: Los kinds canónicos del directorio (sin el escape 'unknown' del extractor).
+_CANONICAL_KINDS = (KIND_PERSONA, KIND_ORG, KIND_PRODUCTO)
+
+
+def _match_group(kind: str) -> str:
+    """Grupo de match del nombre/alias exacto. PERSONA es su propio grupo; ORGANIZACIÓN y PRODUCTO
+    comparten grupo ("entity"): suelen ser la MISMA entidad (Steam/Claude = org Y producto), así
+    que una mención producto resuelve a la org homónima y viceversa. Lo que NO se cruza es
+    persona↔org/producto — el colapso dañino (persona con correo corporativo u homónima)."""
+    return KIND_PERSONA if kind == KIND_PERSONA else "entity"
 
 
 @dataclass(frozen=True)
@@ -77,8 +87,14 @@ class KnownIndex:
         self._domain: dict[str, int] = {}
         self._handle_by_platform: dict[tuple[str, str], int] = {}
         self._handle_any: dict[str, set[int]] = {}
-        self._name: dict[str, int] = {}
-        self._alias: dict[str, int] = {}
+        # Nombre/alias ACOTADOS POR KIND: (kind, key) → id, para que una mención de un kind no
+        # matchee un homónimo de otro. `_name_any`/`_alias_any` (key → ids) son la vista cross-kind
+        # del path de kind DESCONOCIDO (escape del extractor / seam de dominio): resuelve solo si el
+        # nombre es ÚNICO entre todos los kinds.
+        self._name: dict[tuple[str, str], int] = {}
+        self._alias: dict[tuple[str, str], int] = {}
+        self._name_any: dict[str, set[int]] = {}
+        self._alias_any: dict[str, set[int]] = {}
         for ident in identities:
             self.add(ident)
 
@@ -86,13 +102,16 @@ class KnownIndex:
         """Registra una identidad (primer match gana). Permite que el dedup vea identidades creadas
         dentro de la MISMA corrida de extracción."""
         self._kind.setdefault(ident.id, ident.kind)
+        grp = _match_group(ident.kind)
         name_key = normalize_match(ident.display_name)
         if name_key:
-            self._name.setdefault(name_key, ident.id)
+            self._name.setdefault((grp, name_key), ident.id)
+            self._name_any.setdefault(name_key, set()).add(ident.id)
         for a in ident.aliases:
             ak = normalize_match(a)
             if ak:
-                self._alias.setdefault(ak, ident.id)
+                self._alias.setdefault((grp, ak), ident.id)
+                self._alias_any.setdefault(ak, set()).add(ident.id)
         for idf in ident.identifiers:
             if not idf.value_norm:
                 continue
@@ -108,7 +127,10 @@ class KnownIndex:
         """Registra un alias nuevo (p. ej. tras un auto-merge que suma el nombre variante)."""
         ak = normalize_match(alias)
         if ak:
-            self._alias.setdefault(ak, identity_id)
+            kind = self._kind.get(identity_id)
+            if kind is not None:
+                self._alias.setdefault((_match_group(kind), ak), identity_id)
+            self._alias_any.setdefault(ak, set()).add(identity_id)
 
     # --- accessores por-identificador para la resolución de REMITENTE (Fase 2) -------------- #
     # La resolución del remitente (modules/identidades/senders.py) tiene una POLÍTICA propia por
@@ -137,21 +159,32 @@ class KnownIndex:
     def _res(self, identity_id: int, method: str) -> Resolution:
         return Resolution(self._kind.get(identity_id), identity_id, method)
 
-    def _by_email(self, raw: str, method: str) -> Resolution | None:
-        """email exacto → identidad; si no, dominio → org. Una dirección ROLE/RELAY (noreply,
-        notifications, …) NO es clave de identidad → no matchea (se resuelve por nombre)."""
+    def _by_email(
+        self, raw: str, method: str, *, probe_kind: str | None = None
+    ) -> Resolution | None:
+        """email exacto → identidad; si no, dominio → ORG. Una dirección ROLE/RELAY (noreply,
+        notifications, …) NO es clave de identidad → no matchea (se resuelve por nombre).
+
+        El fallback por DOMINIO solo resuelve a una ORGANIZACIÓN (el dueño del dominio es una org) y
+        NUNCA si la mención se asume persona: un dominio no identifica a una persona. Que alguien
+        use un correo corporativo no lo vuelve la org del dominio (la afiliación se modela aparte);
+        una mención persona con correo institucional cae al match por NOMBRE, no a la org.
+        """
         key = norm_identifier("email", raw)
         if not key or is_role_email(key):
             return None
         iid = self._email.get(key)
         if iid is not None:
             return self._res(iid, method)
+        if probe_kind == KIND_PERSONA:
+            return None  # un dominio nunca identifica a una persona
         # Dominio REGISTRABLE (eTLD+1) — mismo cómputo que los identifiers `domain` se guardan
-        # (norm_identifier('domain')), si no el lookup no matchearía un identifier colapsado.
+        # (norm_identifier('domain')), si no el lookup no matchearía un identifier colapsado. Solo
+        # vale si el dueño del dominio es una org (no una persona): el dominio es señal de org.
         domain = norm_identifier("domain", key)
         if domain:
             oid = self._domain.get(domain)
-            if oid is not None:
+            if oid is not None and self._kind.get(oid) != KIND_PERSONA:
                 # el método del dominio es 'domain' salvo que venga del remitente.
                 return self._res(oid, "domain" if method == "email" else method)
         return None
@@ -166,9 +199,12 @@ class KnownIndex:
         # usa: que el correo venga de una identidad conocida (un banco, Nequi) no implica que las
         # OTRAS entidades mencionadas (el comercio donde se pagó) sean ese remitente. El remitente,
         # si importa, se extrae como su propia mención (con su email) y resuelve por email abajo.
-        # 1/2. email del item → identidad; dominio → org.
+        # El kind de la mención acota el match; 'unknown' (escape del extractor o seam de dominio)
+        # resuelve CROSS-KIND, pero solo si el nombre es único.
+        probe_kind = item.kind if item.kind in _CANONICAL_KINDS else None
+        # 1/2. email del item → identidad; dominio → org (nunca persona).
         if item.email:
-            res = self._by_email(item.email, "email")
+            res = self._by_email(item.email, "email", probe_kind=probe_kind)
             if res is not None:
                 return res
         # 4. handle exacto acotado por plataforma (o único entre plataformas si no se conoce).
@@ -183,13 +219,23 @@ class KnownIndex:
                     ids = self._handle_any.get(hk)
                     if ids and len(ids) == 1:
                         return self._res(next(iter(ids)), "handle")
-        # 5/6. nombre exacto / alias.
+        # 5/6. nombre exacto / alias, ACOTADO POR GRUPO (persona ∥ org+producto): no funde homónimos
+        # persona↔org. Con kind desconocido matchea cross-grupo solo si el nombre/alias es ÚNICO.
         name_key = normalize_match(item.name)
         if name_key:
-            iid = self._name.get(name_key)
-            if iid is not None:
-                return self._res(iid, "exact_name")
-            iid = self._alias.get(name_key)
-            if iid is not None:
-                return self._res(iid, "alias")
+            if probe_kind is not None:
+                grp = _match_group(probe_kind)
+                iid = self._name.get((grp, name_key))
+                if iid is not None:
+                    return self._res(iid, "exact_name")
+                iid = self._alias.get((grp, name_key))
+                if iid is not None:
+                    return self._res(iid, "alias")
+            else:
+                nids = self._name_any.get(name_key)
+                if nids and len(nids) == 1:
+                    return self._res(next(iter(nids)), "exact_name")
+                aids = self._alias_any.get(name_key)
+                if aids and len(aids) == 1:
+                    return self._res(next(iter(aids)), "alias")
         return Resolution.unresolved()
