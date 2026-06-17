@@ -41,7 +41,8 @@ from memex.relevance.interests import (
     update_interest,
 )
 from memex.relevance.rules import (
-    RULE_KINDS,
+    EFFECTS,
+    SENDER_KINDS,
     create_rule,
     dry_run_rule,
     list_rules,
@@ -102,17 +103,26 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def cmd_mine(args: argparse.Namespace) -> int:
-    from memex.relevance.mining import run_rule_mining
+    from memex.relevance.mining import run_rule_mining, run_rule_mining_cycle
 
+    client = _build_client(args)
     try:
-        stats = asyncio.run(
-            run_rule_mining(
-                args.user_id,
-                limit=args.limit,
-                min_messages=args.min_count,
-                client=_build_client(args),
+        if args.effect == "all":
+            stats = asyncio.run(
+                run_rule_mining_cycle(
+                    args.user_id, limit=args.limit, min_messages=args.min_count, client=client
+                )
             )
-        )
+        else:
+            stats = asyncio.run(
+                run_rule_mining(
+                    args.user_id,
+                    effect=args.effect,
+                    limit=args.limit,
+                    min_messages=args.min_count,
+                    client=client,
+                )
+            )
     except LLMQuotaError as e:
         print(_quota_msg(e), file=sys.stderr)
         return 1
@@ -203,11 +213,21 @@ def cmd_interests(args: argparse.Namespace) -> int:
         return 0
 
 
+def _rule_predicates_str(r: dict[str, object]) -> str:
+    """Texto de los predicados de una regla compuesta (remitente y/o asunto)."""
+    parts = []
+    if r.get("sender_kind"):
+        parts.append(f"{r['sender_kind']}={r['sender_value']!r}")
+    if r.get("subject_pattern"):
+        parts.append(f"subject~{r['subject_pattern']!r}")
+    return " & ".join(parts) or "(sin predicados)"
+
+
 def _print_rule(r: dict[str, object]) -> None:
     report = r.get("dry_run_report") or {}
     matched = report.get("matched", "?") if isinstance(report, dict) else "?"
     print(
-        f"#{r['id']} [{r['status']}] {r['kind']}={r['pattern']!r} "
+        f"#{r['id']} [{r['effect']}/{r['status']}] {_rule_predicates_str(r)} "
         f"(propuso={r['proposed_by']}, dry-run matched={matched}) {r['rationale'] or ''}".rstrip()
     )
 
@@ -216,7 +236,8 @@ def cmd_rules(args: argparse.Namespace) -> int:
     with connection() as conn:
         if args.action == "list":
             status = None if args.status == "all" else args.status
-            rows = list_rules(conn, args.user_id, status=status)
+            effect = None if args.effect == "all" else args.effect
+            rows = list_rules(conn, args.user_id, status=status, effect=effect)
             if not rows:
                 print("(sin reglas)")
                 return 0
@@ -232,25 +253,42 @@ def cmd_rules(args: argparse.Namespace) -> int:
             _print_rule(row)
             return 0
         # add (manual): corre el dry run; si no pasa NO se persiste (se muestra el reporte)
-        report = dry_run_rule(conn, args.user_id, args.kind, args.pattern)
+        try:
+            report = dry_run_rule(
+                conn,
+                args.user_id,
+                effect=args.effect,
+                sender_kind=args.sender_kind,
+                sender_value=args.sender_value,
+                subject_pattern=args.subject_contains,
+            )
+        except ValueError as e:
+            print(f"predicados inválidos: {e}", file=sys.stderr)
+            return 1
         if not report.passes:
+            lado = "RELEVANTE" if args.effect == "block" else "NO relevante"
+            n_bad = (
+                report.matched_relevant if args.effect == "block" else report.matched_not_relevant
+            )
             print(
-                f"la regla atraparía {report.matched_relevant} correo(s) RELEVANTE(s) "
-                f"(ej. inbox_ids={list(report.relevant_sample_ids)}) — no se crea",
+                f"la regla atraparía {n_bad} correo(s) {lado}(s) "
+                f"(ej. inbox_ids={list(report.contaminating_sample_ids)}) — no se crea",
                 file=sys.stderr,
             )
             return 1
         row = create_rule(
             conn,
             args.user_id,
-            kind=args.kind,
-            pattern=args.pattern,
+            effect=args.effect,
+            sender_kind=args.sender_kind,
+            sender_value=args.sender_value,
+            subject_pattern=args.subject_contains,
             proposed_by="manual",
             report=report,
             rationale=args.rationale or "",
         )
         if row is None:
-            print("ya existe una regla con ese kind+pattern", file=sys.stderr)
+            print("ya existe una regla con esos predicados", file=sys.stderr)
             return 1
         _print_rule(row)
         return 0
@@ -338,8 +376,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_provider_flags(p_run)
     p_run.set_defaults(func=cmd_run)
 
-    p_mine = sub.add_parser("mine", help="minería de reglas sobre los no-relevantes (LLM, paga)")
+    p_mine = sub.add_parser("mine", help="minería de reglas block+allow por remitente (LLM, paga)")
     p_mine.add_argument("--user-id", type=int, default=1)
+    p_mine.add_argument(
+        "--effect",
+        choices=[*EFFECTS, "all"],
+        default="all",
+        help="polaridad a minar (block/allow/all; default all = las dos)",
+    )
     p_mine.add_argument("--limit", type=int, default=500)
     p_mine.add_argument(
         "--min-count",
@@ -401,14 +445,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_rlist.add_argument(
         "--status", default="all", choices=["active", "disabled", "rejected", "all"]
     )
+    p_rlist.add_argument("--effect", default="all", choices=[*EFFECTS, "all"])
     for action in ("enable", "disable"):
         p_ract = rules_sub.add_parser(action)
         p_ract.add_argument("rule_id", type=int)
         p_ract.add_argument("--user-id", type=int, default=1)
-    p_radd = rules_sub.add_parser("add", help="alta manual (corre dry run primero)")
+    p_radd = rules_sub.add_parser(
+        "add", help="alta manual de regla compuesta (≥1 predicado; corre dry run primero)"
+    )
     p_radd.add_argument("--user-id", type=int, default=1)
-    p_radd.add_argument("--kind", required=True, choices=list(RULE_KINDS))
-    p_radd.add_argument("--pattern", required=True)
+    p_radd.add_argument("--effect", choices=list(EFFECTS), default="block")
+    p_radd.add_argument("--sender-kind", choices=list(SENDER_KINDS), default=None)
+    p_radd.add_argument(
+        "--sender-value", default=None, help="valor del remitente (requiere --sender-kind)"
+    )
+    p_radd.add_argument(
+        "--subject-contains", default=None, help="substring del asunto (patrón de contenido)"
+    )
     p_radd.add_argument("--rationale", default=None)
     for sp in rules_sub.choices.values():
         sp.set_defaults(func=cmd_rules)

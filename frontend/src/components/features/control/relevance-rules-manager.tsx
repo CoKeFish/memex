@@ -1,10 +1,11 @@
-// Reglas automáticas del gate de relevancia + cola de revisión manual. Las reglas las propone
-// la minería LLM sobre los no-relevantes (o el dueño a mano) y SOLO se activan si su dry run
-// contra el histórico no atrapa ningún correo relevante; el reporte queda persistido
+// Reglas automáticas del gate de relevancia + cola de revisión manual. Las reglas son COMPUESTAS
+// (un remitente y/o un patrón del asunto) y BIPOLARES (`block` → no-relevante; `allow` → relevante,
+// entra sin juez). Las propone la minería LLM (o el dueño a mano) y SOLO se activan si su dry run
+// contra el histórico no atrapa ningún correo del lado contrario; el reporte queda persistido
 // (auditoría) y el toggle es reversible. La cola junta los `insufficient` (el gate no adivina).
 
 import { useState } from "react"
-import { Ban, Check, ChevronDown, ChevronRight, Loader2, Pickaxe, X } from "lucide-react"
+import { Ban, Check, ChevronDown, ChevronRight, Loader2, Pickaxe, Star, X } from "lucide-react"
 import { toast } from "sonner"
 import { EmptyState, ErrorState } from "@/components/common/data-state"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
@@ -20,14 +21,13 @@ import {
   patchGateRule,
   resolveReview,
 } from "@/data"
-import type { GateRule, ReviewItem } from "@/data"
+import type { GateRule, ReviewItem, RuleEffect } from "@/data"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
 
-const KIND_LABEL: Record<GateRule["kind"], string> = {
+const SENDER_KIND_LABEL: Record<NonNullable<GateRule["senderKind"]>, string> = {
   sender_email: "remitente",
   sender_domain: "dominio",
-  subject_contains: "asunto contiene",
   list_id: "list-id",
 }
 
@@ -35,10 +35,26 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? String(e.detail) : e instanceof Error ? e.message : String(e)
 }
 
+/** Texto de los predicados de una regla compuesta (remitente y/o asunto). */
+function rulePredicates(rule: GateRule): string {
+  const parts: string[] = []
+  if (rule.senderKind) parts.push(`${SENDER_KIND_LABEL[rule.senderKind]}=${rule.senderValue}`)
+  if (rule.subjectPattern) parts.push(`asunto~"${rule.subjectPattern}"`)
+  return parts.join(" & ") || "(sin predicados)"
+}
+
+function effectBadge(effect: RuleEffect) {
+  return effect === "allow" ? (
+    <Badge className="border-status-ok/40 bg-status-ok/10 text-status-ok">permitir</Badge>
+  ) : (
+    <Badge className="border-status-error/40 bg-status-error/10 text-status-error">bloquear</Badge>
+  )
+}
+
 function statusBadge(status: GateRule["status"]) {
-  if (status === "active") return <Badge className="bg-status-ok/15 text-status-ok">activa</Badge>
-  if (status === "disabled") return <Badge variant="secondary">apagada</Badge>
-  return <Badge className="bg-status-error/15 text-status-error">rechazada</Badge>
+  if (status === "active") return <Badge variant="secondary">activa</Badge>
+  if (status === "disabled") return <Badge variant="outline">apagada</Badge>
+  return <Badge variant="outline">rechazada</Badge>
 }
 
 function RuleRow({
@@ -52,6 +68,7 @@ function RuleRow({
 }) {
   const [open, setOpen] = useState(false)
   const report = rule.dryRunReport
+  const lado = rule.effect === "allow" ? "no-relevantes" : "relevantes"
   return (
     <div className="px-3 py-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -63,9 +80,9 @@ function RuleRow({
         >
           {open ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
         </button>
+        {effectBadge(rule.effect)}
         {statusBadge(rule.status)}
-        <span className="text-xs text-muted-foreground">{KIND_LABEL[rule.kind]}</span>
-        <span className="num min-w-0 text-xs font-medium">{rule.pattern}</span>
+        <span className="num min-w-0 text-xs font-medium">{rulePredicates(rule)}</span>
         <span className="text-[11px] text-muted-foreground">
           {rule.proposedBy === "llm" ? "minería" : "manual"}
         </span>
@@ -90,9 +107,9 @@ function RuleRow({
         <div className="mt-2 rounded-md border border-border bg-muted/20 p-2 text-[11px] text-muted-foreground">
           dry run: matcheó {report.matched} correo(s) — {report.matchedRelevant} relevante(s),{" "}
           {report.matchedNotRelevant} no relevante(s), {report.matchedUnverdicted} sin veredicto.{" "}
-          {report.passes ? "Pasó (no atrapa relevantes)." : "NO pasó: atraparía relevantes"}
-          {report.relevantSampleIds.length > 0 && (
-            <> (ej. inbox {report.relevantSampleIds.slice(0, 5).join(", ")})</>
+          {report.passes ? `Pasó (no atrapa ${lado}).` : `NO pasó: atraparía ${lado}`}
+          {report.contaminatingSampleIds.length > 0 && (
+            <> (ej. inbox {report.contaminatingSampleIds.slice(0, 5).join(", ")})</>
           )}
         </div>
       )}
@@ -107,7 +124,8 @@ export function RelevanceRulesManager() {
   const rules = useAsync<GateRule[]>(() => fetchGateRules("all"), [])
   const review = useAsync<ReviewItem[]>(() => fetchReviewQueue(), [])
   const [busy, setBusy] = useState(false)
-  const [blockEmail, setBlockEmail] = useState("")
+  const [senderValue, setSenderValue] = useState("")
+  const [subjectPattern, setSubjectPattern] = useState("")
 
   async function mutate(fn: () => Promise<void>, ok: string, reload: () => void) {
     setBusy(true)
@@ -122,19 +140,25 @@ export function RelevanceRulesManager() {
     }
   }
 
-  /** Bloquear un remitente = regla `sender_email` (corre el dry run; se rechaza si atrapa un
-   *  relevante). Reemplaza al viejo tier `blacklist`: el gate la marca no-relevante, gratis. */
-  const block = () =>
+  /** Alta manual de una regla compuesta: remitente (email→sender_email, si no →sender_domain) y/o
+   *  patrón de asunto. `block` la marca no-relevante; `allow` la deja entrar sin juez. El dry run la
+   *  rechaza si atraparía un correo del lado contrario. */
+  const submit = (effect: RuleEffect) =>
     void mutate(
       async () => {
-        await createGateRule(
-          "sender_email",
-          blockEmail.trim().toLowerCase(),
-          "bloqueo manual desde /filtros",
-        )
-        setBlockEmail("")
+        const sv = senderValue.trim().toLowerCase()
+        const sp = subjectPattern.trim()
+        await createGateRule({
+          effect,
+          senderKind: sv ? (sv.includes("@") ? "sender_email" : "sender_domain") : null,
+          senderValue: sv || null,
+          subjectPattern: sp || null,
+          rationale: "manual desde /filtros",
+        })
+        setSenderValue("")
+        setSubjectPattern("")
       },
-      "Remitente bloqueado (regla del gate)",
+      effect === "block" ? "Regla de bloqueo creada" : "Regla de interés creada",
       rules.reload,
     )
 
@@ -168,12 +192,14 @@ export function RelevanceRulesManager() {
       review.reload,
     )
 
+  const noPredicate = !senderValue.trim() && !subjectPattern.trim()
+
   return (
     <Panel className="overflow-hidden">
       <PanelHeader
         eyebrow="filtros · gate de relevancia"
         title="Reglas automáticas y revisión"
-        sub="reglas deterministas validadas con dry run contra el histórico (atrapar 1 relevante = rechazada); la cola junta los correos donde el gate no pudo decidir"
+        sub="reglas compuestas (remitente y/o asunto) y bipolares (bloquear / permitir), validadas con dry run contra el histórico (atrapar un correo del lado contrario = rechazada); la cola junta los correos donde el gate no pudo decidir"
         right={
           <Button size="sm" variant="outline" disabled={busy} onClick={mine}>
             {busy ? (
@@ -186,21 +212,45 @@ export function RelevanceRulesManager() {
         }
       />
       <PanelBody className="space-y-4">
-        {/* Bloquear remitente (reemplaza al viejo tier blacklist) */}
-        <div className="flex gap-2">
-          <Input
-            placeholder="bloquear remitente (email exacto; crea una regla del gate)"
-            value={blockEmail}
-            onChange={(e) => setBlockEmail(e.target.value)}
-            className="h-8"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && blockEmail.trim()) block()
-            }}
-          />
-          <Button size="sm" variant="outline" disabled={busy || !blockEmail.trim()} onClick={block}>
-            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Ban className="size-3.5" />}
-            Bloquear
-          </Button>
+        {/* Alta manual de regla compuesta: remitente y/o asunto, bloquear o permitir */}
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-2">
+            <Input
+              placeholder="remitente (email o dominio)"
+              value={senderValue}
+              onChange={(e) => setSenderValue(e.target.value)}
+              className="h-8 min-w-[160px] flex-1"
+            />
+            <Input
+              placeholder="patrón de asunto (opcional)"
+              value={subjectPattern}
+              onChange={(e) => setSubjectPattern(e.target.value)}
+              className="h-8 min-w-[160px] flex-1"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || noPredicate}
+              onClick={() => submit("block")}
+            >
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Ban className="size-3.5" />}
+              Bloquear
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || noPredicate}
+              onClick={() => submit("allow")}
+            >
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Star className="size-3.5" />}
+              Marcar como de interés
+            </Button>
+            <span className="text-[11px] text-muted-foreground">
+              remitente y/o asunto — el dry run valida contra el histórico
+            </span>
+          </div>
         </div>
 
         {/* Reglas */}
@@ -213,7 +263,7 @@ export function RelevanceRulesManager() {
         ) : rules.data.length === 0 ? (
           <EmptyState
             title="Sin reglas"
-            hint="La minería (botón arriba) propone reglas a partir de lo que el gate marcó no relevante; también podés crearlas por CLI (memex-relevance rules add)."
+            hint="La minería (botón arriba) propone reglas a partir de lo que el gate marcó relevante o no-relevante; también podés crearlas arriba o por CLI (memex-relevance rules add)."
           />
         ) : (
           <div className="divide-y divide-border rounded-md border border-border">

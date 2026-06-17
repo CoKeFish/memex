@@ -177,15 +177,17 @@ def test_get_inbox_trace_null_without_nodes(client: Any, seed_source: dict[str, 
 
 def test_get_inbox_returns_relevance_verdict(client: Any, seed_source: dict[str, Any]) -> None:
     """GET /inbox/{id} surfacea el veredicto del gate (relevance_verdicts): conclusión + método +
-    razón + modo. Para method='rule' trae kind/pattern de la regla (join a relevance_gate_rules)."""
+    razón + modo. method='rule' trae los predicados de la regla (join a relevance_gate_rules)."""
     _seed_n(seed_source["id"], 1, 2)
     ids = [it["id"] for it in client.get("/inbox").json()["items"]]
     rid_llm, rid_rule = ids[0], ids[1]
     with connection() as c:
         rule_id = c.execute(
             text(
-                "INSERT INTO relevance_gate_rules (user_id, kind, pattern, status, proposed_by) "
-                "VALUES (1, 'sender_email', 'promos@x.com', 'active', 'manual') RETURNING id"
+                "INSERT INTO relevance_gate_rules "
+                "(user_id, effect, sender_kind, sender_value, status, proposed_by) "
+                "VALUES (1, 'block', 'sender_email', 'promos@x.com', 'active', 'manual') "
+                "RETURNING id"
             )
         ).scalar_one()
         c.execute(
@@ -208,14 +210,15 @@ def test_get_inbox_returns_relevance_verdict(client: Any, seed_source: dict[str,
     assert v["method"] == "llm"
     assert v["reason"] == "toca un interes"
     assert v["mode"] == "per_window"
-    assert v["rule_id"] is None and v["rule_kind"] is None
+    assert v["rule_id"] is None and v["rule_sender_kind"] is None
 
     vr = client.get(f"/inbox/{rid_rule}").json()["relevance_verdict"]
     assert vr["verdict"] == "not_relevant"
     assert vr["method"] == "rule"
     assert vr["rule_id"] == rule_id
-    assert vr["rule_kind"] == "sender_email"
-    assert vr["rule_pattern"] == "promos@x.com"
+    assert vr["rule_effect"] == "block"
+    assert vr["rule_sender_kind"] == "sender_email"
+    assert vr["rule_sender_value"] == "promos@x.com"
 
 
 def test_get_inbox_relevance_verdict_null_without_row(

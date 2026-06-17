@@ -6,8 +6,8 @@
 import { apiDelete, apiGet, apiPost } from "@/lib/api"
 import type { Tier } from "@/types/domain"
 
-/** Tier como dial de COSTO sobre lo relevante. «No procesar» ya NO es un tier: es una regla del
- *  gate (Bloquear remitente = `createGateRule("sender_email", …)`). */
+/** Tier como dial de COSTO sobre lo relevante. «No procesar» ya NO es un tier: es una regla `block`
+ *  del gate (Bloquear remitente = `createGateRule({ effect: "block", … })`). */
 export type CostTier = "batch" | "individual"
 
 /**

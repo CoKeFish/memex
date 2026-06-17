@@ -33,7 +33,7 @@ from memex.core.source import SourceKind
 from memex.db import connection
 from memex.llm import LLMQuotaError
 from memex.logging import bound_log_context, get_logger
-from memex.relevance.mining import run_rule_mining
+from memex.relevance.mining import run_rule_mining_cycle
 from memex.relevance.settings import get_settings
 from memex.reprocess import reprocess
 from memex.scheduler import runs
@@ -320,10 +320,10 @@ async def _mine_between_windows(user_id: int, lot: ProcessingLot) -> dict[str, A
     """Minería de reglas INTERCALADA entre ventanas del lote (procesamiento incremental).
 
     El corazón del modelo incremental: tras juzgar una ventana, se mina sobre el ACUMULADO de
-    no-relevantes — cuando una clase (dominio) cruza el umbral, se proponen reglas (dry-run →
-    auto-activa) y la ventana SIGUIENTE corto-circuita esa clase GRATIS, sin volver al juez. NO
-    es "juzgar todo y después minar": el sistema aprende sobre la marcha y cada ventana sale más
-    barata.
+    ambas polaridades (no-relevantes → reglas block; relevantes + rescates → reglas allow) —
+    cuando una clase (dominio) cruza el umbral, se proponen reglas (dry-run → auto-activa) y la
+    ventana SIGUIENTE corto-circuita esa clase GRATIS, sin volver al juez. NO es "juzgar todo y
+    después minar": el sistema aprende sobre la marcha y cada ventana sale más barata.
 
     Solo con el gate encendido, `relevance` en las etapas del lote y `mining_interleave` ON. La
     minería es umbral-gated (no-op barato sin LLM hasta acumular). Best-effort salvo quota: una
@@ -336,7 +336,7 @@ async def _mine_between_windows(user_id: int, lot: ProcessingLot) -> dict[str, A
     if not settings.enabled or not settings.mining_interleave:
         return None
     try:
-        stats = await run_rule_mining(user_id)
+        stats = await run_rule_mining_cycle(user_id)
     except LLMQuotaError:
         raise
     except Exception as e:  # best-effort: minar no debe tumbar el avance del lote

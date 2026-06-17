@@ -63,8 +63,10 @@ interface RelevanceVerdictApi {
   mode?: string | null
   model?: string | null
   rule_id?: number | null
-  rule_kind?: string | null
-  rule_pattern?: string | null
+  rule_effect?: string | null
+  rule_sender_kind?: string | null
+  rule_sender_value?: string | null
+  rule_subject_pattern?: string | null
   created_at?: string | null
 }
 
@@ -76,8 +78,10 @@ function toRelevanceVerdict(v: RelevanceVerdictApi): RelevanceVerdict {
     mode: v.mode ?? null,
     model: v.model ?? null,
     ruleId: v.rule_id ?? null,
-    ruleKind: v.rule_kind ?? null,
-    rulePattern: v.rule_pattern ?? null,
+    ruleEffect: (v.rule_effect ?? null) as RelevanceVerdict["ruleEffect"],
+    ruleSenderKind: v.rule_sender_kind ?? null,
+    ruleSenderValue: v.rule_sender_value ?? null,
+    ruleSubjectPattern: v.rule_subject_pattern ?? null,
     createdAt: v.created_at ?? null,
   }
 }

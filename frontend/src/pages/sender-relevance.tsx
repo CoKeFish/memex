@@ -122,7 +122,12 @@ export function SenderRelevancePage() {
     const msg = p.kind === "bloquear" ? `Remitente bloqueado: ${p.email}` : `Descartado: ${p.email}`
     void runAction(async () => {
       if (p.kind === "bloquear")
-        await createGateRule("sender_email", p.email, "confirmado ruido desde /relevancia")
+        await createGateRule({
+          effect: "block",
+          senderKind: "sender_email",
+          senderValue: p.email,
+          rationale: "confirmado ruido desde /relevancia",
+        })
       else await createFilter({ scope: { "from.email": { equals: p.email } }, action: "ignore" })
       if (p.candidateKey) await setCandidateStatus(p.candidateKey, "confirmed", p.procedure)
     }, msg)

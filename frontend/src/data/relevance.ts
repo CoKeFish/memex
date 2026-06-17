@@ -84,23 +84,30 @@ export async function deleteInterest(id: number): Promise<void> {
 
 // ---- Reglas ------------------------------------------------------------------------------------
 
-export type GateRuleKind = "sender_email" | "sender_domain" | "subject_contains" | "list_id"
+export type SenderKind = "sender_email" | "sender_domain" | "list_id"
+export type RuleEffect = "block" | "allow"
 export type GateRuleStatus = "active" | "disabled" | "rejected"
 
 /** Reporte del dry run de una regla contra el histórico (la auditoría de su activación). */
 export interface DryRunReport {
+  effect: RuleEffect
   matched: number
   matchedRelevant: number
   matchedNotRelevant: number
   matchedUnverdicted: number
   relevantSampleIds: number[]
+  notRelevantSampleIds: number[]
+  /** Los ids del lado contaminante: relevantes para block, no-relevantes para allow. */
+  contaminatingSampleIds: number[]
   passes: boolean
 }
 
 export interface GateRule {
   id: number
-  kind: GateRuleKind
-  pattern: string
+  effect: RuleEffect
+  senderKind: SenderKind | null
+  senderValue: string | null
+  subjectPattern: string | null
   status: GateRuleStatus
   proposedBy: "llm" | "manual"
   rationale: string
@@ -113,18 +120,23 @@ export interface GateRule {
 }
 
 interface DryRunReportApi {
+  effect?: RuleEffect
   matched?: number
   matched_relevant?: number
   matched_not_relevant?: number
   matched_unverdicted?: number
   relevant_sample_ids?: number[]
+  not_relevant_sample_ids?: number[]
+  contaminating_sample_ids?: number[]
   passes?: boolean
 }
 
 interface GateRuleApi {
   id: number
-  kind: GateRuleKind
-  pattern: string
+  effect: RuleEffect
+  sender_kind: SenderKind | null
+  sender_value: string | null
+  subject_pattern: string | null
   status: GateRuleStatus
   proposed_by: "llm" | "manual"
   rationale: string
@@ -139,11 +151,14 @@ interface GateRuleApi {
 function toReport(r: DryRunReportApi): DryRunReport | null {
   if (r == null || r.matched === undefined) return null
   return {
+    effect: r.effect ?? "block",
     matched: r.matched,
     matchedRelevant: r.matched_relevant ?? 0,
     matchedNotRelevant: r.matched_not_relevant ?? 0,
     matchedUnverdicted: r.matched_unverdicted ?? 0,
     relevantSampleIds: r.relevant_sample_ids ?? [],
+    notRelevantSampleIds: r.not_relevant_sample_ids ?? [],
+    contaminatingSampleIds: r.contaminating_sample_ids ?? [],
     passes: r.passes ?? false,
   }
 }
@@ -151,8 +166,10 @@ function toReport(r: DryRunReportApi): DryRunReport | null {
 function toRule(it: GateRuleApi): GateRule {
   return {
     id: it.id,
-    kind: it.kind,
-    pattern: it.pattern,
+    effect: it.effect,
+    senderKind: it.sender_kind,
+    senderValue: it.sender_value,
+    subjectPattern: it.subject_pattern,
     status: it.status,
     proposedBy: it.proposed_by,
     rationale: it.rationale,
@@ -165,19 +182,34 @@ function toRule(it: GateRuleApi): GateRule {
   }
 }
 
-/** Reglas del gate (todas o por status) — GET /relevance/rules. */
-export async function fetchGateRules(status = "all"): Promise<GateRule[]> {
-  const data = await apiGet<{ items: GateRuleApi[] }>(`/relevance/rules?status=${status}`)
+/** Reglas del gate (todas o por status/effect) — GET /relevance/rules. */
+export async function fetchGateRules(status = "all", effect = "all"): Promise<GateRule[]> {
+  const data = await apiGet<{ items: GateRuleApi[] }>(
+    `/relevance/rules?status=${status}&effect=${effect}`,
+  )
   return data.items.map(toRule)
 }
 
-/** Alta manual de una regla (corre dry run; 422 con el reporte si atraparía un relevante). */
-export async function createGateRule(
-  kind: GateRuleKind,
-  pattern: string,
-  rationale = "",
-): Promise<GateRule> {
-  return toRule(await apiPost<GateRuleApi>("/relevance/rules", { kind, pattern, rationale }))
+/** Predicados de una regla nueva: ≥1 (remitente y/o asunto); lo valida el motor. */
+export interface NewRule {
+  effect: RuleEffect
+  senderKind?: SenderKind | null
+  senderValue?: string | null
+  subjectPattern?: string | null
+  rationale?: string
+}
+
+/** Alta manual de una regla compuesta (corre dry run; 422 con el reporte si no pasa). */
+export async function createGateRule(rule: NewRule): Promise<GateRule> {
+  return toRule(
+    await apiPost<GateRuleApi>("/relevance/rules", {
+      effect: rule.effect,
+      sender_kind: rule.senderKind ?? null,
+      sender_value: rule.senderValue ?? null,
+      subject_pattern: rule.subjectPattern ?? null,
+      rationale: rule.rationale ?? "",
+    }),
+  )
 }
 
 /** Toggle reversible de una regla — PATCH /relevance/rules/{id}. */
@@ -197,8 +229,8 @@ export interface MineRulesResult {
   costUsd: number
 }
 
-/** Minería on-demand de reglas (1 llamada LLM + dry run por propuesta) — POST /relevance/rules/mine. */
-export async function mineGateRules(): Promise<MineRulesResult> {
+/** Minería on-demand de reglas (1 llamada LLM por polaridad + dry run) — POST /relevance/rules/mine. */
+export async function mineGateRules(effect = "all"): Promise<MineRulesResult> {
   const r = await apiPost<{
     senders: number
     proposed: number
@@ -206,7 +238,7 @@ export async function mineGateRules(): Promise<MineRulesResult> {
     rejected: number
     skipped: number
     cost_usd: number
-  }>("/relevance/rules/mine")
+  }>(`/relevance/rules/mine?effect=${effect}`)
   return {
     senders: r.senders,
     proposed: r.proposed,

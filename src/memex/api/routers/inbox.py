@@ -415,7 +415,9 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
                 text(
                     """
                     SELECT rv.verdict, rv.method, rv.reason, rv.mode, rv.model, rv.rule_id,
-                           rv.created_at, r.kind AS rule_kind, r.pattern AS rule_pattern
+                           rv.created_at, r.effect AS rule_effect,
+                           r.sender_kind AS rule_sender_kind, r.sender_value AS rule_sender_value,
+                           r.subject_pattern AS rule_subject_pattern
                     FROM relevance_verdicts rv
                     LEFT JOIN relevance_gate_rules r ON r.id = rv.rule_id
                     WHERE rv.inbox_id = :id AND rv.user_id = :uid

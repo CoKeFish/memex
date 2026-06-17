@@ -27,14 +27,13 @@ from memex.relevance.interests import (
     list_interests,
     update_interest,
 )
-from memex.relevance.mining import MiningStats, run_rule_mining
+from memex.relevance.mining import MiningStats, run_rule_mining, run_rule_mining_cycle
 from memex.relevance.rules import (
     DryRunReport,
     apply_active_rules,
     create_rule,
     dry_run_rule,
     list_rules,
-    match_rule,
     set_rule_status,
 )
 from memex.relevance.settings import GateSettings, get_settings, upsert_settings
@@ -68,10 +67,10 @@ __all__ = [
     "list_review_queue",
     "list_rules",
     "load_gate_workset",
-    "match_rule",
     "resolve_insufficient",
     "run_relevance_gate",
     "run_rule_mining",
+    "run_rule_mining_cycle",
     "set_rule_status",
     "update_interest",
     "upsert_settings",

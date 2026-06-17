@@ -6,8 +6,9 @@ LLM default es ANTHROPIC (Opus — decisión del dueño: modelo superior para el
 DeepSeek compartido del resto del pipeline.
 
 Flujo por ventana:
-1. Reglas deterministas activas primero (`apply_active_rules`): lo matcheado se persiste como
-   `not_relevant` `method='rule'` SIN gastar LLM.
+1. Reglas deterministas activas primero (`apply_active_rules`): lo matcheado se persiste con
+   `method='rule'` SIN gastar LLM — `block`→`not_relevant`, `allow`→`relevant`. Si un correo
+   matchea reglas de AMBAS polaridades es un conflicto: no se cortocircuita, cae al juez.
 2. El resto va a Opus según el modo del experimento (`per_window`: 1 llamada con veredictos
    por mensaje; `per_message`: 1 llamada por correo).
 3. Veredictos a `relevance_verdicts` (idempotente); el costo a `llm_calls` con
@@ -242,34 +243,50 @@ async def _process_window(
 ) -> None:
     """Procesa UNA ventana: reglas deterministas primero, el resto al LLM según el modo."""
     with connection() as conn:
-        by_rule = apply_active_rules(conn, user_id, list(window.rows))
-        if by_rule:
+        application = apply_active_rules(conn, user_id, list(window.rows))
+        if application.decisions:
             insert_verdicts(
                 conn,
                 user_id,
                 [
                     VerdictItem(
-                        inbox_id=iid,
-                        verdict="not_relevant",
+                        inbox_id=d.inbox_id,
+                        verdict="relevant" if d.effect == "allow" else "not_relevant",
                         method="rule",
-                        rule_id=rule_id,
-                        reason="regla determinista del gate",
+                        rule_id=d.rule_id,
+                        reason=f"regla {d.effect} del gate",
                     )
-                    for iid, rule_id in by_rule.items()
+                    for d in application.decisions
                 ],
             )
-    if by_rule:
-        stats.by_rule += len(by_rule)
-        stats.not_relevant += len(by_rule)
-        stats.messages += len(by_rule)
+    decisions = application.decisions
+    if decisions:
+        n_allow = sum(1 for d in decisions if d.effect == "allow")
+        n_block = len(decisions) - n_allow
+        stats.by_rule += len(decisions)
+        stats.relevant += n_allow
+        stats.not_relevant += n_block
+        stats.messages += len(decisions)
         _log.info(
             "relevance.gate.by_rule",
             source_id=window.source_id,
-            inbox_ids=sorted(by_rule),
-            rules=sorted(set(by_rule.values())),
+            inbox_ids=sorted(d.inbox_id for d in decisions),
+            block=n_block,
+            allow=n_allow,
+            rules=sorted({d.rule_id for d in decisions}),
+        )
+    # Conflicto allow↔block en el mismo correo: NO se cortocircuita, cae al juez (y se loguea).
+    for c in application.conflicts:
+        _log.info(
+            "relevance.gate.rule_conflict",
+            source_id=window.source_id,
+            inbox_id=c.inbox_id,
+            block_rule_id=c.block_rule_id,
+            allow_rule_id=c.allow_rule_id,
         )
 
-    pending = [r for r in window.rows if r.inbox_id not in by_rule]
+    decided = {d.inbox_id for d in decisions}
+    pending = [r for r in window.rows if r.inbox_id not in decided]
     if not pending:
         return
     if settings.mode == "per_message":
