@@ -86,8 +86,11 @@ async def get_ingest_scheduler(user_id: UserID) -> dict[str, Any]:
         source_rows = (
             conn.execute(
                 text(
-                    "SELECT id, name, type, enabled, config, fetch_schedule "
-                    "FROM sources WHERE user_id = :uid ORDER BY id"
+                    "SELECT s.id, s.name, s.type, s.enabled, s.config, s.fetch_schedule, "
+                    "a.alias AS account_alias, "
+                    "COALESCE(s.config->>'account_email', a.metadata->>'email') AS account_email "
+                    "FROM sources s LEFT JOIN accounts a ON a.id = s.account_id "
+                    "WHERE s.user_id = :uid ORDER BY s.id"
                 ),
                 {"uid": user_id},
             )
@@ -120,6 +123,8 @@ async def get_ingest_scheduler(user_id: UserID) -> dict[str, Any]:
             enabled=bool(s["enabled"]),
             config=dict(s["config"] or {}),
             fetch_schedule=s["fetch_schedule"],
+            account_alias=s["account_alias"],
+            account_email=s["account_email"],
             latest=latest_by_source.get(int(s["id"])),
         )
         for s in source_rows

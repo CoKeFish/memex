@@ -264,18 +264,18 @@ def _resolve_redundant_cooccurrence(
     Mismo triple-filtro (pista + inbox + co-ocurrencia) que la cascada del partidor: las ya
     terminales NO se tocan. Devuelve cuántas confirmó."""
     redundant = [
-        e.id
+        e
         for e in list_edges(conn, user_id, verdict=VERDICT_AMBIGUOUS, producer=PRODUCER_INBOX)
         if e.relation_type == RELTYPE_COOCURRENCIA and frozenset((e.src, e.dst)) in confirmed_pairs
     ]
     if not redundant:
         return 0
-    sources = edge_sources(conn, redundant)
+    sources = edge_sources(conn, [e.id for e in redundant])
     n = 0
-    for eid in redundant:
+    for e in redundant:
         if resolve_edge(
             conn,
-            eid,
+            e.id,
             verdict=VERDICT_CONFIRMED,
             provenance=PROVENANCE_EXTRACTED,
             relation="ya existe una relación confirmada entre ambos",
@@ -283,12 +283,13 @@ def _resolve_redundant_cooccurrence(
             record_decision(
                 conn,
                 user_id,
-                eid,
+                e.id,
                 verdict=VERDICT_CONFIRM,
                 method=METHOD_REGLA,
                 rule="redundante",
-                evidence_sig=evidence_signature(sources.get(eid, set())),
+                evidence_sig=evidence_signature(sources.get(e.id, set())),
             )
+            mark_vertices_dirty(conn, user_id, [e.src, e.dst])  # deja el delta completo
             n += 1
     return n
 

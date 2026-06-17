@@ -30,6 +30,7 @@ from memex.relations.edges import (
     Ref,
     propose_edge,
 )
+from memex.relations.graph_writer import mark_dirty, prune_edges
 
 #: Estados activos (participan del match de reconciliación).
 ACTIVE_STATUSES: tuple[str, ...] = ("candidate", "confirmed", "stale")
@@ -237,20 +238,25 @@ def delete_cluster(conn: Connection, cluster_id: int) -> None:
 
 
 def _delete_cluster_edges(conn: Connection, user_id: int, cluster_id: int) -> None:
-    """Borra las aristas `miembro_de` que apuntan a este cúmulo (no-op hasta materializarlas)."""
-    conn.execute(
-        text(
-            "DELETE FROM relation_edges WHERE user_id = :u AND producer = :p "
-            "AND relation_type = :rt AND dst_slug = :cs AND dst_id = :cid"
-        ),
-        {
-            "u": user_id,
-            "p": PRODUCER_LLM,
-            "rt": RELTYPE_MIEMBRO_DE,
-            "cs": CUMULO_SLUG,
-            "cid": cluster_id,
-        },
-    )
+    """Borra las aristas `miembro_de` de este cúmulo (no-op hasta materializarlas) vía el
+    GraphWriter, que marca dirty a los ex-miembros (perdieron su cúmulo)."""
+    ids = [
+        int(r[0])
+        for r in conn.execute(
+            text(
+                "SELECT id FROM relation_edges WHERE user_id = :u AND producer = :p "
+                "AND relation_type = :rt AND dst_slug = :cs AND dst_id = :cid"
+            ),
+            {
+                "u": user_id,
+                "p": PRODUCER_LLM,
+                "rt": RELTYPE_MIEMBRO_DE,
+                "cs": CUMULO_SLUG,
+                "cid": cluster_id,
+            },
+        ).all()
+    ]
+    prune_edges(conn, user_id, ids)
 
 
 def mark_dissolved(conn: Connection, user_id: int, cluster_id: int) -> None:
@@ -337,10 +343,13 @@ def materialize_cluster_edges(conn: Connection, user_id: int) -> int:
             )
             n += 1
         stale_ids = [eid for ref, eid in existing.items() if ref not in live]
-        if stale_ids:
-            conn.execute(
-                text("DELETE FROM relation_edges WHERE id = ANY(:ids)"), {"ids": stale_ids}
-            )
+        # prune_edges captura (miembro, cúmulo) ANTES del DELETE y marca ambos: el cúmulo queda
+        # dirty al PERDER un miembro (el BFS post-DELETE no lo alcanza). Las ALTAS lo marcan vía
+        # su arista nueva; resta marcar los miembros nuevos. Marca solo el delta (no todo).
+        prune_edges(conn, user_id, stale_ids)
+        new_members = live - existing.keys()
+        if new_members:
+            mark_dirty(conn, user_id, new_members)
     return n
 
 

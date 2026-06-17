@@ -161,3 +161,23 @@ def test_desired_sources_off_master_excludes_scheduled(seed_source: dict[str, An
         )
     _set_daemon(False)
     assert _desired_ids() == []  # master apagado → nada se agenda
+
+
+# ---- identidad de la fuente (alias/email) en el panel ---
+
+
+def test_scheduler_exposes_account_identity(client: Any, seed_source: dict[str, Any]) -> None:
+    """El panel trae account_email (config del cliente local) y account_alias (cuenta vinculada)
+    para que el front rotule con el alias y no el nombre crudo."""
+    sid = seed_source["id"]
+    with connection() as c:
+        c.execute(
+            text(
+                "UPDATE sources SET config = config || "
+                "jsonb_build_object('account_email', CAST(:em AS TEXT)) WHERE id = :sid"
+            ),
+            {"em": "alumno@uni.edu", "sid": sid},
+        )
+    s = client.get("/ingest/scheduler").json()["sources"][0]
+    assert s["account_email"] == "alumno@uni.edu"
+    assert s["account_alias"] is None  # fuente sin cuenta vinculada (cliente local)

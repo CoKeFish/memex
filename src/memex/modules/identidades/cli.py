@@ -69,12 +69,10 @@ from memex.relations.edges import (
     PROVENANCE_EXTRACTED,
     VERDICT_AMBIGUOUS,
     VERDICT_CONFIRMED,
-    VERDICT_REJECTED,
     Ref,
     edges_touching,
-    propose_edge,
-    resolve_edge,
 )
+from memex.relations.graph_writer import add_edge, delete_vertex, reject_override, update_verdict
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 
@@ -1171,7 +1169,7 @@ def _cmd_relate(args: argparse.Namespace) -> int:
             _say("\nLa identidad origen y/o destino no existen para este user.\n", err=True)
             return 1
         (src_ref, a_name), (dst_ref, b_name) = a, b
-        edge_id = propose_edge(
+        edge_id = add_edge(
             conn,
             args.user,
             src_ref,
@@ -1227,8 +1225,9 @@ def _cmd_confirm_relation(args: argparse.Namespace) -> int:
                 err=True,
             )
             return 1
-        changed = resolve_edge(
+        changed = update_verdict(
             conn,
+            args.user,
             args.edge,
             verdict=VERDICT_CONFIRMED,
             provenance=PROVENANCE_EXTRACTED,
@@ -1245,33 +1244,27 @@ def _cmd_confirm_relation(args: argparse.Namespace) -> int:
 
 def _cmd_unrelate(args: argparse.Namespace) -> int:
     """Descarta una arista: la marca `rejected` (terminal). El humano puede rechazar una ambigua O
-    una confirmed (override; UPDATE directo acotado al user); fija `provenance='extracted'` (es una
-    aserción del dueño, no del LLM) y `dirty=TRUE`. Idempotente: una ya rechazada no cambia."""
+    una confirmed (override), vía `graph_writer.reject_override`, que además marca dirty los dos
+    extremos. Idempotente: una ya rechazada no cambia."""
+    why = args.why.strip()
     with connection() as conn:
-        n = conn.execute(
-            text(
-                """
-                UPDATE relation_edges
-                SET verdict = :rej, provenance = 'extracted', decided_at = NOW(), dirty = TRUE,
-                    evidence = COALESCE(NULLIF(:why, ''), evidence),
-                    relation = COALESCE(NULLIF(:why, ''), relation)
-                WHERE id = :e AND user_id = :u AND verdict <> :rej
-                """
-            ),
-            {"rej": VERDICT_REJECTED, "why": args.why.strip(), "e": args.edge, "u": args.user},
-        ).rowcount
         exists = conn.execute(
             text("SELECT 1 FROM relation_edges WHERE id = :e AND user_id = :u"),
             {"e": args.edge, "u": args.user},
         ).first()
+        changed = (
+            reject_override(conn, args.user, args.edge, evidence=why, relation=why)
+            if exists is not None
+            else False
+        )
     if exists is None:
         _say(f"\nNo existe la arista id={args.edge} para el user {args.user}.\n", err=True)
         return 1
-    result = {"edge_id": args.edge, "verdict": "rejected", "changed": n > 0}
+    result = {"edge_id": args.edge, "verdict": "rejected", "changed": changed}
     if args.as_json:
         _emit_json(result)
     else:
-        msg = "rechazada" if n > 0 else "ya estaba rechazada"
+        msg = "rechazada" if changed else "ya estaba rechazada"
         _say(f"\nArista {args.edge} {msg}.\n")
     return 0
 
@@ -1545,15 +1538,21 @@ def _cmd_interest_remove(args: argparse.Namespace) -> int:
     with connection() as conn:
         row = conn.execute(
             text(
-                "DELETE FROM mod_identidades WHERE id = :id AND user_id = :uid "
-                "RETURNING display_name"
+                "SELECT kind, display_name FROM mod_identidades WHERE id = :id AND user_id = :uid"
             ),
             {"id": args.id, "uid": args.user},
         ).first()
+        if row is not None:
+            # Saca el vértice del grafo + dirty a vecinos ANTES de borrar la fila del módulo.
+            delete_vertex(conn, args.user, Ref(IDENTITY_SLUG_BY_KIND[str(row[0])], args.id))
+            conn.execute(
+                text("DELETE FROM mod_identidades WHERE id = :id AND user_id = :uid"),
+                {"id": args.id, "uid": args.user},
+            )
     if row is None:
         _say(f"\nNo existe la identidad id={args.id} para el user {args.user}.\n", err=True)
         return 1
-    _say(f"\nQuitada de la lista: {row[0]!r} (id={args.id}).\n")
+    _say(f"\nQuitada de la lista: {row[1]!r} (id={args.id}).\n")
     return 0
 
 

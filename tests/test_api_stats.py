@@ -259,6 +259,26 @@ def test_pipeline_ingestion_invariant_and_totals(client: Any) -> None:
     assert ing["totals"]["unbalanced"] == 1
 
 
+def test_pipeline_runs_expose_account_identity(client: Any) -> None:
+    """Corridas con account_alias / account_email para rotular la fuente con el alias."""
+    sid = _seed_source("gmail-test")
+    with connection() as c:
+        aid = c.execute(
+            text(
+                "INSERT INTO accounts (user_id, alias, provider, kind, metadata) "
+                "VALUES (1, 'Mi Gmail', 'google', 'email', "
+                "jsonb_build_object('email', CAST(:em AS TEXT))) RETURNING id"
+            ),
+            {"em": "me@gmail.com"},
+        ).scalar_one()
+        c.execute(text("UPDATE sources SET account_id = :a WHERE id = :s"), {"a": aid, "s": sid})
+    _seed_run(sid)
+    runs = client.get("/stats/pipeline").json()["ingestion"]["runs"]
+    run = next(r for r in runs if r["source_id"] == sid)
+    assert run["account_alias"] == "Mi Gmail"
+    assert run["account_email"] == "me@gmail.com"
+
+
 def test_pipeline_ingestion_window(client: Any) -> None:
     sid = _seed_source("s")
     _seed_run(sid, started_at=datetime(2026, 3, 1, tzinfo=UTC), posted=1, inserted=1)

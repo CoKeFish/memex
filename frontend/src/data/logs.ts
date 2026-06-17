@@ -6,6 +6,7 @@
 // de lo persistido por el pipeline (ingestion_runs + worker_runs vía /stats/pipeline).
 
 import { apiGet } from "@/lib/api"
+import { sourceDisplayName } from "@/lib/inbox-format"
 import { fetchPipeline } from "./pipeline"
 import { multiParam, windowParams, type FilterMode, type MetricsWindow } from "./metrics"
 import type {
@@ -147,7 +148,7 @@ export async function fetchObsTimeline(): Promise<ObsTimelineEntry[]> {
       id: `obs-ing-${r.id}`,
       ts: r.startedAt,
       kind: "ingestion",
-      title: `Ingesta · ${r.sourceName ?? r.sourceId}`,
+      title: `Ingesta · ${sourceDisplayName(r.accountAlias, r.accountEmail, r.sourceName) || r.sourceId}`,
       detail: `posted ${r.posted} · inserted ${r.inserted} · dup ${r.duplicates} · err ${r.errors} · filt ${r.filtered}`,
       tone: r.status === "ok" ? "ok" : r.status === "running" ? "running" : "error",
       requestId: null,

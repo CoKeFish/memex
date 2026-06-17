@@ -31,6 +31,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
+from memex.relations.edges import Ref
+from memex.relations.graph_writer import merge_vertices
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 _log = get_logger("memex.modules.identidades.merge")
@@ -121,60 +123,11 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
         p,
     )
 
-    # 4. aristas del grafo. Primero borrar las que quedarían self-loop (absorbida↔superviviente en
-    #    el mismo slug), luego las que colisionarían con la UNIQUE lógica de la superviviente, luego
-    #    re-apuntar src y dst.
-    conn.execute(
-        text(
-            """
-            DELETE FROM relation_edges
-            WHERE user_id = :u
-              AND ((src_slug = :slug AND src_id = :absb AND dst_slug = :slug AND dst_id = :surv)
-                OR (src_slug = :slug AND src_id = :surv AND dst_slug = :slug AND dst_id = :absb))
-            """
-        ),
-        p,
-    )
-    conn.execute(
-        text(
-            """
-            DELETE FROM relation_edges a
-            WHERE a.user_id = :u AND a.src_slug = :slug AND a.src_id = :absb AND EXISTS (
-              SELECT 1 FROM relation_edges s
-              WHERE s.user_id = :u AND s.src_slug = :slug AND s.src_id = :surv
-                AND s.dst_slug = a.dst_slug AND s.dst_id = a.dst_id
-                AND s.relation_type = a.relation_type AND s.producer = a.producer)
-            """
-        ),
-        p,
-    )
-    conn.execute(
-        text(
-            "UPDATE relation_edges SET src_id = :surv "
-            "WHERE user_id = :u AND src_slug = :slug AND src_id = :absb"
-        ),
-        p,
-    )
-    conn.execute(
-        text(
-            """
-            DELETE FROM relation_edges a
-            WHERE a.user_id = :u AND a.dst_slug = :slug AND a.dst_id = :absb AND EXISTS (
-              SELECT 1 FROM relation_edges s
-              WHERE s.user_id = :u AND s.dst_slug = :slug AND s.dst_id = :surv
-                AND s.src_slug = a.src_slug AND s.src_id = a.src_id
-                AND s.relation_type = a.relation_type AND s.producer = a.producer)
-            """
-        ),
-        p,
-    )
-    conn.execute(
-        text(
-            "UPDATE relation_edges SET dst_id = :surv "
-            "WHERE user_id = :u AND dst_slug = :slug AND dst_id = :absb"
-        ),
-        p,
-    )
+    # 4 + 4d. aristas del grafo y membresía de cúmulos: re-apuntado vía el GraphWriter (único punto
+    #    de mutación del grafo). Además captura los ex-vecinos del absorbido y los marca `dirty`
+    #    (groundwork incremental, ADR-021) — antes este merge re-apuntaba sin avisar al grafo, y los
+    #    vecinos heredados quedaban stale hasta el próximo barrido completo.
+    merge_vertices(conn, user_id, absorbed=Ref(slug, absorbed_id), survivor=Ref(slug, survivor_id))
 
     # 4b. jerarquía de pertenencia: los hijos del absorbido cuelgan del superviviente; si el
     #     superviviente colgaba del absorbido, ese link queda self-loop → se limpia (el fill-only de
@@ -209,30 +162,6 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
         text(
             "UPDATE mod_finance_transactions SET counterparty_identity_id = :surv "
             "WHERE user_id = :u AND counterparty_identity_id = :absb"
-        ),
-        p,
-    )
-
-    # 4d. membresía de cúmulos: sin esto la fila de la absorbida queda apuntando a un vértice
-    #     muerto y cada build re-crea + poda su arista `miembro_de` (churn). Si el superviviente ya
-    #     es miembro del mismo cúmulo gana su fila (incluido su `pruned`, respetando la UNIQUE);
-    #     si no, se re-apunta.
-    conn.execute(
-        text(
-            """
-            DELETE FROM relation_cluster_members a
-            WHERE a.user_id = :u AND a.member_slug = :slug AND a.member_id = :absb AND EXISTS (
-              SELECT 1 FROM relation_cluster_members s
-              WHERE s.cluster_id = a.cluster_id
-                AND s.member_slug = :slug AND s.member_id = :surv)
-            """
-        ),
-        p,
-    )
-    conn.execute(
-        text(
-            "UPDATE relation_cluster_members SET member_id = :surv "
-            "WHERE user_id = :u AND member_slug = :slug AND member_id = :absb"
         ),
         p,
     )

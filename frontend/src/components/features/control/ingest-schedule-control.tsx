@@ -36,8 +36,8 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e)
 }
 
-/** Adapta una fila del scheduler (o un id+config sueltos) a la forma `Source` que espera sourceMeta
- *  (solo lee type/name/config) — así el icono/etiqueta de proveedor es el mismo que en el resto. */
+/** Adapta una fila del scheduler a la forma `Source` que consumen sourceMeta/sourceFullLabel — así el
+ *  icono y el rótulo (proveedor · alias/email) son los mismos que en el resto del dashboard. */
 function asSource(s: IngestScheduleSource): Source {
   return {
     id: s.sourceId,
@@ -46,7 +46,9 @@ function asSource(s: IngestScheduleSource): Source {
     enabled: s.enabled,
     createdAt: "",
     config: s.config,
-    fetchModes: ["incremental"], // sourceMeta solo lee type/name/config; default seguro
+    accountAlias: s.accountAlias,
+    accountEmail: s.accountEmail,
+    fetchModes: ["incremental"], // fetchModes no lo usa sourceMeta; default seguro
   }
 }
 

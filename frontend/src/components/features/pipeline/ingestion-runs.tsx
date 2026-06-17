@@ -5,6 +5,7 @@ import { StatusBadge } from "@/components/common/led"
 import { RelativeTime } from "@/components/common/time"
 import { formatInt } from "@/lib/format"
 import { ingestionLabel, ingestionTone } from "@/lib/status"
+import { sourceDisplayName } from "@/lib/inbox-format"
 import type { IngestionRunRow, IngestionTotalsRow } from "@/data"
 
 export function IngestionRuns({ runs, totals }: { runs: IngestionRunRow[]; totals: IngestionTotalsRow }) {
@@ -45,7 +46,9 @@ export function IngestionRuns({ runs, totals }: { runs: IngestionRunRow[]; total
               <tbody className="divide-y divide-border">
                 {rows.map((r) => (
                   <tr key={r.id} className={cn("hover:bg-accent/30", !r.balanced && "bg-status-error/5")}>
-                    <td className="whitespace-nowrap px-3 py-2 font-medium">{r.sourceName ?? r.sourceId}</td>
+                    <td className="whitespace-nowrap px-3 py-2 font-medium">
+                      {sourceDisplayName(r.accountAlias, r.accountEmail, r.sourceName) || r.sourceId}
+                    </td>
                     <td className="px-3 py-2">
                       <StatusBadge
                         tone={ingestionTone(r.status)}

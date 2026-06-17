@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
@@ -34,6 +33,7 @@ from memex.relations.edges import (
     Ref,
     list_edges,
 )
+from memex.relations.graph_writer import prune_edges
 from memex.relations.vertices import list_vertices
 
 _log = get_logger("memex.relations.maintenance")
@@ -58,12 +58,8 @@ def prune_orphan_edges(conn: Connection, user_id: int) -> int:
     `miembro_de` sobreviven y las de un cúmulo disuelto (que deja de proyectar) se barren acá."""
     live = {v.ref for v in list_vertices(conn, user_id)}
     orphan_ids = [e.id for e in list_edges(conn, user_id) if e.src not in live or e.dst not in live]
-    if orphan_ids:
-        conn.execute(
-            text("DELETE FROM relation_edges WHERE user_id = :u AND id = ANY(:ids)"),
-            {"u": user_id, "ids": orphan_ids},
-        )
-    return len(orphan_ids)
+    # Vía GraphWriter: borra y marca dirty el extremo que sobrevive (perdió una conexión).
+    return prune_edges(conn, user_id, orphan_ids)
 
 
 def _prune_stale_reales(
@@ -85,19 +81,16 @@ def _prune_stale_reales(
         for e in list_edges(conn, user_id, producer=producer)
         if e.relation_type == relation_type and (e.src, e.dst) not in live
     ]
-    if stale:
-        conn.execute(
-            text("DELETE FROM relation_edges WHERE user_id = :u AND id = ANY(:ids)"),
-            {"u": user_id, "ids": stale},
-        )
+    n = prune_edges(conn, user_id, stale)  # borra + marca dirty ambos extremos (siguen vivos)
+    if n:
         _log.info(
             "relation.reconcile.pruned",
             user_id=user_id,
             producer=producer,
             relation_type=relation_type,
-            pruned=len(stale),
+            pruned=n,
         )
-    return len(stale)
+    return n
 
 
 def reconcile_graph(conn: Connection, user_id: int) -> ReconcileStats:

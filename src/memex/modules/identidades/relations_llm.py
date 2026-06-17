@@ -46,8 +46,8 @@ from memex.relations.edges import (
     PROVENANCE_INFERRED,
     VERDICT_CONFIRMED,
     Ref,
-    propose_edge,
 )
+from memex.relations.graph_writer import add_edge
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 _log = get_logger("memex.modules.identidades.relations_llm")
@@ -294,7 +294,7 @@ async def run_cooccurrence_llm(
                             quote_len=len(quote),
                         )
                         continue
-                    propose_edge(
+                    add_edge(
                         conn,
                         user_id,
                         Ref(_slug(kind_by_id[a]), a),

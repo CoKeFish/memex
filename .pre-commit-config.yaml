@@ -33,6 +33,14 @@ repos:
         pass_filenames: false
         args: [src, tests]
 
+      # Frontera del grafo: ningún módulo/API/CLI escribe el grafo en crudo (solo relations/).
+      - id: no-raw-graph-writes
+        name: no raw graph writes outside relations/
+        entry: uv run python scripts/lint_no_raw_graph_writes.py
+        language: system
+        types: [python]
+        pass_filenames: false
+
       # pytest solo en pre-push — correr la suite completa (~1.8k tests) en cada
       # commit sería demasiado lento. Bloquea solo cuando vas a empujar código.
       - id: pytest

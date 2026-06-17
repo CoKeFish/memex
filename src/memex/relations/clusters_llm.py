@@ -59,8 +59,8 @@ from memex.relations.edges import (
     Ref,
     RelationEdge,
     list_edges,
-    resolve_edge,
 )
+from memex.relations.graph_writer import update_verdict
 from memex.relations.prompt import GRAPH_CLUSTER_PARTITION_SYSTEM_PROMPT
 from memex.relations.vertices import Vertex, list_vertices
 
@@ -372,19 +372,24 @@ def _cascade_edges(
     promoted = rejected = 0
     for e in pistas:
         if frozenset((e.src, e.dst)) in rejected_pairs:  # absorbe la orientación src/dst
-            if resolve_edge(conn, e.id, verdict=VERDICT_REJECTED, provenance=PROVENANCE_INFERRED):
+            if update_verdict(
+                conn, user_id, e.id, verdict=VERDICT_REJECTED, provenance=PROVENANCE_INFERRED
+            ):
                 _decide(e.id, VERDICT_REJECT)
                 rejected += 1
             continue
         if survivors is None:  # cúmulo rechazado (caller gateó cluster_reject_pistas)
-            if resolve_edge(conn, e.id, verdict=VERDICT_REJECTED, provenance=PROVENANCE_INFERRED):
+            if update_verdict(
+                conn, user_id, e.id, verdict=VERDICT_REJECTED, provenance=PROVENANCE_INFERRED
+            ):
                 _decide(e.id, VERDICT_REJECT)
                 rejected += 1
         elif (
             e.src in survivors
             and e.dst in survivors
-            and resolve_edge(
+            and update_verdict(
                 conn,
+                user_id,
                 e.id,
                 verdict=VERDICT_CONFIRMED,
                 provenance=PROVENANCE_INFERRED,
