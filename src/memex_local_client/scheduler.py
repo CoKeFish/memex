@@ -48,7 +48,17 @@ def _build_runtimes(
     plugins: dict[str, LocalPlugin],
     state: State,
     now: float,
+    prev: dict[str, _PluginRuntime] | None = None,
 ) -> dict[str, _PluginRuntime]:
+    """Mapea los plugins habilitados a su runtime de agenda.
+
+    `prev` son los runtimes del tick anterior: si un plugin ya estaba agendado se REUSA su
+    runtime (conserva `next_run_at` y el backoff acumulado) y solo se refresca `plugin`/
+    `interval_s` por si el código o el schedule cambió. Sin esto, reconstruir en cada tick
+    reseteaba `next_run_at=now` y el plugin se disparaba en CADA tick, ignorando el intervalo
+    (martilleo). Un plugin recién aparecido arranca con `next_run_at=now` (corre enseguida).
+    """
+    prev = prev or {}
     runtimes: dict[str, _PluginRuntime] = {}
     enabled_names = {p.name for p in state.list_enabled()}
     for name, plugin in plugins.items():
@@ -66,7 +76,13 @@ def _build_runtimes(
                 error=str(e),
             )
             continue
-        runtimes[name] = _PluginRuntime(plugin=plugin, interval_s=interval, next_run_at=now)
+        existing = prev.get(name)
+        if existing is not None:
+            existing.plugin = plugin
+            existing.interval_s = interval
+            runtimes[name] = existing
+        else:
+            runtimes[name] = _PluginRuntime(plugin=plugin, interval_s=interval, next_run_at=now)
     return runtimes
 
 
@@ -116,9 +132,16 @@ class Scheduler:
 
     def run_forever(self) -> None:
         _log.info("memex_local_client.scheduler.start")
+        # Los runtimes VIVEN a través de los ticks: así el `next_run_at` que `_tick` avanza tras
+        # cada corrida persiste y se respeta el intervalo. Reconstruirlos en cada tick (lo que
+        # hacía `run_once`) reseteaba el timing y disparaba en cada tick (martilleo).
+        runtimes: dict[str, _PluginRuntime] = {}
         while not self._stop.is_set():
+            now = time.monotonic()
             try:
-                self.run_once()
+                disc = discover_plugins(self._plugins_root)
+                runtimes = _build_runtimes(disc.plugins, self._state, now, prev=runtimes)
+                self._tick(runtimes, now)
             except Exception as e:
                 _log.exception("memex_local_client.scheduler.tick_failed", exc=str(e))
             self._stop.wait(self._tick_s)
