@@ -212,3 +212,95 @@ def test_reject_override_rechaza_incluso_un_confirmed() -> None:
     assert v is not None and v[0] == VERDICT_REJECTED and v[1] == PROVENANCE_EXTRACTED
     d = _dirty()
     assert _tag(A) in d and _tag(B) in d
+
+
+# --- adversariales: caminos no cubiertos (co-miembros, inexistentes, conflicto UNIQUE) --- #
+def _seed_cluster(members: list[Ref]) -> int:
+    """Siembra un cúmulo confirmado con esos miembros (para probar la propagación a co-miembros)."""
+    with connection() as c:
+        cid = c.execute(
+            text(
+                "INSERT INTO relation_clusters (user_id, status, signature, blob_signature, "
+                "member_count) VALUES (1, 'confirmed', :sig, :sig, :mc) RETURNING id"
+            ),
+            {"sig": f"sig-{members[0].slug}-{members[0].id}", "mc": len(members)},
+        ).scalar_one()
+        for m in members:
+            c.execute(
+                text(
+                    "INSERT INTO relation_cluster_members "
+                    "(user_id, cluster_id, member_slug, member_id) VALUES (1, :c, :s, :i)"
+                ),
+                {"c": int(cid), "s": m.slug, "i": m.id},
+            )
+    return int(cid)
+
+
+def test_merge_vertices_marca_co_miembros_de_cumulo() -> None:
+    x = Ref("identidades:person", 30)
+    y = Ref("finance", 31)
+    _seed_cluster([P_ABS, x, y])
+    _clear_dirty()
+    with connection() as c:
+        merge_vertices(c, 1, absorbed=P_ABS, survivor=P_SURV)
+    d = _dirty()
+    assert _tag(x) in d and _tag(y) in d  # co-miembros del absorbido se reconsideran
+
+
+def test_delete_vertex_marca_co_miembros_y_borra_membresia() -> None:
+    x = Ref("identidades:person", 32)
+    _seed_cluster([P_ABS, x])
+    _clear_dirty()
+    with connection() as c:
+        delete_vertex(c, 1, P_ABS)
+    assert _tag(x) in _dirty()
+    with connection() as c:
+        n = c.execute(
+            text(
+                "SELECT count(*) FROM relation_cluster_members "
+                "WHERE user_id = 1 AND member_slug = :s AND member_id = :i"
+            ),
+            {"s": P_ABS.slug, "i": P_ABS.id},
+        ).scalar()
+    assert n == 0  # su membresía de cúmulo se borró
+
+
+def test_update_verdict_arista_inexistente_no_crashea() -> None:
+    with connection() as c:
+        changed = update_verdict(
+            c, 1, 999999, verdict=VERDICT_CONFIRMED, provenance=PROVENANCE_INFERRED
+        )
+    assert changed is False
+    assert _dirty() == set()
+
+
+def test_delete_edge_inexistente_devuelve_false() -> None:
+    with connection() as c:
+        assert delete_edge(c, 1, 999999) is False
+
+
+def test_merge_vertices_noop_si_mismo_o_distinto_slug() -> None:
+    with connection() as c:
+        merge_vertices(c, 1, absorbed=A, survivor=A)  # mismo vértice
+        merge_vertices(c, 1, absorbed=A, survivor=B)  # distinto slug (finance vs calendar)
+    assert _dirty() == set()  # ninguno hizo nada
+
+
+def test_merge_vertices_colapsa_conflicto_unique() -> None:
+    # absorbido y superviviente tienen, cada uno, una arista al MISMO destino con igual tipo+
+    # productor: re-apuntar crearía un duplicado de la UNIQUE lógica → debe colapsar, no crashear.
+    dst = Ref("finance", 40)
+    _add_edge(P_ABS, dst)
+    _add_edge(P_SURV, dst)
+    _clear_dirty()
+    with connection() as c:
+        merge_vertices(c, 1, absorbed=P_ABS, survivor=P_SURV)
+    with connection() as c:
+        n = c.execute(
+            text(
+                "SELECT count(*) FROM relation_edges WHERE user_id = 1 "
+                "AND src_slug = :s AND src_id = :i AND dst_slug = :ds AND dst_id = :di"
+            ),
+            {"s": P_SURV.slug, "i": P_SURV.id, "ds": dst.slug, "di": dst.id},
+        ).scalar()
+    assert n == 1  # se colapsó, sin duplicado ni IntegrityError

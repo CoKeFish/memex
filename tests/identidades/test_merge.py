@@ -352,3 +352,26 @@ def test_merge_kind_distinto_rechaza(conn: Any) -> None:
     org = _mk_org(conn, "Valve")
     prod = _mk_producto(conn, "Steam")
     assert merge_identities(conn, 1, org, prod) is False
+
+
+def test_merge_marca_dirty_superviviente_y_vecino(conn: Any) -> None:
+    # integración (vía graph_writer.merge_vertices): el merge marca dirty al superviviente y al
+    # ex-vecino del absorbido (groundwork ADR-021) — antes el merge no avisaba al grafo.
+    surv = _mk_person(conn, "Ada")
+    absb = _mk_person(conn, "Ada L.")
+    conn.execute(
+        text(
+            "INSERT INTO relation_edges (user_id, src_slug, src_id, dst_slug, dst_id, producer) "
+            "VALUES (1,'identidades:person',:a,'finance',99,'inbox')"
+        ),
+        {"a": absb},
+    )
+    assert merge_identities(conn, 1, surv, absb) is True
+    dirty = {
+        (str(r[0]), int(r[1]))
+        for r in conn.execute(
+            text("SELECT slug, id FROM relation_vertex_state WHERE user_id = 1 AND dirty")
+        ).all()
+    }
+    assert ("identidades:person", surv) in dirty  # el superviviente
+    assert ("finance", 99) in dirty  # el ex-vecino del absorbido
