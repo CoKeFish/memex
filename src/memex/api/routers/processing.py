@@ -546,16 +546,25 @@ def _resolve_tz(tz: str | None) -> str:
 
 
 #: Fragmentos SQL de "manejado" (constantes propias, nunca input del usuario). Un mensaje está
-#: manejado cuando hay DECISIÓN tomada: resumido, extraído, o clasificado blacklist (decisión
-#: deliberada de NO procesarlo — por eso blacklist cuenta bajo TODOS los criterios: un
-#: blacklisteado jamás va a pasar por la etapa y no debe quedar como "pendiente" eterno).
+#: manejado cuando hay DECISIÓN tomada: resumido, extraído, o decidido-no-procesar (blacklist o
+#: el veredicto `not_relevant` del gate) — un mensaje así jamás va a pasar por la etapa y no debe
+#: quedar como "pendiente" eterno; por eso esa decisión cuenta bajo TODOS los criterios.
 _SUMMARIZED = "EXISTS (SELECT 1 FROM summary_inbox_links sl WHERE sl.inbox_id = i.id)"
 _EXTRACTED = "EXISTS (SELECT 1 FROM module_extractions me WHERE me.inbox_id = i.id)"
 _BLACKLISTED = "c.tier = 'blacklist'"
+#: Veredicto del gate de relevancia unificado (ADR-020): `not_relevant` es una decisión deliberada
+#: de NO procesar (espejo de blacklist). `insufficient` NO entra — el juez no decidió, queda
+#: pendiente (cola de revisión), así que sigue contando como backlog.
+_NOT_RELEVANT = (
+    "EXISTS (SELECT 1 FROM relevance_verdicts rv "
+    "WHERE rv.inbox_id = i.id AND rv.verdict = 'not_relevant')"
+)
+#: "decidido no procesar" = blacklist (tier legacy / dial de costo) o not_relevant (gate unificado).
+_REJECTED = f"({_BLACKLISTED} OR {_NOT_RELEVANT})"
 _HANDLED_SQL: dict[str, str] = {
-    "any": f"{_SUMMARIZED} OR {_EXTRACTED} OR {_BLACKLISTED}",
-    "summarize": f"{_SUMMARIZED} OR {_BLACKLISTED}",
-    "extract": f"{_EXTRACTED} OR {_BLACKLISTED}",
+    "any": f"{_SUMMARIZED} OR {_EXTRACTED} OR {_REJECTED}",
+    "summarize": f"{_SUMMARIZED} OR {_REJECTED}",
+    "extract": f"{_EXTRACTED} OR {_REJECTED}",
 }
 
 
@@ -573,8 +582,9 @@ async def processing_coverage(
     """Cobertura del PROCESAMIENTO sobre lo ya ingerido, por fuente (espejo de /inbox/coverage).
 
     El denominador es lo INGERIDO: cada día (en la tz pedida) se pinta según cuántos de sus
-    mensajes están MANEJADOS bajo `criterion` (`any` = resumido/extraído/blacklist;
-    `summarize`/`extract` = avance de esa etapa, blacklist incluido):
+    mensajes están MANEJADOS bajo `criterion` (`any` = resumido/extraído/decidido-no-procesar;
+    `summarize`/`extract` = avance de esa etapa; "decidido-no-procesar" = blacklist o el veredicto
+    `not_relevant` del gate — `insufficient` NO, sigue pendiente):
 
     - `ranges` (banda sólida): días donde TODOS los mensajes del día están manejados. La fusión
       por `gap_days` solo puentea días SIN mensajes — un día con pendientes corta el tramo,

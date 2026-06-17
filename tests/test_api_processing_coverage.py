@@ -1,8 +1,9 @@
 """GET /processing/coverage — de lo ingerido, qué días ya están MANEJADOS, por fuente.
 
 Espejo de test_api_inbox_coverage.py pero para el timeline de procesamiento: "manejado" =
-resumido / extraído / blacklist según `criterion`. Cubre: día completo vs parcial vs intacto,
-blacklist como decisión tomada bajo todos los criterios, discriminación summarize/extract,
+resumido / extraído / decidido-no-procesar (blacklist o not_relevant del gate) según `criterion`.
+Cubre: día completo vs parcial vs intacto, blacklist y not_relevant como decisión bajo todos los
+criterios (insufficient NO), discriminación summarize/extract,
 fusión por gap_days que NO puentea días con pendientes, ventana since/until, borde de TZ,
 aislamiento multi-tenant, el marcador de frontera del lote (processing_lots) y los 422.
 """
@@ -95,6 +96,19 @@ def _classify(inbox_ids: list[int], tier: str, user_id: int = 1) -> None:
             c.execute(
                 text("INSERT INTO classifications (user_id, inbox_id, tier) VALUES (:u, :i, :t)"),
                 {"u": user_id, "i": iid, "t": tier},
+            )
+
+
+def _gate_verdict(inbox_ids: list[int], verdict: str, user_id: int = 1) -> None:
+    """Veredicto del gate de relevancia unificado (relevance_verdicts), method='llm'."""
+    with connection() as c:
+        for iid in inbox_ids:
+            c.execute(
+                text(
+                    "INSERT INTO relevance_verdicts (user_id, inbox_id, verdict, method) "
+                    "VALUES (:u, :i, :v, 'llm')"
+                ),
+                {"u": user_id, "i": iid, "v": verdict},
             )
 
 
@@ -201,6 +215,32 @@ def test_blacklist_counts_under_all_criteria(client: Any, seed_source: dict[str,
         assert lane["ranges"] == [
             {"start": "2026-06-01", "end": "2026-06-01", "days": 1, "count": 1}
         ], crit
+
+
+def test_not_relevant_gate_counts_under_all_criteria(
+    client: Any, seed_source: dict[str, Any]
+) -> None:
+    # Un not_relevant del gate (sin extraer, sin blacklist) es DECISIÓN tomada: manejado bajo todos.
+    ids = _seed_at(seed_source["id"], 1, [datetime(2026, 6, 1, 12, 0, tzinfo=UTC)], prefix="nr")
+    _gate_verdict(ids, "not_relevant")
+    for crit in ("any", "summarize", "extract"):
+        lane = _lane(
+            client.get(f"/processing/coverage?tz=UTC&criterion={crit}").json(),
+            seed_source["id"],
+        )
+        assert lane["ranges"] == [
+            {"start": "2026-06-01", "end": "2026-06-01", "days": 1, "count": 1}
+        ], crit
+
+
+def test_insufficient_gate_is_not_handled(client: Any, seed_source: dict[str, Any]) -> None:
+    # insufficient = el juez no decidió → sigue pendiente (cola de revisión), no se pinta.
+    ids = _seed_at(seed_source["id"], 1, [datetime(2026, 6, 1, 12, 0, tzinfo=UTC)], prefix="ins")
+    _gate_verdict(ids, "insufficient")
+    lane = _lane(client.get("/processing/coverage?tz=UTC").json(), seed_source["id"])
+    assert lane["ranges"] == []
+    assert lane["swept"] == []
+    assert lane["total"] == 0
 
 
 def test_criterion_discriminates_stage(client: Any, seed_source: dict[str, Any]) -> None:
