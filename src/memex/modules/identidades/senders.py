@@ -17,14 +17,13 @@ POLÍTICA DE CREACIÓN asimétrica por medio (resolver es uniforme; lo que cambi
   quien escribe es gente real que vale tener en el directorio aunque el LLM nunca la extraiga. Se
   crea su persona + su identificador estable de plataforma (`platform_id`). Bots y mensajes de
   servicio (sender NULL) quedan fuera (un relay/automatización no identifica a una persona única).
-- **email corporativo:** el remitente es la ORGANIZACIÓN que representa el DOMINIO
-  (`notifications@nequi.com` → Nequi), no una persona por dirección. Se crea la org si falta (con el
-  dominio como identifier `kind='domain'`; dedup por nombre vía el mecanismo del módulo). Un email
-  role (noreply@) igual cae al dominio; un email exacto NO-role ya conocido (un contacto corporativo
-  real) gana sobre el dominio.
-- **email free-mail** (gmail/outlook/…): el remitente es la PERSONA dueña de la dirección — el
-  dominio no representa a nadie. Se resuelve por email exacto si se conoce; si no, NO se crea (un
-  remitente de free-mail desconocido suele ser ruido que el sistema de calidad ya filtra).
+- **email:** un dominio NUNCA identifica a una persona; identifica a lo sumo a UNA organización
+  (keyed por el dominio → no fragmenta aunque el `from.name` varíe) y para sus usuarios es
+  AFILIACIÓN. Quién es el remitente lo decide el LOCAL-PART: rol/genérico (`noreply@`/`info@`) →
+  la ORG del dominio habla; individuo (`juan.perez@`) → la PERSONA por su correo + arista `afiliado`
+  a la org (se preservan persona, org y la relación; NO se funde la persona en la org). El email
+  exacto ya conocido gana. En **free-mail** (gmail/outlook…) el dominio no representa a nadie:
+  persona por su correo si hay nombre de individuo, si no NO se crea (ruido). Default → persona.
 - **social:** la CUENTA (`account`) se resuelve por handle acotado a la plataforma real; si no
   existe se crea como ORGANIZACIÓN con su handle en la plataforma real (default establecido; se
   reclasifica a persona a mano si toca). Las cuentas monitoreadas son curadas (allowlist).
@@ -44,11 +43,17 @@ from sqlalchemy.engine import Connection
 from memex.core.source import SourceKind
 from memex.logging import get_logger
 from memex.modules.identidades.module import (
+    _affiliate,
     _insert_identifier,
     _resolve_fuzzy_or_create,
     load_known_index,
 )
-from memex.modules.identidades.normalize import is_freemail, is_role_email, norm_identifier
+from memex.modules.identidades.normalize import (
+    is_freemail,
+    is_generic_localpart,
+    is_role_email,
+    norm_identifier,
+)
 from memex.modules.identidades.resolve import (
     KIND_ORG,
     KIND_PERSONA,
@@ -59,7 +64,7 @@ from memex.modules.identidades.resolve import (
 )
 from memex.modules.identidades.schema import IdentityItem
 from memex.relations.canales import sync_canales
-from memex.relations.deterministic import weave_participa_en
+from memex.relations.deterministic import weave_afiliacion, weave_participa_en
 
 _log = get_logger("memex.modules.identidades.senders")
 
@@ -282,53 +287,129 @@ def weave_chat_structure(
 # --- email: organización por dominio (corporativo) / persona por email (free-mail) ------- #
 
 
-def _ensure_domain_org(
-    conn: Connection, user_id: int, domain: str, from_name: str, index: KnownIndex
+def _org_for_domain(
+    conn: Connection, user_id: int, domain: str, display_hint: str, index: KnownIndex
 ) -> int:
-    """Asegura la ORG que representa un dominio corporativo: dedup por NOMBRE (exacto + difuso,
-    reusando el mecanismo del módulo) para no duplicar una org ya conocida; si no existe, la crea.
-    Le ata el identifier `domain` y registra dominio→id en el índice (dedup intra-lote). El nombre
-    sale del `from.name` del correo si lo trae (ej. "Nequi"), si no, del dominio. Devuelve el id."""
-    name = from_name.strip() or domain
-    item = IdentityItem.model_validate(
-        {"source_inbox_ids": (), "name": name, "kind": "organizacion"}
-    )
-    res = index.resolve(item)
-    if res.identity_id is None:
-        res, _hint = _resolve_fuzzy_or_create(conn, user_id, item, index, source="extraction")
-    org_id = res.identity_id
-    assert org_id is not None  # _resolve_fuzzy_or_create siempre ata o crea
+    """Asegura la ORG de un dominio, keyed por el DOMINIO (no por el nombre): UNA org por dominio
+    registrable → no fragmenta aunque el `from.name` varíe entre remitentes. Si ya hay una org con
+    este identifier `domain`, esa. Si no, y el remitente da un nombre de org (habla la org), se
+    dedupea contra orgs ya conocidas por ese nombre (ej. "Nequi" extraída de un cuerpo); si no hay
+    nombre, se crea nombrada por el DOMINIO (nunca por una persona). Le ata el dominio. Devuelve el
+    id."""
+    oid = index.domain_identity(domain)
+    if oid is not None:
+        return oid
     dvn = norm_identifier("domain", domain)
+    if display_hint:
+        item = IdentityItem.model_validate(
+            {"source_inbox_ids": (), "name": display_hint, "kind": "organizacion"}
+        )
+        res = index.resolve(item)
+        if res.identity_id is None:
+            res, _hint = _resolve_fuzzy_or_create(conn, user_id, item, index, source="extraction")
+        org_id = res.identity_id
+        assert org_id is not None  # _resolve_fuzzy_or_create siempre ata o crea
+    else:
+        org_id = int(
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO mod_identidades (user_id, kind, display_name, source, interest)
+                    VALUES (:u, 'organizacion', :n, 'extraction', FALSE)
+                    RETURNING id
+                    """
+                ),
+                {"u": user_id, "n": domain},
+            ).scalar_one()
+        )
     _insert_identifier(conn, user_id, org_id, "domain", "domain", domain, dvn, source="extraction")
     index.add(
         KnownIdentity(
             id=org_id,
             kind=KIND_ORG,
-            display_name=name,
+            display_name=display_hint or domain,
             identifiers=(KnownIdentifier("domain", "domain", dvn),),
         )
     )
     return org_id
 
 
+def _person_by_email(
+    conn: Connection,
+    user_id: int,
+    email: str,
+    from_name: str,
+    email_norm: str,
+    index: KnownIndex,
+) -> int:
+    """Resuelve/crea la PERSONA dueña de un correo, keyed por el EMAIL (su identificador estable).
+    Si el email ya es conocido, esa identidad. Si no, resuelve/crea por NOMBRE (reusa el dedup del
+    módulo: exacto + difuso) y le ata el email para que el próximo correo resuelva exacto. El email
+    es la clave estable de la persona; su dominio queda como AFILIACIÓN aparte, nunca la funde."""
+    iid = index.email_identity(email_norm)
+    if iid is not None:
+        return iid
+    name = from_name.strip() or email
+    item = IdentityItem.model_validate(
+        {"source_inbox_ids": (), "name": name, "kind": "persona", "email": email}
+    )
+    res = index.resolve(item)
+    if res.identity_id is None:
+        res, _hint = _resolve_fuzzy_or_create(conn, user_id, item, index, source="extraction")
+    pid = res.identity_id
+    assert pid is not None  # _resolve_fuzzy_or_create siempre ata o crea
+    _insert_identifier(conn, user_id, pid, "email", "email", email, email_norm, source="extraction")
+    index.add(
+        KnownIdentity(
+            id=pid,
+            kind=KIND_PERSONA,
+            display_name=name,
+            identifiers=(KnownIdentifier("email", "email", email_norm),),
+        )
+    )
+    return pid
+
+
 def _resolve_email_sender(
     conn: Connection, user_id: int, email: str, domain: str, from_name: str, index: KnownIndex
 ) -> Resolution | None:
-    """Resuelve el remitente de un correo según la política corporativo/free-mail. Devuelve la
-    `Resolution` (con `method='sender'`) o None (free-mail desconocido: no se crea)."""
+    """Resuelve el remitente de un correo (política GENERAL, domain-agnóstica). Un dominio NUNCA
+    identifica a una persona: identifica a lo sumo a UNA org (keyed por el dominio) y para sus
+    usuarios es AFILIACIÓN. Quién es el remitente lo decide el LOCAL-PART:
+    - email exacto ya conocido → esa identidad;
+    - free-mail (no representa a nadie) → persona por su correo si hay nombre, si no None;
+    - dominio propio + rol/genérico (`noreply@`/`info@`/`ventas@`) → la ORG del dominio habla;
+    - dominio propio + individuo (`juan.perez@`) → la PERSONA por su correo + arista `afiliado` a la
+      org del dominio (se preservan persona, org y la relación; NO se funde la persona en la org).
+    Default ante la duda → persona. Devuelve la `Resolution` ('sender') o None (no se crea)."""
     email_norm = norm_identifier("email", email)
-    # email exacto de una identidad conocida (NO si es role: un relay no es clave de persona).
-    if email_norm and not is_role_email(email):
+    if not email_norm:
+        return None
+    role = is_role_email(email)
+    # email exacto de una identidad conocida gana (NO si es role: un relay no es clave de persona).
+    if not role:
         iid = index.email_identity(email_norm)
         if iid is not None:
             return Resolution(index.kind_of(iid), iid, "sender")
+    generic = is_generic_localpart(email)
     if is_freemail(domain):
-        return None  # free-mail desconocido → el remitente es persona; no se crea (ruido)
-    oid = index.domain_identity(domain)
-    if oid is not None:
-        return Resolution(index.kind_of(oid), oid, "sender")
-    org_id = _ensure_domain_org(conn, user_id, domain, from_name, index)
-    return Resolution(index.kind_of(org_id) or KIND_ORG, org_id, "sender")
+        # el dominio no representa a nadie → la persona dueña de la dirección. Se crea solo con un
+        # nombre usable y un local-part de individuo (un free-mail rol/genérico/anónimo es ruido).
+        if from_name.strip() and not role and not generic:
+            pid = _person_by_email(conn, user_id, email, from_name, email_norm, index)
+            return Resolution(KIND_PERSONA, pid, "sender")
+        return None
+    # dominio propio: rol/genérico → habla la ORG del dominio; individuo → PERSONA + afiliación.
+    if role or generic:
+        org_id = _org_for_domain(conn, user_id, domain, from_name.strip(), index)
+        return Resolution(index.kind_of(org_id) or KIND_ORG, org_id, "sender")
+    org_id = _org_for_domain(
+        conn, user_id, domain, "", index
+    )  # display = dominio, NUNCA la persona
+    pid = _person_by_email(conn, user_id, email, from_name, email_norm, index)
+    _affiliate(conn, user_id, pid, org_id, None, source="extraction")
+    weave_afiliacion(conn, user_id, pid)
+    return Resolution(KIND_PERSONA, pid, "sender")
 
 
 def weave_email_senders(conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:

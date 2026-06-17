@@ -1,9 +1,9 @@
 """Remitente como identidad de PRIMERA CLASE (Fase 2): el remitente de TODO mensaje se resuelve y se
 persiste como avistamiento (`mod_identidades_mentions`, `resolution_method='sender'`) en la
 extracción (paso 5), y co-ocurre con lo extraído por el brazo NORMAL de menciones (ya NO por un
-brazo derivado al vuelo). Política de creación asimétrica por medio: chat→persona, email corp→org
-por dominio (free-mail→persona, sin crear), social→org por handle. Ver
-`modules/identidades/senders.py`."""
+brazo derivado al vuelo). Política GENERAL por medio: chat→persona; email→un dominio NUNCA es una
+persona (rol/genérico=org del dominio, individuo=persona+afiliación; free-mail=persona con nombre o
+nada); social→org por handle. Ver `modules/identidades/senders.py`."""
 
 from __future__ import annotations
 
@@ -365,18 +365,95 @@ def test_email_freemail_conocido_resuelve_persona() -> None:
     assert _pair(edges[0]) == {("finance", fin), ("identidades:person", p)}
 
 
-def test_email_freemail_desconocido_no_crea_ni_coocurre() -> None:
+def test_email_freemail_con_nombre_crea_persona() -> None:
+    # free-mail con nombre de individuo → PERSONA por su correo (el dominio no representa a nadie);
+    # NO se crea ninguna org (gmail.com no es una organización).
     src = _source("imap", "mail")
-    mid = _inbox(src, "m1", _email_payload("random.person@gmail.com", "Random"))
+    mid = _inbox(src, "m1", _email_payload("ana.garcia@gmail.com", "Ana García"))
+    fin = _finance("Tienda", [mid])
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+        generate_cooccurrence(c, 1)
+        edges = list_edges(c, 1, producer="inbox")
+    assert n == 1
+    ids = _identities()
+    assert len(ids) == 1  # solo la persona; NO se crea org del free-mail
+    person_id = ids[0][0]
+    assert _identity_kinds() == ["persona"]
+    assert ("email", "email", "ana.garcia@gmail.com") in _identifiers_of(person_id)
+    assert _pair(edges[0]) == {("finance", fin), ("identidades:person", person_id)}
+
+
+def test_email_freemail_sin_nombre_no_crea() -> None:
+    # free-mail SIN nombre usable (ni rol/genérico) → ruido: no se crea ni co-ocurre.
+    src = _source("imap", "mail")
+    mid = _inbox(src, "m1", _email_payload("randomguy@gmail.com", ""))
     _finance("Tienda", [mid])
     with connection() as c:
         n = weave_email_senders(c, 1, [mid])
         generate_cooccurrence(c, 1)
         edges = list_edges(c, 1)
     assert n == 0
-    assert _identities() == []  # free-mail desconocido NO crea
+    assert _identities() == []  # free-mail sin nombre NO crea
     assert _sender_mentions() == []
-    assert edges == []  # un solo vértice en el mensaje → sin pares
+    assert edges == []  # un solo vértice (finance) → sin pares
+
+
+def test_email_individuo_corporativo_crea_persona_afiliada() -> None:
+    # GENERALIZA el caso javeriana: una persona con correo de un dominio propio se crea como PERSONA
+    # (por su correo), NO se funde en la org del dominio; se le teje la afiliación a esa org.
+    src = _source("imap", "mail")
+    mid = _inbox(src, "m1", _email_payload("juan.perez@acme.com", "Juan Pérez"))
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+    assert n == 1
+    assert sorted(_identity_kinds()) == [
+        "organizacion",
+        "persona",
+    ]  # la persona + la org del dominio
+    mentions = _sender_mentions()
+    assert len(mentions) == 1 and mentions[0]["rkind"] == "persona"  # el remitente es la PERSONA
+    person_id = mentions[0]["rid"]
+    assert ("email", "email", "juan.perez@acme.com") in _identifiers_of(person_id)
+    with connection() as c:
+        aff = c.execute(
+            text("SELECT person_id, org_id FROM mod_identidades_person_orgs WHERE user_id = 1")
+        ).all()
+        org_dom = c.execute(
+            text(
+                "SELECT identity_id FROM mod_identidades_identifiers "
+                "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'acme.com'"
+            )
+        ).scalar()
+    assert org_dom is not None
+    assert len(aff) == 1
+    assert int(aff[0][0]) == person_id  # la afiliación va de la persona...
+    assert int(aff[0][1]) == int(org_dom)  # ...a la org del dominio
+
+
+def test_email_varios_individuos_mismo_dominio_una_org() -> None:
+    # varias personas distintas @acme.com → varias PERSONAS + UNA sola org (keyed por el dominio, no
+    # fragmenta); el buzón genérico (info@) es la org. Ninguna persona se colapsa en la org.
+    src = _source("imap", "mail")
+    m1 = _inbox(src, "m1", _email_payload("juan.perez@acme.com", "Juan Pérez"))
+    m2 = _inbox(src, "m2", _email_payload("maria.lopez@acme.com", "María López"))
+    m3 = _inbox(src, "m3", _email_payload("info@acme.com", "Acme"))  # genérico → la org
+    with connection() as c:
+        weave_email_senders(c, 1, [m1, m2, m3])
+    assert sorted(_identity_kinds()) == ["organizacion", "persona", "persona"]
+    with connection() as c:
+        domains = c.execute(
+            text(
+                "SELECT identity_id FROM mod_identidades_identifiers "
+                "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'acme.com'"
+            )
+        ).all()
+    assert len(domains) == 1  # una sola org tiene el dominio
+    assert sorted(m["rkind"] for m in _sender_mentions()) == [
+        "organizacion",
+        "persona",
+        "persona",
+    ]
 
 
 # --- social ------------------------------------------------------------------------------ #

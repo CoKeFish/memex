@@ -90,6 +90,70 @@ _ROLE_TOKENS = frozenset(
     }
 )
 
+#: Buzones GENÉRICOS/funcionales: habla la ORGANIZACIÓN, no una persona única (`info@`, `ventas@`,
+#: `soporte@`). Complementa `_ROLE_TOKENS` (relays). Lista CURADA de tokens que casi nunca son el
+#: nombre de un individuo — el sesgo a persona ante la duda (`is_generic_localpart`) cubre lo
+#: ambiguo, así que conviene precisión alta (no inflar con tokens que podrían ser un nombre).
+_GENERIC_LOCAL_TOKENS = frozenset(
+    {
+        "info",
+        "contacto",
+        "contact",
+        "ventas",
+        "sales",
+        "soporte",
+        "support",
+        "ayuda",
+        "help",
+        "admin",
+        "administracion",
+        "comercial",
+        "marketing",
+        "rrhh",
+        "facturacion",
+        "billing",
+        "cobranza",
+        "cobros",
+        "pagos",
+        "payments",
+        "compras",
+        "pedidos",
+        "orders",
+        "atencion",
+        "servicioalcliente",
+        "customerservice",
+        "newsletter",
+        "noticias",
+        "boletin",
+        "comunicaciones",
+        "comunicacion",
+        "prensa",
+        "press",
+        "eventos",
+        "events",
+        "webmaster",
+        "hostmaster",
+        "abuse",
+        "secretaria",
+        "recepcion",
+        "reception",
+        "gerencia",
+        "oficina",
+        "office",
+        "hola",
+        "hello",
+        "team",
+        "equipo",
+        "staff",
+        "notificaciones",
+        "notificacion",
+        "alertas",
+        "alerts",
+        "facturas",
+        "invoices",
+    }
+)
+
 #: Dominios de correo PERSONAL gratuito (free-mail). El dominio NO representa a una organización: el
 #: remitente es la PERSONA dueña de la dirección, no el proveedor. Por eso, al resolver el remitente
 #: de un correo (Fase 2), un dominio free-mail NO crea la org del dominio (sería ruido como una org
@@ -153,6 +217,16 @@ def is_role_email(email: str) -> bool:
     if "noreply" in flat or "donotreply" in flat:
         return True
     return any(tok in _ROLE_TOKENS for tok in re.split(r"[._+-]", local))
+
+
+def is_generic_localpart(email: str) -> bool:
+    """True si el local-part es un buzón GENÉRICO/funcional de una organización (`info@`, `ventas@`,
+    `soporte@`): habla la ORG, no una persona única. Complementa `is_role_email` (relays
+    automáticos). Se parte el local-part por separadores (`. _ + -`) y se compara cada token contra
+    `_GENERIC_LOCAL_TOKENS`. Lo usa la resolución de remitente (`senders.py`) para decidir, en un
+    dominio corporativo, si el remitente es la org (rol/genérico) o una persona (individuo)."""
+    local = email.split("@", 1)[0].lower()
+    return any(tok in _GENERIC_LOCAL_TOKENS for tok in re.split(r"[._+-]", local) if tok)
 
 
 def _strip_accents(text: str) -> str:
