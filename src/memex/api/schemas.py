@@ -1583,6 +1583,8 @@ class StatsIngestionRun(BaseModel):
     id: str  # ingestion_runs.id es UUID
     source_id: int
     source_name: str | None = None
+    account_alias: str | None = None
+    account_email: str | None = None
     trigger: str
     status: str
     started_at: datetime
@@ -2053,6 +2055,8 @@ class IngestScheduleSource(BaseModel):
     enabled: bool
     config: dict[str, Any] = Field(default_factory=dict)
     fetch_schedule: str | None = None  # ISO-8601 o None = no agendada
+    account_alias: str | None = None
+    account_email: str | None = None
     latest: IngestionRunRow | None = None
 
 

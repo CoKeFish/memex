@@ -76,6 +76,7 @@ memex-ingest-scheduler = "memex.ingest_scheduler.cli:main"
 memex-geo = "memex.geo.cli:main"
 memex-graph = "memex.relations.cli:main"
 memex-llm = "memex.llm.cli:main"
+memex-webcontext = "memex.webcontext.cli:main"
 
 [tool.ruff]
 target-version = "py312"

@@ -159,9 +159,12 @@ async def pipeline(
                 text(f"""
                 SELECT r.id, r.source_id, s.name AS source_name, r.trigger, r.status,
                        r.started_at, r.ended_at, r.posted, r.inserted, r.duplicates,
-                       r.errors, r.filtered, r.error_class, r.error_message, r.api_cost_usd
+                       r.errors, r.filtered, r.error_class, r.error_message, r.api_cost_usd,
+                       a.alias AS account_alias,
+                       COALESCE(s.config->>'account_email', a.metadata->>'email') AS account_email
                 FROM ingestion_runs r
                 LEFT JOIN sources s ON s.id = r.source_id
+                LEFT JOIN accounts a ON a.id = s.account_id
                 WHERE {" AND ".join(run_where)}
                 ORDER BY r.started_at DESC
                 LIMIT :limit
@@ -249,6 +252,8 @@ async def pipeline(
                 "id": str(r["id"]),
                 "source_id": r["source_id"],
                 "source_name": r["source_name"],
+                "account_alias": r["account_alias"],
+                "account_email": r["account_email"],
                 "trigger": r["trigger"],
                 "status": r["status"],
                 "started_at": r["started_at"],

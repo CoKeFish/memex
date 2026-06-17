@@ -5,9 +5,11 @@ real contra Opus (mismos 30 correos): acuerdo 30/30; latencia ~8x mayor (codex e
 no una completion). Sus limitaciones son estructurales (documentadas acá, no arreglables sin
 API real):
 
-- **Sin contabilidad**: el CLI no reporta tokens → `LLMUsage` queda en cero y `cost_usd=0`.
-  Las filas de `llm_calls` de una corrida con codex muestran costo 0 aunque consuma los
-  límites de la suscripción. /métricas queda ciego para estas llamadas.
+- **Sin costo en USD, pero CON tokens**: la suscripción no factura por token → `cost_usd=0`
+  en las filas de `llm_calls` (/métricas ciega en $ para estas llamadas, aunque consuman los
+  límites de la suscripción). Los **tokens sí** se capturan: `codex exec --json` emite el
+  `usage` real en el evento `turn.completed` (ver `_parse_usage`), así que `LLMUsage` se puebla
+  y /métricas ve el volumen.
 - **Auth de sesión**: requiere una sesión de `codex login` accesible. En el host: el login
   propio. En el contenedor: el binario viene en la imagen (Dockerfile) y `CODEX_HOME` apunta
   a `/secrets/codex` (compose) — copiar ahí el `auth.json` del host; si la sesión muere, las
@@ -23,9 +25,10 @@ API real):
   para que los veredictos distingan proveedor.
 
 Mecánica: un subproceso `codex exec` por completion — prompt por stdin (evita el límite de
-longitud de argv en Windows), mensaje final capturado con `-o <archivo>` (sin parsear el
-ruido de stdout), `--ephemeral` (sin archivos de sesión), sandbox configurable y cwd en un
-directorio temporal (el agente no debe mirar ningún repo).
+longitud de argv en Windows), mensaje final capturado con `-o <archivo>`, `--json` para que el
+stdout sea JSONL estructurado (de donde `_parse_usage` lee los tokens), `--ephemeral` (sin
+archivos de sesión), sandbox configurable y cwd en un directorio temporal (el agente no debe
+mirar ningún repo).
 
 Sandbox (`MEMEX_CODEX_SANDBOX`, default `read-only`): el sandbox propio de codex (landlock)
 NO funciona dentro de docker → el compose lo fija en `danger-full-access` para el contenedor
@@ -35,6 +38,7 @@ NO funciona dentro de docker → el compose lo fija en `danger-full-access` para
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -42,8 +46,10 @@ import time
 from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from memex.llm._json import normalize_json_output
+from memex.llm._openai import as_int
 from memex.llm.client import ChatMessage, LLMError, LLMResult, LLMUsage, ResponseFormat
 from memex.logging import get_logger
 
@@ -54,6 +60,43 @@ _DEFAULT_TIMEOUT_S = 300.0
 _SANDBOX_ENV = "MEMEX_CODEX_SANDBOX"
 _SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 _DEFAULT_SANDBOX = "read-only"
+
+
+def _parse_usage(stdout: bytes) -> LLMUsage:
+    """Tokens del JSONL de `codex exec --json` (telemetría best-effort).
+
+    `turn.completed.usage` es ACUMULATIVO por sesión (running total), no por-turno → se toma
+    el ÚLTIMO `turn.completed`, NO se suman (openai/codex#17539). El mapeo espeja
+    `_openai.parse_usage`: `cached_input_tokens` es subconjunto de `input_tokens` (no se suma
+    aparte) y `reasoning_output_tokens` ya está incluido en `output_tokens`. Robustez: líneas
+    no-JSON o una salida sin `usage` degradan a `LLMUsage(0, 0, 0)` sin romper la completion.
+    """
+    last: dict[str, Any] | None = None
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "turn.completed":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                last = usage
+    if last is None:
+        return LLMUsage(0, 0, 0)
+    prompt = as_int(last.get("input_tokens"))
+    completion = as_int(last.get("output_tokens"))
+    hit = as_int(last.get("cached_input_tokens"))
+    return LLMUsage(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        total_tokens=prompt + completion,
+        cache_hit_tokens=hit,
+        cache_miss_tokens=max(prompt - hit, 0),
+        reasoning_tokens=as_int(last.get("reasoning_output_tokens")),
+    )
 
 
 class CodexError(LLMError):
@@ -115,6 +158,7 @@ class CodexClient:
             args = [
                 *self._binary,
                 "exec",
+                "--json",  # stdout → JSONL estructurado (tokens vía _parse_usage)
                 "--skip-git-repo-check",
                 "--ephemeral",
                 "--color",
@@ -134,13 +178,13 @@ class CodexClient:
                 proc = await asyncio.create_subprocess_exec(
                     *args,
                     stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,  # JSONL de `--json`: se parsea para el usage
                     stderr=asyncio.subprocess.PIPE,
                 )
             except OSError as e:
                 raise CodexError(0, f"no se pudo lanzar codex: {e}") from e
             try:
-                _, stderr = await asyncio.wait_for(
+                stdout, stderr = await asyncio.wait_for(
                     proc.communicate(prompt.encode("utf-8")), timeout=self._timeout_s
                 )
             except TimeoutError as e:
@@ -173,18 +217,25 @@ class CodexClient:
                 )
                 content = normalized
 
+        usage = _parse_usage(stdout)
         self._log.info(
             "llm.codex.complete",
             model=model_name,
             response_format=response_format,
             latency_ms=latency_ms,
             content_chars=len(content),
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
+            cache_hit_tokens=usage.cache_hit_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
         )
-        # Sin métricas del CLI: usage en cero y costo 0 (la suscripción no factura por token).
+        # Tokens reales del CLI (`--json` → turn.completed.usage); el costo en USD queda 0 porque
+        # la suscripción no factura por token (ver el docstring del módulo).
         return LLMResult(
             content=content,
             model=model_name,
-            usage=LLMUsage(0, 0, 0),
+            usage=usage,
             cost_usd=Decimal(0),
             latency_ms=latency_ms,
             finish_reason="stop",

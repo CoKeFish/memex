@@ -186,6 +186,23 @@ def test_rollup_by_source_labels(client: Any) -> None:
     assert by_source["(sin source)"]["cost_usd"] == 0.01
 
 
+def test_rollup_by_source_prefers_account_alias(client: Any) -> None:
+    """Con cuenta vinculada, by_source.source_name es el alias del usuario, no el nombre crudo."""
+    src = _seed_source("gmail-1")
+    with connection() as c:
+        aid = c.execute(
+            text(
+                "INSERT INTO accounts (user_id, alias, provider, kind) "
+                "VALUES (1, 'Mi Gmail', 'google', 'email') RETURNING id"
+            )
+        ).scalar_one()
+        c.execute(text("UPDATE sources SET account_id = :a WHERE id = :s"), {"a": aid, "s": src})
+    _seed_llm_call(source_id=src, cost_usd="0.05")
+    by_source = {r["source_name"]: r for r in client.get("/metrics/llm/rollup").json()["by_source"]}
+    assert "Mi Gmail" in by_source  # el alias, no "gmail-1"
+    assert "gmail-1" not in by_source
+
+
 # ---- rollup: por modelo (untabulated) ----------------------------------------------------------
 
 
