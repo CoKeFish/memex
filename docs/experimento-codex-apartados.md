@@ -45,7 +45,8 @@ memex-llm settings show
   nocturnos, dudoso para el camino por-mensaje del dashboard.
 - **Calidad/acuerdo**: ¿coincide el resultado con el de DeepSeek sobre la misma entrada?
 - **Costo**: codex = $0 en `llm_calls` (la suscripción no factura por token) → /métricas queda
-  ciego para esas llamadas. El proveedor que sirvió queda en `llm_calls.model` (`codex/...`).
+  ciego en **$** para esas llamadas (los **tokens sí** se registran vía `codex exec --json`). El
+  proveedor que sirvió queda en `llm_calls.model` (`codex/...`).
 
 ## Resultados: summarizer (corrida 2026-06-12, muestra chica)
 

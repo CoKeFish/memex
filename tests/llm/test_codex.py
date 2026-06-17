@@ -10,13 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from memex.llm.client import ChatMessage, LLMClient, LLMError
+from memex.llm.client import ChatMessage, LLMClient, LLMError, LLMUsage
 from memex.llm.codex import CodexClient, CodexError
 
-#: Stub que imita `codex exec`: lee el prompt de stdin, escribe el mensaje final en el
-#: archivo de `-o` y sale 0. `FAIL` en el prompt → exit 3 con stderr (camino de error).
+#: Stub que imita `codex exec --json`: lee el prompt de stdin, emite JSONL por stdout (ruido +
+#: dos `turn.completed` con usage ACUMULATIVO creciente) y escribe el mensaje final en el archivo
+#: de `-o`; sale 0. `FAIL` en el prompt → exit 3 con stderr (camino de error).
 _STUB = textwrap.dedent(
     """
+    import json
     import sys
 
     args = sys.argv[1:]
@@ -25,6 +27,14 @@ _STUB = textwrap.dedent(
     if "FAIL" in prompt:
         sys.stderr.write("boom del stub")
         sys.exit(3)
+    print(json.dumps({"type": "thread.started", "thread_id": "t1"}))
+    print("ruido no-json que debe ignorarse")
+    print(json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": 100, "cached_input_tokens": 0,
+        "output_tokens": 10, "reasoning_output_tokens": 0}}))
+    print(json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": 12416, "cached_input_tokens": 11136,
+        "output_tokens": 49, "reasoning_output_tokens": 42}}))
     with open(out_path, "w", encoding="utf-8") as f:
         f.write('{"verdicts": []}\\n')
         f.write("ARGS:" + "|".join(args))
@@ -46,8 +56,15 @@ def test_complete_captures_last_message_and_zero_cost(tmp_path: Path) -> None:
     assert "exec" in r.content and "--ephemeral" in r.content and "read-only" in r.content
     assert r.content.rstrip().endswith("|-")  # el prompt va por stdin
     assert r.model == "codex/default"
-    assert r.cost_usd == Decimal(0)  # la suscripción no factura por token: costo no medido
-    assert r.usage.prompt_tokens == 0 and r.usage.completion_tokens == 0
+    assert "--json" in r.content  # stdout = JSONL estructurado (de ahí salen los tokens)
+    assert r.cost_usd == Decimal(0)  # la suscripción no factura por token: USD no medido
+    # usage del ÚLTIMO turn.completed (acumulativo: 12416, NO el primero 100 ni la suma 12516).
+    assert r.usage.prompt_tokens == 12416
+    assert r.usage.completion_tokens == 49
+    assert r.usage.total_tokens == 12416 + 49
+    assert r.usage.cache_hit_tokens == 11136
+    assert r.usage.cache_miss_tokens == 12416 - 11136
+    assert r.usage.reasoning_tokens == 42
     assert r.finish_reason == "stop"
 
 
@@ -130,3 +147,31 @@ def test_text_format_passes_fences_through(tmp_path: Path) -> None:
     c = _fenced_client(tmp_path)
     r = asyncio.run(c.complete([ChatMessage("user", "x")]))
     assert r.content.startswith("Claro") and "```json" in r.content
+
+
+#: Stub que emite JSONL SIN ningún `turn.completed` → el cliente degrada a LLMUsage(0,0,0).
+_NO_USAGE_STUB = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    args = sys.argv[1:]
+    out_path = args[args.index("-o") + 1]
+    sys.stdin.read()
+    print(json.dumps({"type": "thread.started", "thread_id": "t1"}))
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message"}}))
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("hola")
+    """
+)
+
+
+def test_usage_absent_degrades_to_zero(tmp_path: Path) -> None:
+    """Sin `turn.completed`/usage en el stdout: usage en cero, sin romper la completion."""
+    stub = tmp_path / "codex_no_usage_stub.py"
+    stub.write_text(_NO_USAGE_STUB, encoding="utf-8")
+    c = CodexClient(binary=(sys.executable, str(stub)))
+    r = asyncio.run(c.complete([ChatMessage("user", "x")]))
+    assert r.content == "hola"
+    assert r.usage == LLMUsage(0, 0, 0)
+    assert r.cost_usd == Decimal(0)

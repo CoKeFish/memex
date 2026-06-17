@@ -211,7 +211,8 @@ veredicto persistido (`reason`, `rule_id`, `model`, `mode`) + la llm_call correl
 el detalle surfacea la regla compuesta que filtró (`rule_effect` + remitente + asunto).
 `llm_calls.purpose`: `relevance_gate` (veredictos), `relevance_rules` (minería de reglas, con
 `metadata.effect` block/allow) y `relevance_interests` (sugerencias), con `source_id`, conteos por
-veredicto en metadata y `response_text` crudo. Codex no mide tokens → costo 0 en esas filas (esperado).
+veredicto en metadata y `response_text` crudo. Codex no factura por token (suscripción) → costo $0
+en esas filas; los tokens **sí** se registran (`codex exec --json` → `turn.completed.usage`).
 
 ## Qué NO hace (a propósito)
 
