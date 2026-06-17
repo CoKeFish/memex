@@ -146,6 +146,35 @@ def _seed_tx(inbox_id: int) -> None:
         )
 
 
+def _llm_call(cost: str, *, inbox_id: int | None = None) -> int:
+    """Una fila `llm_calls` con `cost_usd` (lote/batch → `inbox_id=None`)."""
+    with connection() as c:
+        cid = c.execute(
+            text(
+                "INSERT INTO llm_calls "
+                "(user_id, inbox_id, purpose, model, prompt_tokens, completion_tokens, "
+                " cost_usd, latency_ms, status) "
+                "VALUES (1, :inb, 'extract_grouped', 'fake', 1, 1, "
+                "CAST(:cost AS NUMERIC), 1, 'ok') RETURNING id"
+            ),
+            {"inb": inbox_id, "cost": cost},
+        ).scalar()
+    assert cid is not None
+    return int(cid)
+
+
+def _llm_node(call_id: int, *, inbox_id: int | None) -> None:
+    """Nodo `llm` de `trace_nodes` ligado a una `llm_call` (ancla cost/N al inbox)."""
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO trace_nodes (user_id, inbox_id, kind, llm_call_id) "
+                "VALUES (1, :inb, 'llm', :cid)"
+            ),
+            {"inb": inbox_id, "cid": call_id},
+        )
+
+
 # --- (1) agregación SQL ---------------------------------------------------------- #
 
 
@@ -594,3 +623,61 @@ def test_reevaluate_candidate_runs_the_gate_engine(seed_source: dict[str, Any]) 
 
 def test_reevaluate_unknown_candidate_is_none() -> None:
     assert asyncio.run(reevaluate_candidate(1, sender_key="nope@x.com")) is None
+
+
+# --- (8) atribución de costo LLM por remitente ----------------------------------- #
+
+
+def test_cost_attribution_per_sender(seed_source: dict[str, Any]) -> None:
+    """`cost_usd` por remitente combina: individual con nodo (costo completo), lote
+    compartido (cost/N por mensaje) y `llm_call` huérfana sin nodo trace (costo completo).
+    Sin actividad LLM → 0."""
+    sid = seed_source["id"]
+    # (a) individual: 1 call con nodo trace que la referencia (N=1 → costo completo).
+    indiv = _seed_msg(sid, "indiv", email="indiv@x.com", tier="individual", minute=0)
+    call_a = _llm_call("0.10", inbox_id=indiv)
+    _llm_node(call_a, inbox_id=indiv)
+    # (b) lote: 1 call batch (inbox NULL) compartida por 2 mensajes del mismo remitente (N=2 →
+    #     cost/2 a cada uno → 0.20 al remitente).
+    lote1 = _seed_msg(sid, "lote1", email="lote@x.com", tier="batch", minute=1)
+    lote2 = _seed_msg(sid, "lote2", email="lote@x.com", tier="batch", minute=2)
+    call_b = _llm_call("0.20", inbox_id=None)
+    _llm_node(call_b, inbox_id=lote1)
+    _llm_node(call_b, inbox_id=lote2)
+    # (c) huérfana: call con inbox_id seteado y SIN nodo trace → costo completo vía cost_orphans.
+    orphan = _seed_msg(sid, "orphan", email="orphan@x.com", tier="batch", minute=3)
+    _llm_call("0.05", inbox_id=orphan)
+    # (d) sin actividad LLM → 0.
+    _seed_msg(sid, "free", email="free@x.com", tier="batch", minute=4)
+
+    with connection() as c:
+        rows = senders_by_relevance(c, user_id=1)
+    cost = {r["sender_key"]: float(r["cost_usd"]) for r in rows}
+
+    assert cost["indiv@x.com"] == 0.10
+    assert cost["lote@x.com"] == 0.20
+    assert cost["orphan@x.com"] == 0.05
+    assert cost["free@x.com"] == 0.0
+
+
+def test_cost_shared_call_with_null_inbox_node_not_overattributed(
+    seed_source: dict[str, Any],
+) -> None:
+    """N cuenta TODOS los nodos de la call (incl. el desempate async con inbox NULL): una call de
+    0.30 referenciada por nodos de a, b y un nodo inbox-NULL → N=3; a y b reciben 0.10 (no 0.15) y
+    la porción del nodo NULL no se atribuye a ningún remitente."""
+    sid = seed_source["id"]
+    a = _seed_msg(sid, "a", email="a@x.com", tier="batch", minute=0)
+    b = _seed_msg(sid, "b", email="b@x.com", tier="batch", minute=1)
+    call = _llm_call("0.30", inbox_id=None)
+    _llm_node(call, inbox_id=a)
+    _llm_node(call, inbox_id=b)
+    _llm_node(call, inbox_id=None)  # desempate async: cuenta en N pero su porción no se atribuye
+
+    with connection() as c:
+        rows = senders_by_relevance(c, user_id=1)
+    cost = {r["sender_key"]: float(r["cost_usd"]) for r in rows}
+    assert cost["a@x.com"] == 0.10
+    assert cost["b@x.com"] == 0.10
+    # La porción del nodo inbox-NULL (0.10) no aparece en ningún remitente.
+    assert round(sum(cost.values()), 6) == 0.20

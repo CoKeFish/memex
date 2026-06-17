@@ -287,6 +287,9 @@ class SenderRelevance(BaseModel):
     last_at: datetime | None = None
     tier_mix: dict[str, int] = Field(default_factory=dict)
     volume_ratio: float | None = None
+    # Costo LLM atribuido al remitente (reparto cost/N de lotes vía trace_nodes;
+    # ver relevance/signals.py).
+    cost_usd: float | None = None
 
 
 class SenderRelevanceList(BaseModel):

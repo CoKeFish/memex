@@ -25,6 +25,7 @@ import {
 import type { RelevanceCandidate, SenderRelevance } from "@/data"
 import { ApiError } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { formatUsd } from "@/lib/format"
 import { useAsync } from "@/lib/use-async"
 
 /** Fecha corta `YYYY-MM-DD` desde un ISO. */
@@ -80,6 +81,89 @@ type PendingAction = {
   procedure?: string
 }
 
+/** Columnas numéricas ordenables (`costPerMsg` = costUsd/messages, derivada en el front). */
+type SortKey =
+  | "messages"
+  | "relevancePct"
+  | "relevant"
+  | "summarizedOnly"
+  | "inert"
+  | "marked"
+  | "volumeRatio"
+  | "costUsd"
+  | "costPerMsg"
+type SortState = { key: SortKey; dir: "asc" | "desc" } | null
+
+function sortValue(r: SenderRelevance, key: SortKey): number | null {
+  switch (key) {
+    case "messages":
+      return r.messages
+    case "relevant":
+      return r.relevant
+    case "summarizedOnly":
+      return r.summarizedOnly
+    case "inert":
+      return r.inert
+    case "marked":
+      return r.marked
+    case "relevancePct":
+      return r.relevancePct
+    case "volumeRatio":
+      return r.volumeRatio
+    case "costUsd":
+      return r.costUsd
+    case "costPerMsg":
+      return r.costUsd === null ? null : r.costUsd / r.messages
+  }
+}
+
+/** Ordena por la columna activa; los `null` van siempre al final. `sort` null = orden del server. */
+function sortRows(rows: SenderRelevance[], sort: SortState): SenderRelevance[] {
+  if (!sort) return rows
+  const mult = sort.dir === "asc" ? 1 : -1
+  return [...rows].sort((a, b) => {
+    const av = sortValue(a, sort.key)
+    const bv = sortValue(b, sort.key)
+    if (av === null && bv === null) return 0
+    if (av === null) return 1
+    if (bv === null) return -1
+    return (av - bv) * mult
+  })
+}
+
+/** Encabezado numérico clickeable: alterna asc/desc y marca la dirección activa. */
+function SortableTh({
+  label,
+  sortKey,
+  sort,
+  onSort,
+}: {
+  label: string
+  sortKey: SortKey
+  sort: SortState
+  onSort: (k: SortKey) => void
+}) {
+  const active = sort?.key === sortKey
+  return (
+    <th className="px-3 py-2 text-right font-medium">
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        title="Ordenar por esta columna"
+        className={cn(
+          "inline-flex items-center gap-1 hover:text-foreground",
+          active && "text-foreground",
+        )}
+      >
+        {label}
+        <span aria-hidden className={cn("text-[10px]", !active && "opacity-0")}>
+          {sort?.dir === "asc" ? "▲" : "▼"}
+        </span>
+      </button>
+    </th>
+  )
+}
+
 export function SenderRelevancePage() {
   const { data, loading, error, reload } = useAsync<SenderRelevance[]>(
     () => fetchSenderRelevance(),
@@ -95,7 +179,15 @@ export function SenderRelevancePage() {
   const [busy, setBusy] = useState(false)
   const [kindFilter, setKindFilter] = useState<KindFilter>("all")
   const [procFilter, setProcFilter] = useState<string>("all")
-  const visible = kindFilter === "all" ? rows : rows.filter((r) => r.kind === kindFilter)
+  const [sort, setSort] = useState<SortState>(null)
+  const filtered = kindFilter === "all" ? rows : rows.filter((r) => r.kind === kindFilter)
+  const visible = sortRows(filtered, sort)
+  /** Click en encabezado: la misma columna alterna dir; otra arranca en desc (más alto primero). */
+  function toggleSort(key: SortKey) {
+    setSort((cur) =>
+      cur?.key === key ? { key, dir: cur.dir === "desc" ? "asc" : "desc" } : { key, dir: "desc" },
+    )
+  }
   const procedures = Array.from(new Set(candidates.map((c) => c.procedure)))
   const visibleCandidates =
     procFilter === "all" ? candidates : candidates.filter((c) => c.procedure === procFilter)
@@ -291,13 +383,25 @@ export function SenderRelevancePage() {
             <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 font-medium">Remitente</th>
-                <th className="px-3 py-2 text-right font-medium">Mensajes</th>
-                <th className="px-3 py-2 text-right font-medium">% relevancia</th>
-                <th className="px-3 py-2 text-right font-medium">Relevantes</th>
-                <th className="px-3 py-2 text-right font-medium">Solo lectura</th>
-                <th className="px-3 py-2 text-right font-medium">Inertes</th>
-                <th className="px-3 py-2 text-right font-medium">Marcados</th>
-                <th className="px-3 py-2 text-right font-medium">Volumen</th>
+                <SortableTh label="Mensajes" sortKey="messages" sort={sort} onSort={toggleSort} />
+                <SortableTh
+                  label="% relevancia"
+                  sortKey="relevancePct"
+                  sort={sort}
+                  onSort={toggleSort}
+                />
+                <SortableTh label="Relevantes" sortKey="relevant" sort={sort} onSort={toggleSort} />
+                <SortableTh
+                  label="Solo lectura"
+                  sortKey="summarizedOnly"
+                  sort={sort}
+                  onSort={toggleSort}
+                />
+                <SortableTh label="Inertes" sortKey="inert" sort={sort} onSort={toggleSort} />
+                <SortableTh label="Marcados" sortKey="marked" sort={sort} onSort={toggleSort} />
+                <SortableTh label="Volumen" sortKey="volumeRatio" sort={sort} onSort={toggleSort} />
+                <SortableTh label="Costo LLM" sortKey="costUsd" sort={sort} onSort={toggleSort} />
+                <SortableTh label="$/msg" sortKey="costPerMsg" sort={sort} onSort={toggleSort} />
                 <th className="px-3 py-2 font-medium">Último</th>
                 <th className="px-3 py-2 font-medium">Tiers</th>
                 <th className="px-3 py-2 font-medium">Acciones</th>
@@ -306,7 +410,7 @@ export function SenderRelevancePage() {
             <tbody>
               {visible.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="px-3 py-6 text-center text-sm text-muted-foreground">
+                  <td colSpan={13} className="px-3 py-6 text-center text-sm text-muted-foreground">
                     Sin remitentes de este tipo.
                   </td>
                 </tr>
@@ -341,6 +445,12 @@ export function SenderRelevancePage() {
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
                       {r.volumeRatio === null ? "—" : `${r.volumeRatio}×`}
+                    </td>
+                    <td className="px-3 py-2 text-right font-medium tabular-nums">
+                      {r.costUsd === null ? "—" : formatUsd(r.costUsd)}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                      {r.costUsd === null ? "—" : formatUsd(r.costUsd / r.messages)}
                     </td>
                     <td className="px-3 py-2 text-xs whitespace-nowrap text-muted-foreground">
                       {shortDate(r.lastAt)}
