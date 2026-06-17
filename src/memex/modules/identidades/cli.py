@@ -720,24 +720,29 @@ def _cmd_tree(args: argparse.Namespace) -> int:
         if r["parent_id"] is not None and int(r["parent_id"]) in by_id:
             children.setdefault(int(r["parent_id"]), []).append(int(r["id"]))
 
-    def _node(nid: int) -> dict[str, Any]:
+    # `seen` = ancestros en el camino actual: corta si `nid` ya apareció (ciclo) para no recursar
+    # infinito ante una jerarquía con ciclo (el CHECK de la DB solo atrapa el self-loop directo).
+    def _node(nid: int, seen: frozenset[int] = frozenset()) -> dict[str, Any]:
         r = by_id[nid]
+        kids = [_node(c, seen | {nid}) for c in children.get(nid, [])] if nid not in seen else []
         return {
             "id": nid,
             "kind": r["kind"],
             "display_name": r["display_name"],
             "parent_source": r["parent_source"],
-            "children": [_node(c) for c in children.get(nid, [])],
+            "children": kids,
         }
 
-    def _print(nid: int, depth: int) -> None:
+    def _print(nid: int, depth: int, seen: frozenset[int] = frozenset()) -> None:
         r = by_id[nid]
         tag = " [producto]" if r["kind"] == "producto" else ""
         tag += " [persona]" if r["kind"] == "persona" else ""
         src = f" ({r['parent_source']})" if depth > 0 and r["parent_source"] else ""
         _say(f"  {'    ' * depth}{'└─ ' if depth else ''}#{nid} {r['display_name']}{tag}{src}")
+        if nid in seen:
+            return
         for c in children.get(nid, []):
-            _print(c, depth + 1)
+            _print(c, depth + 1, seen | {nid})
 
     if args.id is not None:
         if args.id not in by_id:
