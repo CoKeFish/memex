@@ -42,6 +42,9 @@ from memex.modules.identidades.merge import merge_identities
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.sync import run_sync
 from memex.relations.deterministic import weave_pertenencia
+from memex.relations.edges import Ref
+from memex.relations.graph_writer import delete_vertex
+from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 router = APIRouter(prefix="/identidades", tags=["identidades"])
 
@@ -519,12 +522,19 @@ async def update_identity(
 @router.delete("/{identity_id:int}")
 async def delete_identity(identity_id: int, user_id: UserID) -> dict[str, bool]:
     with connection() as conn:
-        res = conn.execute(
+        row = conn.execute(
+            text("SELECT kind FROM mod_identidades WHERE id = :id AND user_id = :uid"),
+            {"id": identity_id, "uid": user_id},
+        ).first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="identidad no encontrada")
+        # Saca el vértice del grafo (aristas/membresía + dirty a vecinos) ANTES de borrar la fila,
+        # en el mismo tx (el GraphWriter es el único punto de mutación del grafo).
+        delete_vertex(conn, user_id, Ref(IDENTITY_SLUG_BY_KIND[str(row[0])], identity_id))
+        conn.execute(
             text("DELETE FROM mod_identidades WHERE id = :id AND user_id = :uid"),
             {"id": identity_id, "uid": user_id},
         )
-    if res.rowcount == 0:
-        raise HTTPException(status_code=404, detail="identidad no encontrada")
     return {"deleted": True}
 
 

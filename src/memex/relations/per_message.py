@@ -756,6 +756,7 @@ def _apply_votes(
                         evidence_sig=sig,
                         run_id=run_id,
                     )
+                    dirty_refs.update((e.src, e.dst))
                     stats.llm_rejected += 1
                 continue
             # Evaluada completa sin veredicto: memo `dejar` + marcar que la IA la miró (inferred).

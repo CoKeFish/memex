@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     # valor es el umbral por encima del cual el handler LLM de identidades (relations_llm) releva.
     cooccurrence_cap: int = 8
 
+    # --- Grafo: propagación del marcado dirty (groundwork incremental ADR-021 / GraphWriter) ---
+    # Cuando el GraphWriter marca un vértice dirty, propaga el dirty a sus vecinos hasta N saltos
+    # (BFS por aristas). 0 = solo el vértice; 1 = + vecinos directos (default); N = N niveles.
+    # Es LA perilla de cuánto se "ensancha" el delta que un futuro mantenedor incremental reprocesa;
+    # sobre-marcar es seguro (procesa de más, nunca incorrecto).
+    graph_propagate_dirty_hops: int = 1
+
     # --- Clusterización del grafo: cúmulos (detección de comunidades + validador LLM) ---
     # Detección Louvain (networkx) sobre aristas confirmed + pistas + validación LLM por cúmulo (que
     # promueve/rechaza las pistas internas en cascada). On-demand y apagado por default. Las pistas
