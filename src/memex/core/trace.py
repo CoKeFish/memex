@@ -380,7 +380,7 @@ def _to_float(v: Any) -> float:
 def read_trace(user_id: int, inbox_id: int) -> list[dict[str, Any]] | None:
     """Árbol de traza del inbox (`TraceNodeDto[]`, lista plana camelCase) para `GET /inbox/{id}`.
 
-    Devuelve None si no hay nodos persistidos (→ el front cae al fallback). Cuelga del `root` las
+    Devuelve None si no hay nodos persistidos (→ empty-state en el front). Cuelga del `root` las
     `llm_calls WHERE inbox_id` (ruteo/extracción/OCR) como hojas `llm` sintéticas —salvo las ya
     referenciadas por un nodo `llm` explícito (dedupe por `llm_call_id`)— y calcula el roll-up de
     costo (`ownUsd`/`subtreeUsd`/`calls`) con DFS post-orden.
