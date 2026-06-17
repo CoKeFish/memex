@@ -54,7 +54,6 @@ _ORG_SUFFIXES: tuple[str, ...] = (
     "sac",
     "sca",
     "scs",
-    "spa",
     "slu",
     "srl",
     "pty",
@@ -87,6 +86,70 @@ _ROLE_TOKENS = frozenset(
         "postmaster",
         "bounce",
         "bounces",
+    }
+)
+
+#: Buzones GENÉRICOS/funcionales: habla la ORGANIZACIÓN, no una persona única (`info@`, `ventas@`,
+#: `soporte@`). Complementa `_ROLE_TOKENS` (relays). Lista CURADA de tokens que casi nunca son el
+#: nombre de un individuo — el sesgo a persona ante la duda (`is_generic_localpart`) cubre lo
+#: ambiguo, así que conviene precisión alta (no inflar con tokens que podrían ser un nombre).
+_GENERIC_LOCAL_TOKENS = frozenset(
+    {
+        "info",
+        "contacto",
+        "contact",
+        "ventas",
+        "sales",
+        "soporte",
+        "support",
+        "ayuda",
+        "help",
+        "admin",
+        "administracion",
+        "comercial",
+        "marketing",
+        "rrhh",
+        "facturacion",
+        "billing",
+        "cobranza",
+        "cobros",
+        "pagos",
+        "payments",
+        "compras",
+        "pedidos",
+        "orders",
+        "atencion",
+        "servicioalcliente",
+        "customerservice",
+        "newsletter",
+        "noticias",
+        "boletin",
+        "comunicaciones",
+        "comunicacion",
+        "prensa",
+        "press",
+        "eventos",
+        "events",
+        "webmaster",
+        "hostmaster",
+        "abuse",
+        "secretaria",
+        "recepcion",
+        "reception",
+        "gerencia",
+        "oficina",
+        "office",
+        "hola",
+        "hello",
+        "team",
+        "equipo",
+        "staff",
+        "notificaciones",
+        "notificacion",
+        "alertas",
+        "alerts",
+        "facturas",
+        "invoices",
     }
 )
 
@@ -155,6 +218,16 @@ def is_role_email(email: str) -> bool:
     return any(tok in _ROLE_TOKENS for tok in re.split(r"[._+-]", local))
 
 
+def is_generic_localpart(email: str) -> bool:
+    """True si el local-part es un buzón GENÉRICO/funcional de una organización (`info@`, `ventas@`,
+    `soporte@`): habla la ORG, no una persona única. Complementa `is_role_email` (relays
+    automáticos). Se parte el local-part por separadores (`. _ + -`) y se compara cada token contra
+    `_GENERIC_LOCAL_TOKENS`. Lo usa la resolución de remitente (`senders.py`) para decidir, en un
+    dominio corporativo, si el remitente es la org (rol/genérico) o una persona (individuo)."""
+    local = email.split("@", 1)[0].lower()
+    return any(tok in _GENERIC_LOCAL_TOKENS for tok in re.split(r"[._+-]", local) if tok)
+
+
 def _strip_accents(text: str) -> str:
     """Quita diacríticos por descomposición NFKD (≈ `unaccent` de Postgres para latín acentuado)."""
     decomposed = unicodedata.normalize("NFKD", text)
@@ -194,12 +267,43 @@ def registrable_domain(host: str) -> str:
     return _TLD_EXTRACT(h).top_domain_under_public_suffix or h
 
 
+#: Dominios que IGNORAN los puntos del local-part (Gmail y su alias googlemail).
+_GMAIL_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
+
+
+def _norm_email(value: str) -> str:
+    """Canonicaliza un email para el match: lower; quita el sub-addressing `+tag` (RFC 5233, misma
+    casilla) de TODO dominio; en Gmail/Googlemail ignora además los puntos del local-part y unifica
+    el dominio a `gmail.com`. Así `j.doe+promo@gmail.com` y `jdoe@gmail.com` colapsan al mismo."""
+    local, sep, domain = value.lower().partition("@")
+    if not sep:
+        return value.lower()
+    local = local.split("+", 1)[0]  # +tag (sub-addressing) → misma casilla
+    if domain in _GMAIL_DOMAINS:
+        local = local.replace(".", "")  # Gmail ignora los puntos del local-part
+        domain = "gmail.com"  # googlemail.com == gmail.com
+    return f"{local}@{domain}"
+
+
+def _norm_phone(value: str) -> str:
+    """Normaliza un teléfono: solo dígitos y `+`. Best-effort a E.164 con país por defecto Colombia
+    (+57) para un MÓVIL local de 10 dígitos que empieza en 3 (3XX XXX XXXX); ya en `+` se respeta.
+    Otros formatos quedan como los dígitos (no se adivina prefijo para no mis-prefijar un fijo)."""
+    digits = re.sub(r"[^0-9+]", "", value)
+    if not digits or digits.startswith("+"):
+        return digits
+    if len(digits) == 10 and digits.startswith("3"):
+        return "+57" + digits
+    return digits
+
+
 def norm_identifier(kind: str, value: str) -> str:
     """Normaliza el valor de un identificador para el match acotado por plataforma. ESPEJO de la
     normalización usada en el sync/extracción al insertar `mod_identidades_identifiers.value_norm`.
 
-    - email: lower + strip.
-    - phone: solo dígitos y `+`.
+    - email: lower + canonicalización (quita `+tag`; en Gmail/Googlemail ignora puntos y unifica
+      el dominio) → dos grafías de la misma casilla colapsan. Ver `_norm_email`.
+    - phone: solo dígitos y `+`, best-effort a E.164 (+57 móvil colombiano). Ver `_norm_phone`.
     - handle: lower + strip + sin `@` inicial.
     - domain: parte tras el último `@` (si la hay) → DOMINIO REGISTRABLE (eTLD+1, colapsa
       subdominios; ver `registrable_domain`). Idempotente sobre un registrable.
@@ -210,8 +314,10 @@ def norm_identifier(kind: str, value: str) -> str:
     v = value.strip()
     if kind == "platform_id":
         return v
+    if kind == "email":
+        return _norm_email(v)
     if kind == "phone":
-        return re.sub(r"[^0-9+]", "", v)
+        return _norm_phone(v)
     if kind == "handle":
         return v.lower().lstrip("@")
     if kind == "domain":

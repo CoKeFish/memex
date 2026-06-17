@@ -146,6 +146,29 @@ def test_merge_child_and_parent_no_self_parent(conn: Any) -> None:
     assert _parent_of(conn, surv) is None
 
 
+def test_merge_ancestro_en_descendiente_no_deja_ciclo(conn: Any) -> None:
+    # H2: fundir un ANCESTRO dentro de un DESCENDIENTE. Cadena surv → mid → absb (surv = NIETO de
+    # absb). El re-apunte 4b cuelga `mid` del superviviente mientras el fill-only mantiene surv→mid
+    # → 2-ciclo (el CHECK de la DB solo atrapa el self-loop directo). El guard anti-ciclo
+    # (`would_create_cycle`) lo rompe anulando el padre del superviviente.
+    absb = _mk_person(conn, "Universidad")  # ancestro absorbido
+    mid = _mk_person(conn, "Facultad")  # nodo intermedio
+    surv = _mk_person(conn, "Programa")  # descendiente superviviente
+    _set_parent(conn, mid, absb)  # Facultad → Universidad
+    _set_parent(conn, surv, mid)  # Programa → Facultad
+    assert merge_identities(conn, 1, surv, absb) is True
+    assert _parent_of(conn, mid) == surv  # el intermedio cuelga del superviviente
+    assert _parent_of(conn, surv) is None  # y NO quedó ciclo: su padre se anuló
+    # sanity: ningún par mutuamente apuntado (a→b y b→a)
+    cycles = conn.execute(
+        text(
+            "SELECT a.id FROM mod_identidades a JOIN mod_identidades b "
+            "ON a.parent_identity_id = b.id AND b.parent_identity_id = a.id WHERE a.user_id = 1"
+        )
+    ).all()
+    assert cycles == []
+
+
 def test_merge_dedups_logical_edge(conn: Any) -> None:
     surv = _mk_person(conn, "A")
     absb = _mk_person(conn, "B")

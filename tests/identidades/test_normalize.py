@@ -18,7 +18,15 @@ from memex.modules.identidades.normalize import (
 )
 
 _NAMES = ["Café Ñoño", "  Ada   Lovelace  ", "JOSÉ", "naïve façade", "Müller", "Bogotá D.C."]
-_ORGS = ["Acme S.A.S.", "Unity Technologies", "Grupo Bolívar S.A.", "OpenAI, Inc.", "Ñandú Ltda"]
+_ORGS = [
+    "Acme S.A.S.",
+    "Unity Technologies",
+    "Grupo Bolívar S.A.",
+    "OpenAI, Inc.",
+    "Ñandú Ltda",
+    "Oxford Spa",  # 'spa' ya NO se stripea → cubre la paridad del cambio 0073
+    "Aqua Co",
+]
 
 
 def test_normalize_match_parity(conn: Any) -> None:
@@ -38,6 +46,31 @@ def test_org_core_strips_legal_suffixes() -> None:
     assert org_core("Unity Technologies") == "unity"
     assert org_core("Grupo Bolívar S.A.") == "bolivar"
     assert org_core("OpenAI, Inc.") == "openai"
+
+
+def test_org_core_no_strips_spa_y_no_colapsa() -> None:
+    # 'spa' NO es sufijo legal (0073): conserva su núcleo y NO colapsa orgs distintas — era el bug
+    # que disparaba el auto-merge erróneo ('Oxford Spa' == 'Oxford Group' → 'oxford').
+    assert org_core("Oxford Spa") == "oxford spa"
+    assert org_core("Oxford Spa") != org_core("Oxford Group")
+    assert org_core("Aqua Spa") != org_core("Aqua Co")
+
+
+def test_norm_identifier_email_gmail_y_subaddressing() -> None:
+    # Gmail ignora puntos y +tag; googlemail == gmail → dos grafías de la misma casilla colapsan.
+    assert norm_identifier("email", "j.doe+promo@gmail.com") == "jdoe@gmail.com"
+    assert norm_identifier("email", "jdoe@gmail.com") == "jdoe@gmail.com"
+    assert norm_identifier("email", "JDoe@googlemail.com") == "jdoe@gmail.com"
+    # +tag (RFC 5233) se quita en TODO dominio; los puntos solo en Gmail.
+    assert norm_identifier("email", "juan+work@empresa.com") == "juan@empresa.com"
+    assert norm_identifier("email", "juan.perez@empresa.com") == "juan.perez@empresa.com"
+
+
+def test_norm_identifier_phone_e164() -> None:
+    # móvil CO de 10 dígitos (3XX…) → E.164 +57; ya en '+' se respeta; un fijo no se prefija.
+    assert norm_identifier("phone", "300 123 4567") == "+573001234567"
+    assert norm_identifier("phone", "+57 300 123 4567") == "+573001234567"
+    assert norm_identifier("phone", "(601) 234 5678") == "6012345678"
 
 
 def test_is_role_email() -> None:

@@ -40,6 +40,25 @@ def test_identity_crud_and_detail(client: Any) -> None:
     assert client.get(f"/identidades/{oid}").status_code == 404
 
 
+def test_delete_guard_bloquea_si_participa(client: Any) -> None:
+    # M7: borrar una identidad con menciones la dejaría huérfana → 409, salvo ?force=true.
+    oid = _create(client, kind="organizacion", display_name="Rappi")["id"]
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO mod_identidades_mentions "
+                "(user_id, source_inbox_ids, mentioned_name, resolved_identity_id, "
+                " resolution_method) VALUES (1, ARRAY[5], 'Rappi', :id, 'created')"
+            ),
+            {"id": oid},
+        )
+    blocked = client.delete(f"/identidades/{oid}")
+    assert blocked.status_code == 409
+    assert "merge" in blocked.json()["detail"].lower()
+    assert client.delete(f"/identidades/{oid}?force=true").status_code == 200  # force borra igual
+    assert client.get(f"/identidades/{oid}").status_code == 404
+
+
 def test_create_invalid_kind(client: Any) -> None:
     r = client.post("/identidades", json={"kind": "nope", "display_name": "X"})
     assert r.status_code == 422

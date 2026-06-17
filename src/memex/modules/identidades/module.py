@@ -442,9 +442,13 @@ def load_known_index(conn: Connection, user_id: int) -> KnownIndex:
     Compartido por `dedup` (extracción) y el handle `provide_domain` (`domain.py`)."""
     base = {
         int(r["id"]): (str(r["kind"]), str(r["display_name"]), tuple(r["aliases"] or ()))
+        # `ORDER BY id` hace DETERMINISTA el «primer match gana» del KnownIndex (gana el id MENOR):
+        # el directorio se itera por id, así un nombre/identificador compartido por varias
+        # identidades resuelve siempre a la misma (la más vieja), no al orden físico de las filas.
         for r in conn.execute(
             text(
-                "SELECT id, kind, display_name, aliases FROM mod_identidades WHERE user_id = :uid"
+                "SELECT id, kind, display_name, aliases FROM mod_identidades "
+                "WHERE user_id = :uid ORDER BY id"
             ),
             {"uid": user_id},
         )
@@ -456,7 +460,8 @@ def load_known_index(conn: Connection, user_id: int) -> KnownIndex:
         conn.execute(
             text(
                 "SELECT identity_id, platform, kind, value_norm "
-                "FROM mod_identidades_identifiers WHERE user_id = :uid"
+                "FROM mod_identidades_identifiers WHERE user_id = :uid "
+                "ORDER BY identity_id, id"
             ),
             {"uid": user_id},
         )

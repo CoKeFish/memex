@@ -208,5 +208,30 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
         p,
     )
     conn.execute(text("DELETE FROM mod_identidades WHERE id = :absb AND user_id = :u"), p)
+
+    # 8. anti-ciclo de jerarquía. El re-apunte 4b (hijos del absorbido → superviviente) más el
+    #    fill-only del padre pueden cerrar un ciclo al fundir un ANCESTRO dentro de un DESCENDIENTE:
+    #    el padre del absorbido pasa a colgar del superviviente, que ya descendía de él. El CHECK de
+    #    la DB solo atrapa el self-loop directo, así que el ciclo multinivel se rompe acá con
+    #    `would_create_cycle` (import local: evita el ciclo de import merge↔hierarchy). Toda cadena
+    #    de jerarquía que este merge pudo cerrar pasa por el superviviente, así que anular su padre
+    #    la corta. Idempotente (no-op si no hay ciclo).
+    from memex.modules.identidades.hierarchy import would_create_cycle
+
+    surv_parent = conn.execute(
+        text("SELECT parent_identity_id FROM mod_identidades WHERE id = :surv AND user_id = :u"), p
+    ).scalar()
+    if surv_parent is not None and would_create_cycle(conn, user_id, survivor_id, int(surv_parent)):
+        conn.execute(
+            text(
+                "UPDATE mod_identidades SET parent_identity_id = NULL "
+                "WHERE id = :surv AND user_id = :u"
+            ),
+            p,
+        )
+        _log.info(
+            "identidades.merge.broke_parent_cycle", survivor=survivor_id, absorbed=absorbed_id
+        )
+
     _log.info("identidades.merge.done", survivor=survivor_id, absorbed=absorbed_id)
     return True

@@ -93,3 +93,38 @@ def test_email_beats_name() -> None:
 def test_unresolved() -> None:
     res = _idx().resolve(_probe(name="Nadie Conocido", email="x@nope.com"))
     assert (res.kind, res.identity_id, res.method) == (None, None, "unresolved")
+
+
+def test_persona_con_correo_corporativo_no_colapsa_en_la_org() -> None:
+    # una mención PERSONA con correo de un dominio que pertenece a una org NO se resuelve a la org:
+    # un dominio NO identifica a una persona (su afiliación se teje aparte). Cae al match por
+    # nombre, que acá no existe → unresolved (la persona la crea/afilia el remitente, no este).
+    res = _idx().resolve(_probe(name="Juan Pérez", kind="persona", email="juan.perez@unity.com"))
+    assert res.method == "unresolved"
+
+
+def test_exact_name_kind_scoped_y_cross_kind_unico() -> None:
+    # homónimos de distinto kind NO se colapsan: el match exacto por nombre está acotado al kind de
+    # la mención. Con kind DESCONOCIDO resuelve cross-kind solo si el nombre es ÚNICO.
+    idx = KnownIndex(
+        [
+            KnownIdentity(id=1, kind="persona", display_name="Claude"),
+            KnownIdentity(id=2, kind="producto", display_name="Claude"),
+        ]
+    )
+    assert idx.resolve(_probe(name="Claude", kind="producto")).identity_id == 2
+    assert idx.resolve(_probe(name="Claude", kind="persona")).identity_id == 1
+    # kind desconocido + homónimo de dos kinds → no se arriesga
+    assert idx.resolve(_probe(name="Claude")).method == "unresolved"
+    # pero un nombre ÚNICO sí resuelve cross-kind (caso finance: counterparty "Nequi" sin kind)
+    idx2 = KnownIndex([KnownIdentity(id=9, kind="organizacion", display_name="Nequi")])
+    res = idx2.resolve(_probe(name="Nequi"))
+    assert (res.kind, res.identity_id, res.method) == ("organizacion", 9, "exact_name")
+
+
+def test_producto_mention_resuelve_a_org_homonima() -> None:
+    # org y producto comparten grupo de match: una mención PRODUCTO "Steam" resuelve a la ORG
+    # homónima existente (Steam/Claude son org Y producto = la misma entidad), no crea un duplicado.
+    idx = KnownIndex([KnownIdentity(id=5, kind="organizacion", display_name="Steam")])
+    res = idx.resolve(_probe(name="Steam", kind="producto"))
+    assert (res.kind, res.identity_id, res.method) == ("organizacion", 5, "exact_name")

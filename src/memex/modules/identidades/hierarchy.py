@@ -37,7 +37,6 @@ from memex.core.observability import CostAccum, record_llm_call
 from memex.db import connection
 from memex.llm import ChatMessage, LLMClient, LLMResult, aclose_llm, build_llm_client
 from memex.logging import get_logger
-from memex.modules.identidades.normalize import org_core
 from memex.modules.identidades.prompt import IDENTIDADES_HIERARCHY_SYSTEM_PROMPT
 from memex.relations.deterministic import weave_pertenencia
 
@@ -219,18 +218,20 @@ def _resolve_or_create_parent(conn: Connection, user_id: int, name: str) -> tupl
     como producto, se reusa — no se duplica como org); si no hay, la crea como ORGANIZACIÓN
     (source='extraction', `metadata.created_by='hierarchy_llm'`). Devuelve `(parent_id, created)`.
     Idempotente: dos links al mismo padre-por-nombre convergen a la misma entrada."""
-    core = org_core(name)
-    if core:
-        existing = conn.execute(
-            text(
-                "SELECT id FROM mod_identidades "
-                "WHERE user_id = :u AND kind IN ('organizacion','producto') AND org_core = :core "
-                "ORDER BY id LIMIT 1"
-            ),
-            {"u": user_id, "core": core},
-        ).scalar()
-        if existing is not None:
-            return int(existing), False
+    # `org_core` del nombre se computa en SQL (`memex_org_core`), como la columna generada → sin
+    # divergencia Python↔SQL (NFKD vs unaccent, M4). Se exige core no vacío: un nombre pura-sufijo
+    # (core '') no debe matchear cualquier otra entrada de core vacío.
+    existing = conn.execute(
+        text(
+            "SELECT id FROM mod_identidades "
+            "WHERE user_id = :u AND kind IN ('organizacion','producto') "
+            "  AND memex_org_core(:name) <> '' AND org_core = memex_org_core(:name) "
+            "ORDER BY id LIMIT 1"
+        ),
+        {"u": user_id, "name": name},
+    ).scalar()
+    if existing is not None:
+        return int(existing), False
     new_id = conn.execute(
         text(
             """
