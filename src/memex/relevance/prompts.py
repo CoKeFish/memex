@@ -96,40 +96,63 @@ def parse_gate_verdicts(content: str, expected_ids: set[int]) -> dict[int, tuple
     return {iid: raw_by_id.get(iid, ("insufficient", _FALLBACK_REASON)) for iid in expected_ids}
 
 
-RULES_SYSTEM_PROMPT = (
-    "Sos el analista de patrones de un gate de relevancia de correos. Te paso un AGREGADO de "
-    "los correos que el gate marcó como NO relevantes (publicidad/ruido), agrupados por "
-    "dominio del remitente, con conteos, remitentes y asuntos de ejemplo. Proponé reglas "
-    "DETERMINISTAS para que esa clase de correos no vuelva a pasar por el LLM.\n"
-    "Tipos de regla permitidos (`kind`):\n"
-    "- `sender_email`: igualdad exacta del remitente (ej. promos@tienda.com)\n"
-    "- `sender_domain`: igualdad exacta del dominio (ej. mailing.tienda.com) — preferilo solo "
-    "si TODO lo de ese dominio es ruido\n"
-    "- `subject_contains`: substring del asunto (ej. 'oferta exclusiva') — usalo para plantillas "
-    "repetidas\n"
-    "- `list_id`: igualdad exacta del List-Id\n"
-    "Proponé SOLO reglas con apoyo claro en los datos (varios correos del mismo patrón). Cada "
-    "regla se validará después contra el histórico (dry run): si atrapa un correo relevante "
-    "será rechazada, así que sé preciso, no agresivo.\n"
+#: Espec común del formato de regla COMPUESTA (remitente + asunto, los dos obligatorios) + salida.
+_COMPOSITE_RULE_SPEC = (
+    "Cada regla DEBE combinar un REMITENTE y un PATRÓN DE ASUNTO (los dos, con AND):\n"
+    "- `sender_kind`: 'sender_email' (remitente exacto) | 'sender_domain' (dominio exacto) | "
+    "'list_id' (List-Id exacto); `sender_value`: el valor.\n"
+    "- `subject_pattern`: substring del asunto que delimita ESA clase de correos (ej. 'oferta', "
+    "'práctica profesional').\n"
+    "El remitente solo es demasiado grueso: el patrón del asunto acota el subconjunto. Si para un "
+    "remitente NO ves un patrón de asunto claro y recurrente, NO propongas regla (datos "
+    "insuficientes para esa clase).\n"
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
-    '{"rules": [{"kind": "<kind>", "pattern": "<patrón>", "rationale": "<por qué, max 200 '
-    'chars>"}, ...]}\n'
+    '{"rules": [{"sender_kind": "<kind>", "sender_value": "<valor>", "subject_pattern": '
+    '"<substring del asunto>", "rationale": "<por qué, max 200 chars>"}, ...]}\n'
     'Si no hay patrones claros, devolvé {"rules": []}.'
 )
 
+BLOCK_RULES_SYSTEM_PROMPT = (
+    "Sos el analista de patrones de un gate de relevancia de correos. Te paso un AGREGADO de los "
+    "correos que el gate marcó como NO relevantes (publicidad/ruido), agrupados por dominio del "
+    "remitente, con conteos, remitentes y asuntos de ejemplo. Proponé reglas DETERMINISTAS para "
+    "que esa clase de correos NO vuelva a gastar LLM (quedan `not_relevant`).\n"
+    + _COMPOSITE_RULE_SPEC
+    + "\nCada regla se validará contra el histórico (dry run): si atrapa un correo RELEVANTE será "
+    "rechazada, así que sé preciso, no agresivo."
+)
+
+ALLOW_RULES_SYSTEM_PROMPT = (
+    "Sos el analista de patrones de un gate de relevancia de correos. Te paso un AGREGADO de los "
+    "correos que el gate marcó como RELEVANTES (con valor para el archivo personal) o que el dueño "
+    "rescató a mano, agrupados por dominio del remitente, con conteos, remitentes y asuntos de "
+    "ejemplo. Proponé reglas DETERMINISTAS para que esa clase de correos ENTRE directo sin gastar "
+    "LLM (quedan `relevant`).\n"
+    + _COMPOSITE_RULE_SPEC
+    + "\nCada regla se validará contra el histórico (dry run): si atrapa un correo NO relevante "
+    "será rechazada, así que sé preciso, no agresivo."
+)
+
+
+def rules_system_prompt(effect: str) -> str:
+    """El system prompt de minería según la polaridad (`allow`=relevantes; el resto, ruido)."""
+    return ALLOW_RULES_SYSTEM_PROMPT if effect == "allow" else BLOCK_RULES_SYSTEM_PROMPT
+
 
 def build_rules_user_content(aggregates_json: str) -> str:
-    """Arma el turno `user` de la minería: el agregado de no-relevantes en JSON."""
-    return f"Correos no relevantes agrupados (JSON):\n{aggregates_json}"
+    """Arma el turno `user` de la minería: el agregado por remitente en JSON."""
+    return f"Correos agrupados por remitente (JSON):\n{aggregates_json}"
 
 
 def parse_rule_proposals(content: str) -> list[dict[str, str]] | None:
-    """Parsea `{"rules": [...]}` → [{kind, pattern, rationale}]. None si el JSON es inválido.
+    """Parsea `{"rules": [...]}` → [{sender_kind, sender_value, subject_pattern, rationale}].
 
-    Propuestas con kind desconocido o pattern vacío se descartan (no rompen la corrida). La
-    validación REAL es el dry run del caller; acá solo se sanea el shape.
+    None si el JSON es inválido. Las reglas mineadas son COMPUESTAS: una propuesta sin remitente
+    válido (kind+value) Y sin patrón de asunto se descarta (no rompe la corrida) — incluye el caso
+    «datos insuficientes» (el LLM devuelve `{"rules": []}`). La validación REAL es el dry run del
+    caller; acá solo se sanea el shape.
     """
-    from memex.relevance.rules import RULE_KINDS
+    from memex.relevance.rules import SENDER_KINDS
 
     try:
         data = json.loads(_strip_fences(content))
@@ -141,12 +164,18 @@ def parse_rule_proposals(content: str) -> list[dict[str, str]] | None:
     for item in data["rules"]:
         if not isinstance(item, dict):
             continue
-        kind = str(item.get("kind", "")).strip()
-        pattern = str(item.get("pattern", "")).strip()
-        if kind not in RULE_KINDS or not pattern:
+        sender_kind = str(item.get("sender_kind", "")).strip()
+        sender_value = str(item.get("sender_value", "")).strip()
+        subject_pattern = str(item.get("subject_pattern", "")).strip()
+        if sender_kind not in SENDER_KINDS or not sender_value or not subject_pattern:
             continue
         proposals.append(
-            {"kind": kind, "pattern": pattern, "rationale": str(item.get("rationale", "")).strip()}
+            {
+                "sender_kind": sender_kind,
+                "sender_value": sender_value,
+                "subject_pattern": subject_pattern,
+                "rationale": str(item.get("rationale", "")).strip(),
+            }
         )
     return proposals
 

@@ -44,7 +44,7 @@ def _fake_mining(calls: list[int]) -> Callable[[int], Awaitable[MiningStats]]:
 
 def test_interleave_skips_without_relevance_stage(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
-    monkeypatch.setattr(lots, "run_rule_mining", _fake_mining(calls))
+    monkeypatch.setattr(lots, "run_rule_mining_cycle", _fake_mining(calls))
     with connection() as c:
         upsert_settings(c, 1, enabled=True, mining_interleave=True)
     assert asyncio.run(_mine_between_windows(1, _lot(["extract"]))) is None
@@ -53,7 +53,7 @@ def test_interleave_skips_without_relevance_stage(monkeypatch: pytest.MonkeyPatc
 
 def test_interleave_skips_when_gate_off(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
-    monkeypatch.setattr(lots, "run_rule_mining", _fake_mining(calls))
+    monkeypatch.setattr(lots, "run_rule_mining_cycle", _fake_mining(calls))
     # gate apagado (default) → no-op aunque relevance esté en las etapas
     assert asyncio.run(_mine_between_windows(1, _lot(["relevance", "extract"]))) is None
     assert calls == []
@@ -61,7 +61,7 @@ def test_interleave_skips_when_gate_off(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_interleave_skips_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
-    monkeypatch.setattr(lots, "run_rule_mining", _fake_mining(calls))
+    monkeypatch.setattr(lots, "run_rule_mining_cycle", _fake_mining(calls))
     with connection() as c:
         upsert_settings(c, 1, enabled=True, mining_interleave=False)
     assert asyncio.run(_mine_between_windows(1, _lot(["relevance", "extract"]))) is None
@@ -70,7 +70,7 @@ def test_interleave_skips_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_interleave_mines_when_on(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
-    monkeypatch.setattr(lots, "run_rule_mining", _fake_mining(calls))
+    monkeypatch.setattr(lots, "run_rule_mining_cycle", _fake_mining(calls))
     with connection() as c:
         upsert_settings(c, 1, enabled=True, mining_interleave=True)
     out = asyncio.run(_mine_between_windows(1, _lot(["relevance", "extract"])))

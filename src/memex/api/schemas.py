@@ -375,7 +375,7 @@ class RelevanceVerdictInfo(BaseModel):
     """Veredicto del gate de relevancia para un mensaje (`relevance_verdicts`). Es la CONCLUSIÓN del
     gate —distinta del tier (dial de costo) y de la marca manual (override)—: relevant /
     not_relevant / insufficient, CÓMO se decidió (`method` rule/llm/manual), por qué (`reason`), con
-    qué `mode` (per_window/per_message) y, si fue por regla, qué regla (`rule_kind`+`rule_pattern`).
+    qué `mode` y, si fue por regla, qué regla compuesta (`rule_effect` + remitente + asunto).
     Solo en el detalle (GET /inbox/{id})."""
 
     verdict: str  # relevant | not_relevant | insufficient
@@ -384,8 +384,10 @@ class RelevanceVerdictInfo(BaseModel):
     mode: str | None = None
     model: str | None = None
     rule_id: int | None = None
-    rule_kind: str | None = None
-    rule_pattern: str | None = None
+    rule_effect: str | None = None  # block | allow (si method='rule')
+    rule_sender_kind: str | None = None
+    rule_sender_value: str | None = None
+    rule_subject_pattern: str | None = None
     created_at: datetime | None = None
 
 
@@ -2275,7 +2277,9 @@ class GraphClusterTimeline(BaseModel):
 # --- Gate de relevancia (intereses personales, correos) ---
 GateMode = Literal["per_window", "per_message"]
 GateProvider = Literal["anthropic", "codex"]
-GateRuleKind = Literal["sender_email", "sender_domain", "subject_contains", "list_id"]
+#: El QUIÉN de una regla (el patrón del asunto, el QUÉ, es un campo aparte).
+SenderKind = Literal["sender_email", "sender_domain", "list_id"]
+RuleEffect = Literal["block", "allow"]
 GateRuleStatus = Literal["active", "disabled", "rejected"]
 
 
@@ -2331,11 +2335,13 @@ class InterestPatch(BaseModel):
 
 
 class GateRuleInfo(BaseModel):
-    """Una regla determinista del gate, con su reporte de dry run (auditoría)."""
+    """Una regla determinista del gate (compuesta + bipolar), con su reporte de dry run."""
 
     id: int
-    kind: GateRuleKind
-    pattern: str
+    effect: RuleEffect
+    sender_kind: SenderKind | None
+    sender_value: str | None
+    subject_pattern: str | None
     status: GateRuleStatus
     proposed_by: Literal["llm", "manual"]
     rationale: str
@@ -2352,10 +2358,16 @@ class GateRuleList(BaseModel):
 
 
 class GateRuleCreateRequest(BaseModel):
-    """Alta manual de una regla: corre el dry run; si no pasa → 422 con el reporte."""
+    """Alta manual de una regla compuesta (≥1 predicado): corre el dry run; si no pasa → 422.
 
-    kind: GateRuleKind
-    pattern: str
+    `effect` default 'block'. Predicados: remitente (`sender_kind` + `sender_value`) y/o
+    `subject_pattern`; al menos uno (lo valida el motor).
+    """
+
+    effect: RuleEffect = "block"
+    sender_kind: SenderKind | None = None
+    sender_value: str | None = None
+    subject_pattern: str | None = None
     rationale: str = ""
 
 

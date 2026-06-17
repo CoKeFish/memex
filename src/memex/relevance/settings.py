@@ -37,7 +37,7 @@ class GateSettings:
     enabled: bool = False
     mode: str = "per_window"
     model: str = _DEFAULT_MODEL
-    mining_min_messages: int = 5
+    mining_min_messages: int = 3
     provider: str = "anthropic"
     codex_model: str | None = None
     mining_interleave: bool = True

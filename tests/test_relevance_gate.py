@@ -29,7 +29,11 @@ from memex.relevance import (
     upsert_settings,
 )
 from memex.relevance.gate import GateStats
-from memex.relevance.prompts import GATE_SYSTEM_PROMPT, RULES_SYSTEM_PROMPT
+from memex.relevance.prompts import (
+    ALLOW_RULES_SYSTEM_PROMPT,
+    BLOCK_RULES_SYSTEM_PROMPT,
+    GATE_SYSTEM_PROMPT,
+)
 from memex.reprocess import STAGE_ORDER, reprocess
 
 
@@ -99,6 +103,7 @@ class FakeGateLLM:
         *,
         default_verdict: str = "relevant",
         rules: list[dict[str, str]] | None = None,
+        allow_rules: list[dict[str, str]] | None = None,
         gate_content: str | None = None,
         finish_reason: str = "stop",
         quota: bool = False,
@@ -110,6 +115,7 @@ class FakeGateLLM:
         self._verdicts = verdicts or {}
         self._default = default_verdict
         self._rules = rules or []
+        self._allow_rules = allow_rules or []
         self._gate_content = gate_content
         self._finish = finish_reason
         self._quota = quota
@@ -148,9 +154,12 @@ class FakeGateLLM:
                         ]
                     }
                 )
-        elif system == RULES_SYSTEM_PROMPT:
+        elif system == BLOCK_RULES_SYSTEM_PROMPT:
             self.mining_calls += 1
             content = json.dumps({"rules": self._rules})
+        elif system == ALLOW_RULES_SYSTEM_PROMPT:
+            self.mining_calls += 1
+            content = json.dumps({"rules": self._allow_rules})
         else:  # pragma: no cover - prompt inesperado
             raise AssertionError(f"system prompt inesperado: {system[:60]}")
         return LLMResult(
@@ -224,10 +233,13 @@ def test_gate_rules_prefilter_without_llm() -> None:
         rule = create_rule(
             conn,
             1,
-            kind="sender_domain",
-            pattern="promos.io",
+            effect="block",
+            sender_kind="sender_domain",
+            sender_value="promos.io",
             proposed_by="manual",
-            report=dry_run_rule(conn, 1, "sender_domain", "promos.io"),
+            report=dry_run_rule(
+                conn, 1, effect="block", sender_kind="sender_domain", sender_value="promos.io"
+            ),
         )
         assert rule is not None and rule["status"] == "active"
     llm = FakeGateLLM(default_verdict="relevant")
@@ -242,6 +254,71 @@ def test_gate_rules_prefilter_without_llm() -> None:
             text("SELECT rule_id FROM relevance_verdicts WHERE inbox_id = :i"), {"i": noise}
         ).scalar()
     assert rule_id == rule["id"]
+
+
+def test_gate_allow_rule_marks_relevant_without_llm() -> None:
+    _enable("per_window")
+    sid = _seed_source()
+    wanted = _seed_msg(sid, "m1", sender="prof@uni.edu", subject="Notas del parcial", minute=0)
+    other = _seed_msg(sid, "m2", sender="x@y.com", subject="hola", minute=1)
+    with connection() as conn:
+        rule = create_rule(
+            conn,
+            1,
+            effect="allow",
+            sender_kind="sender_domain",
+            sender_value="uni.edu",
+            subject_pattern="notas",
+            proposed_by="manual",
+            report=dry_run_rule(
+                conn,
+                1,
+                effect="allow",
+                sender_kind="sender_domain",
+                sender_value="uni.edu",
+                subject_pattern="notas",
+            ),
+        )
+        assert rule is not None and rule["status"] == "active"
+    llm = FakeGateLLM(default_verdict="not_relevant")
+    stats = asyncio.run(run_relevance_gate(1, client=llm))
+    assert llm.seen_ids == [[other]]  # el allow corto-circuita; el otro sí va al juez
+    assert stats.by_rule == 1 and stats.relevant == 1
+    rows = _verdict_rows()
+    assert rows[wanted] == ("relevant", "rule")  # allow → relevant determinista, method='rule'
+    assert rows[other] == ("not_relevant", "llm")
+
+
+def test_gate_rule_conflict_falls_to_judge() -> None:
+    _enable("per_window")
+    sid = _seed_source()
+    iid = _seed_msg(sid, "m1", sender="prof@uni.edu", subject="Oferta de notas", minute=0)
+    with connection() as conn:
+        block = create_rule(
+            conn,
+            1,
+            effect="block",
+            subject_pattern="oferta",
+            proposed_by="manual",
+            report=dry_run_rule(conn, 1, effect="block", subject_pattern="oferta"),
+        )
+        allow = create_rule(
+            conn,
+            1,
+            effect="allow",
+            sender_kind="sender_domain",
+            sender_value="uni.edu",
+            proposed_by="manual",
+            report=dry_run_rule(
+                conn, 1, effect="allow", sender_kind="sender_domain", sender_value="uni.edu"
+            ),
+        )
+        assert block is not None and allow is not None
+    llm = FakeGateLLM({iid: "insufficient"})
+    stats = asyncio.run(run_relevance_gate(1, client=llm))
+    assert llm.seen_ids == [[iid]]  # conflicto block↔allow → no se cortocircuita, va al juez
+    assert stats.by_rule == 0
+    assert _verdict_rows()[iid] == ("insufficient", "llm")
 
 
 def test_gate_unparseable_is_retryable_with_deadletter() -> None:
@@ -383,10 +460,26 @@ def test_mining_activates_good_rejects_bad_skips_dup() -> None:
                 VerdictItem(bank_real, "relevant", "llm"),
             ],
         )
+    # Reglas COMPUESTAS (remitente + asunto); todos los seeds tienen asunto "Oferta".
     proposals = [
-        {"kind": "sender_domain", "pattern": "spam.io", "rationale": "todo ruido"},
-        {"kind": "sender_domain", "pattern": "bank.com", "rationale": "promos"},
-        {"kind": "sender_domain", "pattern": "spam.io", "rationale": "duplicada"},
+        {
+            "sender_kind": "sender_domain",
+            "sender_value": "spam.io",
+            "subject_pattern": "oferta",
+            "rationale": "todo ruido",
+        },
+        {
+            "sender_kind": "sender_domain",
+            "sender_value": "bank.com",
+            "subject_pattern": "oferta",
+            "rationale": "promos",
+        },
+        {
+            "sender_kind": "sender_domain",
+            "sender_value": "spam.io",
+            "subject_pattern": "oferta",
+            "rationale": "duplicada",
+        },
     ]
     with connection() as conn:
         upsert_settings(conn, 1, mining_min_messages=2)  # spam.io (2) llega; bank.com (1) no
@@ -399,11 +492,14 @@ def test_mining_activates_good_rejects_bad_skips_dup() -> None:
     assert stats.skipped == 1  # duplicada
     with connection() as conn:
         rows = conn.execute(
-            text("SELECT pattern, status, proposed_by FROM relevance_gate_rules ORDER BY id")
+            text(
+                "SELECT sender_value, subject_pattern, status, proposed_by "
+                "FROM relevance_gate_rules ORDER BY id"
+            )
         ).all()
-    assert [(r[0], r[1], r[2]) for r in rows] == [
-        ("spam.io", "active", "llm"),
-        ("bank.com", "rejected", "llm"),
+    assert [(r[0], r[1], r[2], r[3]) for r in rows] == [
+        ("spam.io", "oferta", "active", "llm"),
+        ("bank.com", "oferta", "rejected", "llm"),
     ]
     # purpose propio en llm_calls
     with connection() as conn:
@@ -441,7 +537,16 @@ def test_mining_accumulation_threshold_and_rule_method_excluded() -> None:
             ],
         )
         upsert_settings(conn, 1, mining_min_messages=2)
-    llm = FakeGateLLM(rules=[{"kind": "sender_domain", "pattern": "spam.io", "rationale": "x"}])
+    llm = FakeGateLLM(
+        rules=[
+            {
+                "sender_kind": "sender_domain",
+                "sender_value": "spam.io",
+                "subject_pattern": "oferta",
+                "rationale": "x",
+            }
+        ]
+    )
     stats = asyncio.run(run_rule_mining(1, client=llm))
     assert llm.calls == 0  # solo 1 'llm' acumulado < umbral 2 → ni se llama al LLM
     assert stats.senders == 0 and stats.proposed == 0
@@ -449,6 +554,37 @@ def test_mining_accumulation_threshold_and_rule_method_excluded() -> None:
     stats = asyncio.run(run_rule_mining(1, min_messages=1, client=llm))
     assert llm.mining_calls == 1
     assert stats.senders == 1 and stats.activated == 1
+
+
+def test_mining_allow_proposes_from_relevant_and_rescues() -> None:
+    """Espejo allow: la fuente son los RELEVANTES del juez (+ rescates manuales). El LLM propone
+    una regla allow compuesta; el dry run la valida (0 no-relevantes) → se auto-activa."""
+    _enable()
+    sid = _seed_source()
+    r1 = _seed_msg(sid, "m1", sender="prof@uni.edu", subject="Notas parcial", minute=0)
+    r2 = _seed_msg(sid, "m2", sender="dir@uni.edu", subject="Notas finales", minute=1)
+    with connection() as conn:
+        insert_verdicts(
+            conn, 1, [VerdictItem(r1, "relevant", "llm"), VerdictItem(r2, "relevant", "llm")]
+        )
+        upsert_settings(conn, 1, mining_min_messages=2)
+    allow_props = [
+        {
+            "sender_kind": "sender_domain",
+            "sender_value": "uni.edu",
+            "subject_pattern": "notas",
+            "rationale": "calificaciones",
+        },
+    ]
+    llm = FakeGateLLM(allow_rules=allow_props)
+    stats = asyncio.run(run_rule_mining(1, effect="allow", client=llm))
+    assert llm.mining_calls == 1
+    assert stats.proposed == 1 and stats.activated == 1
+    with connection() as conn:
+        row = conn.execute(
+            text("SELECT effect, sender_value, subject_pattern, status FROM relevance_gate_rules")
+        ).first()
+    assert row is not None and tuple(row) == ("allow", "uni.edu", "notas", "active")
 
 
 # ---------------------------------------------------------------- etapa de reproceso

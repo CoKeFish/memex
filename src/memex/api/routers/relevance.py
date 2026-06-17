@@ -64,7 +64,7 @@ from memex.relevance.interests import (
     list_interests,
     update_interest,
 )
-from memex.relevance.mining import run_rule_mining
+from memex.relevance.mining import run_rule_mining, run_rule_mining_cycle
 from memex.relevance.rules import create_rule, dry_run_rule, list_rules, set_rule_status
 from memex.relevance.settings import GateSettings, get_settings, upsert_settings
 from memex.relevance.signals import senders_by_relevance
@@ -167,19 +167,35 @@ async def delete_interest_endpoint(interest_id: int, user_id: UserID) -> None:
 async def list_rules_endpoint(
     user_id: UserID,
     status: Annotated[Literal["active", "disabled", "rejected", "all"], Query()] = "all",
+    effect: Annotated[Literal["block", "allow", "all"], Query()] = "all",
 ) -> dict[str, Any]:
     with connection() as conn:
-        return {"items": list_rules(conn, user_id, status=None if status == "all" else status)}
+        return {
+            "items": list_rules(
+                conn,
+                user_id,
+                status=None if status == "all" else status,
+                effect=None if effect == "all" else effect,
+            )
+        }
 
 
 @router.post("/rules", response_model=GateRuleInfo, status_code=201)
 async def create_rule_endpoint(user_id: UserID, body: GateRuleCreateRequest) -> dict[str, Any]:
-    """Alta MANUAL de una regla: corre el dry run primero. Si atraparía algún correo relevante
-    NO se persiste → 422 con el reporte en `detail` (a diferencia de la minería LLM, que sí
-    persiste sus rechazadas como auditoría). 409 si ya existe."""
+    """Alta MANUAL de una regla compuesta: corre el dry run primero. Si no pasa (atraparía un correo
+    del lado contrario a su polaridad) NO se persiste → 422 con el reporte en `detail` (a
+    diferencia de la minería LLM, que sí persiste sus rechazadas como auditoría). 409 si ya existe;
+    422 si los predicados son inválidos."""
     with connection() as conn:
         try:
-            report = dry_run_rule(conn, user_id, body.kind, body.pattern)
+            report = dry_run_rule(
+                conn,
+                user_id,
+                effect=body.effect,
+                sender_kind=body.sender_kind,
+                sender_value=body.sender_value,
+                subject_pattern=body.subject_pattern,
+            )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
         if not report.passes:
@@ -187,20 +203,24 @@ async def create_rule_endpoint(user_id: UserID, body: GateRuleCreateRequest) -> 
         row = create_rule(
             conn,
             user_id,
-            kind=body.kind,
-            pattern=body.pattern,
+            effect=body.effect,
+            sender_kind=body.sender_kind,
+            sender_value=body.sender_value,
+            subject_pattern=body.subject_pattern,
             proposed_by="manual",
             report=report,
             rationale=body.rationale,
         )
     if row is None:
-        raise HTTPException(status_code=409, detail="ya existe una regla con ese kind+pattern")
+        raise HTTPException(status_code=409, detail="ya existe una regla con esos predicados")
     _log.info(
         "relevance.rule.created",
         user_id=user_id,
         rule_id=row["id"],
-        kind=body.kind,
-        pattern=body.pattern,
+        effect=body.effect,
+        sender_kind=body.sender_kind,
+        sender_value=body.sender_value,
+        subject_pattern=body.subject_pattern,
     )
     return row
 
@@ -217,14 +237,22 @@ async def patch_rule_endpoint(rule_id: int, user_id: UserID, body: GateRulePatch
 
 
 @router.post("/rules/mine", response_model=MineRulesResponse)
-async def mine_rules_endpoint(user_id: UserID) -> dict[str, Any]:
-    """Minería on-demand: 1 llamada LLM sobre el agregado de no-relevantes + dry run por
-    propuesta. 422 si el gate está apagado o el LLM no está configurado; 402 sin saldo."""
+async def mine_rules_endpoint(
+    user_id: UserID,
+    effect: Annotated[Literal["block", "allow", "all"], Query()] = "all",
+) -> dict[str, Any]:
+    """Minería on-demand: 1 llamada LLM por polaridad sobre el agregado por remitente + dry run por
+    propuesta. `effect=all` (default) mina block y allow. 422 si el gate está apagado o el LLM no
+    está configurado; 402 sin saldo."""
     with connection() as conn:
         if not get_settings(conn, user_id).enabled:
             raise HTTPException(status_code=422, detail="el gate de relevancia está apagado")
     try:
-        stats = await run_rule_mining(user_id)
+        stats = (
+            await run_rule_mining_cycle(user_id)
+            if effect == "all"
+            else await run_rule_mining(user_id, effect=effect)
+        )
     except LLMConfigError as e:
         raise HTTPException(status_code=422, detail="LLM no configurado (ANTHROPIC_API_KEY)") from e
     except LLMQuotaError as e:

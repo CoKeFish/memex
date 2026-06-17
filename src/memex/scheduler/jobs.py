@@ -40,7 +40,7 @@ from memex.relations.per_message import ConfirmStats, run_per_message_confirm
 from memex.relations.reconcile import detect_and_reconcile
 from memex.relevance.candidates import run_relevance_detection
 from memex.relevance.gate import run_relevance_gate
-from memex.relevance.mining import run_rule_mining
+from memex.relevance.mining import run_rule_mining_cycle
 
 _log = get_logger("memex.scheduler.jobs")
 
@@ -448,7 +448,7 @@ _REGISTRY: dict[str, Job] = {
     # Gate de relevancia (correos) + mineria de reglas: apagados por default (fuera de
     # enabled_jobs); el gate igualmente corre dentro de las corridas de procesamiento.
     "relevance_gate": Job("relevance_gate", "PT1H", run_relevance_gate),
-    "relevance_rules": Job("relevance_rules", "P1D", run_rule_mining),
+    "relevance_rules": Job("relevance_rules", "P1D", run_rule_mining_cycle),
     "graph": Job("graph", "P1D", run_graph_cycle),
     "graph_confirm": Job("graph_confirm", "P1D", run_graph_confirm),
     "log_purge": Job("log_purge", "P1D", _sync(run_log_purge)),

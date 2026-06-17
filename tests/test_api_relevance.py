@@ -44,7 +44,7 @@ def test_settings_default_and_patch(client: Any) -> None:
         "enabled": False,
         "mode": "per_window",
         "model": "claude-opus-4-8",
-        "mining_min_messages": 5,
+        "mining_min_messages": 3,
         "provider": "anthropic",
         "codex_model": None,
     }
@@ -91,7 +91,10 @@ def test_rules_manual_dry_run_and_toggle(client: Any, seed_source: dict[str, Any
         insert_verdicts(c, 1, [VerdictItem(relevant, "relevant", "llm")])
 
     # Una regla que atraparía al relevante NO se persiste: 422 con el reporte
-    bad = client.post("/relevance/rules", json={"kind": "sender_domain", "pattern": "bank.com"})
+    bad = client.post(
+        "/relevance/rules",
+        json={"sender_kind": "sender_domain", "sender_value": "bank.com"},
+    )
     assert bad.status_code == 422
     detail = bad.json()["detail"]
     assert detail["matched_relevant"] == 1 and detail["relevant_sample_ids"] == [relevant]
@@ -100,15 +103,17 @@ def test_rules_manual_dry_run_and_toggle(client: Any, seed_source: dict[str, Any
     # Una regla limpia se activa
     ok = client.post(
         "/relevance/rules",
-        json={"kind": "sender_domain", "pattern": "spam.io", "rationale": "puro ruido"},
+        json={"sender_kind": "sender_domain", "sender_value": "spam.io", "rationale": "puro ruido"},
     )
     assert ok.status_code == 201
     rule = ok.json()
     assert rule["status"] == "active" and rule["proposed_by"] == "manual"
+    assert rule["effect"] == "block" and rule["sender_value"] == "spam.io"
     assert rule["dry_run_report"]["passes"] is True
     assert (
         client.post(
-            "/relevance/rules", json={"kind": "sender_domain", "pattern": "spam.io"}
+            "/relevance/rules",
+            json={"sender_kind": "sender_domain", "sender_value": "spam.io"},
         ).status_code
         == 409
     )
@@ -123,6 +128,44 @@ def test_rules_manual_dry_run_and_toggle(client: Any, seed_source: dict[str, Any
     # Filtro por status
     assert client.get("/relevance/rules?status=active").json()["items"][0]["id"] == rid
     assert client.get("/relevance/rules?status=rejected").json()["items"] == []
+
+
+def test_rules_allow_effect_create_and_filter(client: Any, seed_source: dict[str, Any]) -> None:
+    # Alta de regla ALLOW compuesta (remitente + asunto)
+    ok = client.post(
+        "/relevance/rules",
+        json={
+            "effect": "allow",
+            "sender_kind": "sender_domain",
+            "sender_value": "uni.edu",
+            "subject_pattern": "notas",
+            "rationale": "calificaciones",
+        },
+    )
+    assert ok.status_code == 201
+    rule = ok.json()
+    assert (rule["effect"], rule["sender_kind"], rule["subject_pattern"], rule["status"]) == (
+        "allow",
+        "sender_domain",
+        "notas",
+        "active",
+    )
+    # Un block con los MISMOS predicados coexiste (dedup por effect)
+    blk = client.post(
+        "/relevance/rules",
+        json={
+            "effect": "block",
+            "sender_kind": "sender_domain",
+            "sender_value": "uni.edu",
+            "subject_pattern": "notas",
+        },
+    )
+    assert blk.status_code == 201
+    allow_items = client.get("/relevance/rules?effect=allow").json()["items"]
+    assert {r["effect"] for r in allow_items} == {"allow"}
+    assert len(client.get("/relevance/rules").json()["items"]) == 2
+    # Sin ningún predicado → 422
+    assert client.post("/relevance/rules", json={"effect": "block"}).status_code == 422
 
 
 def test_review_queue_and_resolve(client: Any, seed_source: dict[str, Any]) -> None:

@@ -79,7 +79,6 @@ const METHOD_LABEL: Record<string, string> = {
 const RULE_KIND_LABEL: Record<string, string> = {
   sender_email: "remitente",
   sender_domain: "dominio",
-  subject_contains: "asunto contiene",
   list_id: "list-id",
 }
 
@@ -93,8 +92,14 @@ function VerdictLine({ v }: { v: RelevanceVerdict }) {
   const meta = VERDICT_META[v.verdict]
   const method = METHOD_LABEL[v.method] ?? v.method
   const ruleTxt =
-    v.method === "rule" && v.rulePattern
-      ? `${RULE_KIND_LABEL[v.ruleKind ?? ""] ?? v.ruleKind ?? "regla"}: ${v.rulePattern}`
+    v.method === "rule"
+      ? [
+          v.ruleSenderKind &&
+            `${RULE_KIND_LABEL[v.ruleSenderKind] ?? v.ruleSenderKind}=${v.ruleSenderValue}`,
+          v.ruleSubjectPattern && `asunto~"${v.ruleSubjectPattern}"`,
+        ]
+          .filter(Boolean)
+          .join(" & ") || "regla"
       : null
   return (
     <div className="mt-1.5 text-[11px] text-muted-foreground">

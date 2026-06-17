@@ -32,13 +32,18 @@ from memex.relevance import (
     list_review_queue,
     list_rules,
     load_gate_workset,
-    match_rule,
     resolve_insufficient,
     set_rule_status,
     update_interest,
     upsert_settings,
 )
-from memex.relevance.rules import EmailFields, extract_email_fields
+from memex.relevance.rules import (
+    EmailFields,
+    extract_email_fields,
+    match_sender,
+    match_subject,
+    rule_matches,
+)
 
 
 def _seed_source(name: str = "mail", source_type: str = "imap") -> int:
@@ -102,6 +107,38 @@ def _enable_gate() -> None:
         upsert_settings(c, 1, enabled=True)
 
 
+def _mk_rule(
+    c: Any,
+    *,
+    effect: str = "block",
+    sender_kind: str | None = None,
+    sender_value: str | None = None,
+    subject_pattern: str | None = None,
+    proposed_by: str = "manual",
+    rationale: str = "",
+) -> dict[str, Any] | None:
+    """Helper: corre el dry run y crea la regla compuesta sobre los MISMOS predicados."""
+    report = dry_run_rule(
+        c,
+        1,
+        effect=effect,
+        sender_kind=sender_kind,
+        sender_value=sender_value,
+        subject_pattern=subject_pattern,
+    )
+    return create_rule(
+        c,
+        1,
+        effect=effect,
+        sender_kind=sender_kind,
+        sender_value=sender_value,
+        subject_pattern=subject_pattern,
+        proposed_by=proposed_by,
+        report=report,
+        rationale=rationale,
+    )
+
+
 # ---------------------------------------------------------------- settings + intereses
 
 
@@ -109,15 +146,15 @@ def test_settings_default_off_and_partial_upsert() -> None:
     with connection() as c:
         s = get_settings(c, 1)
         assert (s.enabled, s.mode, s.model) == (False, "per_window", "claude-opus-4-8")
-        assert s.mining_min_messages == 5
+        assert s.mining_min_messages == 3  # disparador por cantidad, default bajo y configurable
         assert (s.provider, s.codex_model) == ("anthropic", None)
         # Sistema unificado: minería intercalada ON por default; umbral del lazo de intereses.
         assert (s.mining_interleave, s.interest_suggest_min_marks) == (True, 5)
         upsert_settings(c, 1, enabled=True)
         upsert_settings(c, 1, mode="per_message")  # parcial: no toca enabled
-        upsert_settings(c, 1, mining_min_messages=3)  # parcial: no toca mode
+        upsert_settings(c, 1, mining_min_messages=4)  # parcial: no toca mode
         s = get_settings(c, 1)
-        assert (s.enabled, s.mode, s.mining_min_messages) == (True, "per_message", 3)
+        assert (s.enabled, s.mode, s.mining_min_messages) == (True, "per_message", 4)
         upsert_settings(c, 1, provider="codex", codex_model="gpt-5.1-codex")
         s = get_settings(c, 1)
         assert (s.provider, s.codex_model) == ("codex", "gpt-5.1-codex")
@@ -186,59 +223,103 @@ def test_extract_email_fields_normalizes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("kind", "pattern", "expected"),
+    ("sender_kind", "sender_value", "expected"),
     [
         ("sender_email", "promo@steam.com", True),
         ("sender_email", "otro@steam.com", False),
         ("sender_domain", "STEAM.com", True),
         ("sender_domain", "valve.com", False),
-        ("subject_contains", "oferta", True),
-        ("subject_contains", "factura", False),
         ("list_id", "l.steam", True),
         ("list_id", "l.otro", False),
     ],
 )
-def test_match_rule_per_kind(kind: str, pattern: str, expected: bool) -> None:
+def test_match_sender_per_kind(sender_kind: str, sender_value: str, expected: bool) -> None:
     fields = EmailFields("promo@steam.com", "steam.com", "Gran OFERTA de verano", "l.steam")
-    assert match_rule(kind, pattern, fields) is expected
+    assert match_sender(sender_kind, sender_value, fields) is expected
 
 
-def test_apply_active_rules_first_match_wins_and_ignores_disabled() -> None:
+def test_match_subject_substring_case_insensitive() -> None:
+    fields = EmailFields("promo@steam.com", "steam.com", "Gran OFERTA de verano", "l.steam")
+    assert match_subject("oferta", fields) is True
+    assert match_subject("factura", fields) is False
+
+
+def test_rule_matches_composite_is_and_of_predicates() -> None:
+    fields = EmailFields("prof@uni.edu", "uni.edu", "Notas del parcial", "")
+    # remitente + asunto: matchea solo si los DOS coinciden
+    assert rule_matches("sender_domain", "uni.edu", "notas", fields) is True
+    assert rule_matches("sender_domain", "uni.edu", "oferta", fields) is False  # asunto no
+    assert rule_matches("sender_domain", "otra.edu", "notas", fields) is False  # remitente no
+    # un solo predicado: matchea por ese solo
+    assert rule_matches("sender_domain", "uni.edu", None, fields) is True
+    assert rule_matches(None, None, "notas", fields) is True
+    # sin predicados → False (defensivo: una regla vacía no matchea todo)
+    assert rule_matches(None, None, None, fields) is False
+
+
+def test_apply_active_rules_block_first_match_wins_and_ignores_disabled() -> None:
     sid = _seed_source()
     iid = _seed_msg(sid, "m1", sender="promo@steam.com", subject="Oferta")
     rows = load_gate_workset(1)
     assert [r.inbox_id for r in rows] == [iid]
     with connection() as c:
-        from memex.relevance.rules import dry_run_rule as dr
-
-        r1 = create_rule(
-            c,
-            1,
-            kind="sender_domain",
-            pattern="steam.com",
-            proposed_by="manual",
-            report=dr(c, 1, "sender_domain", "steam.com"),
-        )
-        r2 = create_rule(
-            c,
-            1,
-            kind="subject_contains",
-            pattern="oferta",
-            proposed_by="manual",
-            report=dr(c, 1, "subject_contains", "oferta"),
-        )
+        r1 = _mk_rule(c, sender_kind="sender_domain", sender_value="steam.com")
+        r2 = _mk_rule(c, subject_pattern="oferta")
         assert r1 is not None and r2 is not None
-        matched = apply_active_rules(c, 1, rows)
-        assert matched == {iid: int(r1["id"])}  # la más vieja primero
+        app = apply_active_rules(c, 1, rows)
+        assert app.conflicts == []
+        assert [(d.inbox_id, d.effect, d.rule_id) for d in app.decisions] == [
+            (iid, "block", int(r1["id"]))  # la más vieja primero
+        ]
         assert set_rule_status(c, int(r1["id"]), 1, "disabled") is not None
-        matched = apply_active_rules(c, 1, rows)
-        assert matched == {iid: int(r2["id"])}
+        app = apply_active_rules(c, 1, rows)
+        assert [d.rule_id for d in app.decisions] == [int(r2["id"])]
+
+
+def test_apply_active_rules_allow_marks_relevant() -> None:
+    sid = _seed_source()
+    iid = _seed_msg(sid, "m1", sender="prof@uni.edu", subject="Notas del parcial")
+    rows = load_gate_workset(1)
+    with connection() as c:
+        rule = _mk_rule(
+            c,
+            effect="allow",
+            sender_kind="sender_domain",
+            sender_value="uni.edu",
+            subject_pattern="notas",
+        )
+        assert rule is not None and rule["status"] == "active"
+        app = apply_active_rules(c, 1, rows)
+        assert app.conflicts == []
+        assert [(d.inbox_id, d.effect, d.rule_id) for d in app.decisions] == [
+            (iid, "allow", int(rule["id"]))
+        ]
+
+
+def test_apply_active_rules_conflict_goes_to_judge() -> None:
+    sid = _seed_source()
+    iid = _seed_msg(sid, "m1", sender="prof@uni.edu", subject="Oferta y notas")
+    rows = load_gate_workset(1)
+    with connection() as c:
+        block = _mk_rule(c, effect="block", subject_pattern="oferta")
+        allow = _mk_rule(c, effect="allow", sender_kind="sender_domain", sender_value="uni.edu")
+        assert block is not None and allow is not None
+        app = apply_active_rules(c, 1, rows)
+        # matchea AMBAS polaridades → no se cortocircuita (sin decisión), cae al juez
+        assert app.decisions == []
+        assert len(app.conflicts) == 1
+        conflict = app.conflicts[0]
+        assert (conflict.inbox_id, conflict.block_rule_id, conflict.allow_rule_id) == (
+            iid,
+            int(block["id"]),
+            int(allow["id"]),
+        )
 
 
 # ---------------------------------------------------------------- dry run + ciclo de reglas
 
 
-def test_dry_run_rejects_rule_that_catches_relevant_mail() -> None:
+def test_dry_run_block_rejects_rule_that_catches_relevant_mail() -> None:
     sid = _seed_source()
     relevant = _seed_msg(sid, "m1", sender="promo@steam.com", subject="Oferta wishlist")
     noise = _seed_msg(sid, "m2", sender="promo@steam.com", subject="Oferta basura", minute=1)
@@ -246,14 +327,44 @@ def test_dry_run_rejects_rule_that_catches_relevant_mail() -> None:
     _verdict(noise, "not_relevant")
     pending = _seed_msg(sid, "m3", sender="promo@steam.com", subject="Otra", minute=2)
     with connection() as c:
-        report = dry_run_rule(c, 1, "sender_domain", "steam.com")
+        report = dry_run_rule(
+            c, 1, effect="block", sender_kind="sender_domain", sender_value="steam.com"
+        )
     assert report.matched == 3
     assert report.matched_relevant == 1
     assert report.matched_not_relevant == 1
     assert report.matched_unverdicted == 1
     assert report.relevant_sample_ids == (relevant,)
+    assert report.contaminating_sample_ids == (relevant,)  # block: el lado malo es el relevante
     assert report.passes is False
     assert pending not in report.relevant_sample_ids
+
+
+def test_dry_run_allow_passes_only_when_no_not_relevant() -> None:
+    # La precisión la da el patrón: el remitente solo es mixto (1 relevant + 1 not_relevant), pero
+    # la regla allow compuesta (remitente + asunto) carva solo el subconjunto relevante → pasa.
+    sid = _seed_source()
+    good = _seed_msg(sid, "m1", sender="prof@uni.edu", subject="Notas del parcial")
+    bad = _seed_msg(sid, "m2", sender="prof@uni.edu", subject="Promo del bazar", minute=1)
+    _verdict(good, "relevant")
+    _verdict(bad, "not_relevant")
+    with connection() as c:
+        coarse = dry_run_rule(  # solo-remitente: atrapa el not_relevant → rechazada
+            c, 1, effect="allow", sender_kind="sender_domain", sender_value="uni.edu"
+        )
+        precise = dry_run_rule(  # compuesta (remitente + asunto): solo el relevante → pasa
+            c,
+            1,
+            effect="allow",
+            sender_kind="sender_domain",
+            sender_value="uni.edu",
+            subject_pattern="notas",
+        )
+    assert coarse.matched_not_relevant == 1
+    assert coarse.contaminating_sample_ids == (bad,)  # allow: el lado malo es el no-relevante
+    assert coarse.passes is False
+    assert precise.matched == 1 and precise.matched_not_relevant == 0
+    assert precise.passes is True
 
 
 def test_dry_run_manual_mark_wins_over_verdict() -> None:
@@ -262,7 +373,9 @@ def test_dry_run_manual_mark_wins_over_verdict() -> None:
     _verdict(iid, "not_relevant")
     with connection() as c:
         set_mark(c, user_id=1, inbox_id=iid, is_relevant=True)
-        report = dry_run_rule(c, 1, "sender_email", "promo@steam.com")
+        report = dry_run_rule(
+            c, 1, effect="block", sender_kind="sender_email", sender_value="promo@steam.com"
+        )
     assert report.matched_relevant == 1  # la mark manual TRUE pisa el veredicto del gate
     assert report.passes is False
 
@@ -272,31 +385,15 @@ def test_create_rule_activates_or_rejects_and_skips_duplicates() -> None:
     relevant = _seed_msg(sid, "m1", sender="humano@uni.edu", subject="Notas")
     _verdict(relevant, "relevant")
     with connection() as c:
-        bad = create_rule(
+        bad = _mk_rule(
             c,
-            1,
-            kind="sender_domain",
-            pattern="uni.edu",
+            sender_kind="sender_domain",
+            sender_value="uni.edu",
             proposed_by="llm",
-            report=dry_run_rule(c, 1, "sender_domain", "uni.edu"),
             rationale="ruido",
         )
-        good = create_rule(
-            c,
-            1,
-            kind="sender_domain",
-            pattern="spam.io",
-            proposed_by="llm",
-            report=dry_run_rule(c, 1, "sender_domain", "spam.io"),
-        )
-        dup = create_rule(
-            c,
-            1,
-            kind="sender_domain",
-            pattern="spam.io",
-            proposed_by="manual",
-            report=dry_run_rule(c, 1, "sender_domain", "spam.io"),
-        )
+        good = _mk_rule(c, sender_kind="sender_domain", sender_value="spam.io", proposed_by="llm")
+        dup = _mk_rule(c, sender_kind="sender_domain", sender_value="spam.io", proposed_by="manual")
     assert bad is not None and bad["status"] == "rejected"
     assert bad["dry_run_report"]["passes"] is False
     assert bad["activated_at"] is None
@@ -305,7 +402,30 @@ def test_create_rule_activates_or_rejects_and_skips_duplicates() -> None:
     assert dup is None
     with connection() as c:
         assert {r["status"] for r in list_rules(c, 1)} == {"rejected", "active"}
-        assert [r["pattern"] for r in list_rules(c, 1, status="active")] == ["spam.io"]
+        active = list_rules(c, 1, status="active")
+        assert [(r["effect"], r["sender_value"]) for r in active] == [("block", "spam.io")]
+
+
+def test_block_and_allow_same_predicates_coexist() -> None:
+    # El dedup es por (user, effect, predicados): la MISMA firma vale en las dos polaridades.
+    with connection() as c:
+        b = _mk_rule(
+            c,
+            effect="block",
+            sender_kind="sender_domain",
+            sender_value="x.com",
+            subject_pattern="oferta",
+        )
+        a = _mk_rule(
+            c,
+            effect="allow",
+            sender_kind="sender_domain",
+            sender_value="x.com",
+            subject_pattern="oferta",
+        )
+        assert b is not None and a is not None
+        assert {r["effect"] for r in list_rules(c, 1)} == {"block", "allow"}
+        assert [r["effect"] for r in list_rules(c, 1, effect="allow")] == ["allow"]
 
 
 def test_rejected_rule_cannot_be_activated() -> None:
@@ -313,13 +433,8 @@ def test_rejected_rule_cannot_be_activated() -> None:
     relevant = _seed_msg(sid, "m1", sender="humano@uni.edu")
     _verdict(relevant, "relevant")
     with connection() as c:
-        bad = create_rule(
-            c,
-            1,
-            kind="sender_email",
-            pattern="humano@uni.edu",
-            proposed_by="llm",
-            report=dry_run_rule(c, 1, "sender_email", "humano@uni.edu"),
+        bad = _mk_rule(
+            c, sender_kind="sender_email", sender_value="humano@uni.edu", proposed_by="llm"
         )
         assert bad is not None
         assert set_rule_status(c, int(bad["id"]), 1, "active") is None
@@ -327,12 +442,20 @@ def test_rejected_rule_cannot_be_activated() -> None:
             set_rule_status(c, int(bad["id"]), 1, "rejected")
 
 
+def test_create_rule_rejects_invalid_predicates() -> None:
+    with connection() as c:
+        with pytest.raises(ValueError):  # sin ningún predicado
+            dry_run_rule(c, 1, effect="block")
+        with pytest.raises(ValueError):  # remitente sin valor
+            dry_run_rule(c, 1, effect="allow", sender_kind="sender_domain")
+
+
 def test_dry_run_subject_contains_escapes_like_metachars() -> None:
     sid = _seed_source()
     _seed_msg(sid, "m1", subject="descuento 100% real")
     _seed_msg(sid, "m2", subject="sin porcentaje", minute=1)
     with connection() as c:
-        report = dry_run_rule(c, 1, "subject_contains", "100% real")
+        report = dry_run_rule(c, 1, effect="block", subject_pattern="100% real")
     assert report.matched == 1  # el % es literal, no comodín
 
 
