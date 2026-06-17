@@ -38,6 +38,8 @@ _RAW_PRIMITIVE = re.compile(r"\b(propose_edge|resolve_edge|mark_vertices_dirty)\
 def _violations(path: Path) -> list[tuple[int, str]]:
     out: list[tuple[int, str]] = []
     for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if line.lstrip().startswith("#"):  # comentarios de línea completa: no son código
+            continue
         if _RAW_WRITE.search(line):
             out.append((n, "escritura cruda a una tabla del grafo"))
         if _RAW_PRIMITIVE.search(line):

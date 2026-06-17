@@ -156,6 +156,8 @@ def update_verdict(
     reject por igual (un rechazo le quita peso al clustering del vecindario: ese era el hueco).
     Reemplaza los `resolve_edge` sueltos. Devuelve si cambió algo."""
     ends = _edge_endpoints(conn, user_id, edge_id)
+    if ends is None:  # no existe (o es de otro user) — simetría con delete_edge
+        return False
     changed = resolve_edge(
         conn,
         edge_id,
@@ -165,7 +167,7 @@ def update_verdict(
         confidence=confidence,
         evidence=evidence,
     )
-    if changed and ends is not None:
+    if changed:
         mark_dirty(conn, user_id, [ends[0], ends[1]])
     return changed
 

@@ -343,15 +343,13 @@ def materialize_cluster_edges(conn: Connection, user_id: int) -> int:
             )
             n += 1
         stale_ids = [eid for ref, eid in existing.items() if ref not in live]
-        if stale_ids:
-            conn.execute(
-                text("DELETE FROM relation_edges WHERE id = ANY(:ids)"), {"ids": stale_ids}
-            )
-        # Marca dirty SOLO el delta de membresía materializada (altas + bajas), no todo el cúmulo:
-        # re-materializar sin cambios no inunda el delta incremental (ADR-021).
-        delta = (live - existing.keys()) | {ref for ref in existing if ref not in live}
-        if delta:
-            mark_dirty(conn, user_id, delta)
+        # prune_edges captura (miembro, cúmulo) ANTES del DELETE y marca ambos: el cúmulo queda
+        # dirty al PERDER un miembro (el BFS post-DELETE no lo alcanza). Las ALTAS lo marcan vía
+        # su arista nueva; resta marcar los miembros nuevos. Marca solo el delta (no todo).
+        prune_edges(conn, user_id, stale_ids)
+        new_members = live - existing.keys()
+        if new_members:
+            mark_dirty(conn, user_id, new_members)
     return n
 
 

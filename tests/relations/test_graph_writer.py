@@ -13,7 +13,9 @@ from typing import Any
 from sqlalchemy import text
 
 from memex.db import connection
+from memex.relations.cluster_store import materialize_cluster_edges
 from memex.relations.edges import (
+    CUMULO_SLUG,
     PRODUCER_INBOX,
     PROVENANCE_EXTRACTED,
     PROVENANCE_INFERRED,
@@ -304,3 +306,25 @@ def test_merge_vertices_colapsa_conflicto_unique() -> None:
             {"s": P_SURV.slug, "i": P_SURV.id, "ds": dst.slug, "di": dst.id},
         ).scalar()
     assert n == 1  # se colapsó, sin duplicado ni IntegrityError
+
+
+def test_materialize_marca_cumulo_al_perder_miembro() -> None:
+    # regresión del bug del audit (#1): al PERDER un miembro, el cúmulo debe quedar dirty (antes
+    # no: el DELETE de la arista miembro_de corría ANTES del marcado y el BFS no lo alcanzaba).
+    m1 = Ref("identidades:person", 50)
+    m2 = Ref("identidades:person", 51)
+    cid = _seed_cluster([m1, m2])
+    with connection() as c:
+        materialize_cluster_edges(c, 1)  # crea las 2 aristas miembro_de
+    with connection() as c:  # "perder" m2: marcarlo pruned → deja de ser live
+        c.execute(
+            text(
+                "UPDATE relation_cluster_members SET pruned = TRUE "
+                "WHERE cluster_id = :c AND member_id = :m"
+            ),
+            {"c": cid, "m": m2.id},
+        )
+    _clear_dirty()
+    with connection() as c:
+        materialize_cluster_edges(c, 1)  # m2 se va → la baja debe marcar el cúmulo
+    assert (CUMULO_SLUG, cid) in _dirty()
