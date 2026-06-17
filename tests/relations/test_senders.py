@@ -380,7 +380,8 @@ def test_email_freemail_con_nombre_crea_persona() -> None:
     assert len(ids) == 1  # solo la persona; NO se crea org del free-mail
     person_id = ids[0][0]
     assert _identity_kinds() == ["persona"]
-    assert ("email", "email", "ana.garcia@gmail.com") in _identifiers_of(person_id)
+    # value_norm plegado por Gmail (los puntos se ignoran): ana.garcia → anagarcia
+    assert ("email", "email", "anagarcia@gmail.com") in _identifiers_of(person_id)
     assert _pair(edges[0]) == {("finance", fin), ("identidades:person", person_id)}
 
 
