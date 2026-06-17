@@ -30,6 +30,7 @@ from memex.relations.edges import (
     Ref,
     propose_edge,
 )
+from memex.relations.graph_writer import mark_dirty, prune_edges
 
 #: Estados activos (participan del match de reconciliación).
 ACTIVE_STATUSES: tuple[str, ...] = ("candidate", "confirmed", "stale")
@@ -237,20 +238,25 @@ def delete_cluster(conn: Connection, cluster_id: int) -> None:
 
 
 def _delete_cluster_edges(conn: Connection, user_id: int, cluster_id: int) -> None:
-    """Borra las aristas `miembro_de` que apuntan a este cúmulo (no-op hasta materializarlas)."""
-    conn.execute(
-        text(
-            "DELETE FROM relation_edges WHERE user_id = :u AND producer = :p "
-            "AND relation_type = :rt AND dst_slug = :cs AND dst_id = :cid"
-        ),
-        {
-            "u": user_id,
-            "p": PRODUCER_LLM,
-            "rt": RELTYPE_MIEMBRO_DE,
-            "cs": CUMULO_SLUG,
-            "cid": cluster_id,
-        },
-    )
+    """Borra las aristas `miembro_de` de este cúmulo (no-op hasta materializarlas) vía el
+    GraphWriter, que marca dirty a los ex-miembros (perdieron su cúmulo)."""
+    ids = [
+        int(r[0])
+        for r in conn.execute(
+            text(
+                "SELECT id FROM relation_edges WHERE user_id = :u AND producer = :p "
+                "AND relation_type = :rt AND dst_slug = :cs AND dst_id = :cid"
+            ),
+            {
+                "u": user_id,
+                "p": PRODUCER_LLM,
+                "rt": RELTYPE_MIEMBRO_DE,
+                "cs": CUMULO_SLUG,
+                "cid": cluster_id,
+            },
+        ).all()
+    ]
+    prune_edges(conn, user_id, ids)
 
 
 def mark_dissolved(conn: Connection, user_id: int, cluster_id: int) -> None:
@@ -341,6 +347,11 @@ def materialize_cluster_edges(conn: Connection, user_id: int) -> int:
             conn.execute(
                 text("DELETE FROM relation_edges WHERE id = ANY(:ids)"), {"ids": stale_ids}
             )
+        # Marca dirty SOLO el delta de membresía materializada (altas + bajas), no todo el cúmulo:
+        # re-materializar sin cambios no inunda el delta incremental (ADR-021).
+        delta = (live - existing.keys()) | {ref for ref in existing if ref not in live}
+        if delta:
+            mark_dirty(conn, user_id, delta)
     return n
 
 
