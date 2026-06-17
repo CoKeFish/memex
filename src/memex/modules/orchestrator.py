@@ -662,7 +662,8 @@ async def _persist_unit(
             for iid in inbox_ids:
                 root_node = attach_to_root(conn, user_id=user_id, inbox_id=iid)
                 if root_node is not None:
-                    root_node.llm(call_id, label=leaf_label)
+                    # seq negativo: la hoja de extracción va arriba (antes de los spans de módulo).
+                    root_node.llm(call_id, label=leaf_label, seq=-1500)
     _log.info(
         "extract.unit.done",
         slugs=slugs,
@@ -724,8 +725,9 @@ async def _process_window(
             for r in window.rows:
                 root_node = attach_to_root(conn, user_id=user_id, inbox_id=r.inbox_id)
                 if root_node is not None:
-                    for cid in route_call_ids:
-                        root_node.llm(cid, label="Ruteo")
+                    for idx, cid in enumerate(route_call_ids):
+                        # seq negativo (antes de la extracción y de los spans de módulo).
+                        root_node.llm(cid, label="Ruteo", seq=-2000 + idx)
 
     # Etapa B — construir las UNIDADES de extracción (mismo cálculo de filas pending/co/leftover) en
     # el ORDEN de `chosen` (topo): la FASE 2 persiste en este orden, así una dependencia persiste

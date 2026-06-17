@@ -95,12 +95,16 @@ class TraceNode:
         detail: dict[str, Any] | None = None,
         ref: tuple[str, int] | None = None,
         llm_call_id: int | None = None,
+        seq: int | None = None,
     ) -> TraceNode:
         if not self._active:
             return self  # NULL_TRACER / inactivo
         assert self._conn is not None
-        seq = self._next_seq
-        self._next_seq += 1
+        # `seq` explícito (negativo) ubica la hoja antes de los spans de módulo en el orden de
+        # hermanos (igual que las hojas sintéticas de read_trace); None → auto-incremento normal.
+        if seq is None:
+            seq = self._next_seq
+            self._next_seq += 1
         new_id = self._conn.execute(
             text(
                 """
@@ -186,11 +190,12 @@ class TraceNode:
         label: str = "LLM",
         status: str | None = None,
         detail: dict[str, Any] | None = None,
+        seq: int | None = None,
     ) -> TraceNode:
         """Nodo de una llamada LLM ya registrada en `llm_calls` (su costo/output crudo se leen de
-        ahí). Para colgar el desempate de un dedup bajo su comparación (worker async, slice
-        posterior)."""
-        return self._child("llm", label, status=status, detail=detail, llm_call_id=call_id)
+        ahí). `seq` explícito ubica la hoja en el orden de hermanos (las hojas de costo COMPARTIDO
+        usan seq negativo para ir antes de los spans de módulo); None → auto-incremento."""
+        return self._child("llm", label, status=status, detail=detail, llm_call_id=call_id, seq=seq)
 
     def __enter__(self) -> TraceNode:
         return self
