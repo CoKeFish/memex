@@ -30,13 +30,12 @@ from sqlalchemy.engine import Connection
 from memex.core.source import HealthResult, SourceKind
 from memex.logging import get_logger
 from memex.modules.contract import (
-    CAP_DEBUG_INBOX,
     CAP_EXTRACT,
     CAP_PROVIDE_DOMAIN,
     ExtractionItem,
     ModuleContext,
 )
-from memex.modules.dedup import fetch_internal_calls, forget_inbox_rows
+from memex.modules.dedup import forget_inbox_rows
 from memex.modules.identidades.domain import IdentidadesDomainReader
 from memex.modules.identidades.fuzzy import (
     HIGH_THRESHOLD,
@@ -95,9 +94,7 @@ class IdentidadesModule:
     )
     extraction_schema: ClassVar[type[ExtractionItem]] = IdentityItem
     extraction_prompt: ClassVar[str] = IDENTIDADES_SYSTEM_PROMPT
-    capabilities: ClassVar[frozenset[str]] = frozenset(
-        {CAP_EXTRACT, CAP_PROVIDE_DOMAIN, CAP_DEBUG_INBOX}
-    )
+    capabilities: ClassVar[frozenset[str]] = frozenset({CAP_EXTRACT, CAP_PROVIDE_DOMAIN})
     consumes_kinds: ClassVar[frozenset[SourceKind]] = frozenset(
         {SourceKind.EMAIL, SourceKind.CHAT, SourceKind.SOCIAL}
     )
@@ -181,7 +178,11 @@ class IdentidadesModule:
         if res.identity_id is None:
             return
         ent = ctx.trace.entity(
-            "mod_identidades", id=res.identity_id, label=f"«{m.name}» → {res.method}", status="ok"
+            "mod_identidades",
+            id=res.identity_id,
+            label=f"«{m.name}» → {res.method}",
+            status="ok",
+            source_inbox_ids=m.source_inbox_ids,
         )
         if res.method == "created":
             ent.log("no se parece a nada → creada nueva", status="info")
@@ -241,113 +242,6 @@ class IdentidadesModule:
             .all()
         )
         return [dict(r) for r in rows]
-
-    def debug_for_inbox(
-        self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
-    ) -> dict[str, Any]:
-        """Estado INTERNO de identidades para `inbox_ids` (capacidad `debug_inbox`, vista
-        `/datos/:id`): `{"rows", "internal_calls"}`. `rows` = por mención: cómo resolvió (método) a
-        qué identidad y los candidatos de merge que la tocan. `internal_calls` = llamadas LLM
-        `identidades_dedup` (desempate de esos candidatos) + `identidades_cooccurrence` (de este
-        correo, correlacionada por `metadata.inbox_id`), con su costo real."""
-        mentions = (
-            conn.execute(
-                text(
-                    """
-                    SELECT m.id, m.mentioned_name, m.mentioned_kind, m.resolved_kind,
-                           m.resolution_method, m.resolved_identity_id, m.confidence, m.created_at,
-                           ri.display_name AS resolved_identity_name
-                    FROM mod_identidades_mentions m
-                    LEFT JOIN mod_identidades ri ON ri.id = m.resolved_identity_id
-                    WHERE m.user_id = :uid AND CAST(:ids AS BIGINT[]) && m.source_inbox_ids
-                    ORDER BY m.id
-                    """
-                ),
-                {"uid": user_id, "ids": list(inbox_ids)},
-            )
-            .mappings()
-            .all()
-        )
-        if not mentions:
-            return {"rows": [], "internal_calls": []}
-        identity_ids = sorted(
-            {
-                int(m["resolved_identity_id"])
-                for m in mentions
-                if m["resolved_identity_id"] is not None
-            }
-        )
-        by_identity: dict[int, list[dict[str, Any]]] = {iid: [] for iid in identity_ids}
-        cand_ids: list[int] = []
-        if identity_ids:
-            cands = (
-                conn.execute(
-                    text(
-                        """
-                        SELECT mc.id, mc.identity_a_id, mc.identity_b_id, mc.reason, mc.score,
-                               mc.status, mc.decided_by, mc.confidence, mc.rationale, mc.created_at,
-                               mc.decided_at, ia.display_name AS a_name, ib.display_name AS b_name
-                        FROM mod_identidades_merge_candidates mc
-                        LEFT JOIN mod_identidades ia ON ia.id = mc.identity_a_id
-                        LEFT JOIN mod_identidades ib ON ib.id = mc.identity_b_id
-                        WHERE mc.user_id = :uid AND (
-                            mc.identity_a_id = ANY(CAST(:ids AS BIGINT[]))
-                            OR mc.identity_b_id = ANY(CAST(:ids AS BIGINT[]))
-                        )
-                        ORDER BY mc.id
-                        """
-                    ),
-                    {"uid": user_id, "ids": identity_ids},
-                )
-                .mappings()
-                .all()
-            )
-            cand_ids = [int(c["id"]) for c in cands]
-            for c in cands:
-                a, b = int(c["identity_a_id"]), int(c["identity_b_id"])
-                pair = {
-                    "reason": c["reason"],
-                    "score": float(c["score"]) if c["score"] is not None else None,
-                    "status": c["status"],
-                    "decided_by": c["decided_by"],
-                    "confidence": float(c["confidence"]) if c["confidence"] is not None else None,
-                    "rationale": c["rationale"],
-                    "created_at": c["created_at"],
-                    "decided_at": c["decided_at"],
-                }
-                if a in by_identity:
-                    by_identity[a].append(
-                        {**pair, "other_identity_id": b, "other_identity_name": c["b_name"]}
-                    )
-                if b in by_identity:
-                    by_identity[b].append(
-                        {**pair, "other_identity_id": a, "other_identity_name": c["a_name"]}
-                    )
-        mention_rows = [
-            {
-                "mention_id": int(m["id"]),
-                "mentioned_name": m["mentioned_name"],
-                "mentioned_kind": m["mentioned_kind"],
-                "resolved_kind": m["resolved_kind"],
-                "resolution_method": m["resolution_method"],
-                "resolved_identity_id": m["resolved_identity_id"],
-                "resolved_identity_name": m["resolved_identity_name"],
-                "confidence": float(m["confidence"]) if m["confidence"] is not None else None,
-                "created_at": m["created_at"],
-                "merge_candidates": by_identity.get(int(m["resolved_identity_id"]), [])
-                if m["resolved_identity_id"] is not None
-                else [],
-            }
-            for m in mentions
-        ]
-        # Llamadas LLM internas correlacionadas a este correo: el desempate de merge (por `pair_id`)
-        # y la co-ocurrencia (por `metadata.inbox_id`). Traen su costo real.
-        internal_calls = fetch_internal_calls(
-            conn, user_id, purpose="identidades_dedup", pair_ids=cand_ids
-        ) + fetch_internal_calls(
-            conn, user_id, purpose="identidades_cooccurrence", inbox_ids=list(inbox_ids)
-        )
-        return {"rows": mention_rows, "internal_calls": internal_calls}
 
     def forget_inbox(self, conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
         """Olvida lo aportado por `inbox_ids`: saca la referencia y borra la mención solo si queda

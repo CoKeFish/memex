@@ -18,8 +18,9 @@ calcula al leer (`read_trace`), que además cuelga del root las `llm_calls` atri
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
@@ -27,6 +28,24 @@ from sqlalchemy.engine import Connection
 from memex.db import connection
 
 # --- escritura: root + handle ------------------------------------------------------- #
+
+
+class Tracer(Protocol):
+    """Lo que un módulo ve como `ctx.trace`. Lo satisfacen `TraceNode` (un span fijo —o
+    `NULL_TRACER`, no-op—) y `ModuleTracer` (rutea cada entidad al root de SU mensaje cuando la
+    unidad abarca un lote). Los módulos SOLO llaman `.entity(...)` directo y cuelgan el resto
+    (`step/decision/log`) del handle que devuelve."""
+
+    def entity(
+        self,
+        table: str,
+        *,
+        id: int,
+        label: str,
+        status: str | None = None,
+        detail: dict[str, Any] | None = None,
+        source_inbox_ids: Sequence[int] | None = None,
+    ) -> TraceNode: ...
 
 
 def create_root(conn: Connection, *, user_id: int, inbox_id: int, label: str) -> int:
@@ -119,6 +138,7 @@ class TraceNode:
         label: str,
         status: str | None = None,
         detail: dict[str, Any] | None = None,
+        source_inbox_ids: Sequence[int] | None = None,
     ) -> TraceNode:
         """Nodo de ENTIDAD: referencia (no copia) una fila de dominio (`table`+`id`). El front la
         muestra como `#id` linkeable y le cuelga abajo los pasos de qué le pasó.
@@ -127,7 +147,12 @@ class TraceNode:
         estrictamente "insertada en esta corrida". finance/calendar/hackathones emiten una por fila
         materializada; identidades emite una por MENCIÓN resuelta, anclada a la identidad resuelta
         —que puede ser preexistente—. Por eso el invariante de cobertura exige `≥1` entity cuando un
-        módulo persistió filas, no una correspondencia 1:1."""
+        módulo persistió filas, no una correspondencia 1:1.
+
+        `source_inbox_ids` lo acepta por el contrato `Tracer` (lo pasa el módulo), pero este nodo lo
+        IGNORA —ya está fijado a un mensaje—; quien lo usa para rutear al root correcto es
+        `ModuleTracer`."""
+        del source_inbox_ids
         return self._child("entity", label, status=status, detail=detail, ref=(table, id))
 
     def step(
@@ -204,6 +229,62 @@ def open_module_tracer(
         {"u": user_id, "i": inbox_id, "p": root_id, "s": seq, "ms": slug, "l": label},
     ).scalar_one()
     return TraceNode(conn, user_id=user_id, inbox_id=inbox_id, node_id=int(new_id))
+
+
+class ModuleTracer:
+    """`ctx.trace` de un módulo sobre una UNIDAD que puede abarcar varios mensajes de un lote. Rutea
+    cada `.entity(...)` al span del módulo bajo el root del mensaje que la originó
+    (`source_inbox_ids[0]`), abriendo ese span perezosamente y cacheándolo por inbox_id —así la
+    entidad de cada mensaje cuelga de SU árbol, no del primero del lote. Satisface `Tracer`. El span
+    de un módulo es lazy: si no emite entidades para un mensaje, ese root no gana un nodo vacío."""
+
+    def __init__(
+        self,
+        conn: Connection,
+        *,
+        user_id: int,
+        trace_roots: Mapping[int, int],
+        slug: str,
+        seq: int,
+    ) -> None:
+        self._conn = conn
+        self._user_id = user_id
+        self._roots = trace_roots
+        self._slug = slug
+        self._seq = seq
+        self._spans: dict[int, TraceNode] = {}
+
+    def _span(self, inbox_id: int) -> TraceNode:
+        span = self._spans.get(inbox_id)
+        if span is None:
+            span = open_module_tracer(
+                self._conn,
+                user_id=self._user_id,
+                inbox_id=inbox_id,
+                root_id=self._roots[inbox_id],
+                slug=self._slug,
+                label=self._slug,
+                seq=self._seq,
+            )
+            self._spans[inbox_id] = span
+        return span
+
+    def entity(
+        self,
+        table: str,
+        *,
+        id: int,
+        label: str,
+        status: str | None = None,
+        detail: dict[str, Any] | None = None,
+        source_inbox_ids: Sequence[int] | None = None,
+    ) -> TraceNode:
+        """Cuelga la entidad del span del módulo bajo el root de `source_inbox_ids[0]`. Sin
+        atribución a un mensaje de la ventana (vacío o fuera de ella) → no-op."""
+        iid = source_inbox_ids[0] if source_inbox_ids else None
+        if iid is None or iid not in self._roots:
+            return NULL_TRACER
+        return self._span(iid).entity(table, id=id, label=label, status=status, detail=detail)
 
 
 def attach_to_entity(
@@ -365,6 +446,25 @@ def read_trace(user_id: int, inbox_id: int) -> list[dict[str, Any]] | None:
                     {"u": user_id, "ids": missing},
                 ).mappings()
             )
+        # Reparto del costo de una call COMPARTIDA: cuántos nodos `llm` (de CUALQUIER inbox) la
+        # referencian. 1 nodo (mensaje individual / desempate async colgado a uno) → costo completo;
+        # N nodos (una `extract_grouped`/ruteo de lote colgada a cada mensaje del lote) → cost/N por
+        # nodo. El COUNT de nodos es la verdad (no `metadata["n"]`: miente con co/leftover).
+        share_by_call: dict[int, int] = {}
+        if explicit_ids:
+            share_by_call = {
+                int(cr["llm_call_id"]): int(cr["n"])
+                for cr in conn.execute(
+                    text(
+                        """
+                        SELECT llm_call_id, COUNT(*) AS n FROM trace_nodes
+                        WHERE user_id = :u AND llm_call_id = ANY(CAST(:ids AS BIGINT[]))
+                        GROUP BY llm_call_id
+                        """
+                    ),
+                    {"u": user_id, "ids": explicit_ids},
+                ).mappings()
+            }
 
     root_id = root_row["id"] if root_row is not None else None
     call_by_id: dict[Any, Any] = {c["id"]: c for c in calls}
@@ -381,7 +481,8 @@ def read_trace(user_id: int, inbox_id: int) -> list[dict[str, Any]] | None:
         if r["kind"] == "llm" and r["llm_call_id"] is not None:
             c = call_by_id.get(r["llm_call_id"])
             if c is not None:
-                own_cost = _to_float(c["cost_usd"])
+                # cost/N si la call es compartida (N nodos la referencian); N=1 → costo completo.
+                own_cost = _to_float(c["cost_usd"]) / share_by_call.get(int(r["llm_call_id"]), 1)
                 payload = _llm_payload(c)
         node = {
             "id": int(r["id"]),

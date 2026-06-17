@@ -430,15 +430,12 @@ async def get_inbox(inbox_id: int, user_id: UserID) -> dict[str, Any]:
         )
     # Extracciones: única fuente = read_extractions (de-hardcodeado, itera el registry). Antes este
     # router duplicaba el SQL por módulo y ya había divergido (le faltaba identidades).
-    from memex.modules.orchestrator import read_extractions, read_extractions_debug
+    from memex.modules.orchestrator import read_extractions
 
     data["summary"] = dict(summary) if summary else None
     data["extraction"] = read_extractions(user_id, inbox_id)
-    # Estado interno por-módulo (dedup, seam contraparte→identidad, consolidación) para la vista de
-    # DEBUG; de-hardcodeado (itera el registry por CAP_DEBUG_INBOX). Mapa slug→filas; {} si ninguno.
-    data["extraction_debug"] = read_extractions_debug(user_id, inbox_id)
-    # Árbol de traza jerárquica (vista en stack); None ⇒ sin árbol persistido → el front usa el
-    # fallback (LlmTrace + extraction_debug). Cuelga del root las llm_calls de ruteo/extracción/OCR.
+    # Árbol de traza jerárquica (vista en stack); None ⇒ mensaje sin árbol (procesado antes de la
+    # traza por lote). Cuelga las llm_calls de ruteo/extracción/OCR del root (reparto cost/N).
     from memex.core.trace import read_trace
 
     data["trace"] = read_trace(user_id, inbox_id)

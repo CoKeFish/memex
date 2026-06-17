@@ -97,7 +97,13 @@ class HackathonModule:
             label = h.name.strip() or "(sin nombre)"
             if h.starts_on is not None:
                 label = f"{label} · {h.starts_on}"
-            ctx.trace.entity("mod_hackathones_events", id=hid, label=label, status="ok")
+            ctx.trace.entity(
+                "mod_hackathones_events",
+                id=hid,
+                label=label,
+                status="ok",
+                source_inbox_ids=h.source_inbox_ids,
+            )
         return len(hackathons)
 
     async def health_check(self) -> HealthResult:

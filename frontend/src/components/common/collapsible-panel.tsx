@@ -5,7 +5,7 @@ import { Panel, PanelBody } from "@/components/common/panel"
 
 /** Panel cuyo header es un botón que abre/cierra el cuerpo. Mantiene la firma visual del Panel
  * (corner-ticks) y el mismo header (eyebrow + título + sub) que PanelHeader, con un chevron que rota.
- * Reusa el patrón de toggle de message/llm-trace.tsx. Cerrado por defecto. */
+ * Cerrado por defecto. */
 export function CollapsiblePanel({
   eyebrow,
   title,

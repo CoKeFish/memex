@@ -3,7 +3,6 @@
 
 import { apiDelete, apiGet, apiGetBlob, ApiError, apiPost } from "@/lib/api"
 import type {
-  ExtractionDebug,
   FeedbackKind,
   InboxExtraction,
   InboxFeedback,
@@ -251,8 +250,7 @@ interface InboxApiRow {
     metadata?: Record<string, unknown> | null
   } | null
   extraction?: InboxExtraction | null
-  extraction_debug?: ExtractionDebug | null
-  /** Árbol de traza jerárquica (camelCase, ya en la forma que consume el front). null ⇒ fallback. */
+  /** Árbol de traza jerárquica (camelCase, ya en la forma que consume el front). null ⇒ sin árbol. */
   trace?: TraceNodeDto[] | null
   llm?: {
     calls: number
@@ -365,7 +363,6 @@ function toInboxRow(r: InboxApiRow): InboxRow {
         }
       : null,
     extraction: r.extraction ?? null,
-    extractionDebug: r.extraction_debug ?? null,
     trace: r.trace ?? null,
     llm: toLlmUsage(r.llm),
     media,

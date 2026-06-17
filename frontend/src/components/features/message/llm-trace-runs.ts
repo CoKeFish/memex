@@ -26,10 +26,6 @@ export interface Run {
   producedExtraction: boolean
 }
 
-function str(v: unknown): string {
-  return v == null ? "" : String(v)
-}
-
 function tsOf(c: InboxLlmCall): number {
   const t = c.createdAt ? Date.parse(c.createdAt) : NaN
   return Number.isNaN(t) ? 0 : t
@@ -115,43 +111,4 @@ export function fmtCost(usd: number): string {
   if (!usd) return "$0"
   if (usd < 0.01) return `$${usd.toFixed(6)}`
   return `$${usd.toFixed(4)}`
-}
-
-/** Resume la decisión de una llamada desde su metadata (auditoría del ruteo / extracción / OCR). */
-export function callDetail(c: InboxLlmCall): string {
-  const m = c.metadata ?? {}
-  const list = (v: unknown) => (Array.isArray(v) ? v.map(String).join(", ") : str(v))
-  if (c.purpose === "module_route") {
-    return `evaluó: ${list(m.slugs_in) || "—"} → eligió: ${list(m.chosen) || "ninguno"}`
-  }
-  if (c.purpose.startsWith("extract")) {
-    return `items: ${str(m.items)} · descartados: ${str(m.discarded)}${m.n ? ` · ventana: ${str(m.n)} msj` : ""}`
-  }
-  if (c.purpose.startsWith("summarize")) {
-    return m.n ? `ventana: ${str(m.n)} msj` : ""
-  }
-  if (c.purpose === "ocr") return ocrDetail(m)
-  return ""
-}
-
-/** Detalle de una llamada/evento OCR: transcripción de una imagen, omisión por tope, o manifiesto. */
-function ocrDetail(m: Record<string, unknown>): string {
-  const kind = str(m.kind)
-  if (kind === "pdf-skipped" || kind === "zip-pdf-skipped") {
-    const tope = m.max_images ? ` (tope ${str(m.max_images)} imgs)` : ""
-    const origin = m.origin ? ` · ${str(m.origin)}` : ""
-    return `omitido · ${str(m.skipped_reason) || "límite de imágenes"}${tope}${origin}`
-  }
-  if (kind === "zip-manifest") {
-    const entries = Array.isArray(m.entries) ? m.entries.length : 0
-    const skipped = Array.isArray(m.skipped) ? m.skipped.length : 0
-    const trunc = m.truncated === true ? " · truncado" : ""
-    return `ZIP: ${entries} entrada(s)${skipped ? ` · ${skipped} salteada(s)` : ""}${trunc}`
-  }
-  // Llamada de visión real sobre una imagen / página.
-  const label = kind || "imagen"
-  const origin = m.origin ? ` · ${str(m.origin)}` : ""
-  const chars = m.chars != null ? ` · ${str(m.chars)} chars` : ""
-  const trunc = m.truncated === true ? " · truncado" : ""
-  return `${label}${origin}${chars}${trunc}`
 }

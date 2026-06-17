@@ -714,180 +714,6 @@ def test_routed_out_cursor_cuenta_atribucion_previa(seed_source: dict[str, Any])
     assert cnt == 1
 
 
-def test_read_extractions_debug_exposes_finance_seam(seed_source: dict[str, Any]) -> None:
-    """read_extractions_debug (vista DEBUG): expone el estado INTERNO de finance — la contraparte
-    resuelta a identidad + el outcome de dedup. Solo módulos con CAP_DEBUG_INBOX (calendar/
-    hackathones NO aparecen aunque estén registrados)."""
-    from memex.modules.orchestrator import read_extractions_debug
-
-    _enable("finance")
-    _enable("identidades")
-    oid = _seeded_identity("Test")
-    iid = _seed(seed_source["id"], "m1", "individual", {"body_text": "pagué $4500"})
-    asyncio.run(run_extraction(1, client=FakeExtractLLM(route_choose=["finance"])))
-
-    debug = read_extractions_debug(1, iid)
-    assert "calendar" not in debug and "hackathones" not in debug  # no declaran CAP_DEBUG_INBOX
-    fin = debug["finance"]
-    assert len(fin["rows"]) == 1
-    row = fin["rows"][0]
-    assert row["counterparty_identity_id"] == oid
-    assert row["counterparty_identity_name"] == "Test"
-    assert row["processing_outcome"] in {"pending", "unique", "duplicate"}
-    assert row["dedup_candidates"] == []  # único movimiento → sin pares (la query igual corre)
-    assert fin["internal_calls"] == []  # sin dedup fase-2 todavía → sin llamadas LLM internas
-
-
-def test_identidades_debug_for_inbox_exposes_resolution_and_merge() -> None:
-    """IdentidadesModule.debug_for_inbox: por mención, método de resolución, identidad resuelta y
-    los candidatos de merge que la tocan (con el nombre de la otra). Ejercita el SQL completo."""
-    from memex.modules.identidades.module import IdentidadesModule
-
-    with connection() as c:
-        a = c.execute(
-            text(
-                "INSERT INTO mod_identidades (user_id, kind, display_name) "
-                "VALUES (1,'organizacion','Acme') RETURNING id"
-            )
-        ).scalar_one()
-        b = c.execute(
-            text(
-                "INSERT INTO mod_identidades (user_id, kind, display_name) "
-                "VALUES (1,'organizacion','Acme Inc') RETURNING id"
-            )
-        ).scalar_one()
-        lo, hi = sorted((int(a), int(b)))
-        c.execute(
-            text(
-                """INSERT INTO mod_identidades_merge_candidates
-                   (user_id, identity_a_id, identity_b_id, reason, score, status)
-                   VALUES (1, :lo, :hi, 'trgm_name', 0.7, 'candidate')"""
-            ),
-            {"lo": lo, "hi": hi},
-        )
-        c.execute(
-            text(
-                """INSERT INTO mod_identidades_mentions
-                   (user_id, source_inbox_ids, mentioned_name, mentioned_kind,
-                    resolved_kind, resolved_identity_id, resolution_method)
-                   VALUES (1, ARRAY[55]::bigint[], 'Acme', 'organizacion',
-                           'organizacion', :rid, 'fuzzy')"""
-            ),
-            {"rid": lo},
-        )
-
-    with connection() as c:
-        result = IdentidadesModule().debug_for_inbox(c, 1, [55])
-
-    rows = result["rows"]
-    assert result["internal_calls"] == []  # sin llamadas LLM internas sembradas
-    assert len(rows) == 1
-    m = rows[0]
-    assert m["resolution_method"] == "fuzzy"
-    assert m["resolved_identity_id"] == lo
-    assert len(m["merge_candidates"]) == 1
-    cand = m["merge_candidates"][0]
-    assert cand["other_identity_id"] == hi
-    assert cand["other_identity_name"] == "Acme Inc"
-    assert cand["status"] == "candidate"
-    assert cand["score"] == 0.7
-
-
-def test_finance_internal_calls_surface_dedup_cost() -> None:
-    """Las llamadas LLM de dedup fase-2 (`finance_dedup`) corren en batch con inbox_id=NULL; el
-    debug las correlaciona por `metadata.pair_id` → candidato → tx del correo, con su COSTO real."""
-    from decimal import Decimal
-
-    from memex.core.observability import record_llm_call
-    from memex.modules.orchestrator import read_extractions_debug
-
-    with connection() as c:
-        t1 = int(
-            c.execute(
-                text(
-                    "INSERT INTO mod_finance_transactions (user_id, source_inbox_ids, direction, "
-                    "amount, currency, occurred_at, counterparty) "
-                    "VALUES (1, ARRAY[77]::bigint[], 'egreso', 100, 'COP', NOW(), 'Uber') "
-                    "RETURNING id"
-                )
-            ).scalar_one()
-        )
-        t2 = int(
-            c.execute(
-                text(
-                    "INSERT INTO mod_finance_transactions (user_id, source_inbox_ids, direction, "
-                    "amount, currency, occurred_at, counterparty) "
-                    "VALUES (1, ARRAY[88]::bigint[], 'egreso', 100, 'COP', NOW(), 'Uber') "
-                    "RETURNING id"
-                )
-            ).scalar_one()
-        )
-        lo, hi = sorted((t1, t2))
-        cand = int(
-            c.execute(
-                text(
-                    "INSERT INTO mod_finance_dedup_candidates (user_id, transaction_a_id, "
-                    "transaction_b_id, reason, score, status, decided_by, confidence) "
-                    "VALUES (1, :a, :b, 'amount+fecha', 0.9, 'confirmed', 'llm', 0.95) RETURNING id"
-                ),
-                {"a": lo, "b": hi},
-            ).scalar_one()
-        )
-    record_llm_call(
-        user_id=1,
-        purpose="finance_dedup",
-        model="deepseek-chat",
-        prompt_tokens=120,
-        completion_tokens=20,
-        cost_usd=Decimal("0.0004"),
-        latency_ms=300,
-        status="ok",
-        inbox_id=None,  # corre en batch: la correlación es por metadata.pair_id, no por columna
-        metadata={"pair_id": cand, "same": True, "confidence": 0.95},
-    )
-
-    calls = read_extractions_debug(1, 77)["finance"]["internal_calls"]
-    assert len(calls) == 1
-    assert calls[0]["purpose"] == "finance_dedup"
-    assert calls[0]["cost_usd"] == 0.0004  # costo real visible en el debug del mensaje
-    assert calls[0]["metadata"]["pair_id"] == cand
-
-
-def test_identidades_internal_calls_surface_cooccurrence_cost() -> None:
-    """La co-ocurrencia (`identidades_cooccurrence`) es por-mensaje pero con inbox_id=NULL en la
-    columna; se correlaciona por `metadata.inbox_id` y trae su costo real."""
-    from decimal import Decimal
-
-    from memex.core.observability import record_llm_call
-    from memex.modules.identidades.module import IdentidadesModule
-
-    with connection() as c:
-        c.execute(
-            text(
-                "INSERT INTO mod_identidades_mentions (user_id, source_inbox_ids, mentioned_name, "
-                "mentioned_kind) VALUES (1, ARRAY[91]::bigint[], 'Foo', 'organizacion')"
-            )
-        )
-    record_llm_call(
-        user_id=1,
-        purpose="identidades_cooccurrence",
-        model="deepseek-chat",
-        prompt_tokens=200,
-        completion_tokens=40,
-        cost_usd=Decimal("0.0006"),
-        latency_ms=400,
-        status="ok",
-        inbox_id=None,
-        metadata={"inbox_id": 91, "identities": 5, "pairs": 3},
-    )
-
-    with connection() as c:
-        calls = IdentidadesModule().debug_for_inbox(c, 1, [91])["internal_calls"]
-    cooc = [x for x in calls if x["purpose"] == "identidades_cooccurrence"]
-    assert len(cooc) == 1
-    assert cooc[0]["cost_usd"] == 0.0006
-
-
 def test_read_extractions_de_hardcoded_returns_all_module_keys() -> None:
     """read_extractions itera el registry (de-hardcodeado): TODAS las claves de módulo presentes
     —incluida identidades, que antes no aparecía— aun sin datos, para no soltar una clave que el
@@ -933,11 +759,40 @@ def test_extract_inbox_writes_trace_tree(seed_source: dict[str, Any]) -> None:
     assert any(r["kind"] == "entity" and r["ref_table"] == "mod_finance_transactions" for r in rows)
 
 
-def test_run_extraction_batch_writes_no_trace(seed_source: dict[str, Any]) -> None:
-    """El camino batch (run_extraction) NO materializa traza (trace_root_id None → NULL_TRACER): la
-    traza es por-mensaje único, para no mis-atribuir un lote entero a un root."""
+def test_run_extraction_batch_writes_trace_per_message(seed_source: dict[str, Any]) -> None:
+    """run_extraction (lote) ahora materializa un árbol POR mensaje: un root por inbox + la entidad
+    de cada transacción colgando del root de SU mensaje (atribución por `source_inbox_ids`), no del
+    primero del lote. El costo compartido se reparte cost/N al leer (ver test_core_trace)."""
     _enable("finance")
-    _seed(seed_source["id"], "m1", "batch", {"body_text": "pagué $4500"})
+    m1 = _seed(seed_source["id"], "m1", "batch", {"body_text": "pagué $4500"}, minute=0)
+    m2 = _seed(seed_source["id"], "m2", "batch", {"body_text": "pagué $9000"}, minute=1)
     asyncio.run(run_extraction(1, client=FakeExtractLLM()))
 
-    assert _count("trace_nodes") == 0
+    with connection() as c:
+        roots = {
+            int(r["inbox_id"])
+            for r in c.execute(
+                text("SELECT inbox_id FROM trace_nodes WHERE kind = 'root'")
+            ).mappings()
+        }
+        # entity → span de módulo → root; join a la transacción para ver su atribución real.
+        attribution = (
+            c.execute(
+                text(
+                    """
+                    SELECT root.inbox_id AS root_inbox, tx.source_inbox_ids AS tx_inboxes
+                    FROM trace_nodes e
+                    JOIN trace_nodes mod ON mod.id = e.parent_id
+                    JOIN trace_nodes root ON root.id = mod.parent_id
+                    JOIN mod_finance_transactions tx ON tx.id = e.ref_id
+                    WHERE e.kind = 'entity' AND e.ref_table = 'mod_finance_transactions'
+                    """
+                )
+            )
+            .mappings()
+            .all()
+        )
+    assert roots == {m1, m2}  # un root por mensaje del lote (antes: 0 — batch no tenía árbol)
+    assert len(attribution) == 2  # una entidad por mensaje
+    for r in attribution:  # cada transacción colgó del root de SU mensaje, no del primero del lote
+        assert r["root_inbox"] in r["tx_inboxes"]

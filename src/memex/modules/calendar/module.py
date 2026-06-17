@@ -210,12 +210,16 @@ class CalendarModule:
         new_rows = _insert_events(ctx.conn, ctx.user_id, events)
         # Traza: una ENTIDAD por evento (no-op si la traza está apagada).
         ents: dict[int, TraceNode] = {}
-        for r in new_rows:
+        for ev, r in zip(events, new_rows, strict=True):
             label = r.title.strip() or "(sin título)"
             if r.starts_on is not None:
                 label = f"{label} · {r.starts_on}"
             ents[r.event_id] = ctx.trace.entity(
-                "mod_calendar_events", id=r.event_id, label=label, status="ok"
+                "mod_calendar_events",
+                id=r.event_id,
+                label=label,
+                status="ok",
+                source_inbox_ids=ev.source_inbox_ids,
             )
         # Traza: dedup FASE 1 → comparación "vs evento #other" bajo la entidad que toca el par.
         pairs = _mark_dedup(ctx.conn, ctx.user_id, new_rows)

@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from memex.core.source import HealthResult, SourceKind
-from memex.core.trace import NULL_TRACER, TraceNode
+from memex.core.trace import NULL_TRACER, Tracer
 from memex.logging import get_logger
 
 if TYPE_CHECKING:
@@ -44,12 +44,6 @@ CAP_EXTRACT = "extract"
 #: Futuras, declaradas pero SIN flujo en este slice (las ejercitan calendar/hackathones):
 CAP_PROVIDE_DOMAIN = "provide_domain"
 CAP_CONTRIBUTE_DOMAIN = "contribute_domain"
-#: Expone el ESTADO INTERNO por-mensaje (dedup, seam, consolidación) para la vista de DEBUG
-#: `/datos/:id` — lo que `read_for_inbox` oculta. Vía `InboxDebugProvider`. NO es legacy: la traza
-#: jerárquica `ctx.trace` → `trace_nodes` solo se construye para ventanas de UN mensaje (extracción
-#: individual); los lotes (chat siempre, correos batch, el daemon) nunca generan árbol por diseño y
-#: caen acá — es el camino de debug VIGENTE para todo lo procesado en lote.
-CAP_DEBUG_INBOX = "debug_inbox"
 
 
 class ExtractionItem(BaseModel):
@@ -78,10 +72,11 @@ class ModuleContext:
       handle (`ctx.deps[slug]`). Vacío si el módulo no declara dependencias con dominio.
     - `summary_id`: None en este slice (la extracción no depende del resumen; ADR-015 §9).
     - `inbox_ids`: los ids del lote — base de la atribución (`source_inbox_ids ⊆ inbox_ids`).
-    - `trace`: handle de la traza jerárquica (`memex.core.trace.TraceNode`). El módulo emite logs
-      SOLO por acá (`ctx.trace.entity(...).step(...)`, etc.); el front los renderiza genérico (vista
-      en stack). Escribe en `ctx.conn` (atómico con el persist). `NULL_TRACER` (default) = no-op
-      cuando la traza está apagada (batch / window multi-mensaje): el módulo llama sin chequear.
+    - `trace`: handle de la traza jerárquica (`Tracer`). Puede ser un `TraceNode` fijo o un
+      `ModuleTracer` que rutea cada entidad al root de SU mensaje en un lote. El módulo emite SOLO
+      por acá (`ctx.trace.entity(..., source_inbox_ids=...).step(...)`); el front lo renderiza
+      genérico (vista en stack). Escribe en `ctx.conn` (atómico con el persist). `NULL_TRACER`
+      (default) = no-op cuando la traza está apagada: el módulo llama sin chequear.
     """
 
     user_id: int
@@ -90,7 +85,7 @@ class ModuleContext:
     deps: Mapping[str, object]
     summary_id: int | None
     inbox_ids: tuple[int, ...]
-    trace: TraceNode = NULL_TRACER
+    trace: Tracer = NULL_TRACER
 
 
 @runtime_checkable
@@ -186,27 +181,6 @@ class DomainProvider(Protocol):
 
     def provide_domain(self, conn: Connection, user_id: int) -> object:
         """Construye el handle de dominio del módulo ligado a `(conn, user_id)`."""
-        ...
-
-
-@runtime_checkable
-class InboxDebugProvider(Protocol):
-    """Capacidad `debug_inbox`: expone el ESTADO INTERNO por-mensaje que `read_for_inbox` oculta —
-    para la vista de DEBUG `/datos/:id`. Cada fila de debug describe una entidad que el módulo
-    materializó desde el mensaje, con sus señales internas: resolución del seam (p. ej.
-    contraparte→identidad), dedup (pares candidatos, decisión proc/LLM, score, timestamps) y
-    consolidación. Read-only; NO abre tx propia. La consume `read_extractions_debug` iterando el
-    registry; los módulos sin estado interno interesante (calendar/hackathones) no la declaran."""
-
-    def debug_for_inbox(
-        self, conn: Connection, user_id: int, inbox_ids: Sequence[int]
-    ) -> dict[str, Any]:
-        """Estado interno del módulo para `inbox_ids`: `{"rows": [...], "internal_calls": [...]}`.
-        `rows` = una fila por entidad materializada (sus señales internas). `internal_calls` = las
-        llamadas LLM INTERNAS (dedup fase-2, co-ocurrencia, …) que tocaron esas entidades —
-        correlacionadas por metadata (`pair_id`/`inbox_id`) porque corren en batch con
-        `inbox_id=NULL`; cada una con su costo real, para que el costo del LLM sea visible aquí.
-        Read-only; NO abre tx propia."""
         ...
 
 

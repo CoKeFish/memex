@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -43,18 +44,16 @@ from memex.core.observability import (
 from memex.core.observability import (
     cost_fields as _cost_fields,
 )
-from memex.core.trace import create_root, open_module_tracer
+from memex.core.trace import NULL_TRACER, ModuleTracer, Tracer, attach_to_root, create_root
 from memex.db import connection
 from memex.llm import ChatMessage, LLMClient, LLMQuotaError, LLMResult, aclose_llm, build_llm_client
 from memex.logging import bound_log_context, get_logger
 from memex.modules import known_modules, resolve
 from memex.modules.attribution import attributed_counts
 from memex.modules.contract import (
-    CAP_DEBUG_INBOX,
     CAP_PROVIDE_DOMAIN,
     DomainProvider,
     ExtractionItem,
-    InboxDebugProvider,
     InterestModule,
     ModuleContext,
     parse_items,
@@ -208,9 +207,9 @@ async def _route_chunk(
     *,
     chunk_idx: int = 0,
     n_chunks: int = 1,
-) -> list[str]:
-    """Una llamada LLM de ruteo sobre un chunk de candidatos. Devuelve los slugs elegidos del
-    chunk (∩ chunk); parse inválido → todos los del chunk (fallback conservador)."""
+) -> tuple[list[str], int]:
+    """Una llamada LLM de ruteo sobre un chunk de candidatos. Devuelve (slugs elegidos del chunk
+    ∩ chunk; parse inválido → todos, fallback conservador) y el id de la `llm_call` de ruteo."""
     chunk_slugs = {c.slug for c in chunk}
     catalog = [(c.slug, c.interest) for c in chunk]
     msgs = [
@@ -222,7 +221,7 @@ async def _route_chunk(
     )
     stats.routed += 1
     parsed = parse_routing(result.content)
-    record_llm_call(
+    call_id = record_llm_call(
         user_id=user_id,
         purpose="module_route",
         model=result.model,
@@ -250,8 +249,8 @@ async def _route_chunk(
     )
     if parsed is None:
         _log.warning("route.parse_fallback", source_id=window.source_id, chunk=chunk_idx)
-        return sorted(chunk_slugs)
-    return [s for s in parsed if s in chunk_slugs]
+        return sorted(chunk_slugs), call_id
+    return [s for s in parsed if s in chunk_slugs], call_id
 
 
 async def _route(
@@ -263,19 +262,22 @@ async def _route(
     stats: ExtractStats,
     *,
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
-) -> list[str]:
-    """Devuelve los slugs a extraer, en orden topológico. Short-circuit con ≤1 candidato (sin LLM).
+) -> tuple[list[str], list[int]]:
+    """Devuelve (slugs a extraer en orden topológico, ids de las calls de ruteo). Short-circuit con
+    ≤1 candidato (sin LLM → sin ids).
 
     Con ≥2 candidatos rutea por LLM. Si `route_chunk_size>0` y hay más candidatos que ese tope, se
     rutea en SUB-PASADAS (un chunk por llamada) y se UNEN los elegidos. Después `resolve_order`
     corre UNA vez sobre el mapa completo, así que `depends_on` cross-chunk queda resuelto por el
     cierre transitivo (una dep en otro chunk se arrastra aunque su router no la haya elegido)."""
+    route_call_ids: list[int] = []
     if len(candidates) <= 1:
-        chosen: list[str] = [c.slug for c in candidates]
+        chosen: list[str] = [c.slug for c in candidates]  # short-circuit: sin LLM, sin call
     else:
         messages_json, _ = _build_messages(window)
         if route_chunk_size <= 0 or len(candidates) <= route_chunk_size:
-            chosen = await _route_chunk(user_id, llm, window, messages_json, candidates, stats)
+            chosen, cid = await _route_chunk(user_id, llm, window, messages_json, candidates, stats)
+            route_call_ids.append(cid)
         else:
             ordered_c = sorted(candidates, key=lambda c: c.slug)
             chunks = [
@@ -284,18 +286,18 @@ async def _route(
             ]
             union: set[str] = set()
             for idx, chunk in enumerate(chunks):
-                union.update(
-                    await _route_chunk(
-                        user_id,
-                        llm,
-                        window,
-                        messages_json,
-                        chunk,
-                        stats,
-                        chunk_idx=idx,
-                        n_chunks=len(chunks),
-                    )
+                slugs, cid = await _route_chunk(
+                    user_id,
+                    llm,
+                    window,
+                    messages_json,
+                    chunk,
+                    stats,
+                    chunk_idx=idx,
+                    n_chunks=len(chunks),
                 )
+                union.update(slugs)
+                route_call_ids.append(cid)
             chosen = sorted(union)
 
     ordered = resolve_order(chosen, active_by_slug)
@@ -308,7 +310,7 @@ async def _route(
         n=len(window.rows),
         inbox_ids=[r.inbox_id for r in window.rows],
     )
-    return list(ordered.order)
+    return list(ordered.order), route_call_ids
 
 
 # --- Etapa B: extracción ----------------------------------------------------------- #
@@ -332,8 +334,8 @@ def _record_cost(
     discarded: int = 0,
     error_message: str | None = None,
     response_text: str | None = None,
-) -> None:
-    record_llm_call(
+) -> int:
+    call_id = record_llm_call(
         user_id=user_id,
         purpose=f"extract_{slug}",
         model=model,
@@ -360,6 +362,7 @@ def _record_cost(
         completion_tokens=completion_tokens,
         cost_usd=cost_usd,
     )
+    return call_id
 
 
 def _build_deps(
@@ -481,7 +484,7 @@ def _record_grouped_cost(
     items_by_slug: dict[str, int] | None = None,
     discarded_by_slug: dict[str, int] | None = None,
     error_message: str | None = None,
-) -> None:
+) -> int:
     """UN solo `extract_grouped` `llm_call` por llamada agrupada (el costo per-módulo no es
     separable: prompt+completion compartido). Conserva la atribución items/discarded por slug."""
     metadata: dict[str, object] = {
@@ -494,7 +497,7 @@ def _record_grouped_cost(
         metadata["items_by_slug"] = items_by_slug
     if discarded_by_slug is not None:
         metadata["discarded_by_slug"] = discarded_by_slug
-    record_llm_call(
+    call_id = record_llm_call(
         user_id=user_id,
         purpose="extract_grouped",
         model=result.model,
@@ -515,6 +518,7 @@ def _record_grouped_cost(
         completion_tokens=result.usage.completion_tokens,
         cost_usd=result.cost_usd,
     )
+    return call_id
 
 
 async def _persist_unit(
@@ -525,7 +529,7 @@ async def _persist_unit(
     stats: ExtractStats,
     active_by_slug: dict[str, InterestModule],
     *,
-    trace_root_id: int | None = None,
+    trace_roots: Mapping[int, int] | None = None,
 ) -> None:
     """FASE 2 (persistir/dedup): SECUENCIAL y en topo-orden. Materializa los items de la unidad —
     cada módulo en su PROPIA tx con `ctx.deps` ya poblado (la dependencia persistió en una unidad
@@ -588,16 +592,15 @@ async def _persist_unit(
     # que la dependencia ya commiteó, así que `_build_deps` ve su dominio fresco.
     for i, module in enumerate(unit.modules):
         with connection() as conn:
-            # Span del módulo bajo el root (atómico con persist + cursor en esta tx). NULL_TRACER
-            # si la traza está apagada (trace_root_id None → batch / window multi-mensaje).
-            tracer = open_module_tracer(
-                conn,
-                user_id=user_id,
-                inbox_id=inbox_ids[0],
-                root_id=trace_root_id,
-                slug=module.slug,
-                label=module.slug,
-                seq=i,
+            # `ctx.trace` rutea cada entidad al span del módulo bajo el root de SU mensaje
+            # (`source_inbox_ids[0]`), atómico con persist + cursor en esta tx. Sin roots (un test
+            # que llama _persist_unit directo) → NULL_TRACER no-op.
+            tracer: Tracer = (
+                ModuleTracer(
+                    conn, user_id=user_id, trace_roots=trace_roots, slug=module.slug, seq=i
+                )
+                if trace_roots
+                else NULL_TRACER
             )
             ctx = ModuleContext(
                 user_id=user_id,
@@ -620,7 +623,7 @@ async def _persist_unit(
         stats.by_module[module.slug] = stats.by_module.get(module.slug, 0) + persisted
 
     if unit.grouped:
-        _record_grouped_cost(
+        call_id = _record_grouped_cost(
             user_id,
             unit,
             result,
@@ -631,9 +634,10 @@ async def _persist_unit(
             items_by_slug=items_by_slug,
             discarded_by_slug=outcome.discarded_by_slug,
         )
+        leaf_label = "Extracción agrupada"
     else:
         slug = unit.modules[0].slug
-        _record_cost(
+        call_id = _record_cost(
             user_id,
             slug,
             stats,
@@ -650,6 +654,15 @@ async def _persist_unit(
             discarded=outcome.discarded_by_slug[slug],
             response_text=result.content,
         )
+        leaf_label = f"Extracción · {slug}"
+    # Hoja de costo COMPARTIDO de extracción: la call cubre los inbox de la unit → un nodo `llm`
+    # bajo el root de CADA uno (tx propia, presentacional); `read_trace` reparte cost/N.
+    if trace_roots:
+        with connection() as conn:
+            for iid in inbox_ids:
+                root_node = attach_to_root(conn, user_id=user_id, inbox_id=iid)
+                if root_node is not None:
+                    root_node.llm(call_id, label=leaf_label)
     _log.info(
         "extract.unit.done",
         slugs=slugs,
@@ -670,7 +683,6 @@ async def _process_window(
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
     batching_policy: str = "grouped",
     group_size: int = _GROUP_SIZE_DEFAULT,
-    trace_root_id: int | None = None,
 ) -> None:
     kind = kind_for_type(window.rows[0].source_type)
     candidates = candidates_for_kind(kind, active)
@@ -691,11 +703,29 @@ async def _process_window(
 
     with connection() as conn:
         done = _done_by_id(conn, [r.inbox_id for r in window.rows])
+        # Traza jerárquica: un root POR mensaje de la ventana (delete-then-write → re-extraer
+        # reemplaza). Se crean ANTES de rutear/persistir para que las hojas de costo compartido
+        # (ruteo/extracción) y las entidades cuelguen de ellos. Cubre individual y lote por igual.
+        trace_roots = {
+            r.inbox_id: create_root(
+                conn, user_id=user_id, inbox_id=r.inbox_id, label=f"mensaje #{r.inbox_id}"
+            )
+            for r in window.rows
+        }
 
-    chosen = await _route(
+    chosen, route_call_ids = await _route(
         user_id, llm, window, candidates, active_by_slug, stats, route_chunk_size=route_chunk_size
     )
     chosen_set = set(chosen)
+    # Hojas de ruteo: la(s) call(s) de ruteo cubren TODA la ventana → un nodo `llm` bajo cada root;
+    # `read_trace` reparte cost/N por el nº de nodos que referencian cada call.
+    if route_call_ids:
+        with connection() as conn:
+            for r in window.rows:
+                root_node = attach_to_root(conn, user_id=user_id, inbox_id=r.inbox_id)
+                if root_node is not None:
+                    for cid in route_call_ids:
+                        root_node.llm(cid, label="Ruteo")
 
     # Etapa B — construir las UNIDADES de extracción (mismo cálculo de filas pending/co/leftover) en
     # el ORDEN de `chosen` (topo): la FASE 2 persiste en este orden, así una dependencia persiste
@@ -765,7 +795,7 @@ async def _process_window(
             inbox_id=unit.rows[0].inbox_id if len(unit.rows) == 1 else None,
         ):
             await _persist_unit(
-                user_id, llm, unit, outcome, stats, active_by_slug, trace_root_id=trace_root_id
+                user_id, llm, unit, outcome, stats, active_by_slug, trace_roots=trace_roots
             )
 
     # Candidatos ruteados-fuera: marcar "considerado" para no re-rutearlos eternamente.
@@ -1001,24 +1031,6 @@ def read_extractions(user_id: int, inbox_id: int) -> dict[str, Any]:
     return result
 
 
-def read_extractions_debug(user_id: int, inbox_id: int) -> dict[str, dict[str, Any]]:
-    """Estado INTERNO por-módulo de un inbox para la vista de DEBUG (`/datos/:id`): de-hardcodeado,
-    itera el registry y le pide su `debug_for_inbox` a cada módulo que declara `CAP_DEBUG_INBOX`.
-    Cada valor es `{"rows": [...], "internal_calls": [...]}` (estado por-entidad + las llamadas LLM
-    internas correlacionadas, con su costo). Solo módulos con la capacidad (finance/identidades);
-    el resto se omite. Read-only."""
-    out: dict[str, dict[str, Any]] = {}
-    with connection() as conn:
-        for slug in known_modules():
-            module = resolve(slug)()
-            if CAP_DEBUG_INBOX not in module.capabilities or not isinstance(
-                module, InboxDebugProvider
-            ):
-                continue
-            out[slug] = module.debug_for_inbox(conn, user_id, [inbox_id])
-    return out
-
-
 def _coerce_payload(raw: Any) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
@@ -1085,18 +1097,9 @@ async def extract_inbox(
                 row.source_id,
                 (row,),
             )
-        # Traza jerárquica: SOLO con un mensaje único (scope individual / window de 1) — un lote
-        # multi-mensaje mis-atribuiría todo al root del target. `create_root` hace delete-then-write
-        # (re-extraer reemplaza la traza). Apagada (None) → los módulos reciben NULL_TRACER.
-        trace_root_id: int | None = None
-        if len(window.rows) == 1:
-            with connection() as conn:
-                trace_root_id = create_root(
-                    conn, user_id=user_id, inbox_id=inbox_id, label=f"mensaje #{inbox_id}"
-                )
-        await _process_window(
-            user_id, llm, window, active, active_by_slug, stats, trace_root_id=trace_root_id
-        )
+        # Traza jerárquica: los roots (uno por mensaje de la ventana) se crean dentro de
+        # `_process_window`, así individual y lote quedan cubiertos por igual.
+        await _process_window(user_id, llm, window, active, active_by_slug, stats)
     finally:
         if owns_client:
             await aclose_llm(llm)

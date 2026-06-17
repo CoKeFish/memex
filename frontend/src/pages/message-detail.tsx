@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react"
-import { ArrowLeft, Braces, CalendarDays, DollarSign, Eye, Loader2, Network, Paperclip, RotateCw, ScrollText, Sparkles, Trophy, Users, Zap } from "lucide-react"
+import { ArrowLeft, CalendarDays, DollarSign, Eye, Loader2, Network, Paperclip, RotateCw, ScrollText, Sparkles, Trophy, Users, Zap } from "lucide-react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
@@ -11,7 +11,6 @@ import { StatusBadge } from "@/components/common/led"
 import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { RelativeTime } from "@/components/common/time"
 import { JourneyTimeline } from "@/components/features/message/journey-timeline"
-import { LlmTrace } from "@/components/features/message/llm-trace"
 import { TraceTree } from "@/components/features/message/trace-tree"
 import { MediaOcr, UnstoredAttachments, type DeclaredAttachment } from "@/components/features/message/media-ocr"
 import { ProcessingWindow } from "@/components/features/message/processing-window"
@@ -48,12 +47,8 @@ import {
 } from "@/lib/attachment-kind"
 import type { Tone } from "@/lib/status"
 import type {
-  ExtractionDebug,
-  FinanceDebugRow,
-  IdentidadesDebugRow,
   InboxLlmCall,
   InboxRow,
-  InternalLlmCall,
   MessageJourney,
   RelevanceVerdict,
   Source,
@@ -718,24 +713,16 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
         </Stage>
 
           </div>
-          {/* Columna derecha: traza LLM (route+extract) + "qué hizo cada módulo" (dedup, contraparte,
-              consolidación + operaciones posteriores LLM con su costo). */}
+          {/* Columna derecha: árbol de traza jerárquica de la extracción (o vacío si el mensaje aún
+              no tiene árbol — procesado antes de la traza por lote). */}
           <div className="min-w-0 space-y-4 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-1">
             {trace ? (
               <TraceTree nodes={trace} />
             ) : (
-              /* Sin árbol por-mensaje (lotes/chat: el árbol solo se arma en ventanas de 1 msg):
-                 traza heurística por corridas + estado interno por módulo. */
-              <>
-                {llm && llm.calls > 0 ? (
-                  <LlmTrace llm={llm} runs={runs} />
-                ) : (
-                  <p className="num text-[11px] text-muted-foreground">
-                    Sin traza LLM atribuida a este mensaje (las ops internas, si las hubo, van abajo).
-                  </p>
-                )}
-                <ModuleDebug debug={row.extractionDebug} />
-              </>
+              <p className="num text-[11px] text-muted-foreground">
+                Sin árbol de traza para este mensaje (procesado antes de la traza por lote). Re-extraé
+                para generarlo.
+              </p>
             )}
           </div>
         </div>
@@ -885,210 +872,6 @@ function describeExtractionCalls(calls: InboxLlmCall[]): string {
       : `${calls.length} llamadas agrupadas (split por tamaño/dependencias)`
   if (grouped === 0 && perModule > 0) return `${perModule} llamada(s) por módulo (per_module)`
   return `${calls.length} llamadas (mixto)`
-}
-
-function dedupStatusTone(status: string): string {
-  if (status === "confirmed") return "text-status-ok"
-  if (status === "rejected") return "text-muted-foreground"
-  return "text-chart-4" // candidate (pendiente de decidir)
-}
-
-const OUTCOME_TONE: Record<string, string> = {
-  unique: "text-status-ok",
-  duplicate: "text-chart-4",
-  pending: "text-muted-foreground",
-}
-
-interface DedupPair {
-  other: string
-  reason: string
-  score: number | null
-  status: string
-  decided_by: string | null
-  confidence: number | null
-}
-
-function DedupPairs({ pairs }: { pairs: DedupPair[] }) {
-  if (pairs.length === 0) return null
-  return (
-    <div className="num mt-1 space-y-0.5 pl-2 text-[10px] text-muted-foreground">
-      {pairs.map((p, i) => (
-        <div key={i} className="flex flex-wrap items-center gap-x-1.5">
-          <span className="text-muted-foreground/70">dedup vs {p.other}:</span>
-          <span className={dedupStatusTone(p.status)}>{p.status}</span>
-          {p.score != null && <span>· score {p.score.toFixed(2)}</span>}
-          <span>· {p.decided_by === "llm" ? "LLM" : "proc"}</span>
-          {p.confidence != null && <span>· conf {p.confidence.toFixed(2)}</span>}
-          {p.reason && <span className="text-muted-foreground/60">· {p.reason}</span>}
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function FinanceDebug({ rows }: { rows: FinanceDebugRow[] }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="eyebrow">finanzas · {rows.length} transacción(es)</div>
-      {rows.map((r) => (
-        <div key={r.transaction_id} className="num rounded border border-border bg-card/40 p-2 text-[11px]">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-            <span className="text-foreground">tx #{r.transaction_id}</span>
-            <span className="text-muted-foreground">
-              {r.direction} {r.amount} {r.currency}
-            </span>
-            <span className={OUTCOME_TONE[r.processing_outcome] ?? "text-muted-foreground"}>
-              {r.processing_outcome}
-            </span>
-            {r.consolidated_id != null && (
-              <span className="text-muted-foreground">
-                · consolidado #{r.consolidated_id}
-                {r.is_winner ? " (ganadora)" : ""}
-              </span>
-            )}
-          </div>
-          <div className="mt-0.5 text-muted-foreground">
-            contraparte: {r.counterparty || "—"}{" "}
-            {r.counterparty_identity_id != null ? (
-              <span className="text-status-ok">
-                → identidad «{r.counterparty_identity_name ?? r.counterparty_identity_id}» (#
-                {r.counterparty_identity_id})
-              </span>
-            ) : (
-              <span>· sin identidad resuelta</span>
-            )}
-          </div>
-          <DedupPairs
-            pairs={r.dedup_candidates.map((c) => ({
-              other: `tx #${c.other_transaction_id}`,
-              reason: c.reason,
-              score: c.score,
-              status: c.status,
-              decided_by: c.decided_by,
-              confidence: c.confidence,
-            }))}
-          />
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function IdentidadesDebug({ rows }: { rows: IdentidadesDebugRow[] }) {
-  return (
-    <div className="space-y-1.5">
-      <div className="eyebrow">identidades · {rows.length} mención(es)</div>
-      {rows.map((r) => (
-        <div key={r.mention_id} className="num rounded border border-border bg-card/40 p-2 text-[11px]">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-            <span className="text-foreground">«{r.mentioned_name}»</span>
-            {r.resolved_identity_id != null ? (
-              <span className="text-status-ok">
-                → «{r.resolved_identity_name ?? r.resolved_identity_id}» (#{r.resolved_identity_id})
-              </span>
-            ) : (
-              <span className="text-muted-foreground">· sin resolver</span>
-            )}
-            {r.resolution_method && (
-              <span className="text-muted-foreground">· por {r.resolution_method}</span>
-            )}
-          </div>
-          <DedupPairs
-            pairs={r.merge_candidates.map((c) => ({
-              other: `«${c.other_identity_name ?? c.other_identity_id}»`,
-              reason: c.reason,
-              score: c.score,
-              status: c.status,
-              decided_by: c.decided_by,
-              confidence: c.confidence,
-            }))}
-          />
-        </div>
-      ))}
-    </div>
-  )
-}
-
-const INTERNAL_PURPOSE_LABEL: Record<string, string> = {
-  finance_dedup: "Dedup finanzas",
-  identidades_dedup: "Dedup identidades",
-  identidades_cooccurrence: "Co-ocurrencia identidades",
-  identidades_hierarchy: "Jerarquía identidades",
-}
-
-/** Llamadas LLM INTERNAS (dedup fase-2 / co-ocurrencia) correlacionadas a este correo, con su costo
- *  real — corren en batch con inbox_id=NULL, así que no salen en la traza principal de arriba. */
-function InternalCalls({ calls }: { calls: InternalLlmCall[] }) {
-  if (calls.length === 0) return null
-  const total = calls.reduce((a, c) => a + c.cost_usd, 0)
-  return (
-    <div className="space-y-1">
-      <div className="eyebrow">
-        operaciones posteriores (LLM) · {calls.length} · <span className="text-brand">{fmtCost(total)}</span>
-      </div>
-      {calls.map((c, i) => (
-        <div
-          key={i}
-          className="num flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded border border-border bg-card/40 p-2 text-[10px] text-muted-foreground"
-        >
-          <span className="text-foreground">{INTERNAL_PURPOSE_LABEL[c.purpose] ?? c.purpose}</span>
-          <span>{c.model}</span>
-          <span>
-            {c.prompt_tokens}+{c.completion_tokens} tok
-          </span>
-          <span>{c.latency_ms} ms</span>
-          <span className={c.status === "ok" ? "text-status-ok" : "text-status-error"}>{c.status}</span>
-          {c.created_at && <RelativeTime date={c.created_at} />}
-          <span className="ml-auto text-brand">{fmtCost(c.cost_usd)}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-/** Estado INTERNO por-módulo (capacidad `debug_inbox`): dedup, seam contraparte→identidad,
- *  consolidación + las operaciones LLM posteriores. Colapsable + JSON crudo (herramienta de debug). */
-function ModuleDebug({ debug }: { debug?: ExtractionDebug | null }) {
-  const [open, setOpen] = useState(true)
-  const [raw, setRaw] = useState(false)
-  const finance = debug?.finance?.rows ?? []
-  const identidades = debug?.identidades?.rows ?? []
-  const internalCalls = [
-    ...(debug?.finance?.internal_calls ?? []),
-    ...(debug?.identidades?.internal_calls ?? []),
-  ]
-  if (finance.length === 0 && identidades.length === 0 && internalCalls.length === 0) return null
-  return (
-    <div className="rounded-md border border-border bg-muted/10 p-2.5">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="eyebrow flex items-center gap-1.5 hover:text-foreground"
-      >
-        <Braces className="size-3" /> qué hizo cada módulo · dedup, contraparte, consolidación{" "}
-        {open ? "▾" : "▸"}
-      </button>
-      {open && (
-        <div className="mt-2 space-y-3">
-          {finance.length > 0 && <FinanceDebug rows={finance} />}
-          {identidades.length > 0 && <IdentidadesDebug rows={identidades} />}
-          <InternalCalls calls={internalCalls} />
-          <button
-            type="button"
-            onClick={() => setRaw((v) => !v)}
-            className="eyebrow inline-flex items-center gap-1 hover:text-foreground"
-          >
-            <Braces className="size-2.5" /> JSON crudo {raw ? "▾" : "▸"}
-          </button>
-          {raw && (
-            <pre className="num max-h-60 overflow-auto rounded border border-border bg-muted/30 p-2 text-[10px] text-muted-foreground">
-              {JSON.stringify(debug, null, 2)}
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
-  )
 }
 
 function MockDetail({ journey }: { journey: MessageJourney }) {

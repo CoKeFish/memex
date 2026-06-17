@@ -275,3 +275,70 @@ def test_attach_to_root_returns_none_without_root() -> None:
     iid = _seed_inbox()
     with connection() as c:
         assert attach_to_root(c, user_id=1, inbox_id=iid) is None
+
+
+def test_read_trace_splits_shared_call_cost_across_messages() -> None:
+    # Lote: una `extract_grouped` (inbox_id=NULL) cubre N mensajes; un nodo `llm` explícito bajo el
+    # root de cada uno (mismo call_id) → read_trace reparte cost/N (N = nodos que la referencian).
+    # Sumar los árboles de los N reconstruye el costo real.
+    a = _seed_inbox("split-a")
+    b = _seed_inbox("split-b")
+    with connection() as c:  # la call compartida del lote, SIN inbox_id (como en batch)
+        cid = int(
+            c.execute(
+                text(
+                    """
+                    INSERT INTO llm_calls
+                      (user_id, inbox_id, purpose, model, prompt_tokens, completion_tokens,
+                       cost_usd, latency_ms, status, response_text)
+                    VALUES (1, NULL, 'extract_grouped', 'fake', 10, 5, 0.006, 100, 'ok', '{}')
+                    RETURNING id
+                    """
+                ),
+            ).scalar_one()
+        )
+    for iid in (a, b):  # un nodo `llm` explícito bajo el root de CADA mensaje del lote
+        with connection() as c:
+            create_root(c, user_id=1, inbox_id=iid, label="msg")
+            node = attach_to_root(c, user_id=1, inbox_id=iid)
+            assert node is not None
+            node.llm(cid, label="Extracción agrupada")
+
+    tree_a = read_trace(1, a)
+    tree_b = read_trace(1, b)
+    assert tree_a is not None and tree_b is not None
+    leaf_a = next(n for n in tree_a if n["kind"] == "llm" and n["llmCallId"] == cid)
+    leaf_b = next(n for n in tree_b if n["kind"] == "llm" and n["llmCallId"] == cid)
+    assert leaf_a["cost"]["ownUsd"] == pytest.approx(0.003)  # 0.006 / 2 mensajes
+    assert leaf_b["cost"]["ownUsd"] == pytest.approx(0.003)
+    assert leaf_a["cost"]["ownUsd"] + leaf_b["cost"]["ownUsd"] == pytest.approx(0.006)
+
+
+def test_read_trace_single_referencing_node_keeps_full_cost() -> None:
+    # Invariante del reparto: una call referenciada por UN solo nodo (mensaje individual, o el
+    # desempate async colgado a una sola entidad) NO se divide — share=1 → costo completo.
+    iid = _seed_inbox("full-cost")
+    with connection() as c:
+        cid = int(
+            c.execute(
+                text(
+                    """
+                    INSERT INTO llm_calls
+                      (user_id, inbox_id, purpose, model, prompt_tokens, completion_tokens,
+                       cost_usd, latency_ms, status, response_text)
+                    VALUES (1, NULL, 'extract_grouped', 'fake', 10, 5, 0.006, 100, 'ok', '{}')
+                    RETURNING id
+                    """
+                ),
+            ).scalar_one()
+        )
+    with connection() as c:
+        create_root(c, user_id=1, inbox_id=iid, label="msg")
+        node = attach_to_root(c, user_id=1, inbox_id=iid)
+        assert node is not None
+        node.llm(cid, label="Extracción agrupada")
+
+    tree = read_trace(1, iid)
+    assert tree is not None
+    leaf = next(n for n in tree if n["kind"] == "llm" and n["llmCallId"] == cid)
+    assert leaf["cost"]["ownUsd"] == pytest.approx(0.006)  # 1 nodo → sin dividir
