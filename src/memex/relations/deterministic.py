@@ -37,8 +37,8 @@ from memex.relations.edges import (
     RELTYPE_PARTICIPA_EN,
     VERDICT_CONFIRMED,
     Ref,
-    propose_edge,
 )
+from memex.relations.graph_writer import add_edge
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 #: Normalización SQL del `activity` para el match registro↔hábito (lower + colapso de whitespace).
@@ -82,7 +82,7 @@ def _materialize_afiliacion(
     (incremental); sin él, barre todas. Idempotente. Devuelve cuántas."""
     n = 0
     for src, dst in _afiliacion_pairs(conn, user_id, person_ids=person_ids):
-        propose_edge(
+        add_edge(
             conn,
             user_id,
             src,
@@ -134,7 +134,7 @@ def _materialize_pertenencia(
     `child_ids` acota (incremental); sin él, barre todas. Idempotente. Devuelve cuántas."""
     n = 0
     for src, dst in _pertenencia_pairs(conn, user_id, child_ids=child_ids):
-        propose_edge(
+        add_edge(
             conn,
             user_id,
             src,
@@ -186,7 +186,7 @@ def _materialize_contraparte(
     `consolidated_ids` acota (incremental); sin él, barre todos. Idempotente. Devuelve cuántas."""
     n = 0
     for src, dst in _contraparte_pairs(conn, user_id, consolidated_ids=consolidated_ids):
-        propose_edge(
+        add_edge(
             conn,
             user_id,
             src,
@@ -249,7 +249,7 @@ def _materialize_same_event(
         ),
         params,
     ).mappings():
-        propose_edge(
+        add_edge(
             conn,
             user_id,
             Ref(str(r["a_slug"]), int(r["a_vid"])),
@@ -305,7 +305,7 @@ def _materialize_cumple(
         ),
         params,
     ).mappings():
-        propose_edge(
+        add_edge(
             conn,
             user_id,
             Ref("bienestar", int(r["rid"])),
@@ -355,7 +355,7 @@ def weave_participa_en(
         params,
     ).mappings():
         slug = IDENTITY_SLUG_BY_KIND[str(r["kind"])]
-        propose_edge(
+        add_edge(
             conn,
             user_id,
             Ref(slug, int(r["iid"])),
