@@ -37,6 +37,7 @@ class SchedulerSettings(BaseSettings):
     # cúmulos: co-ocurrencia + detección/reconciliación + validación LLM + reconcile, diario
     interval_graph: str = "P1D"
     interval_log_purge: str = "P1D"  # retención de log_events, diario
+    interval_transport: str = "PT10M"  # "¿llego a tiempo?": reactivo, frecuente
 
     def interval_for(self, job_name: str) -> str | None:
         value = getattr(self, f"interval_{job_name}", None)
