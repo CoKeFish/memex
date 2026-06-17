@@ -73,7 +73,10 @@ function baseSourceMeta(source?: Source): Omit<SourceMeta, "account"> {
  * el nombre interno crudo. */
 export function sourceMeta(source?: Source): SourceMeta {
   const base = baseSourceMeta(source)
-  return { ...base, account: accountAlias(source, base.label) }
+  // Preferir la identidad REAL de la cuenta (alias que define el usuario → email real); caer a la
+  // derivación del nombre solo si no hay ninguna. Así el rótulo dice de qué cuenta/buzón es.
+  const real = (source?.accountAlias ?? "").trim() || (source?.accountEmail ?? "").trim()
+  return { ...base, account: real || accountAlias(source, base.label) }
 }
 
 /** Etiqueta completa para selectores: "Gmail · roy@gmail.com" (proveedor · alias). Si no hay

@@ -1,7 +1,7 @@
 // Gestión de cuentas y credenciales de ingestors (vault cifrado server-side).
 // El valor de las credenciales se pega acá y se cifra en el backend; la UI solo ve `last4`.
 
-import { KeyRound, Loader2, Plug, Plus, RefreshCw, Trash2 } from "lucide-react"
+import { KeyRound, Loader2, Pencil, Plug, Plus, RefreshCw, Trash2 } from "lucide-react"
 import { type FormEvent, useEffect, useState } from "react"
 import { toast } from "sonner"
 import { StatusBadge } from "@/components/common/led"
@@ -16,6 +16,7 @@ import {
   healthCheckAccount,
   type HealthStatus,
   type ManagedAccount,
+  patchAccount,
   SECRET_NAMES,
   setCredential,
   startGoogleOAuth,
@@ -180,6 +181,9 @@ function AccountCard({ account, onChange }: { account: ManagedAccount; onChange:
   const googleConnected = account.secrets.some(
     (s) => s.secretName === GOOGLE_OAUTH_SECRET && s.configured,
   )
+  // Email real de la cuenta (OAuth lo deja en metadata) — solo para mostrar de qué buzón es. No es secreto.
+  const rawEmail = account.metadata.email
+  const accountEmail = typeof rawEmail === "string" ? rawEmail : ""
 
   async function connectGoogle() {
     try {
@@ -216,9 +220,14 @@ function AccountCard({ account, onChange }: { account: ManagedAccount; onChange:
   return (
     <div className="rounded-lg border border-border bg-background/40 p-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-sm font-medium">
-          {account.provider} · {account.alias}
-        </span>
+        <div className="min-w-0 flex-1">
+          <AliasEditor account={account} onSaved={onChange} />
+          {accountEmail ? (
+            <div className="truncate text-xs text-muted-foreground" title={accountEmail}>
+              {accountEmail}
+            </div>
+          ) : null}
+        </div>
         <div className="flex items-center gap-1.5">
           <StatusBadge tone={tone} label={account.healthStatus} />
           {account.kind === "email" &&
@@ -279,6 +288,81 @@ function AccountCard({ account, onChange }: { account: ManagedAccount; onChange:
     </div>
   )
 }
+
+function AliasEditor({
+  account,
+  onSaved,
+}: {
+  account: ManagedAccount
+  onSaved: () => void | Promise<void>
+}) {
+  const [editing, setEditing] = useState(false)
+  const [alias, setAlias] = useState(account.alias)
+  const [busy, setBusy] = useState(false)
+
+  async function submit(e: FormEvent) {
+    e.preventDefault()
+    const next = alias.trim()
+    if (!next || next === account.alias) {
+      setEditing(false)
+      setAlias(account.alias)
+      return
+    }
+    setBusy(true)
+    try {
+      await patchAccount(account.id, { alias: next })
+      toast.success("Alias actualizado")
+      setEditing(false)
+      await onSaved()
+    } catch (err) {
+      toast.error(errMsg(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className="group inline-flex max-w-full items-center gap-1.5 text-sm font-medium"
+        onClick={() => {
+          setAlias(account.alias)
+          setEditing(true)
+        }}
+        title="Editar alias"
+      >
+        <span className="truncate">
+          {account.provider} · {account.alias}
+        </span>
+        <Pencil className="size-3 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100" />
+      </button>
+    )
+  }
+
+  return (
+    <form onSubmit={submit} className="flex items-center gap-1.5 text-sm">
+      <span className="shrink-0 text-muted-foreground">{account.provider} ·</span>
+      <input
+        name="account-alias-edit"
+        value={alias}
+        disabled={busy}
+        onChange={(e) => setAlias(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            setEditing(false)
+            setAlias(account.alias)
+          }
+        }}
+        className={`${inputCls} w-36 py-1`}
+      />
+      <button type="submit" disabled={busy} className={btnCls}>
+        {busy ? <Loader2 className="size-3 animate-spin" /> : "Guardar"}
+      </button>
+    </form>
+  )
+}
+
 
 function CredentialForm({
   account,

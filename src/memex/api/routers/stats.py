@@ -60,7 +60,8 @@ async def pipeline(
         sources = (
             conn.execute(
                 text("""
-                SELECT s.id, s.name, s.type, s.enabled, a.alias
+                SELECT s.id, s.name, s.type, s.enabled, a.alias,
+                       COALESCE(s.config->>'account_email', a.metadata->>'email') AS account_email
                 FROM sources s
                 LEFT JOIN accounts a ON a.id = s.account_id
                 WHERE s.user_id = :uid
@@ -186,6 +187,7 @@ async def pipeline(
                 "type": s["type"],
                 "enabled": bool(s["enabled"]),
                 "alias": s["alias"],
+                "account_email": s["account_email"],
                 "last_run": (
                     {
                         "started_at": lr["started_at"],

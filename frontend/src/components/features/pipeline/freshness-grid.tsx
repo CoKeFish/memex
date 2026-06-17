@@ -22,7 +22,7 @@ export function FreshnessGrid({
   const cells: Cell[] = [
     ...sources.map((s): Cell => ({
       key: `s-${s.sourceId}`,
-      label: s.name,
+      label: s.alias || s.accountEmail || s.name,
       kind: "source",
       date: s.lastRun?.startedAt ?? null,
       running: s.lastRun?.status === "running",

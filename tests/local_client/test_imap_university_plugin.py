@@ -79,3 +79,20 @@ def test_build_source_returns_imap_source(
     }
     src = plugin_module.build_source(cfg)
     assert isinstance(src, ImapSource)
+
+
+def test_identity_resolves_username_env(
+    plugin_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`identity()` devuelve el email IMAP (el username) para que memex sepa de qué buzón es."""
+    monkeypatch.setenv("UNI_IMAP_USER", "alumno@uni.edu")
+    cfg = {"server": "imap.test.edu", "auth": "basic", "username_env": "UNI_IMAP_USER"}
+    assert plugin_module.identity(cfg) == "alumno@uni.edu"
+
+
+def test_identity_none_when_env_missing(
+    plugin_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("UNI_IMAP_USER", raising=False)
+    cfg = {"server": "imap.test.edu", "username_env": "UNI_IMAP_USER"}
+    assert plugin_module.identity(cfg) is None

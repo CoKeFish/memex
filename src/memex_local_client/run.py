@@ -17,7 +17,7 @@ from typing import Any
 from memex.ingestors.gateway_client import GatewayClient
 from memex.ingestors.runner import RunStats, run_ingestor
 from memex.logging import get_logger
-from memex_local_client.protocol import LocalPlugin
+from memex_local_client.protocol import LocalPlugin, plugin_identity
 from memex_local_client.registry import attach_source_id
 from memex_local_client.state import State
 
@@ -55,6 +55,14 @@ def execute_plugin(
     log = _log.bind(plugin=plugin.name)
     config = load_plugin_config(plugin.name, plugins_root)
 
+    # Identidad de la cuenta (p. ej. el email IMAP) que el plugin expone — best-effort: si falla, no
+    # se reporta, pero la ingesta sigue. memex la usa para rotular de qué buzón vienen los records.
+    try:
+        account_email = plugin_identity(plugin, config)
+    except Exception as e:
+        log.warning("memex_local_client.run.identity_failed", exc=str(e))
+        account_email = None
+
     with state.start_run(plugin.name) as run_id:
         try:
             source = plugin.build_source(config)
@@ -68,6 +76,7 @@ def execute_plugin(
             plugin_name=plugin.name,
             source_type=plugin.source_type,
             api_token=api_token,
+            account_email=account_email,
         )
         try:
             try:

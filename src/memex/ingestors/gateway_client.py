@@ -33,6 +33,7 @@ class GatewayClient(MemexServerClient):
         source_type: str,
         api_token: str | None = None,
         *,
+        account_email: str | None = None,
         client: httpx.Client | None = None,
         timeout: float = 30.0,
         max_retries: int = 3,
@@ -48,6 +49,8 @@ class GatewayClient(MemexServerClient):
         )
         self.plugin_name = plugin_name
         self.source_type = source_type
+        #: Identidad de la cuenta del plugin (email), reportada al gateway en /state.
+        self.account_email = account_email
         self._source_id: int | None = None
         self._initial_cursor: dict[str, Any] | None = None
         self._state_loaded = False
@@ -124,10 +127,13 @@ class GatewayClient(MemexServerClient):
     # --- internals ---
 
     def _load_state(self) -> None:
+        body: dict[str, Any] = {"source_type": self.source_type}
+        if self.account_email:
+            body["account_email"] = self.account_email
         resp = self._request(
             "POST",
             f"/gateway/plugins/{self.plugin_name}/state",
-            json={"source_type": self.source_type},
+            json=body,
         )
         data = resp.json()
         self._source_id = int(data["source_id"])

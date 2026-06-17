@@ -162,3 +162,49 @@ def test_state_rejects_unknown_source_type(client: Any) -> None:
     que el work-set de extracción nunca procesaría."""
     r = client.post("/gateway/plugins/weird/state", json={"source_type": "nope"})
     assert r.status_code == 400
+
+
+# ---------------- account_email (identidad que reporta el cliente local) ----------------
+
+
+def test_state_persists_account_email(client: Any) -> None:
+    """El cliente local reporta el email en /state → se guarda en config.account_email."""
+    r = client.post(
+        "/gateway/plugins/uni/state",
+        json={"source_type": "imap", "account_email": "alumno@uni.edu"},
+    )
+    assert r.status_code == 200
+    with connection() as c:
+        cfg = c.execute(
+            text("SELECT config FROM sources WHERE id = :s"), {"s": r.json()["source_id"]}
+        ).scalar()
+    assert isinstance(cfg, dict)
+    assert cfg["account_email"] == "alumno@uni.edu"
+
+
+def test_state_account_email_refreshes_idempotent(client: Any) -> None:
+    """Re-reportar /state con otro email actualiza la config (idempotente)."""
+    first = client.post(
+        "/gateway/plugins/uni2/state",
+        json={"source_type": "imap", "account_email": "old@uni.edu"},
+    ).json()
+    client.post(
+        "/gateway/plugins/uni2/state",
+        json={"source_type": "imap", "account_email": "new@uni.edu"},
+    )
+    with connection() as c:
+        cfg = c.execute(
+            text("SELECT config FROM sources WHERE id = :s"), {"s": first["source_id"]}
+        ).scalar()
+    assert isinstance(cfg, dict)
+    assert cfg["account_email"] == "new@uni.edu"
+
+
+def test_state_without_account_email_leaves_config_clean(client: Any) -> None:
+    r = client.post("/gateway/plugins/uni3/state", json={"source_type": "imap"})
+    assert r.status_code == 200
+    with connection() as c:
+        cfg = c.execute(
+            text("SELECT config FROM sources WHERE id = :s"), {"s": r.json()["source_id"]}
+        ).scalar()
+    assert "account_email" not in (cfg or {})

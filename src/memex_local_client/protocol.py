@@ -35,6 +35,11 @@ class LocalPlugin(Protocol):
     El plugin se identifica por `name` — slug único, validado contra el del
     directorio donde vive. Un plugin que no cumpla este contrato es rechazado
     por el discovery con un mensaje claro.
+
+    HOOK OPCIONAL `identity(local_config) -> str | None`: si el plugin lo define, el
+    daemon reporta esa identidad (p. ej. el email IMAP de la cuenta) al gateway para que
+    memex sepa de qué buzón vienen los records. No es parte del contrato mínimo; los
+    plugins que no lo implementan no reportan identidad. Invocarlo vía `plugin_identity`.
     """
 
     name: ClassVar[str]
@@ -65,3 +70,20 @@ class LocalPlugin(Protocol):
         Devuelve una lista vacía si todo está OK.
         """
         ...
+
+
+def plugin_identity(plugin: LocalPlugin, local_config: Mapping[str, Any]) -> str | None:
+    """Identidad de la cuenta del plugin (p. ej. el email IMAP), si la expone.
+
+    Hook OPCIONAL del contrato: un plugin puede definir `identity(local_config) -> str | None`
+    para decirle a memex de qué cuenta vienen sus records — el daemon lo reporta al gateway en
+    `POST /state` y memex lo guarda para rotular la fuente. Los plugins que no lo implementan
+    devuelven None (no se reporta identidad).
+    """
+    fn = getattr(plugin, "identity", None)
+    if not callable(fn):
+        return None
+    value = fn(local_config)
+    if not value:
+        return None
+    return str(value).strip() or None

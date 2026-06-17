@@ -23,6 +23,9 @@ export interface SourceHealthRow {
   type: SourceType
   enabled: boolean
   alias: string | null
+  /** Identidad real de la cuenta/buzón (el email): de la cuenta server-side o reportado por el
+   * cliente local. Para rotular de qué correo es. */
+  accountEmail: string | null
   lastRun: SourceLastRun | null
   successRate: number
   totalInserted: number
@@ -115,6 +118,7 @@ interface SourceHealthApi {
   type: SourceType
   enabled: boolean
   alias: string | null
+  account_email: string | null
   last_run: SourceRunApi | null
   success_rate: number
   total_inserted: number
@@ -170,6 +174,7 @@ function toSource(s: SourceHealthApi): SourceHealthRow {
     type: s.type,
     enabled: s.enabled,
     alias: s.alias,
+    accountEmail: s.account_email,
     lastRun: s.last_run
       ? {
           startedAt: s.last_run.started_at,

@@ -37,6 +37,11 @@ export interface Source {
   /** Categoría conceptual del tipo (server-driven, espeja SourceRow.kind). null/ausente = tipo
    * sin kind registrado (calendar/gateway/dummy). */
   kind?: "email" | "chat" | "social" | null
+  /** Alias amigable que define el usuario en /cuenta (espeja SourceRow.account_alias). */
+  accountAlias?: string | null
+  /** Identidad real de la cuenta/buzón (el email): de la cuenta server-side o reportado por el
+   * cliente local (espeja SourceRow.account_email). Para rotular de qué correo es la fuente. */
+  accountEmail?: string | null
 }
 
 // Payloads fieles (subconjunto usado por la UI). snake_case = claves del JSONB.

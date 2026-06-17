@@ -203,6 +203,41 @@ def test_patch_source_duplicate_name_409(client: Any) -> None:
     assert client.patch(f"/sources/{src['id']}", json={"name": "ocupado"}).status_code == 409
 
 
+# ----- account_email: de qué cuenta/buzón es la fuente --------------------- #
+
+
+def test_list_sources_exposes_account_email_from_config(client: Any) -> None:
+    """Cliente local: el email vive en config.account_email (no hay cuenta vinculada)."""
+    sid = client.post("/sources", json={"name": "uni-mail", "type": "imap"}).json()["id"]
+    with connection() as c:
+        c.execute(
+            text(
+                "UPDATE sources SET config = config || "
+                "jsonb_build_object('account_email', CAST(:em AS TEXT)) WHERE id = :s"
+            ),
+            {"s": sid, "em": "alumno@uni.edu"},
+        )
+    row = next(s for s in client.get("/sources").json() if s["id"] == sid)
+    assert row["account_email"] == "alumno@uni.edu"
+
+
+def test_list_sources_exposes_account_email_from_account_metadata(client: Any) -> None:
+    """Server-side (OAuth): el email vive en accounts.metadata.email; el COALESCE lo trae."""
+    sid = client.post("/sources", json={"name": "gmail-x", "type": "imap"}).json()["id"]
+    with connection() as c:
+        aid = c.execute(
+            text(
+                "INSERT INTO accounts (user_id, alias, provider, kind, metadata) "
+                "SELECT user_id, 'gmail-acct', 'google', 'email', "
+                '\'{"email": "me@gmail.com"}\'::jsonb FROM sources WHERE id = :s RETURNING id'
+            ),
+            {"s": sid},
+        ).scalar()
+        c.execute(text("UPDATE sources SET account_id = :a WHERE id = :s"), {"a": aid, "s": sid})
+    row = next(s for s in client.get("/sources").json() if s["id"] == sid)
+    assert row["account_email"] == "me@gmail.com"
+
+
 def test_delete_source_guards_inbox_then_cascade(client: Any) -> None:
     # sin inbox: borra directo (204).
     empty = client.post("/sources", json={"name": "vacia", "type": "imap"}).json()

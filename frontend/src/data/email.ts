@@ -90,6 +90,8 @@ interface SourceApiRow {
   enabled: boolean
   config: Record<string, unknown>
   created_at: string
+  account_alias?: string | null
+  account_email?: string | null
   token_source?: string | null
   fetch_modes?: string[] | null
   mode_caveats?: Record<string, string> | null
@@ -104,6 +106,8 @@ function toSource(r: SourceApiRow): Source {
     enabled: r.enabled,
     createdAt: r.created_at,
     config: r.config,
+    accountAlias: r.account_alias ?? null,
+    accountEmail: r.account_email ?? null,
     tokenSource: (r.token_source ?? null) as Source["tokenSource"],
     // Backend viejo sin el campo → asumir solo incremental (el default seguro).
     fetchModes: r.fetch_modes ?? ["incremental"],

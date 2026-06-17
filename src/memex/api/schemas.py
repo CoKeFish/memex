@@ -58,6 +58,9 @@ class GatewayRecord(BaseModel):
 
 class GatewayStateRequest(BaseModel):
     source_type: str
+    #: Identidad de la cuenta del plugin (el email IMAP), reportada por el cliente local. Opcional:
+    #: los plugins sin identidad la omiten.
+    account_email: str | None = None
 
 
 class GatewayStateResponse(BaseModel):
@@ -1546,6 +1549,7 @@ class StatsSourceHealth(BaseModel):
     type: str
     enabled: bool
     alias: str | None = None
+    account_email: str | None = None
     last_run: StatsSourceRun | None = None
     success_rate: float  # ok / terminadas (0..1); 0 si no hay corridas terminadas
     total_inserted: int
@@ -1680,6 +1684,9 @@ class SourceRow(BaseModel):
     # Cuenta vinculada (0018). Optional/default para back-compat de SELECTs que no la traen.
     account_id: int | None = None
     account_alias: str | None = None
+    # Identidad real de la cuenta/buzón (el email): de `accounts.metadata.email` (server-side) o de
+    # `config.account_email` (cliente local). Para rotular de qué correo es la fuente.
+    account_email: str | None = None
     # Agenda de ingesta (0025): intervalo ISO-8601 (PT1H, P1D…) o None = no se agenda.
     fetch_schedule: str | None = None
     # De dónde resuelve el token de Apify esta fuente (solo redes): "vault" = secreto cifrado de la

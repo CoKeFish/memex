@@ -45,7 +45,7 @@ export function SourcesHealth({ items }: { items: SourceHealthRow[] }) {
                       <FreshnessDot date={s.lastRun.startedAt} pulse={s.lastRun.status === "running"} />
                     ) : null}
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-medium">{s.name}</div>
+                      <div className="truncate text-sm font-medium">{s.alias || s.accountEmail || s.name}</div>
                       <div className="eyebrow mt-0.5">
                         {TYPE_LABEL[s.type]}
                         {!s.enabled && " · deshabilitada"}

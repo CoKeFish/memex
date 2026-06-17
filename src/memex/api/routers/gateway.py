@@ -114,6 +114,16 @@ async def plugin_state(
         source_id, created = _ensure_source(
             conn, user_id=user_id, name=plugin_name, source_type=body.source_type
         )
+        # El cliente local reporta su email; lo guardamos en config.account_email para rotular la
+        # fuente (las del gateway no tienen `account` con vault).
+        if body.account_email:
+            conn.execute(
+                text(
+                    "UPDATE sources SET config = config || "
+                    "jsonb_build_object('account_email', CAST(:em AS TEXT)) WHERE id = :sid"
+                ),
+                {"em": body.account_email, "sid": source_id},
+            )
         cursor = checkpoint.get_cursor(conn, source_id)
     _log.info(
         "gateway.state.fetched",

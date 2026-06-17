@@ -37,7 +37,8 @@ MIN_FETCH_INTERVAL_S = 60.0
 
 _SOURCE_SELECT = """
     SELECT s.id, s.user_id, s.name, s.type, s.enabled, s.config, s.created_at,
-           s.account_id, s.fetch_schedule, a.alias AS account_alias
+           s.account_id, s.fetch_schedule, a.alias AS account_alias,
+           COALESCE(s.config->>'account_email', a.metadata->>'email') AS account_email
     FROM sources s LEFT JOIN accounts a ON a.id = s.account_id
     WHERE s.id = :sid
 """
@@ -121,7 +122,9 @@ async def list_sources(user_id: UserID) -> list[dict[str, Any]]:
                 text(
                     """
                     SELECT s.id, s.user_id, s.name, s.type, s.enabled, s.config, s.created_at,
-                           s.account_id, s.fetch_schedule, a.alias AS account_alias
+                           s.account_id, s.fetch_schedule, a.alias AS account_alias,
+                           COALESCE(s.config->>'account_email', a.metadata->>'email')
+                               AS account_email
                     FROM sources s LEFT JOIN accounts a ON a.id = s.account_id
                     WHERE s.user_id = :uid ORDER BY s.id
                     """

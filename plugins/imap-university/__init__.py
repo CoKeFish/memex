@@ -44,6 +44,18 @@ def build_source(local_config: Mapping[str, Any]) -> Source:
     return ImapSource(ImapConfig.from_source_config(cfg))
 
 
+def identity(local_config: Mapping[str, Any]) -> str | None:
+    """Email/usuario IMAP de la cuenta — el login con el que el plugin se conecta.
+
+    memex lo usa solo para saber de qué buzón vienen los correos (no es secreto: el
+    daemon lo reporta al gateway). Resuelve el env var `username_env`; None si no está.
+    """
+    var = local_config.get("username_env")
+    if not var:
+        return None
+    return os.environ.get(str(var), "").strip() or None
+
+
 def validate_requirements(local_config: Mapping[str, Any]) -> list:
     """Chequea que los env vars referidos por el config existan y no estén vacíos."""
     from memex_local_client.protocol import Problem
