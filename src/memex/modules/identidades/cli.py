@@ -404,6 +404,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", dest="as_json", action="store_true", help="Emite la lista como JSON."
     )
 
+    health_p = sub.add_parser(
+        "health", help="Diagnóstico read-only: entidades sospechosas del directorio."
+    )
+    health_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    health_p.add_argument(
+        "--json", dest="as_json", action="store_true", help="Emite el reporte como JSON."
+    )
+
     return parser
 
 
@@ -1609,6 +1617,46 @@ def _cmd_candidates(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_health(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from memex.modules.identidades.health import vertex_health
+
+    with connection() as conn:
+        rep = vertex_health(conn, args.user)
+    if getattr(args, "as_json", False):
+        _emit_json(asdict(rep) | {"suspicious": rep.suspicious})
+        return 0
+    _say(f"\nSalud del directorio (user {args.user}): {rep.total} identidades {rep.by_kind}")
+    _say(f"Hallazgos accionables: {rep.suspicious}\n")
+    if rep.orphans:
+        _say(f"Huérfanas (sin menciones/hijos/afiliación) — {len(rep.orphans)}:")
+        for e in rep.orphans:
+            _say(f"  #{e.id} [{e.kind}] {e.display_name!r}")
+    if rep.shared_identifiers:
+        _say(f"\nIdentificador compartido por varias identidades — {len(rep.shared_identifiers)}:")
+        for s in rep.shared_identifiers:
+            _say(f"  {s.detail} {s.key!r} → {list(s.ids)}")
+    if rep.cross_kind_homonyms:
+        _say(f"\nHomónimos cross-kind — {len(rep.cross_kind_homonyms)}:")
+        for s in rep.cross_kind_homonyms:
+            _say(f"  {s.key!r} ({s.detail}) → {list(s.ids)}")
+    if rep.containment_dups:
+        _say(f"\nCuasi-duplicados por contención — {len(rep.containment_dups)}:")
+        for p in rep.containment_dups:
+            _say(f"  #{p.a_id} {p.a_name!r} ⊂ #{p.b_id} {p.b_name!r} [{p.kind}]")
+    if rep.empty_org_core:
+        _say(f"\norg_core vacío (indeduplicable por difuso) — {len(rep.empty_org_core)}:")
+        for e in rep.empty_org_core:
+            _say(f"  #{e.id} {e.display_name!r}")
+    if rep.cycles:
+        _say(f"\n⚠ Ciclos de jerarquía — {len(rep.cycles)}: {rep.cycles}")
+    if rep.suspicious == 0:
+        _say("Sin hallazgos. Directorio sano.")
+    _say("")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -1666,6 +1714,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_merge(args)
         if args.cmd == "candidates":
             return _cmd_candidates(args)
+        if args.cmd == "health":
+            return _cmd_health(args)
         if args.cmd == "interest":
             if args.interest_cmd == "add":
                 return _cmd_interest_add(args)
