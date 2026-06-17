@@ -86,6 +86,17 @@ export function sourceFullLabel(source?: Source): string {
   return account ? `${label} · ${account}` : label
 }
 
+/** Identidad mostrable de una fuente a partir de campos SUELTOS (cuando no hay una `Source` completa
+ * para `sourceMeta` — p. ej. filas de costos/corridas): alias del usuario → email real → nombre
+ * crudo. Devuelve "" solo si los tres faltan (el caller decide el fallback, p. ej. el id). */
+export function sourceDisplayName(
+  alias: string | null | undefined,
+  email: string | null | undefined,
+  name: string | null | undefined,
+): string {
+  return alias?.trim() || email?.trim() || name?.trim() || ""
+}
+
 //: Etiquetas en español de los medios (los kinds del backend son email/chat/social).
 export const KIND_LABELS: Record<string, string> = {
   email: "correo",

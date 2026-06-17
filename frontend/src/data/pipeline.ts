@@ -54,6 +54,9 @@ export interface IngestionRunRow {
   sourceId: number
   /** Nombre de la fuente (JOIN); null si la fuente fue borrada. */
   sourceName: string | null
+  /** Identidad de la cuenta: alias del usuario / email real (para rotular en vez del name crudo). */
+  accountAlias: string | null
+  accountEmail: string | null
   trigger: string
   status: IngestionRunStatus
   startedAt: string
@@ -137,6 +140,8 @@ interface IngestionRunApi {
   id: string
   source_id: number
   source_name: string | null
+  account_alias: string | null
+  account_email: string | null
   trigger: string
   status: IngestionRunStatus
   started_at: string
@@ -212,6 +217,8 @@ function toRun(r: IngestionRunApi): IngestionRunRow {
     id: r.id,
     sourceId: r.source_id,
     sourceName: r.source_name,
+    accountAlias: r.account_alias,
+    accountEmail: r.account_email,
     trigger: r.trigger,
     status: r.status,
     startedAt: r.started_at,

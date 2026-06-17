@@ -178,7 +178,14 @@ export function InboxFeed() {
     const list = Object.entries(s)
       .map(([id, v]) => ({ id: Number(id), count: v.total, source: sourceById.get(Number(id)) }))
       .sort((a, b) => b.count - a.count)
-    return { total, list }
+    // Proveedores con más de una fuente → el chip desambigua con la cuenta (alias/email); con una
+    // sola, el proveedor solo ya es claro y el icono lo refuerza, así que no se alarga.
+    const providerCount = new Map<string, number>()
+    for (const { source } of list) {
+      const lbl = sourceMeta(source).label
+      providerCount.set(lbl, (providerCount.get(lbl) ?? 0) + 1)
+    }
+    return { total, list, providerCount }
   }, [stats, sourceById])
 
   return (
@@ -194,6 +201,7 @@ export function InboxFeed() {
         />
         {rail.list.map(({ id, count, source }) => {
           const m = sourceMeta(source)
+          const ambiguous = (rail.providerCount.get(m.label) ?? 0) > 1
           return (
             <SourceChip
               key={id}
@@ -201,7 +209,7 @@ export function InboxFeed() {
               onClick={() => setParam("source", String(id))}
               icon={m.icon}
               tone={m.tone}
-              label={m.label}
+              label={ambiguous && m.account ? m.account : m.label}
               count={count}
             />
           )

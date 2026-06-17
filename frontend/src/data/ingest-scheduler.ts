@@ -16,6 +16,8 @@ export interface IngestScheduleSource {
   enabled: boolean
   config: Record<string, unknown> // para sourceMeta (icono/etiqueta de proveedor)
   fetchSchedule: string | null // ISO-8601 (PT1H, P1D…) o null = no agendada
+  accountAlias: string | null
+  accountEmail: string | null
   latest: IngestionRun | null
 }
 
@@ -57,6 +59,8 @@ interface IngestScheduleSourceApi {
   enabled: boolean
   config: Record<string, unknown>
   fetch_schedule: string | null
+  account_alias: string | null
+  account_email: string | null
   latest: IngestionRunApi | null
 }
 
@@ -97,6 +101,8 @@ function toState(s: IngestSchedulerApi): IngestSchedulerState {
       enabled: x.enabled,
       config: x.config ?? {},
       fetchSchedule: x.fetch_schedule,
+      accountAlias: x.account_alias,
+      accountEmail: x.account_email,
       latest: x.latest ? toRun(x.latest) : null,
     })),
   }

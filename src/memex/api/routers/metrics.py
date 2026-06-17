@@ -58,8 +58,8 @@ _MODULE_CASE = """
 #: Etiqueta de fuente: nombre real, o pseudo-fuente para las llamadas sin source (calendar cruza
 #: fuentes; el resto sin atribución = "(sin source)") — así el gasto sin source se VE, no se pierde.
 _SOURCE_LABEL = (
-    "COALESCE(s.name, CASE WHEN lc.purpose LIKE 'calendar%' "
-    "THEN '(calendar)' ELSE '(sin source)' END)"
+    "COALESCE(a.alias, s.config->>'account_email', a.metadata->>'email', s.name, "
+    "CASE WHEN lc.purpose LIKE 'calendar%' THEN '(calendar)' ELSE '(sin source)' END)"
 )
 
 #: Columnas permitidas para ordenar la auditoría (nunca interpolar input del usuario como columna).
@@ -163,6 +163,7 @@ async def llm_rollup(
                        COALESCE(SUM(lc.cost_usd), 0) AS cost_usd
                 FROM llm_calls lc
                 LEFT JOIN sources s ON s.id = lc.source_id
+                LEFT JOIN accounts a ON a.id = s.account_id
                 WHERE {where}
                 GROUP BY lc.source_id, source_name
                 ORDER BY cost_usd DESC
@@ -222,6 +223,7 @@ async def llm_rollup(
                        COALESCE(SUM(lc.cost_usd), 0) AS cost_usd
                 FROM llm_calls lc
                 LEFT JOIN sources s ON s.id = lc.source_id
+                LEFT JOIN accounts a ON a.id = s.account_id
                 WHERE {where}
                 GROUP BY lc.source_id, source_name, module
                 ORDER BY cost_usd DESC
@@ -398,6 +400,7 @@ async def llm_calls(
                    {_SOURCE_LABEL} AS source_name
             FROM llm_calls lc
             LEFT JOIN sources s ON s.id = lc.source_id
+            LEFT JOIN accounts a ON a.id = s.account_id
             WHERE {where}
         )
         SELECT id, created_at, purpose, module, model, prompt_tokens, completion_tokens,
@@ -438,7 +441,10 @@ async def llm_calls(
 # ---- Apify (tabla apify_runs): gasto real de scraping social ------------------------------------
 
 #: La fuente puede haberse borrado (FK ON DELETE SET NULL): el gasto se conserva y se etiqueta.
-_APIFY_SOURCE_LABEL = "COALESCE(s.name, '(fuente borrada)')"
+_APIFY_SOURCE_LABEL = (
+    "COALESCE(a.alias, s.config->>'account_email', a.metadata->>'email', "
+    "s.name, '(fuente borrada)')"
+)
 
 _APIFY_SORT_COLS = {
     "created_at": "created_at",
@@ -526,6 +532,7 @@ async def apify_rollup(
                        COALESCE(SUM(ar.cost_usd), 0) AS cost_usd
                 FROM apify_runs ar
                 LEFT JOIN sources s ON s.id = ar.source_id
+                LEFT JOIN accounts a ON a.id = s.account_id
                 WHERE {where}
                 GROUP BY ar.source_id, source_name
                 ORDER BY cost_usd DESC
@@ -691,6 +698,7 @@ async def apify_runs_audit(
                    {_APIFY_SOURCE_LABEL} AS source_name
             FROM apify_runs ar
             LEFT JOIN sources s ON s.id = ar.source_id
+            LEFT JOIN accounts a ON a.id = s.account_id
             WHERE {where}
         )
         SELECT *, COUNT(*) OVER() AS total
@@ -740,6 +748,7 @@ async def llm_call_detail(call_id: int, user_id: UserID) -> dict[str, Any]:
                {_SOURCE_LABEL} AS source_name, lc.metadata, lc.response_text
         FROM llm_calls lc
         LEFT JOIN sources s ON s.id = lc.source_id
+        LEFT JOIN accounts a ON a.id = s.account_id
         WHERE lc.id = :id AND lc.user_id = :uid
     """
     with connection() as conn:
