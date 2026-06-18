@@ -17,6 +17,7 @@ from sqlalchemy import text
 from memex.core.source import HealthResult
 from memex.db import connection
 from memex.modules.calendar.providers.base import (
+    CalendarParticipant,
     ProviderEvent,
     ProviderEventRef,
     ProviderEventWrite,
@@ -66,6 +67,8 @@ def _ev(
     location: str = "",
     memex_consolidated_id: str | None = None,
     recurring_event_id: str | None = None,
+    organizer: CalendarParticipant | None = None,
+    attendees: tuple[CalendarParticipant, ...] = (),
 ) -> ProviderEvent:
     return ProviderEvent(
         provider_event_id=pid,
@@ -76,7 +79,29 @@ def _ev(
         location=location,
         memex_consolidated_id=memex_consolidated_id,
         recurring_event_id=recurring_event_id,
+        organizer=organizer,
+        attendees=attendees,
     )
+
+
+def _participants(event_pid: str) -> list[dict[str, Any]]:
+    with connection() as c:
+        return [
+            dict(r)
+            for r in c.execute(
+                text(
+                    """
+                    SELECT p.* FROM mod_calendar_event_participants p
+                    JOIN mod_calendar_events e ON e.id = p.event_id
+                    WHERE e.provider_event_id = :pid
+                    ORDER BY p.role DESC, p.email
+                    """
+                ),
+                {"pid": event_pid},
+            )
+            .mappings()
+            .all()
+        ]
 
 
 def _seed_account(provider: str = "google", label: str = "me@gmail.com") -> int:
@@ -304,3 +329,70 @@ async def test_pull_paginates_and_accumulates() -> None:
     assert stats.created == 2
     assert fake.calls == 2  # dos páginas consumidas en una corrida
     assert _sync_token(aid) == "FINAL"
+
+
+@pytest.mark.asyncio
+async def test_pull_persists_participants_with_normalized_email() -> None:
+    aid = _seed_account()
+    ev = _ev(
+        "evp",
+        "Reunión",
+        organizer=CalendarParticipant(email="John.Doe+promo@gmail.com", display_name="John"),
+        attendees=(
+            CalendarParticipant(email="beto@example.com", response_status="declined"),
+            CalendarParticipant(email="me@company.com", response_status="accepted", is_self=True),
+            CalendarParticipant(
+                email="room@resource.calendar.google.com",
+                response_status="accepted",
+                is_resource=True,
+            ),
+        ),
+    )
+    await run_pull(1, aid, client=FakeProvider(ProviderPage(events=(ev,), next_sync_token="T")))
+
+    parts = _participants("evp")
+    assert len(parts) == 4
+    org = next(p for p in parts if p["role"] == "organizer")
+    assert org["email"] == "John.Doe+promo@gmail.com"  # crudo preservado
+    # email_norm reproduce norm_identifier('email', …): Gmail ignora puntos + quita +tag → paridad
+    # con value_norm de los identifiers (sin esto el join del tejedor fallaría).
+    assert org["email_norm"] == "johndoe@gmail.com"
+    assert org["display_name"] == "John"
+
+    by_email = {p["email"]: p for p in parts if p["role"] == "attendee"}
+    assert by_email["beto@example.com"]["response_status"] == "declined"
+    assert by_email["me@company.com"]["is_self"] is True
+    assert by_email["room@resource.calendar.google.com"]["is_resource"] is True
+
+
+@pytest.mark.asyncio
+async def test_pull_replaces_participants_on_modify_keeps_on_unchanged() -> None:
+    aid = _seed_account()
+    ev1 = _ev(
+        "evp",
+        "R",
+        etag="e1",
+        attendees=(
+            CalendarParticipant(email="beto@example.com"),
+            CalendarParticipant(email="cory@example.com"),
+        ),
+    )
+    await run_pull(1, aid, client=FakeProvider(ProviderPage(events=(ev1,), next_sync_token="T1")))
+    assert {p["email"] for p in _participants("evp")} == {"beto@example.com", "cory@example.com"}
+
+    # unchanged (mismo etag): los participantes quedan intactos
+    await run_pull(1, aid, client=FakeProvider(ProviderPage(events=(ev1,), next_sync_token="T2")))
+    assert {p["email"] for p in _participants("evp")} == {"beto@example.com", "cory@example.com"}
+
+    # modify (etag nuevo): a cory lo des-invitan, entra dina → delete+reinsert refleja la lista
+    ev2 = _ev(
+        "evp",
+        "R",
+        etag="e2",
+        attendees=(
+            CalendarParticipant(email="beto@example.com"),
+            CalendarParticipant(email="dina@example.com"),
+        ),
+    )
+    await run_pull(1, aid, client=FakeProvider(ProviderPage(events=(ev2,), next_sync_token="T3")))
+    assert {p["email"] for p in _participants("evp")} == {"beto@example.com", "dina@example.com"}

@@ -128,6 +128,77 @@ async def test_list_delta_multiday_all_day_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_delta_captures_organizer_and_attendees() -> None:
+    body = {
+        "items": [
+            {
+                "id": "ev",
+                "status": "confirmed",
+                "summary": "Sync",
+                "start": {"dateTime": "2026-06-03T15:00:00-05:00"},
+                "end": {"dateTime": "2026-06-03T16:00:00-05:00"},
+                "organizer": {"email": "Ana@Example.com", "displayName": "Ana"},
+                "attendees": [
+                    # duplicado del organizador (organizer:true) → se omite para no doble-tejer
+                    {"email": "Ana@Example.com", "organizer": True, "responseStatus": "accepted"},
+                    {"email": "beto@example.com", "responseStatus": "declined"},
+                    {"email": "cory@example.com", "responseStatus": "accepted", "self": True},
+                    {
+                        "email": "room@resource.calendar.google.com",
+                        "resource": True,
+                        "responseStatus": "accepted",
+                    },
+                    {"displayName": "Sin email"},  # sin email → se omite
+                ],
+            }
+        ],
+        "nextSyncToken": "T",
+    }
+    with respx.mock(base_url=BASE_URL) as router:
+        router.get(EVENTS).respond(json=body)
+        async with _client() as c:
+            page = await c.list_delta(sync_token=None)
+
+    ev = page.events[0]
+    assert ev.organizer is not None
+    assert ev.organizer.email == "Ana@Example.com"  # crudo: la normalización ocurre al persistir
+    assert ev.organizer.display_name == "Ana"
+    # se omiten el attendee organizer:true (duplicado) y el sin email → quedan beto, cory, room
+    assert [a.email for a in ev.attendees] == [
+        "beto@example.com",
+        "cory@example.com",
+        "room@resource.calendar.google.com",
+    ]
+    beto, cory, room = ev.attendees
+    assert beto.response_status == "declined"
+    assert cory.is_self is True
+    assert room.is_resource is True
+
+
+@pytest.mark.asyncio
+async def test_list_delta_event_without_participants() -> None:
+    body = {
+        "items": [
+            {
+                "id": "ev",
+                "status": "confirmed",
+                "summary": "Solo",
+                "start": {"date": "2026-06-05"},
+                "end": {"date": "2026-06-06"},
+            }
+        ],
+        "nextSyncToken": "T",
+    }
+    with respx.mock(base_url=BASE_URL) as router:
+        router.get(EVENTS).respond(json=body)
+        async with _client() as c:
+            page = await c.list_delta(sync_token=None)
+    ev = page.events[0]
+    assert ev.organizer is None
+    assert ev.attendees == ()
+
+
+@pytest.mark.asyncio
 async def test_list_delta_sends_sync_token_and_page_token() -> None:
     with respx.mock(base_url=BASE_URL) as router:
         route = router.get(EVENTS).respond(json={"items": [], "nextPageToken": "P2"})

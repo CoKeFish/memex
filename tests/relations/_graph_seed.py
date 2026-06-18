@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import text
 
 from memex.db import connection
+from memex.modules.identidades.normalize import norm_identifier
 
 
 def run(sql: str, **params: Any) -> Any:
@@ -93,6 +94,29 @@ def producto(name: str) -> int:
     )
 
 
+def desconocido(name: str) -> int:
+    return int(
+        run(
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1, 'desconocido', :n) RETURNING id",
+            n=name,
+        )
+    )
+
+
+def email_identifier(identity_id: int, email: str) -> None:
+    """Identifier de email de una identidad. `value_norm` con el MISMO `norm_identifier` que usa el
+    sync al persistir participantes → el join del tejedor (`email_norm = value_norm`) matchea."""
+    run(
+        "INSERT INTO mod_identidades_identifiers "
+        "(user_id, identity_id, platform, kind, value, value_norm) "
+        "VALUES (1, :iid, '', 'email', :v, :vn)",
+        iid=identity_id,
+        v=email,
+        vn=norm_identifier("email", email),
+    )
+
+
 def link_person_org(person_id: int, org_id: int) -> None:
     run(
         "INSERT INTO mod_identidades_person_orgs (user_id, person_id, org_id) VALUES (1, :p, :o)",
@@ -114,13 +138,15 @@ def mention(identity_id: int, inbox_ids: list[int], kind: str = "persona") -> No
     )
 
 
-def calendar(title: str, inbox_ids: list[int]) -> int:
-    """Evento crudo + su consolidado + el link. El VÉRTICE es el consolidado (devuelto)."""
+def calendar_event(title: str, inbox_ids: list[int] | None = None) -> tuple[int, int]:
+    """Evento crudo + su consolidado + el link. Devuelve `(consolidado, event_id_crudo)`: el
+    consolidado es el VÉRTICE; el crudo es donde cuelgan los participantes (`calendar_participant`).
+    `inbox_ids` opcional (los participantes no dependen de la co-ocurrencia)."""
     crudo = int(
         run(
             "INSERT INTO mod_calendar_events (user_id, source_inbox_ids, title, starts_on) "
             "VALUES (1, :ids, :t, DATE '2026-07-01') RETURNING id",
-            ids=inbox_ids,
+            ids=inbox_ids if inbox_ids is not None else [],
             t=title,
         )
     )
@@ -137,7 +163,56 @@ def calendar(title: str, inbox_ids: list[int]) -> int:
         c=cons,
         e=crudo,
     )
-    return cons
+    return cons, crudo
+
+
+def calendar(title: str, inbox_ids: list[int]) -> int:
+    """Evento consolidado (el VÉRTICE), sin participantes — para co-ocurrencia / huérfanas."""
+    return calendar_event(title, inbox_ids)[0]
+
+
+def calendar_participant(
+    event_id: int,
+    role: str,
+    email: str,
+    *,
+    is_self: bool = False,
+    is_resource: bool = False,
+    response_status: str | None = None,
+) -> None:
+    """Cuelga un participante del evento CRUDO (`event_id` de `calendar_event`). `email_norm` con el
+    mismo `norm_identifier` que el sync, para que el join del tejedor con identifiers matchee."""
+    run(
+        "INSERT INTO mod_calendar_event_participants "
+        "(user_id, event_id, role, display_name, email, email_norm, "
+        " is_self, is_resource, response_status) "
+        "VALUES (1, :e, :r, '', :em, :en, :slf, :res, :rs)",
+        e=event_id,
+        r=role,
+        em=email,
+        en=norm_identifier("email", email) if email else "",
+        slf=is_self,
+        res=is_resource,
+        rs=response_status,
+    )
+
+
+def calendar_declined_setting(value: bool) -> None:
+    """Setea la perilla `asiste_includes_declined` (module_settings.config del módulo calendar): ¿un
+    invitado `declined` recibe «asiste»? Mismo upsert que el writer real de `calendar.settings`."""
+    run(
+        "INSERT INTO module_settings (user_id, module_slug, config) "
+        "VALUES (1, 'calendar', "
+        "jsonb_build_object('asiste_includes_declined', CAST(:v AS boolean))) "
+        "ON CONFLICT (user_id, module_slug) "
+        "DO UPDATE SET config = module_settings.config || EXCLUDED.config",
+        v=value,
+    )
+
+
+def set_edge_verdict(producer: str, verdict: str) -> None:
+    """Fija el `verdict` de todas las aristas de un producer (simula una decisión humana)."""
+    run("UPDATE relation_edges SET verdict = :v WHERE producer = :p", v=verdict, p=producer)
 
 
 def set_parent(child: int, parent: int | None) -> None:

@@ -7,11 +7,25 @@ from __future__ import annotations
 from memex.db import connection
 from memex.relations.deterministic import (
     weave_afiliacion,
+    weave_calendar_consolidated,
     weave_finance_consolidated,
     weave_pertenencia,
 )
 from memex.relations.edges import list_edges
-from tests.relations._graph_seed import finance, link_person_org, org, person, producto, set_parent
+from tests.relations._graph_seed import (
+    calendar_declined_setting,
+    calendar_event,
+    calendar_participant,
+    desconocido,
+    email_identifier,
+    finance,
+    link_person_org,
+    org,
+    person,
+    producto,
+    set_edge_verdict,
+    set_parent,
+)
 
 
 def test_afiliacion_real_persona_org() -> None:
@@ -135,3 +149,135 @@ def test_weave_idempotente() -> None:
         weave_afiliacion(c, 1, p)
         edges = list_edges(c, 1, producer="identidades")
     assert len(edges) == 1
+
+
+# --- calendar: organiza/asiste (evento→identidad) ------------------------------------- #
+
+
+def test_calendar_organiza_y_asiste() -> None:
+    # organizador → «organiza», asistente resuelto por email → «asiste», ambas evento→identidad.
+    ana = person("Ana")
+    beto = person("Beto")
+    email_identifier(ana, "ana@example.com")
+    email_identifier(beto, "beto@example.com")
+    cons, ev = calendar_event("Reunión")
+    calendar_participant(ev, "organizer", "ana@example.com")
+    calendar_participant(ev, "attendee", "beto@example.com", response_status="accepted")
+    with connection() as c:
+        n = weave_calendar_consolidated(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert n == 2
+    by_rel = {e.relation_type: e for e in edges}
+    org_e = by_rel["organiza"]
+    assert org_e.producer == "calendar"
+    assert org_e.verdict == "confirmed" and org_e.provenance == "extracted"
+    assert (org_e.src.slug, org_e.src.id) == ("calendar", cons)  # dirección evento→identidad
+    assert (org_e.dst.slug, org_e.dst.id) == ("identidades:person", ana)
+    asi_e = by_rel["asiste"]
+    assert (asi_e.src.slug, asi_e.src.id) == ("calendar", cons)
+    assert (asi_e.dst.slug, asi_e.dst.id) == ("identidades:person", beto)
+
+
+def test_calendar_filtra_self_y_resource() -> None:
+    # el dueño (self) está en todos sus eventos = ruido; una sala (resource) no es persona.
+    org_id = org("Acme")
+    me = person("Yo")
+    room = person("Sala A")
+    email_identifier(org_id, "org@acme.com")
+    email_identifier(me, "me@acme.com")
+    email_identifier(room, "room@acme.com")
+    _cons, ev = calendar_event("Evento")
+    calendar_participant(ev, "organizer", "org@acme.com")
+    calendar_participant(ev, "attendee", "me@acme.com", is_self=True)
+    calendar_participant(ev, "attendee", "room@acme.com", is_resource=True)
+    with connection() as c:
+        weave_calendar_consolidated(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert len(edges) == 1  # solo el organizador; self y resource fuera
+    assert edges[0].relation_type == "organiza"
+    assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:org", org_id)
+
+
+def test_calendar_declined_excluido_por_default_y_con_perilla() -> None:
+    ana = person("Ana")  # organizadora que rechazó → igual «organiza»
+    beto = person("Beto")  # asistente que rechazó → sin «asiste» por default
+    email_identifier(ana, "ana@example.com")
+    email_identifier(beto, "beto@example.com")
+    _cons, ev = calendar_event("Reunión")
+    calendar_participant(ev, "organizer", "ana@example.com", response_status="declined")
+    calendar_participant(ev, "attendee", "beto@example.com", response_status="declined")
+    with connection() as c:
+        weave_calendar_consolidated(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert {e.relation_type for e in edges} == {"organiza"}  # declined no asiste
+
+    calendar_declined_setting(True)  # con la perilla, el declined entra
+    with connection() as c:
+        weave_calendar_consolidated(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert {e.relation_type for e in edges} == {"organiza", "asiste"}
+    asi = next(e for e in edges if e.relation_type == "asiste")
+    assert (asi.dst.slug, asi.dst.id) == ("identidades:person", beto)
+
+
+def test_calendar_veta_producto_enlaza_desconocido() -> None:
+    # «quién organiza/asiste» es persona/org/desconocido (un email real sin tipo definido vale);
+    # un producto no participa de una reunión → vetado.
+    prod = producto("Steam")
+    desc = desconocido("alguien")
+    email_identifier(prod, "steam@valvesoftware.com")
+    email_identifier(desc, "alguien@raro.com")
+    _cons, ev = calendar_event("Evento")
+    calendar_participant(ev, "attendee", "steam@valvesoftware.com", response_status="accepted")
+    calendar_participant(ev, "attendee", "alguien@raro.com", response_status="accepted")
+    with connection() as c:
+        weave_calendar_consolidated(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert len(edges) == 1  # producto vetado; desconocido enlaza
+    assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:desconocido", desc)
+
+
+def test_calendar_email_canonicalizado_matchea() -> None:
+    # identifier "jdoe@gmail.com" vs participante "J.Doe+promo@gmail.com": ambos colapsan vía
+    # norm_identifier (Gmail ignora puntos + quita +tag) → el join exacto matchea.
+    ana = person("Ana")
+    email_identifier(ana, "jdoe@gmail.com")
+    _cons, ev = calendar_event("Evento")
+    calendar_participant(ev, "organizer", "J.Doe+promo@gmail.com")
+    with connection() as c:
+        weave_calendar_consolidated(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert len(edges) == 1
+    assert (edges[0].dst.slug, edges[0].dst.id) == ("identidades:person", ana)
+
+
+def test_calendar_idempotente_y_no_resucita_rechazada() -> None:
+    ana = person("Ana")
+    email_identifier(ana, "ana@example.com")
+    _cons, ev = calendar_event("Evento")
+    calendar_participant(ev, "organizer", "ana@example.com")
+    with connection() as c:
+        n1 = weave_calendar_consolidated(c, 1)
+        n2 = weave_calendar_consolidated(c, 1)  # misma tx: 2ª corrida no agrega (diff vacío)
+        edges = list_edges(c, 1, producer="calendar")
+    assert (n1, n2) == (1, 0)
+    assert len(edges) == 1
+
+    # un humano rechaza la arista → re-tejer NO la resucita (el diff la ve en `existing`).
+    set_edge_verdict("calendar", "rejected")
+    with connection() as c:
+        n3 = weave_calendar_consolidated(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert n3 == 0
+    assert len(edges) == 1 and edges[0].verdict == "rejected"
+
+
+def test_calendar_participante_sin_identidad_no_edge() -> None:
+    # un email que no está en el directorio → no hay arista (no se crea identidad).
+    _cons, ev = calendar_event("Evento")
+    calendar_participant(ev, "organizer", "desconocido@nadie.com")
+    with connection() as c:
+        n = weave_calendar_consolidated(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert n == 0
+    assert edges == []

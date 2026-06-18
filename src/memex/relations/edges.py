@@ -65,6 +65,7 @@ PRODUCER_HUMANO = "humano"  #: confirmada/creada por el usuario
 PRODUCER_EVENT = "event"  #: hechos correlacionados por Hermes en un mismo mensaje (mismo event_id)
 PRODUCER_BIENESTAR = "bienestar"  #: un registro de bienestar cumple un hábito (match determinista)
 PRODUCER_CANAL = "canal"  #: estructura del medio: quién escribe en qué canal (remitente resuelto)
+PRODUCER_CALENDAR = "calendar"  #: organizador/asistente de un evento resuelto a una identidad
 #: Conocidos (referencia); el `producer` real es texto libre — agregar uno NO requiere migración.
 PRODUCERS: frozenset[str] = frozenset(
     {
@@ -78,6 +79,7 @@ PRODUCERS: frozenset[str] = frozenset(
         PRODUCER_EVENT,
         PRODUCER_BIENESTAR,
         PRODUCER_CANAL,
+        PRODUCER_CALENDAR,
     }
 )
 
@@ -98,6 +100,15 @@ RELTYPE_PARTICIPA_EN = "participa_en"
 #: Slug del vértice «canal» (lo proyecta `mod_canales`, tabla del grafo derivada de inbox). El
 #: canal NO cuenta para el cap de co-ocurrencia (es estructural, está en TODO mensaje del chat).
 CANAL_SLUG = "canal"
+#: Participación en un evento de calendario: aristas REALES `evento → identidad` para el ORGANIZADOR
+#: («organiza») y los ASISTENTES («asiste»), resueltos por email contra el directorio.
+#: `producer='calendar'`, confirmed determinista. El tipo va en `relation_type`; la dirección
+#: (evento→identidad) es la del card y la del hermano `contraparte`.
+RELTYPE_ORGANIZA = "organiza"
+RELTYPE_ASISTE = "asiste"
+#: Slug del vértice del evento de calendario (lo proyecta `mod_calendar_consolidated`, ver
+#: `vertices.NODE_SOURCES`). La arista apunta al evento CONSOLIDADO, no al raw.
+CALENDAR_SLUG = "calendar"
 
 
 @dataclass(frozen=True)

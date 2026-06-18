@@ -516,11 +516,21 @@ def test_list_events_exposes_resolved_place(client: Any) -> None:
 
 
 def test_calendar_settings_default_and_patch(client: Any) -> None:
-    assert client.get("/calendar/settings").json() == {"llm_on_past_events": False}
+    assert client.get("/calendar/settings").json() == {
+        "llm_on_past_events": False,
+        "asiste_includes_declined": False,
+    }
+    # PATCH parcial: mandar una sola perilla no pisa la otra (campos omitidos = None = no tocar).
     resp = client.patch("/calendar/settings", json={"llm_on_past_events": True})
     assert resp.status_code == 200
-    assert resp.json() == {"llm_on_past_events": True}
-    assert client.get("/calendar/settings").json() == {"llm_on_past_events": True}
+    assert resp.json() == {"llm_on_past_events": True, "asiste_includes_declined": False}
+    resp = client.patch("/calendar/settings", json={"asiste_includes_declined": True})
+    assert resp.status_code == 200
+    assert resp.json() == {"llm_on_past_events": True, "asiste_includes_declined": True}
+    assert client.get("/calendar/settings").json() == {
+        "llm_on_past_events": True,
+        "asiste_includes_declined": True,
+    }
 
 
 def test_sync_now_provider_error_is_502(client: Any, monkeypatch: Any) -> None:

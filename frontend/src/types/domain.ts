@@ -832,6 +832,8 @@ export interface CalendarSyncHealth {
 export interface CalendarSettings {
   /** ¿Dedup F2 y merge (los pasos que GASTAN LLM) procesan eventos ya vencidos? Default false. */
   llmOnPastEvents: boolean
+  /** ¿Un invitado que rechazó recibe igual la arista «asiste» (evento→identidad)? Default false. */
+  asisteIncludesDeclined: boolean
 }
 
 /** Resultado de POST /calendar/accounts/{id}/sync (pull + consolidación, sin LLM ni push). */

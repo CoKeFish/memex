@@ -1006,13 +1006,20 @@ class CalendarSettings(BaseModel):
     """Perillas del módulo calendar (`module_settings.config`).
 
     `llm_on_past_events`: ¿el dedup FASE 2 y el merge (pasos que GASTAN LLM) procesan eventos ya
-    vencidos? Default False — no gastar en lo que ya pasó; lo salteado se retoma al prenderla."""
+    vencidos? Default False — no gastar en lo que ya pasó; lo salteado se retoma al prenderla.
+    `asiste_includes_declined`: ¿un invitado que rechazó la invitación recibe igual la arista
+    «asiste» (evento→identidad)? Default False — rechazar no es asistir."""
 
     llm_on_past_events: bool
+    asiste_includes_declined: bool
 
 
 class CalendarSettingsPatch(BaseModel):
-    llm_on_past_events: bool
+    """PATCH parcial: solo se setean los campos presentes; un `None` no toca esa perilla (así el UID
+    puede mandar una sola perilla sin pisar la otra)."""
+
+    llm_on_past_events: bool | None = None
+    asiste_includes_declined: bool | None = None
 
 
 # ---- Módulo identidades (tablas `mod_identidades_*`) --------------------------------------------

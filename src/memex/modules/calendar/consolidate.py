@@ -34,6 +34,7 @@ from memex.geo.places import PlaceRecord
 from memex.logging import get_logger
 from memex.modules.calendar.conflicts import ConflictEvent, find_conflicts
 from memex.modules.contract import normalize
+from memex.relations.deterministic import weave_calendar_consolidated
 
 _log = get_logger("memex.modules.calendar.consolidate")
 
@@ -672,6 +673,9 @@ def run_consolidation(user_id: int) -> ConsolidationStats:
         _set_outcomes(conn, outcomes)
         stats.orphans = _tombstone_orphans(conn, user_id)
         stats.conflicts = _detect_conflicts(conn, user_id)
+        # Teje organiza/asiste evento→identidad en la MISMA tx (SQL puro, sin I/O → commitea atómico
+        # con la consolidación, a diferencia del geocode). Full-sweep: barato e idempotente.
+        weave_calendar_consolidated(conn, user_id)
 
     _log.info(
         "calendar.consolidate.done",

@@ -7,10 +7,13 @@ Dos limpiezas, ambas necesarias porque los `weave_*` solo agregan:
   vértice vivo (fila borrada / consolidado tombstoneado / identidad absorbida en un merge / cúmulo
   disuelto). Misma proyección que LEE el grafo (`list_vertices`): prune y lectura no divergen.
 - **Reconciliación de stale** (`_prune_stale_reales`): borra aristas REALES cuyo DATO de origen
-  cambió (contraparte re-resuelta, afiliación o padre quitado) aunque AMBOS vértices sigan vivos.
-  Para saber qué sobra, recalcula los pares que el dato implica HOY (`_*_pairs`, read-only, SIN
-  re-tejer) y borra las aristas que ya no están. Solo las tres reales del directorio/finanzas;
-  `cumple`/`mismo_evento`/`participa_en` se limpian solo por huérfanas (igual que antes).
+  cambió (contraparte re-resuelta, afiliación o padre quitado, asistente des-invitado) aunque AMBOS
+  vértices sigan vivos. Para saber qué sobra, recalcula los pares que el dato implica HOY
+  (`_*_pairs`, read-only, SIN re-tejer) y borra las aristas que ya no están. Las del directorio/
+  finanzas (afiliado/pertenece_a/contraparte) y las de calendar (organiza/asiste): sus participantes
+  son MUTABLES (a alguien lo des-invitan o pasa a `declined` con el evento aún vivo).
+  `cumple`/`mismo_evento`/`participa_en` NO: son append-only (un registro/remitente no se
+  «desescribe»), se limpian solo por huérfanas.
 
 Disparable por job/CLI/endpoint. Idempotente.
 """
@@ -24,12 +27,16 @@ from sqlalchemy.engine import Connection
 from memex.logging import get_logger
 from memex.relations.deterministic import (
     _afiliacion_pairs,
+    _calendar_participa_pairs,
     _contraparte_pairs,
     _pertenencia_pairs,
 )
 from memex.relations.edges import (
+    PRODUCER_CALENDAR,
     PRODUCER_FINANCE,
     PRODUCER_IDENTIDADES,
+    RELTYPE_ASISTE,
+    RELTYPE_ORGANIZA,
     Ref,
     list_edges,
 )
@@ -46,6 +53,8 @@ class ReconcileStats:
     stale_afiliacion: int = 0
     stale_pertenencia: int = 0
     stale_contraparte: int = 0
+    stale_organiza: int = 0
+    stale_asiste: int = 0
     orphans_pruned: int = 0
 
 
@@ -94,8 +103,8 @@ def _prune_stale_reales(
 
 
 def reconcile_graph(conn: Connection, user_id: int) -> ReconcileStats:
-    """Mantenimiento del grafo (idempotente): reconcilia las tres aristas reales del directorio/
-    finanzas cuyo dato de origen cambió y poda las huérfanas. NO teje aristas nuevas. La
+    """Mantenimiento del grafo (idempotente): reconcilia las aristas reales (directorio/finanzas +
+    calendar) cuyo dato de origen cambió y poda las huérfanas. NO teje aristas nuevas. La
     reconciliación corre ANTES de la poda (borra reales stale aunque ambos extremos vivan); la poda
     barre lo que quedó con un extremo muerto."""
     afil = _prune_stale_reales(
@@ -119,6 +128,22 @@ def reconcile_graph(conn: Connection, user_id: int) -> ReconcileStats:
         relation_type="contraparte",
         live=set(_contraparte_pairs(conn, user_id)),
     )
+    # Un solo recálculo de los pares de calendar alimenta las dos relaciones (organiza/asiste).
+    cal = list(_calendar_participa_pairs(conn, user_id))
+    organiza = _prune_stale_reales(
+        conn,
+        user_id,
+        producer=PRODUCER_CALENDAR,
+        relation_type=RELTYPE_ORGANIZA,
+        live={(s, d) for s, d, rt in cal if rt == RELTYPE_ORGANIZA},
+    )
+    asiste = _prune_stale_reales(
+        conn,
+        user_id,
+        producer=PRODUCER_CALENDAR,
+        relation_type=RELTYPE_ASISTE,
+        live={(s, d) for s, d, rt in cal if rt == RELTYPE_ASISTE},
+    )
     pruned = prune_orphan_edges(conn, user_id)
     _log.info(
         "relation.reconcile.done",
@@ -126,11 +151,15 @@ def reconcile_graph(conn: Connection, user_id: int) -> ReconcileStats:
         stale_afiliacion=afil,
         stale_pertenencia=pert,
         stale_contraparte=contra,
+        stale_organiza=organiza,
+        stale_asiste=asiste,
         orphans_pruned=pruned,
     )
     return ReconcileStats(
         stale_afiliacion=afil,
         stale_pertenencia=pert,
         stale_contraparte=contra,
+        stale_organiza=organiza,
+        stale_asiste=asiste,
         orphans_pruned=pruned,
     )

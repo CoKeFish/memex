@@ -26,6 +26,7 @@ import httpx
 from memex.core.source import HealthResult
 from memex.logging import get_logger
 from memex.modules.calendar.providers.base import (
+    CalendarParticipant,
     CalendarProviderError,
     CalendarSyncTokenExpired,
     ProviderEvent,
@@ -89,6 +90,19 @@ def _parse_when(
     return None, None, None, None
 
 
+def _parse_participant(raw: dict[str, Any]) -> CalendarParticipant:
+    """Mapea un bloque `organizer`/`attendee` de Google a `CalendarParticipant`. `self`/`resource`/
+    `responseStatus` se conservan crudos (el tejedor del grafo los interpreta)."""
+    rs = raw.get("responseStatus")
+    return CalendarParticipant(
+        email=str(raw.get("email") or "").strip(),
+        display_name=str(raw.get("displayName") or ""),
+        response_status=rs if isinstance(rs, str) else None,
+        is_self=bool(raw.get("self")),
+        is_resource=bool(raw.get("resource")),
+    )
+
+
 def _parse_event(item: dict[str, Any], provider_event_id: str) -> ProviderEvent | None:
     """Construye un `ProviderEvent` de un item de la API. None si no tiene fecha mapeable."""
     starts_on, ends_on, start_time, end_time = _parse_when(
@@ -113,6 +127,19 @@ def _parse_event(item: dict[str, Any], provider_event_id: str) -> ProviderEvent 
     # deriva parseando el `provider_event_id`.
     rec = item.get("recurringEventId")
 
+    org_raw = item.get("organizer")
+    organizer = (
+        _parse_participant(org_raw) if isinstance(org_raw, dict) and org_raw.get("email") else None
+    )
+    # Google duplica al organizador en `attendees` (con `organizer: true`); se omite ahí para no
+    # emitir doble arista (se captura solo del bloque `organizer`). Un asistente sin email tampoco
+    # entra: el email es la llave de resolución contra el directorio.
+    attendees = tuple(
+        _parse_participant(a)
+        for a in (item.get("attendees") or [])
+        if isinstance(a, dict) and a.get("email") and not a.get("organizer")
+    )
+
     return ProviderEvent(
         provider_event_id=provider_event_id,
         title=str(item.get("summary") or ""),
@@ -127,6 +154,8 @@ def _parse_event(item: dict[str, Any], provider_event_id: str) -> ProviderEvent 
         updated=updated,
         memex_consolidated_id=mcid if isinstance(mcid, str) else None,
         recurring_event_id=rec if isinstance(rec, str) else None,
+        organizer=organizer,
+        attendees=attendees,
     )
 
 

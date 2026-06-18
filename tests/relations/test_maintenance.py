@@ -8,6 +8,7 @@ from memex.db import connection
 from memex.relations.cooccurrence import generate_cooccurrence
 from memex.relations.deterministic import (
     weave_afiliacion,
+    weave_calendar_consolidated,
     weave_finance_consolidated,
     weave_pertenencia,
 )
@@ -15,10 +16,14 @@ from memex.relations.edges import list_edges
 from memex.relations.maintenance import reconcile_graph
 from memex.relations.vertices import list_vertices
 from tests.relations._graph_seed import (
+    calendar_event,
+    calendar_participant,
+    email_identifier,
     finance,
     hack,
     link_person_org,
     org,
+    person,
     producto,
     run,
     set_parent,
@@ -153,4 +158,68 @@ def test_poda_huerfana_por_fila_borrada() -> None:
         stats = reconcile_graph(c, 1)
         edges = list_edges(c, 1)
     assert stats.orphans_pruned == 1
+    assert edges == []
+
+
+def test_reconcile_calendar_asistente_desinvitado() -> None:
+    # a un asistente lo des-invitan (se borra su participant) con el evento vivo: la poda de
+    # huérfanas no lo ve (ambos vértices viven); reconcile recalcula los pares de HOY y lo borra.
+    ana = person("Ana")
+    email_identifier(ana, "ana@example.com")
+    _cons, ev = calendar_event("Reunión")
+    calendar_participant(ev, "attendee", "ana@example.com", response_status="accepted")
+    with connection() as c:
+        weave_calendar_consolidated(c, 1)
+        assert len(list_edges(c, 1, producer="calendar")) == 1
+    run("DELETE FROM mod_calendar_event_participants WHERE event_id = :e", e=ev)
+    with connection() as c:
+        stats = reconcile_graph(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert stats.stale_asiste == 1
+    assert edges == []
+
+
+def test_reconcile_calendar_declined_quita_asiste() -> None:
+    # un asistente pasa a `declined` (perilla apagada): su par sale de los vigentes HOY → reconcile
+    # borra el «asiste» aunque evento e identidad sigan vivos.
+    ana = person("Ana")
+    email_identifier(ana, "ana@example.com")
+    _cons, ev = calendar_event("Reunión")
+    calendar_participant(ev, "attendee", "ana@example.com", response_status="accepted")
+    with connection() as c:
+        weave_calendar_consolidated(c, 1)
+        assert len(list_edges(c, 1, producer="calendar")) == 1
+    run(
+        "UPDATE mod_calendar_event_participants "
+        "SET response_status = 'declined' WHERE event_id = :e",
+        e=ev,
+    )
+    with connection() as c:
+        stats = reconcile_graph(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert stats.stale_asiste == 1
+    assert edges == []
+
+
+def test_reconcile_calendar_evento_tombstoneado() -> None:
+    # tombstonear el evento consolidado: deja de proyectar vértice (where NOT deleted) y sale de los
+    # pares vigentes → reconcile borra su «organiza». La caza el stale (corre antes que la poda de
+    # huérfanas), porque `_calendar_participa_pairs` filtra `NOT c.deleted`.
+    ana = person("Ana")
+    email_identifier(ana, "ana@example.com")
+    cons, ev = calendar_event("Reunión")
+    calendar_participant(ev, "organizer", "ana@example.com")
+    with connection() as c:
+        weave_calendar_consolidated(c, 1)
+        assert len(list_edges(c, 1, producer="calendar")) == 1
+    # `deleted_source` es obligatorio cuando `deleted` (CHECK de coherencia de 0059).
+    run(
+        "UPDATE mod_calendar_consolidated SET deleted = TRUE, deleted_source = 'user' "
+        "WHERE id = :i",
+        i=cons,
+    )
+    with connection() as c:
+        stats = reconcile_graph(c, 1)
+        edges = list_edges(c, 1, producer="calendar")
+    assert stats.stale_organiza == 1
     assert edges == []

@@ -373,18 +373,26 @@ export async function fetchCalendarSyncHealth(): Promise<CalendarSyncHealth> {
   }
 }
 
-/** Perillas del módulo (GET /calendar/settings). */
-export async function fetchCalendarSettings(): Promise<CalendarSettings> {
-  const r = await apiGet<{ llm_on_past_events: boolean }>("/calendar/settings")
-  return { llmOnPastEvents: r.llm_on_past_events }
+type CalendarSettingsWire = { llm_on_past_events: boolean; asiste_includes_declined: boolean }
+
+function toCalendarSettings(r: CalendarSettingsWire): CalendarSettings {
+  return { llmOnPastEvents: r.llm_on_past_events, asisteIncludesDeclined: r.asiste_includes_declined }
 }
 
-/** Setea «gastar LLM en eventos pasados» (la leen dedup F2 y merge en cada corrida). */
-export async function patchCalendarSettings(llmOnPastEvents: boolean): Promise<CalendarSettings> {
-  const r = await apiPatch<{ llm_on_past_events: boolean }>("/calendar/settings", {
-    llm_on_past_events: llmOnPastEvents,
-  })
-  return { llmOnPastEvents: r.llm_on_past_events }
+/** Perillas del módulo (GET /calendar/settings). */
+export async function fetchCalendarSettings(): Promise<CalendarSettings> {
+  return toCalendarSettings(await apiGet<CalendarSettingsWire>("/calendar/settings"))
+}
+
+/** Setea perillas del módulo (PATCH parcial: solo las claves presentes se tocan). */
+export async function patchCalendarSettings(
+  patch: Partial<CalendarSettings>,
+): Promise<CalendarSettings> {
+  const body: Record<string, boolean> = {}
+  if (patch.llmOnPastEvents !== undefined) body.llm_on_past_events = patch.llmOnPastEvents
+  if (patch.asisteIncludesDeclined !== undefined)
+    body.asiste_includes_declined = patch.asisteIncludesDeclined
+  return toCalendarSettings(await apiPatch<CalendarSettingsWire>("/calendar/settings", body))
 }
 
 /** «Sincronizar ahora»: pull + consolidación in-process (sin LLM ni push). */
