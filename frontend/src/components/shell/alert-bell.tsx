@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Bell, CheckCheck } from "lucide-react"
+import { Bell, CheckCheck, X } from "lucide-react"
 import { useNavigate } from "react-router-dom"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -14,7 +14,7 @@ import type { AlertSeverity } from "@/types/domain"
 const sevTone: Record<AlertSeverity, Tone> = { critica: "error", alta: "review", info: "running" }
 
 export function AlertBell() {
-  const { alerts, unread, markRead, markAllRead } = useAlerts()
+  const { alerts, unread, markRead, markAllRead, dismiss } = useAlerts()
   const nav = useNavigate()
   const [open, setOpen] = useState(false)
 
@@ -40,7 +40,7 @@ export function AlertBell() {
         <ScrollArea className="max-h-[340px]">
           <ul className="divide-y divide-border">
             {alerts.map((a) => (
-              <li key={a.id}>
+              <li key={a.id} className="group relative">
                 <button
                   onClick={() => {
                     markRead(a.id)
@@ -65,6 +65,18 @@ export function AlertBell() {
                     <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{a.detail}</p>
                   </div>
                 </button>
+                {a.source === "persisted" && (
+                  <button
+                    aria-label="Descartar"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      dismiss(a.id)
+                    }}
+                    className="absolute right-1 top-1/2 hidden -translate-y-1/2 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground group-hover:block"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
               </li>
             ))}
           </ul>

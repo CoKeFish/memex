@@ -458,6 +458,7 @@ export const reviewItems: ReviewItem[] = [
 export const seedAlerts: AlertEvent[] = [
   {
     id: "al-402",
+    source: "dynamic",
     severity: "critica",
     kind: "saldo",
     title: "Saldo LLM agotado (402)",
@@ -468,6 +469,7 @@ export const seedAlerts: AlertEvent[] = [
   },
   {
     id: "al-stale",
+    source: "dynamic",
     severity: "alta",
     kind: "worker-stale",
     title: "Worker extract colgado",
@@ -478,6 +480,7 @@ export const seedAlerts: AlertEvent[] = [
   },
   {
     id: "al-run",
+    source: "dynamic",
     severity: "alta",
     kind: "run-failed",
     title: "Ingesta fallida: Correo universitario",
@@ -488,6 +491,7 @@ export const seedAlerts: AlertEvent[] = [
   },
   {
     id: "al-src",
+    source: "dynamic",
     severity: "alta",
     kind: "source-stale",
     title: "Instagram sin sincronizar",
@@ -498,6 +502,7 @@ export const seedAlerts: AlertEvent[] = [
   },
   {
     id: "al-review",
+    source: "dynamic",
     severity: "info",
     kind: "review",
     title: `${reviewItems.length} ítems pendientes de revisión`,

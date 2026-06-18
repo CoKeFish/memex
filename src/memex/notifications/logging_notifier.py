@@ -1,15 +1,16 @@
-"""Stub de `Notifier`: deja el aviso en el log (structlog). Verifica el seam sin persistir nada.
+"""Stub `LoggingNotifier` (solo loguea) + `build_notifier()`, el cableado del notificador activo.
 
-`build_notifier()` es el ÚNICO punto de cableado del notificador activo: hoy devuelve
-`LoggingNotifier`; cuando exista el servicio de notificaciones real (persistencia + vista en el
-dashboard), otra sesión cambia SOLO esta función y ni los emisores (transport) ni el scheduler se
-tocan.
+`build_notifier()` es el ÚNICO punto de cableado: hoy devuelve el servicio real
+(`PersistentNotifier`, que persiste en la cola `notifications`). `LoggingNotifier` queda como stub
+válido — útil en tests o para volver al comportamiento solo-log. Cambiar el notificador activo es
+cambiar SOLO esta función; ni los emisores (transport) ni el scheduler se tocan.
 """
 
 from __future__ import annotations
 
 from memex.logging import get_logger
 from memex.notifications.client import Notification, Notifier
+from memex.notifications.persistent_notifier import PersistentNotifier
 
 _log = get_logger("memex.notifications")
 
@@ -29,5 +30,9 @@ class LoggingNotifier:
 
 
 def build_notifier() -> Notifier:
-    """El `Notifier` activo. Hoy: el stub que loguea. Mañana: el servicio real (otra sesión)."""
-    return LoggingNotifier()
+    """El `Notifier` activo: el servicio real que persiste los avisos en la cola `notifications`.
+
+    Para volver al comportamiento solo-log (p.ej. en un entorno sin DB), devolver
+    `LoggingNotifier()`.
+    """
+    return PersistentNotifier()

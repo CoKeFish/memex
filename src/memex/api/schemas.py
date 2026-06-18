@@ -1651,6 +1651,36 @@ class StatsAlert(BaseModel):
     deep_link: str
 
 
+# ----- Notificaciones (cola persistida) ------------------------------------ #
+
+
+class NotificationRow(BaseModel):
+    """Un aviso de la cola `notifications` para la vista/campana (servicio general, no solo geo).
+
+    `payload` lleva las referencias estructuradas del emisor (ids, tiempos). `deep_link` es a dónde
+    navega la vista al abrir el aviso. Los timestamps de estado son nullable: `read_at` (leído),
+    `dismissed_at` (descartado), `expires_at` (vence). El listado ya excluye descartados y vencidos.
+    """
+
+    id: int
+    kind: str
+    severity: Literal["info", "alta", "critica"]
+    title: str
+    body: str
+    payload: dict[str, Any]
+    deep_link: str | None = None
+    created_at: datetime
+    read_at: datetime | None = None
+    dismissed_at: datetime | None = None
+    expires_at: datetime | None = None
+
+
+class NotificationList(BaseModel):
+    items: list[NotificationRow]
+    unread: int  # avisos activos sin leer (para el badge de la campana)
+    next_cursor: int | None = None
+
+
 class ReviewDeadLetterItem(BaseModel):
     """Mensaje en 'pendiente de revisión' (dead-letter) con contexto del inbox para la cola."""
 

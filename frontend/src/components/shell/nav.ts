@@ -1,6 +1,7 @@
 import type { LucideIcon } from "lucide-react"
 import {
   Activity,
+  Bell,
   Database,
   DollarSign,
   Image,
@@ -51,6 +52,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { path: "/", label: "Resumen", icon: LayoutDashboard },
       { path: "/revision", label: "Revisión", icon: ListChecks, reviewBadge: true },
+      { path: "/notificaciones", label: "Notificaciones", icon: Bell },
     ],
   },
   {

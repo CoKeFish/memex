@@ -6,6 +6,7 @@ import { SessionProvider, useSession } from "@/state/session"
 import { OverviewPage } from "@/pages/overview"
 import { PipelinePage } from "@/pages/pipeline"
 import { ReviewPage } from "@/pages/review"
+import { NotificationsPage } from "@/pages/notifications"
 import { DataPage } from "@/pages/data"
 import { MessageDetailPage } from "@/pages/message-detail"
 import { MetricsPage } from "@/pages/metrics"
@@ -54,6 +55,7 @@ export default function App() {
         <Route index element={<OverviewPage />} />
         <Route path="pipeline" element={<PipelinePage />} />
         <Route path="revision" element={<ReviewPage />} />
+        <Route path="notificaciones" element={<NotificationsPage />} />
         <Route path="datos" element={<DataPage />} />
         <Route path="datos/:id" element={<MessageDetailPage />} />
         <Route path="calendario" element={<CalendarPage />} />

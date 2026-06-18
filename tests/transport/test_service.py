@@ -134,6 +134,10 @@ async def test_leave_now_emits_notification() -> None:
     assert sent.kind == "transport.leave_by"
     assert sent.dedup_key.endswith(":leave_now")
     assert sent.payload["verdict"] == "leave_now"
+    assert sent.user_id == 1
+    assert sent.deep_link == "/calendario"
+    # Vencimiento = inicio del evento (15:00 del 2026-06-17, TZ Bogotá).
+    assert sent.expires_at == datetime(2026, 6, 17, 15, 0, tzinfo=_TZ)
 
 
 @pytest.mark.asyncio

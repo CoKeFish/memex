@@ -42,6 +42,11 @@ export { MODULES, moduleChart, moduleLabel } from "@/lib/metrics"
 // /resumen). Reemplazan a los selectores mock sourceHealth/workerLatest/ingestion*/*Count de abajo.
 export * from "./pipeline"
 
+// ---- Notificaciones (cola persistida, datos reales: router /notifications) ----
+// fetchNotifications (cola activa + no-leídas) + mark/dismiss/read-all + toAlertEvent (proyección al
+// AlertBell). Alimenta la página /notificaciones y el AlertsProvider (campana unificada).
+export * from "./notifications"
+
 // ---- Procesamiento (datos reales: routers /modules y /processing) -------------
 // Toggle de fuentes/módulos + cobertura, control del scheduler y corridas por lote (dry-run + run en
 // background + polling). Reemplaza los getters mock getSources/getModuleSettings/getScheduler*/dryRunRun.
