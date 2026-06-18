@@ -134,12 +134,38 @@ def test_request_code_returns_state(authed: TestClient, monkeypatch: pytest.Monk
     assert body["phone_masked"]  # enmascarado, no vacío
 
 
-def test_request_code_no_source_422(authed: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_request_code_autocreates_source(
+    authed: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cuenta de Telegram con credenciales pero SIN source vinculada: el flujo la crea+vincula al
+    vuelo (antes tiraba 422 y quedabas trabado sin un botón). Idempotente: no duplica."""
+    from memex.db import connection
+
     _patch_client(monkeypatch)
     r = authed.post("/accounts", json={"alias": "tg2", "provider": "telegram", "kind": "chat"})
-    aid = int(r.json()["id"])  # sin source vinculada
+    aid = int(r.json()["id"])  # sin source vinculada todavía
+    for name, val in (("api_id", "12345"), ("api_hash", "deadbeef"), ("phone", "+34999")):
+        assert (
+            authed.post(
+                f"/accounts/{aid}/credentials", json={"secret_name": name, "value": val}
+            ).status_code
+            == 200
+        )
+
+    def _tg_sources() -> int:
+        with connection() as conn:
+            n = conn.execute(
+                text("SELECT count(*) FROM sources WHERE account_id = :a AND type = 'telegram'"),
+                {"a": aid},
+            ).scalar()
+        return int(n or 0)
+
     resp = authed.post(f"/accounts/{aid}/telegram/request-code")
-    assert resp.status_code == 422
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "code_sent"
+    assert _tg_sources() == 1  # se creó+vinculó
+    authed.post(f"/accounts/{aid}/telegram/request-code")
+    assert _tg_sources() == 1  # idempotente: no duplica
 
 
 def test_request_code_already_authorized(

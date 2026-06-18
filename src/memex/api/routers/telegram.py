@@ -95,8 +95,50 @@ def _assert_owns(conn: Any, user_id: int, account_id: int) -> None:
         raise HTTPException(status_code=404, detail="account not found")
 
 
+def _ensure_tg_source(conn: Any, user_id: int, account_id: int) -> dict[str, Any]:
+    """Get-or-create de la source de Telegram vinculada a la cuenta. Antes este paso faltaba: el
+    wizard exigía una source ya existente pero nada la creaba (gmail se autocrea por el OAuth,
+    outlook por el cliente local), así que tras un wipe o con una cuenta nueva la conexión quedaba
+    trabada con un 422 y sin un botón que la creara. Idempotente; devuelve la fila con `config`."""
+    alias = conn.execute(
+        text("SELECT alias FROM accounts WHERE id = :aid"), {"aid": account_id}
+    ).scalar()
+    name = f"Telegram · {alias}" if alias else f"Telegram (cuenta {account_id})"
+    existing = (
+        conn.execute(
+            text("SELECT id, config FROM sources WHERE user_id = :uid AND name = :name"),
+            {"uid": user_id, "name": name},
+        )
+        .mappings()
+        .first()
+    )
+    if existing is not None:
+        conn.execute(
+            text("UPDATE sources SET account_id = :aid WHERE id = :sid"),
+            {"aid": account_id, "sid": existing["id"]},
+        )
+        _log.info("telegram.source.ensured", account_id=account_id, action="linked")
+        return dict(existing)
+    row = (
+        conn.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type, config, account_id) "
+                "VALUES (:uid, :name, 'telegram', '{}'::jsonb, :aid) RETURNING id, config"
+            ),
+            {"uid": user_id, "name": name, "aid": account_id},
+        )
+        .mappings()
+        .first()
+    )
+    assert row is not None
+    _log.info("telegram.source.ensured", account_id=account_id, action="created")
+    return dict(row)
+
+
 def _resolve_tg_config(conn: Any, user_id: int, account_id: int) -> TelegramConfig:
-    """Config Telegram de la source vinculada a la cuenta, con credenciales del VAULT."""
+    """Config Telegram de la source vinculada a la cuenta, con credenciales del VAULT. Si la source
+    no existe todavía, se crea y vincula al vuelo (get-or-create) — el wizard no debe trabarse por
+    un paso manual faltante."""
     src = (
         conn.execute(
             text(
@@ -109,10 +151,7 @@ def _resolve_tg_config(conn: Any, user_id: int, account_id: int) -> TelegramConf
         .first()
     )
     if src is None:
-        raise HTTPException(
-            status_code=422,
-            detail="vinculá una source de Telegram a la cuenta antes de conectar",
-        )
+        src = _ensure_tg_source(conn, user_id, account_id)
     cfg = dict(src["config"] or {})
     env = build_resolved_env(
         conn, user_id=user_id, source_type="telegram", cfg=cfg, account_id=account_id
