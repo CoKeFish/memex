@@ -221,5 +221,9 @@ def _build_notification(
         body=body,
         dedup_key=f"transport:{user_id}:{result.event_id}:{assessment.verdict.value}",
         created_at=now,
+        user_id=user_id,
         payload=payload,
+        deep_link="/calendario",
+        # Vencimiento natural: una vez empezado el evento, "salí hacia él" ya no aplica.
+        expires_at=result.event_start,
     )

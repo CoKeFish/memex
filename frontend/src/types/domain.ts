@@ -433,15 +433,40 @@ export interface ReviewItem {
 
 export type AlertSeverity = "critica" | "alta" | "info"
 
+/** De dónde sale un item de la campana: alerta dinámica (/stats/alerts, "leído" en cliente) o aviso
+ *  persistido (cola /notifications, "leído"/"descartado" en servidor). */
+export type AlertSource = "dynamic" | "persisted"
+
 export interface AlertEvent {
   id: string
   severity: AlertSeverity
-  kind: "saldo" | "worker-stale" | "run-failed" | "source-stale" | "review"
+  // Las alertas dinámicas traen un kind cerrado (saldo/worker-stale/…); los avisos persistidos traen
+  // su kind de notificación (p.ej. "transport.leave_by"). `string` cubre ambos.
+  kind: string
   title: string
   detail: string
   at: string
   read: boolean
   deepLink: string
+  source: AlertSource
+  // id numérico de la fila en `notifications` cuando source === "persisted" (para read/dismiss).
+  notifId?: number
+}
+
+/** Un aviso de la cola persistida (`GET /notifications`). Alimenta la página /notificaciones y, vía
+ *  `toAlertEvent`, el AlertBell. Multi-tenant: el backend ya acota al usuario. */
+export interface PersistedNotification {
+  id: number
+  kind: string
+  severity: AlertSeverity
+  title: string
+  body: string
+  payload: Record<string, unknown>
+  deepLink: string | null
+  createdAt: string
+  readAt: string | null
+  dismissedAt: string | null
+  expiresAt: string | null
 }
 
 // ---- Cuenta y acceso ----------------------------------------------------------
@@ -807,6 +832,8 @@ export interface CalendarSyncHealth {
 export interface CalendarSettings {
   /** ¿Dedup F2 y merge (los pasos que GASTAN LLM) procesan eventos ya vencidos? Default false. */
   llmOnPastEvents: boolean
+  /** ¿Un invitado que rechazó recibe igual la arista «asiste» (evento→identidad)? Default false. */
+  asisteIncludesDeclined: boolean
 }
 
 /** Resultado de POST /calendar/accounts/{id}/sync (pull + consolidación, sin LLM ni push). */

@@ -35,6 +35,7 @@ from memex.modules.calendar.dedup import DedupRow
 from memex.modules.calendar.module import _mark_dedup
 from memex.modules.calendar.providers import oauth, resolve
 from memex.modules.calendar.providers.base import (
+    CalendarParticipant,
     CalendarProvider,
     CalendarProviderError,
     CalendarSyncTokenExpired,
@@ -43,6 +44,11 @@ from memex.modules.calendar.providers.base import (
 )
 from memex.modules.calendar.providers.config import CalendarSyncConfig
 from memex.modules.calendar.providers.google import GoogleCalendarClient
+
+# `email_norm` se calcula con el MISMO normalizador que pobla `mod_identidades_identifiers`
+# (`value_norm`): identidades es módulo hoja en `normalize` (sin ciclo). Así el tejedor del grafo
+# une el participante con su identidad por igualdad exacta de email. Ver `relations.deterministic`.
+from memex.modules.identidades.normalize import norm_identifier
 
 _log = get_logger("memex.modules.calendar.sync")
 
@@ -194,6 +200,54 @@ def _dedup_row(event_id: int, ev: ProviderEvent) -> DedupRow:
     )
 
 
+def _participant_row(
+    user_id: int, event_id: int, role: str, p: CalendarParticipant
+) -> dict[str, object]:
+    """Fila para `mod_calendar_event_participants`. `email_norm` reproduce la normalización de los
+    identifiers (`norm_identifier('email', …)`) para que el join del tejedor sea exacto; '' si no
+    hay email (ese participante nunca enlaza — el tejedor filtra `email_norm <> ''`)."""
+    email = p.email.strip()
+    return {
+        "uid": user_id,
+        "eid": event_id,
+        "role": role,
+        "name": p.display_name,
+        "email": email,
+        "email_norm": norm_identifier("email", email) if email else "",
+        "is_self": p.is_self,
+        "is_resource": p.is_resource,
+        "rs": p.response_status,
+    }
+
+
+def _replace_participants(conn: Connection, user_id: int, event_id: int, ev: ProviderEvent) -> None:
+    """Reemplaza (delete + reinsert) los participantes del evento raw con los del `ProviderEvent`.
+    Delete+reinsert (no upsert por-fila) porque la lista entera puede cambiar entre syncs (a alguien
+    lo des-invitan). Idempotente. El `ON DELETE CASCADE` de la FK limpia si se borra el evento."""
+    conn.execute(
+        text("DELETE FROM mod_calendar_event_participants WHERE event_id = :eid"),
+        {"eid": event_id},
+    )
+    rows: list[dict[str, object]] = []
+    if ev.organizer is not None:
+        rows.append(_participant_row(user_id, event_id, "organizer", ev.organizer))
+    rows.extend(_participant_row(user_id, event_id, "attendee", a) for a in ev.attendees)
+    if rows:
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_calendar_event_participants
+                  (user_id, event_id, role, display_name, email, email_norm,
+                   is_self, is_resource, response_status)
+                VALUES
+                  (:uid, :eid, :role, :name, :email, :email_norm,
+                   :is_self, :is_resource, :rs)
+                """
+            ),
+            rows,
+        )
+
+
 def _upsert_event(
     conn: Connection, account: _Account, ev: ProviderEvent, run_id: int
 ) -> tuple[str, DedupRow | None]:
@@ -258,6 +312,7 @@ def _upsert_event(
                 },
             ).scalar_one()
         )
+        _replace_participants(conn, account.user_id, event_id, ev)
         _record_change(
             conn,
             user_id=account.user_id,
@@ -291,6 +346,7 @@ def _upsert_event(
         ),
         {**params, "id": event_id},
     )
+    _replace_participants(conn, account.user_id, event_id, ev)
     _record_change(
         conn,
         user_id=account.user_id,

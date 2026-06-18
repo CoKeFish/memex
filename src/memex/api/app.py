@@ -30,6 +30,7 @@ from memex.api.routers import (
     media,
     metrics,
     modules,
+    notifications,
     oauth,
     processing,
     relevance,
@@ -133,3 +134,4 @@ app.include_router(modules.router)
 app.include_router(processing.router)
 app.include_router(relevance.router)
 app.include_router(review.router)
+app.include_router(notifications.router)

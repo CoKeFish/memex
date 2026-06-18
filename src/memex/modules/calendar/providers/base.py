@@ -51,6 +51,25 @@ class CalendarSyncTokenExpired(CalendarProviderError):
 
 
 @dataclass(frozen=True)
+class CalendarParticipant:
+    """Un participante de un evento (organizador o asistente) tal como lo da el proveedor.
+
+    `email` es la LLAVE para resolverlo contra el directorio de identidades (arista determinista
+    organiza/asiste); `display_name` es solo rótulo. `response_status` es la respuesta del invitado
+    (Google: accepted/tentative/declined/needsAction; None para el organizador). `is_self` marca
+    la cuenta dueña del calendario (está en TODOS sus eventos ⇒ ruido); `is_resource`, una sala o
+    equipo (no es persona). Se capturan los flags crudos; quién recibe arista lo decide el tejedor
+    del grafo (filtra self/resource y, según perilla, los `declined`).
+    """
+
+    email: str
+    display_name: str = ""
+    response_status: str | None = None
+    is_self: bool = False
+    is_resource: bool = False
+
+
+@dataclass(frozen=True)
 class ProviderEvent:
     """Un evento tal como lo devuelve un proveedor externo (ya estructurado).
 
@@ -63,6 +82,10 @@ class ProviderEvent:
     `recurringEventId`, lo da la API por instancia cuando `singleEvents=true`); None si el evento no
     es recurrente. Es la señal autoritativa para agrupar las instancias de una misma serie (p.ej.
     para que un choque recurrente se muestre como UN conflicto, no uno por instancia).
+
+    `organizer`/`attendees` son los participantes del evento (None/`()` si el proveedor no los
+    trae): se persisten para tejer la arista determinista evento→identidad (organiza/asiste)
+    resolviendo por email contra el directorio. No intervienen en el dedup ni en el write-back.
     """
 
     provider_event_id: str
@@ -78,6 +101,8 @@ class ProviderEvent:
     updated: datetime | None = None
     memex_consolidated_id: str | None = None
     recurring_event_id: str | None = None
+    organizer: CalendarParticipant | None = None
+    attendees: tuple[CalendarParticipant, ...] = ()
 
 
 @dataclass(frozen=True)

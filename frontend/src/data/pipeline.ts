@@ -289,5 +289,6 @@ export async function fetchAlerts(): Promise<AlertEvent[]> {
     at: a.at,
     read: a.read,
     deepLink: a.deep_link,
+    source: "dynamic" as const,
   }))
 }

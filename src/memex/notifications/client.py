@@ -6,7 +6,9 @@ notificador falso sin montar nada, y el servicio de notificaciones real (persist
 dashboard) entra después SIN tocar a los emisores — solo cambia `build_notifier` (ver
 `logging_notifier.py`). `LoggingNotifier` es UNA implementación válida (stub), no LA única.
 
-Esta tanda define solo el contrato + el stub; la persistencia y la vista las construye otra sesión.
+El contrato es de USO GENERAL (no atado a geo/transporte): cualquier emisor manda su `kind`. La
+persistencia real (cola + colapso por `dedup_key` + vista en el dashboard) vive en `store.py` y
+`persistent_notifier.py`; `LoggingNotifier` queda como stub para tests.
 """
 
 from __future__ import annotations
@@ -18,12 +20,15 @@ from typing import Any, Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class Notification:
-    """Un aviso para el usuario, agnóstico del canal de entrega.
+    """Un aviso para el usuario, agnóstico del canal de entrega y del dominio que lo emite.
 
     `dedup_key` es la clave de idempotencia: un emisor puede re-emitir el MISMO aviso en cada
     corrida (p.ej. el daemon de transporte cada 10 min) y el `Notifier` real colapsa los repetidos
-    por esa clave. `payload` lleva las referencias estructuradas (ids, tiempos) para que la vista
-    arme el detalle sin re-derivar nada.
+    por esa clave (por usuario). `payload` lleva las referencias estructuradas (ids, tiempos) para
+    que la vista arme el detalle sin re-derivar nada. `deep_link` es a dónde navega la vista al
+    abrir el aviso (lo decide el emisor, no un mapa por `kind` en el frontend). `expires_at` marca
+    cuándo el aviso deja de aplicar: los vencidos se ocultan en lectura y son purgables — `None` =
+    sin vencimiento.
     """
 
     kind: str  # taxonomía del aviso, p.ej. "transport.leave_by"
@@ -32,7 +37,10 @@ class Notification:
     body: str
     dedup_key: str
     created_at: datetime  # aware; el instante con el que el emisor lo generó
+    user_id: int  # dueño del aviso (multi-tenant); el Notifier persiste por usuario
     payload: dict[str, Any] = field(default_factory=dict)
+    deep_link: str | None = None  # ruta del dashboard a abrir al hacer clic, p.ej. "/calendario"
+    expires_at: datetime | None = None  # aware; None = sin vencimiento
 
 
 @runtime_checkable

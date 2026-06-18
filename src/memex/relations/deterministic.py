@@ -27,16 +27,21 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from memex.relations.edges import (
+    CALENDAR_SLUG,
     CANAL_SLUG,
     PRODUCER_BIENESTAR,
+    PRODUCER_CALENDAR,
     PRODUCER_CANAL,
     PRODUCER_EVENT,
     PRODUCER_FINANCE,
     PRODUCER_IDENTIDADES,
     PROVENANCE_EXTRACTED,
+    RELTYPE_ASISTE,
+    RELTYPE_ORGANIZA,
     RELTYPE_PARTICIPA_EN,
     VERDICT_CONFIRMED,
     Ref,
+    list_edges,
 )
 from memex.relations.graph_writer import add_edge
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
@@ -205,6 +210,104 @@ def _materialize_contraparte(
             relation_type="contraparte",
             verdict=VERDICT_CONFIRMED,
             provenance=PROVENANCE_EXTRACTED,
+        )
+        n += 1
+    return n
+
+
+# --- calendar: organiza/asiste (evento→identidad) ------------------------------------- #
+
+
+def _calendar_asiste_includes_declined(conn: Connection, user_id: int) -> bool:
+    """Lee la perilla `asiste_includes_declined` de `module_settings.config` (módulo calendar):
+    ¿un invitado que RECHAZÓ cuenta como que asiste? Ausente ⇒ False (no cuenta). La clave canónica
+    y su writer viven en `calendar.settings`; acá se lee con SQL inline (NO se importa: `calendar`
+    ya importa `relations` → invertir crearía ciclo, misma convención que `_NORM_ACTIVITY`)."""
+    return bool(
+        conn.execute(
+            text(
+                "SELECT (config->>'asiste_includes_declined') = 'true' "
+                "FROM module_settings WHERE user_id = :u AND module_slug = 'calendar'"
+            ),
+            {"u": user_id},
+        ).scalar()
+    )
+
+
+def _calendar_participa_pairs(
+    conn: Connection, user_id: int, *, consolidated_ids: Sequence[int] | None = None
+) -> Iterator[tuple[Ref, Ref, str]]:
+    """Pares identidad→evento de calendario vigentes HOY (read-only), con su `relation_type`
+    («organiza» para el organizador, «asiste» para un asistente). Resuelve al participante por EMAIL
+    con un join exacto sobre `value_norm` (lo pobló el MISMO `norm_identifier` que `email_norm`).
+    Filtra self/recursos y veta `producto`; los `declined` entran solo si la perilla lo pide (el
+    organizador siempre, sin importar su respuesta). Con `consolidated_ids` acota; sin él, barre
+    todos. Fuente de verdad ÚNICA del weave y de la reconciliación.
+
+    Dirección evento→identidad (el tipo va en `relation_type`): igual que el hermano `contraparte`.
+    """
+    scope = "" if consolidated_ids is None else " AND c.id = ANY(:cids)"
+    params: dict[str, Any] = {
+        "u": user_id,
+        "incl": _calendar_asiste_includes_declined(conn, user_id),
+    }
+    if consolidated_ids is not None:
+        params["cids"] = list(consolidated_ids)
+    for r in conn.execute(
+        text(
+            f"""
+            SELECT DISTINCT c.id AS cid, i.id AS iid, i.kind AS kind, p.role AS role
+            FROM mod_calendar_consolidated c
+            JOIN mod_calendar_event_links l ON l.consolidated_id = c.id
+            JOIN mod_calendar_event_participants p ON p.event_id = l.event_id
+            JOIN mod_identidades_identifiers idf
+              ON idf.user_id = c.user_id AND idf.kind = 'email' AND idf.value_norm = p.email_norm
+            JOIN mod_identidades i ON i.id = idf.identity_id AND i.user_id = c.user_id
+            WHERE c.user_id = :u AND NOT c.deleted
+              AND p.email_norm <> ''
+              AND NOT p.is_self AND NOT p.is_resource
+              AND i.kind IN ('persona', 'organizacion', 'desconocido')
+              AND (p.role = 'organizer'
+                   OR CAST(:incl AS BOOLEAN)
+                   OR p.response_status IS DISTINCT FROM 'declined'){scope}
+            """
+        ),
+        params,
+    ).mappings():
+        reltype = RELTYPE_ORGANIZA if str(r["role"]) == "organizer" else RELTYPE_ASISTE
+        yield (
+            Ref(CALENDAR_SLUG, int(r["cid"])),
+            Ref(IDENTITY_SLUG_BY_KIND[str(r["kind"])], int(r["iid"])),
+            reltype,
+        )
+
+
+def weave_calendar_consolidated(
+    conn: Connection, user_id: int, consolidated_ids: Sequence[int] | None = None
+) -> int:
+    """REAL: aristas «organiza»/«asiste» evento→identidad por cada participante RESUELTO por email.
+    Lo llama el finisher de la consolidación de calendar (donde nace el vértice del evento), en la
+    misma tx. FULL-SWEEP por defecto (capta cambios de participantes que NO reescriben el
+    consolidado e identidades que resuelven tarde — el join es lazy). Diff `desired - existing` para
+    NO re-marcar dirty lo ya tejido (ni resucitar una arista que un humano rechazó). Idempotente
+    (además `add_edge` colapsa por el unique lógico). Devuelve cuántas aristas creó."""
+    desired = set(_calendar_participa_pairs(conn, user_id, consolidated_ids=consolidated_ids))
+    existing = {
+        (e.src, e.dst, e.relation_type)
+        for e in list_edges(conn, user_id, producer=PRODUCER_CALENDAR)
+    }
+    n = 0
+    for src, dst, reltype in desired - existing:
+        add_edge(
+            conn,
+            user_id,
+            src,
+            dst,
+            producer=PRODUCER_CALENDAR,
+            relation_type=reltype,
+            verdict=VERDICT_CONFIRMED,
+            provenance=PROVENANCE_EXTRACTED,
+            evidence="organizer" if reltype == RELTYPE_ORGANIZA else "attendee",
         )
         n += 1
     return n

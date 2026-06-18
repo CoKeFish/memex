@@ -464,7 +464,7 @@ function LlmPastToggle({
   async function toggle(next: boolean) {
     setBusy(true)
     try {
-      await patchCalendarSettings(next)
+      await patchCalendarSettings({ llmOnPastEvents: next })
       toast.success(
         next ? "LLM en eventos pasados: prendido" : "LLM en eventos pasados: apagado",
         {
@@ -496,6 +496,55 @@ function LlmPastToggle({
         disabled={busy}
         onCheckedChange={toggle}
         aria-label="Gastar LLM en eventos pasados"
+      />
+    </div>
+  )
+}
+
+/** Toggle «contar como asistente a quien rechazó» (PATCH /calendar/settings). */
+function AsisteDeclinedToggle({
+  settings,
+  onChanged,
+}: {
+  settings: CalendarSettings
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  async function toggle(next: boolean) {
+    setBusy(true)
+    try {
+      await patchCalendarSettings({ asisteIncludesDeclined: next })
+      toast.success(
+        next ? "Asiste incluye declined: prendido" : "Asiste incluye declined: apagado",
+        {
+          description: next
+            ? "Quien rechazó la invitación recibirá la arista «asiste» en la próxima consolidación."
+            : "Las aristas «asiste» de invitados que rechazaron se quitan en el próximo mantenimiento.",
+        },
+      )
+      onChanged()
+    } catch (e) {
+      toast.error("No se pudo guardar", {
+        description: e instanceof ApiError ? e.detail : e instanceof Error ? e.message : String(e),
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-background/40 px-3 py-2">
+      <div className="min-w-0">
+        <div className="text-sm">Contar como asistente a quien rechazó</div>
+        <p className="text-xs text-muted-foreground">
+          Apagado: un invitado que rechazó (declined) no genera la relación «asiste» en el grafo. El
+          organizador siempre cuenta; a vos mismo y a las salas nunca se los enlaza.
+        </p>
+      </div>
+      <Switch
+        checked={settings.asisteIncludesDeclined}
+        disabled={busy}
+        onCheckedChange={toggle}
+        aria-label="Contar como asistente a quien rechazó"
       />
     </div>
   )
@@ -547,6 +596,12 @@ export function SyncPanel({ onSynced }: { onSynced?: () => void }) {
             })()}
             {settingsState.data && (
               <LlmPastToggle
+                settings={settingsState.data}
+                onChanged={() => setRefresh((r) => r + 1)}
+              />
+            )}
+            {settingsState.data && (
+              <AsisteDeclinedToggle
                 settings={settingsState.data}
                 onChanged={() => setRefresh((r) => r + 1)}
               />

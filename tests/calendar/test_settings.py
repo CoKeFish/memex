@@ -21,7 +21,12 @@ from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.calendar.cli import main as cal_main
 from memex.modules.calendar.dedup_llm import run_dedup_phase2
 from memex.modules.calendar.merge_llm import run_merge
-from memex.modules.calendar.settings import llm_on_past_events, set_llm_on_past_events
+from memex.modules.calendar.settings import (
+    asiste_includes_declined,
+    llm_on_past_events,
+    set_asiste_includes_declined,
+    set_llm_on_past_events,
+)
 
 _PAST = date.today() - timedelta(days=10)
 _FUTURE = date.today() + timedelta(days=10)
@@ -281,3 +286,38 @@ def test_cli_set_llm_past(capsys: pytest.CaptureFixture[str]) -> None:
     assert cal_main(["set-llm-past", "off", "--json"]) == 0
     out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert out["llm_on_past_events"] is False
+
+
+# ----- perilla asiste_includes_declined ----------------------------------------------- #
+
+
+def test_asiste_declined_default_is_off() -> None:
+    with connection() as c:
+        assert asiste_includes_declined(c, 1) is False  # ausente → rechazar no es asistir
+
+
+def test_asiste_declined_independent_of_llm_past() -> None:
+    # las dos perillas conviven en el mismo `config`; setear una no pisa la otra (merge `||`).
+    with connection() as c:
+        set_llm_on_past_events(c, 1, True)
+        set_asiste_includes_declined(c, 1, True)
+    with connection() as c:
+        assert llm_on_past_events(c, 1) is True
+        assert asiste_includes_declined(c, 1) is True
+    with connection() as c:
+        set_asiste_includes_declined(c, 1, False)
+    with connection() as c:
+        assert asiste_includes_declined(c, 1) is False
+        assert llm_on_past_events(c, 1) is True  # la otra perilla intacta
+
+
+def test_cli_set_asiste_declined(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cal_main(["set-asiste-declined", "on", "--json"]) == 0
+    out: Any = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["asiste_includes_declined"] is True
+    with connection() as c:
+        assert asiste_includes_declined(c, 1) is True
+
+    assert cal_main(["set-asiste-declined", "off", "--json"]) == 0
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert out["asiste_includes_declined"] is False

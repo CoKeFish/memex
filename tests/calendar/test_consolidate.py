@@ -21,6 +21,8 @@ from memex.modules.calendar.consolidate import (
     run_consolidation,
 )
 from memex.modules.calendar.domain import CalendarDomainReader
+from memex.relations.edges import list_edges
+from tests.relations._graph_seed import calendar_participant, email_identifier, person
 
 # ----- puro: build_groups -------------------------------------------------------- #
 
@@ -405,3 +407,29 @@ def test_user_tombstone_never_resurrected() -> None:
     run_consolidation(1)
     row = next(r for r in _consolidated() if r["id"] == cons_id)
     assert (row["deleted"], row["deleted_source"]) == (True, "user")
+
+
+def test_consolidation_weaves_organiza_asiste_edges() -> None:
+    # Smoke end-to-end del finisher: un evento raw con organizador + asistente resueltos por email →
+    # run_consolidation crea el consolidado, lo linkea y teje organiza/asiste evento→identidad.
+    ana = person("Ana")
+    beto = person("Beto")
+    email_identifier(ana, "ana@example.com")
+    email_identifier(beto, "beto@example.com")
+    ev = _seed("Reunión de equipo", start_time=time(15, 0))
+    calendar_participant(ev, "organizer", "ana@example.com")
+    calendar_participant(ev, "attendee", "beto@example.com", response_status="accepted")
+
+    run_consolidation(1)
+
+    cons_id = _link_of(ev)
+    assert cons_id is not None
+    with connection() as c:
+        edges = list_edges(c, 1, producer="calendar")
+    # ambas aristas nacen del consolidado (no del raw) hacia la identidad correcta
+    assert all((e.src.slug, e.src.id) == ("calendar", cons_id) for e in edges)
+    triples = {(e.relation_type, e.dst.slug, e.dst.id) for e in edges}
+    assert triples == {
+        ("organiza", "identidades:person", ana),
+        ("asiste", "identidades:person", beto),
+    }

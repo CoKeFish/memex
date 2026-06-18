@@ -51,7 +51,12 @@ from memex.modules.calendar.manual import (
 from memex.modules.calendar.merge_llm import run_merge
 from memex.modules.calendar.providers import known_providers, oauth
 from memex.modules.calendar.providers.base import CalendarProviderError
-from memex.modules.calendar.settings import llm_on_past_events, set_llm_on_past_events
+from memex.modules.calendar.settings import (
+    asiste_includes_declined,
+    llm_on_past_events,
+    set_asiste_includes_declined,
+    set_llm_on_past_events,
+)
 from memex.modules.calendar.sync import run_pull, run_push
 
 #: Env var (nombre) con el path al client_secret.json de Google (OAuth Desktop App).
@@ -273,6 +278,14 @@ def _build_parser() -> argparse.ArgumentParser:
     slp_p.add_argument("mode", choices=("on", "off"), help="on = procesa pasados; off = no gasta.")
     slp_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     slp_p.add_argument("--json", action="store_true", dest="as_json", help="Salida JSON.")
+
+    sad_p = sub.add_parser(
+        "set-asiste-declined",
+        help="¿Un invitado que rechazó cuenta como «asiste»? Default: off (rechazar ≠ asistir).",
+    )
+    sad_p.add_argument("mode", choices=("on", "off"), help="on = cuenta; off = no cuenta.")
+    sad_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    sad_p.add_argument("--json", action="store_true", dest="as_json", help="Salida JSON.")
 
     return parser
 
@@ -611,12 +624,28 @@ def _cmd_set_llm_past(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_set_asiste_declined(args: argparse.Namespace) -> int:
+    value = args.mode == "on"
+    with connection() as conn:
+        set_asiste_includes_declined(conn, args.user, value)
+    if value:
+        _say("Asiste incluye declined: PRENDIDO — quien rechazó la invitación recibe «asiste».")
+        _say("Las nuevas aristas aparecen en la próxima consolidación (el organizador no cambia).")
+    else:
+        _say("Asiste incluye declined: APAGADO — quien rechazó NO recibe «asiste».")
+        _say("Las «asiste» de invitados que rechazaron se quitan en el próximo reconcile_graph.")
+    if args.as_json:
+        _emit_json({"asiste_includes_declined": value})
+    return 0
+
+
 def _cmd_sync_status(args: argparse.Namespace) -> int:
     with connection() as conn:
         data = sync_health(conn, args.user)
         llm_past = llm_on_past_events(conn, args.user)
+        asiste_decl = asiste_includes_declined(conn, args.user)
     if args.as_json:
-        _emit_json(data)
+        _emit_json({**data, "asiste_includes_declined": asiste_decl})
         return 0
     _say(f"\nSincronización de calendario (user {args.user}):")
     _say(
@@ -626,6 +655,10 @@ def _cmd_sync_status(args: argparse.Namespace) -> int:
             if llm_past
             else "APAGADO (no gasta en lo vencido)."
         )
+    )
+    _say(
+        "  Asiste incluye declined: "
+        + ("SÍ (quien rechazó asiste)." if asiste_decl else "NO (rechazar no es asistir).")
     )
     ages = [
         a["last_pull_age_hours"]
@@ -798,6 +831,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_sync_status(args)
         if args.cmd == "set-llm-past":
             return _cmd_set_llm_past(args)
+        if args.cmd == "set-asiste-declined":
+            return _cmd_set_asiste_declined(args)
         log.error("calendar.cli.unknown_command", cmd=args.cmd)
         return 1
     except ManualEventError as e:

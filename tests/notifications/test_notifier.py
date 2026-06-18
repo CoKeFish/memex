@@ -17,6 +17,7 @@ def _sample() -> Notification:
         body="Salí antes de las 14:40 o no llegás a la reunión.",
         dedup_key="transport:1:42:leave_now",
         created_at=datetime(2026, 6, 17, 14, 10, tzinfo=UTC),
+        user_id=1,
         payload={"event_id": 42, "verdict": "leave_now"},
     )
 

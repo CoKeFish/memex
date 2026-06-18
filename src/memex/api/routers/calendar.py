@@ -19,6 +19,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 from memex.api.auth import current_user_id
 from memex.api.schemas import (
@@ -37,7 +38,12 @@ from memex.logging import get_logger
 from memex.modules.calendar.consolidate import run_consolidation
 from memex.modules.calendar.health import sync_health
 from memex.modules.calendar.providers.base import CalendarProviderError
-from memex.modules.calendar.settings import llm_on_past_events, set_llm_on_past_events
+from memex.modules.calendar.settings import (
+    asiste_includes_declined,
+    llm_on_past_events,
+    set_asiste_includes_declined,
+    set_llm_on_past_events,
+)
 from memex.modules.calendar.sync import run_pull
 from memex.modules.contract import normalize
 
@@ -475,23 +481,33 @@ async def sync_account_now(account_id: int, user_id: UserID) -> dict[str, Any]:
     }
 
 
+def _calendar_settings(conn: Connection, user_id: int) -> dict[str, Any]:
+    return {
+        "llm_on_past_events": llm_on_past_events(conn, user_id),
+        "asiste_includes_declined": asiste_includes_declined(conn, user_id),
+    }
+
+
 @router.get("/settings", response_model=CalendarSettings)
 async def get_calendar_settings(user_id: UserID) -> dict[str, Any]:
-    """Perillas del módulo calendar (hoy: gastar LLM en eventos pasados sí/no)."""
+    """Perillas del módulo calendar (LLM en eventos pasados; `declined` cuenta como asiste o no)."""
     with connection() as conn:
-        return {"llm_on_past_events": llm_on_past_events(conn, user_id)}
+        return _calendar_settings(conn, user_id)
 
 
 @router.patch("/settings", response_model=CalendarSettings)
 async def patch_calendar_settings(body: CalendarSettingsPatch, user_id: UserID) -> dict[str, Any]:
-    """Setea la perilla en `module_settings.config` (la leen dedup FASE 2 y merge en cada corrida,
-    incluido el ciclo del scheduler)."""
+    """Setea las perillas PRESENTES en `module_settings.config` (PATCH parcial; un `None` no toca la
+    suya). `llm_on_past_events` la leen dedup FASE 2 / merge; `asiste_includes_declined`, el tejedor
+    del grafo. Devuelve el estado resultante de ambas."""
     with connection() as conn:
-        set_llm_on_past_events(conn, user_id, body.llm_on_past_events)
-    _log.info(
-        "calendar.settings.patched", user_id=user_id, llm_on_past_events=body.llm_on_past_events
-    )
-    return {"llm_on_past_events": body.llm_on_past_events}
+        if body.llm_on_past_events is not None:
+            set_llm_on_past_events(conn, user_id, body.llm_on_past_events)
+        if body.asiste_includes_declined is not None:
+            set_asiste_includes_declined(conn, user_id, body.asiste_includes_declined)
+        current = _calendar_settings(conn, user_id)
+    _log.info("calendar.settings.patched", user_id=user_id, **current)
+    return current
 
 
 @router.get("/provider-accounts", response_model=CalendarProviderAccountList)
