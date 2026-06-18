@@ -37,6 +37,7 @@ from memex.api.routers import (
     sources,
     stats,
     telegram,
+    transport,
 )
 from memex.api.streaming import build_streaming_runner
 from memex.config import settings
@@ -114,6 +115,7 @@ app.include_router(sources.router)
 app.include_router(backfill.router)
 app.include_router(gateway.router)
 app.include_router(geo.router)
+app.include_router(transport.router)
 app.include_router(media.router)
 app.include_router(filters.router)
 app.include_router(feedback.router)

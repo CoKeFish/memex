@@ -2,9 +2,9 @@
 
 > **Estado: parcialmente construido.** El **plano de ubicación** (entrada de GPS por el gateway +
 > almacenamiento + lectura), la **resolución de lugares** (migraciones 0042/0043) y el **catálogo de
-> lugares** con su integración al calendario (0047 + 0062) ya están **hechos**. Falta lo **reactivo**:
-> el clustering de "lugares donde estuve", el daemon de transporte, y la app móvil. Geo dejó de ser
-> "solo un servicio de mapas".
+> lugares** con su integración al calendario (0047 + 0062) ya están **hechos**, igual que el **daemon
+> de transporte** ("¿llego a tiempo?", reactivo, arranca apagado). Falta lo demás de lo **reactivo**:
+> el clustering de "lugares donde estuve" y la app móvil. Geo dejó de ser "solo un servicio de mapas".
 
 **Geo NO es un módulo de extracción** como finanzas o calendario (esos sacan datos de los mensajes y
 procesan por lotes). Es un **subsistema de ubicación**: tiene su propia entrada (el GPS del teléfono,
@@ -39,17 +39,17 @@ flowchart TB
   lugares_r --> serv
   cli --> serv
   serv --> maps
-  daemon -. "ubicación (seam listo)" .-> lectura
-  daemon -. "próximo evento" .-> cal
+  daemon -->|ubicación| lectura
+  daemon -->|"próximo evento"| cal
   daemon --> serv
-  daemon -->|"salí a las 2:40"| agente
+  daemon -->|"salí a las 2:40 (Notifier)"| agente
 
   classDef done fill:#dcfce7,stroke:#15803d,color:#1f2937;
   classDef pend fill:#e5e7eb,stroke:#6b7280,color:#374151;
   classDef store fill:#fde68a,stroke:#b45309,color:#1f2937;
-  class gw,lectura,lugares_r,serv done;
+  class gw,lectura,lugares_r,serv,daemon done;
   class ubic store;
-  class app,cluster,daemon pend;
+  class app,cluster pend;
 ```
 
 ## Las piezas
@@ -68,9 +68,11 @@ flowchart TB
 - **Servicio de mapas** *(hecho, ya existía)* — geocodificar direcciones y calcular distancias/rutas/tiempos.
 - **Lugares donde estuve** *(pendiente)* — se derivarán **agrupando** los pings por permanencia
   (*clustering*). Hoy solo está la base (leer los pings de un rango); falta el algoritmo y su tabla.
-- **Daemon de transporte** *(pendiente)* — mirará tu ubicación + tu próximo evento (del **calendario**)
-  + el tiempo de viaje (del servicio) y disparará el aviso. El seam para leer tu ubicación **ya está
-  enchufado**, pero nadie lo consume todavía.
+- **Daemon de transporte** *(hecho)* — cruza tu ubicación + tu próximo evento (del **calendario**) + el
+  tiempo de viaje (del servicio) y, si hay que salir, emite el aviso por el seam **`Notifier`** (hoy un
+  stub que loguea; el servicio real —vista en el dashboard— lo implementa otra sesión). Vive en
+  `memex.transport` (job `transport` del scheduler, arranca **apagado**); además consulta on-demand por
+  `GET /transport/next-arrival` y `memex-transport next-arrival`.
 
 ## Catálogo de lugares y resolución por texto (hecho, 0062)
 
@@ -157,10 +159,15 @@ consolidado) con dedupe por texto + colapso por `provider_place_id` (ver secció
 (`memex-finance geo` → catálogo con `source='gps'` → propagación vía la consolidación) o a mano
 (`memex finance set-place`).
 
+**✅ Hecho además — daemon de transporte (`memex.transport`):** el consumidor reactivo de "¿llego a
+tiempo?". Cruza próximo evento (calendar) + ubicación (`StoredLocationSource`) + tiempo de viaje y, si
+hay que salir, emite por el seam **`Notifier`** (stub que loguea; el servicio real lo hace otra
+sesión). Job `transport` del scheduler (**apagado** por default), consulta on-demand
+`GET /transport/next-arrival` + `memex-transport next-arrival`, y emisor de prueba `memex-geo ping`.
+Determinista, **sin migración** (stateless; la dedup la maneja el `Notifier` vía `dedup_key`).
+
 **⏳ Falta:**
 - **Clustering** de puntos → "lugares donde estuve" (solo está la base de leer pings por rango).
-- **Daemon de transporte** (reactivo): leer ubicación + próximo evento del calendario, calcular el
-  leave-by, y disparar el aviso vía el agente. No hay job en el scheduler.
 - **Inferencia de presencia** ping↔evento (diferida a la app móvil): el catálogo ya deja a ambos
   hablar el mismo idioma (lugares con coordenadas + eventos con FK + pings con coordenadas).
 - **App móvil** que capture el GPS y mande los pings.
@@ -177,7 +184,10 @@ consolidado) con dedupe por texto + colapso por `provider_place_id` (ver secció
 | `geo/client.py` | Contrato: `GeoProvider`, `GeoPoint`, `TravelEstimate`, `PlaceResult`, `ResolvedPlace` (`in_transit`), `LocationSource` (v0 `ManualLocationSource`). |
 | `geo/google.py` · `geo/ors.py` | Proveedores: Google Maps (geocode + rutas + Places) y OpenRouteService (geocode + rutas; sin Places). |
 | `geo/places.py` | **Catálogo de lugares** (single-writer): `resolve_place` (texto→catálogo, resolve-or-create con caché), `upsert_place_from_poi` (POI ya resuelto → catálogo, p.ej. del seam GPS de finanzas), `get_place`, `list_places` (refs de calendario + finanzas). No confundir con `service.resolve_place` (coordenada→POI). |
-| `geo/cli.py` (`memex-geo`) | CLI: `geocode` / `trip` / `place` (proveedor) + `places` (catálogo, solo DB). |
+| `geo/cli.py` (`memex-geo`) | CLI: `geocode` / `trip` / `place` (proveedor) + `places` (catálogo, solo DB) + `ping` (emisor de prueba: inyecta un ping, solo DB). |
+| `transport/` (`memex-transport`) | **Daemon "¿llego a tiempo?"**: `reachability.py` (cálculo puro), `service.py` (orquesta calendar+geo+`Notifier`), `job.py` (`transport` en el scheduler, apagado), `cli.py`, `config.py`. |
+| `api/routers/transport.py` | `GET /transport/next-arrival`: consulta on-demand del veredicto (no emite). |
+| `notifications/` | Seam de avisos: `Notifier` Protocol + `Notification` (con `dedup_key`) + stub `LoggingNotifier` + `build_notifier`. El servicio real (persistencia + vista dashboard) lo implementa otra sesión. |
 | `modules/finance/geo_places.py` | El seam GPS de finanzas (`memex-finance geo`): ping del instante del cobro → POI → alta en el catálogo (`source='gps'`) + `metadata.geo.catalog_place_id` + propagación a la consolidada. |
 | `modules/finance/manual.py` | Operaciones manuales sobre el pago consolidado: `set_place` (asociación al catálogo) y `show_transaction` (detalle con lugar). CLI: `memex finance set-place` / `show`. |
 | `migrations/0042_geo_location_pings.py` · `0043_geo_place_cache.py` | Tablas: `geo_location_pings` (por usuario, append-only) y `geo_place_cache` (global, por celda — reverse). |

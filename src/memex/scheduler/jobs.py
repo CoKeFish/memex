@@ -41,6 +41,7 @@ from memex.relations.reconcile import detect_and_reconcile
 from memex.relevance.candidates import run_relevance_detection
 from memex.relevance.gate import run_relevance_gate
 from memex.relevance.mining import run_rule_mining_cycle
+from memex.transport.job import run_transport_check
 
 _log = get_logger("memex.scheduler.jobs")
 
@@ -452,6 +453,9 @@ _REGISTRY: dict[str, Job] = {
     "graph": Job("graph", "P1D", run_graph_cycle),
     "graph_confirm": Job("graph_confirm", "P1D", run_graph_confirm),
     "log_purge": Job("log_purge", "P1D", _sync(run_log_purge)),
+    # Daemon de transporte ("¿llego a tiempo?"): reactivo, arranca APAGADO (no está en
+    # enabled_jobs). Cruza próximo evento (calendar) + ubicación (geo) + tiempo de viaje y avisa.
+    "transport": Job("transport", "PT10M", run_transport_check),
 }
 
 

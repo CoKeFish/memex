@@ -134,3 +134,28 @@ def test_places_empty_ok(
     rc = main(["places"])
     assert rc == 0
     assert "Sin lugares" in capsys.readouterr().out
+
+
+# ----- ping (emisor de prueba; solo DB, sin proveedor ni key) ---------------------- #
+
+
+def test_ping_inserts_location(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("GMAPS_API_KEY", raising=False)  # ping es solo DB, no usa Maps
+    rc = main(["ping", "--point", "4.65,-74.05"])
+    assert rc == 0
+    from memex.db import connection
+    from memex.geo.store import latest_ping
+
+    with connection() as c:
+        fix = latest_ping(c, user_id=1)
+    assert fix is not None
+    assert abs(fix.point.lat - 4.65) < 1e-9
+    assert abs(fix.point.lng - (-74.05)) < 1e-9
+
+
+def test_ping_invalid_point_exit2(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GMAPS_API_KEY", raising=False)
+    rc = main(["ping", "--point", "not-a-point"])
+    assert rc == 2

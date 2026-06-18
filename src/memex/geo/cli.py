@@ -22,7 +22,7 @@ import asyncio
 import json
 import sys
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 
 from dotenv import load_dotenv
 
@@ -46,6 +46,7 @@ from memex.geo import (
     reverse_geocode,
 )
 from memex.geo.places import list_places
+from memex.geo.store import PingInput, insert_pings
 from memex.logging import get_logger, setup_logging
 
 
@@ -158,6 +159,27 @@ def _build_parser() -> argparse.ArgumentParser:
     places_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     places_p.add_argument("--limit", type=int, default=50, help="Máximo de lugares (default 50).")
     places_p.add_argument("--json", action="store_true", help="Salida JSON (última línea).")
+
+    ping_p = sub.add_parser(
+        "ping",
+        help="Inyecta un ping de ubicación (emisor de prueba; simula la app móvil; solo DB).",
+        epilog="Una coordenada que empieza con '-' se pasa con '=': --point=-34.6,-58.4.",
+    )
+    ping_p.add_argument(
+        "--point", required=True, help="Ubicación 'lat,lng' a registrar (ej. 4.65,-74.05)."
+    )
+    ping_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    ping_p.add_argument(
+        "--captured-at",
+        default=None,
+        help="Instante ISO 8601 con zona (ej. 2026-06-17T14:00:00-05:00); default: ahora.",
+    )
+    ping_p.add_argument(
+        "--source",
+        choices=["device", "manual", "inferred"],
+        default="device",
+        help="Origen del ping (default device).",
+    )
     return parser
 
 
@@ -336,6 +358,35 @@ def _cmd_places(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_ping(args: argparse.Namespace) -> int:
+    """Inserta un ping de ubicación (emisor de prueba). Solo DB: no usa el proveedor de mapas."""
+    point = _parse_point(args.point)
+    if point is None:
+        _say("--point debe ser 'lat,lng' (ej. 4.65,-74.05).", err=True)
+        return 2
+    if args.captured_at:
+        try:
+            captured = datetime.fromisoformat(args.captured_at)
+        except ValueError:
+            _say(f"--captured-at inválido: {args.captured_at!r} (usá ISO 8601 con zona).", err=True)
+            return 2
+        if captured.tzinfo is None:
+            _say("--captured-at sin zona horaria; agregá el offset (ej. -05:00).", err=True)
+            return 2
+    else:
+        captured = datetime.now(UTC)
+    with connection() as conn:
+        inserted = insert_pings(
+            conn,
+            user_id=args.user,
+            pings=[
+                PingInput(lat=point.lat, lng=point.lng, captured_at=captured, source=args.source)
+            ],
+        )
+    _say(f"Ping guardado (user {args.user}): {point.lat}, {point.lng} · {inserted} fila(s).")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -351,6 +402,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return asyncio.run(_cmd_place(args))
         if args.cmd == "places":
             return _cmd_places(args)
+        if args.cmd == "ping":
+            return _cmd_ping(args)
     except GeoNotFoundError as e:
         _say(f"Sin resultados para {e.query!r}.", err=True)
         return 1
