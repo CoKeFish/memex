@@ -420,10 +420,19 @@ export function SenderRelevancePage() {
                 return (
                   <tr key={r.senderKey} className="border-t align-top">
                     <td className="px-3 py-2">
-                      <div className="font-medium">{r.senderLabel}</div>
-                      {r.senderLabel !== r.senderKey && (
-                        <div className="text-xs text-muted-foreground">{r.senderKey}</div>
-                      )}
+                      <div className="max-w-[240px]">
+                        <div className="truncate font-medium" title={r.senderLabel}>
+                          {r.senderLabel}
+                        </div>
+                        {r.senderLabel !== r.senderKey && (
+                          <div
+                            className="truncate text-xs text-muted-foreground"
+                            title={r.senderKey}
+                          >
+                            {r.senderKey}
+                          </div>
+                        )}
+                      </div>
                     </td>
                     <td className="px-3 py-2 text-right tabular-nums">{r.messages}</td>
                     <td
