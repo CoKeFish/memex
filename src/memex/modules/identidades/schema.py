@@ -18,8 +18,9 @@ from pydantic import ConfigDict, field_validator
 from memex.modules.contract import ExtractionItem
 
 #: Tipos válidos de identidad mencionada (espejo de `mentioned_kind` en la migración 0057).
-#: 'unknown' es SOLO el escape del extractor (pliega a persona al resolver); 'agente' salió de la
-#: taxonomía en 0057 (sus menciones son 'producto').
+#: 'unknown' es SOLO el escape del extractor (al resolver, una mención sin tipo afirmado crea/queda
+#: como `desconocido`, no persona); 'agente' salió de la taxonomía en 0057 (sus menciones son
+#: 'producto').
 IDENTITY_KINDS: tuple[str, ...] = ("persona", "organizacion", "producto", "unknown")
 _KIND_SET = frozenset(IDENTITY_KINDS)
 

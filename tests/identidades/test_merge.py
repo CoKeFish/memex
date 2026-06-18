@@ -370,6 +370,36 @@ def test_merge_producto_repunta_con_slug_producto(conn: Any) -> None:
     )
 
 
+def test_merge_desconocido_repunta_con_slug_desconocido(conn: Any) -> None:
+    # desconocido con desconocido fusiona y re-apunta aristas con el slug 'identidades:desconocido'
+    # (mapa IDENTITY_SLUG_BY_KIND; sin la entrada sería KeyError en merge.py).
+    surv = int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'desconocido','Buzon A') RETURNING id"
+            )
+        ).scalar_one()
+    )
+    absb = int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'desconocido','Buzon B') RETURNING id"
+            )
+        ).scalar_one()
+    )
+    conn.execute(
+        text(
+            "INSERT INTO relation_edges (user_id, src_slug, src_id, dst_slug, dst_id, producer) "
+            "VALUES (1,'identidades:desconocido',:a,'finance',99,'inbox')"
+        ),
+        {"a": absb},
+    )
+    assert merge_identities(conn, 1, surv, absb) is True
+    assert conn.execute(text("SELECT src_id FROM relation_edges")).scalar_one() == surv
+
+
 def test_merge_kind_distinto_rechaza(conn: Any) -> None:
     # producto y org NUNCA se funden (mismo-kind es invariante del merge)
     org = _mk_org(conn, "Valve")

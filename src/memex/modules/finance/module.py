@@ -59,8 +59,9 @@ def _resolve_identity(handle: object | None, name: str) -> int | None:
     """Resuelve la contraparte (`name`) contra el directorio de identidades usando el handle de
     `ctx.deps['identidades']` (dependencia BLANDA). Best-effort: sin handle (identidades apagado) o
     sin texto → None; sin match en el directorio → None. Determinista (el handle no usa LLM).
-    VETO de kind (política de finanzas): quien te cobra es una persona o una organización — si la
-    referencia resuelve a un producto, NO se ata (None) en vez de atar mal."""
+    VETO de kind (política de finanzas, allowlist): quien te cobra es una persona o una organización
+    — si la referencia resuelve a un producto o a un `desconocido` (tipo aún sin definir), NO se ata
+    (None) en vez de atar mal. La contraparte es válida solo si es persona/organización."""
     if handle is None or not name.strip():
         return None
     res = cast("IdentidadesDomain", handle).resolve(name=name)

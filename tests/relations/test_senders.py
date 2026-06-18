@@ -2,8 +2,9 @@
 persiste como avistamiento (`mod_identidades_mentions`, `resolution_method='sender'`) en la
 extracción (paso 5), y co-ocurre con lo extraído por el brazo NORMAL de menciones (ya NO por un
 brazo derivado al vuelo). Política GENERAL por medio: chat→persona; email→un dominio NUNCA es una
-persona (rol/genérico=org del dominio, individuo=persona+afiliación; free-mail=persona con nombre o
-nada); social→org por handle. Ver `modules/identidades/senders.py`."""
+persona (rol/genérico=org del dominio; individuo=persona si el nombre es humano, si no DESCONOCIDO,
+ambos +afiliación; free-mail=persona/desconocido/nada según el nombre); social→cuenta DESCONOCIDA
+por handle (el tipo se define luego). Ver `modules/identidades/senders.py`."""
 
 from __future__ import annotations
 
@@ -457,10 +458,109 @@ def test_email_varios_individuos_mismo_dominio_una_org() -> None:
     ]
 
 
+def test_email_individuo_corporativo_ambiguo_es_desconocido_afiliado() -> None:
+    # un buzón de DEPENDENCIA (local-part ambiguo + from.name de unidad org) en dominio propio NO se
+    # adivina persona: queda DESCONOCIDO, afiliado a la org. La arista `afiliado` proyecta bajo su
+    # slug (identidades:desconocido), no huérfana (fix _afiliacion_pairs).
+    src = _source("imap", "mail")
+    mid = _inbox(
+        src, "m1", _email_payload("ielec@javeriana.edu.co", "Carrera de Ingeniería Electrónica")
+    )
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+        edges = list_edges(c, 1)  # solo la arista afiliado (sin co-ocurrencia)
+    assert n == 1
+    assert sorted(_identity_kinds()) == ["desconocido", "organizacion"]  # el buzón + la org dominio
+    mentions = _sender_mentions()
+    assert len(mentions) == 1 and mentions[0]["rkind"] == "desconocido"
+    eid = mentions[0]["rid"]
+    assert ("email", "email", "ielec@javeriana.edu.co") in _identifiers_of(eid)
+    with connection() as c:
+        org_dom = c.execute(
+            text(
+                "SELECT identity_id FROM mod_identidades_identifiers "
+                "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'javeriana.edu.co'"
+            )
+        ).scalar()
+    assert org_dom is not None
+    assert len(edges) == 1
+    assert _pair(edges[0]) == {
+        ("identidades:desconocido", eid),
+        ("identidades:org", int(org_dom)),
+    }
+
+
+def test_email_persona_real_corporativa_sigue_persona() -> None:
+    # una persona REAL (nombre humano) con correo de dominio propio sigue siendo PERSONA: el gate de
+    # tipo no rompe el caso bueno (uribej ← "Jose Luis Uribe Aponte").
+    src = _source("imap", "mail")
+    mid = _inbox(src, "m1", _email_payload("uribej@javeriana.edu.co", "Jose Luis Uribe Aponte"))
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+    assert n == 1
+    assert sorted(_identity_kinds()) == ["organizacion", "persona"]
+    assert _sender_mentions()[0]["rkind"] == "persona"
+
+
+def test_email_egerlein_reusa_persona_existente() -> None:
+    # egerlein@ ya conocido por su email (persona existente) → resuelve a ESA persona; el email
+    # exacto gana antes del gate de tipo → NO crea org ni un desconocido.
+    p = _person("Eduardo Gerlein")
+    _identifier(p, "email", "email", "egerlein@javeriana.edu.co")
+    src = _source("imap", "mail")
+    mid = _inbox(
+        src, "m1", _email_payload("egerlein@javeriana.edu.co", "Eduardo Andres Gerlein Reyes")
+    )
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+    assert n == 1
+    assert _identity_kinds() == ["persona"]
+    assert _sender_mentions()[0]["rid"] == p
+
+
+def test_email_varios_buzones_depto_mismo_dominio_una_org() -> None:
+    # dos buzones de dependencia distintos del mismo dominio → DOS desconocidos + UNA sola org.
+    src = _source("imap", "mail")
+    m1 = _inbox(
+        src, "m1", _email_payload("ielec@javeriana.edu.co", "Carrera de Ingeniería Electrónica")
+    )
+    m2 = _inbox(
+        src, "m2", _email_payload("viceacad@javeriana.edu.co", "Vicerrectoría Académica PUJ")
+    )
+    with connection() as c:
+        weave_email_senders(c, 1, [m1, m2])
+    assert sorted(_identity_kinds()) == ["desconocido", "desconocido", "organizacion"]
+    with connection() as c:
+        domains = c.execute(
+            text(
+                "SELECT identity_id FROM mod_identidades_identifiers "
+                "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'javeriana.edu.co'"
+            )
+        ).all()
+    assert len(domains) == 1  # una sola org para ambos deptos
+
+
+def test_email_freemail_nombre_tipo_org_es_desconocido() -> None:
+    # free-mail con nombre tipo-ORG (no representa a una org del dominio) → DESCONOCIDO, sin afil.
+    src = _source("imap", "mail")
+    mid = _inbox(src, "m1", _email_payload("rh.global@gmail.com", "Departamento de Gestión Humana"))
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+    assert n == 1
+    assert _identity_kinds() == ["desconocido"]  # ni persona ni org del free-mail
+    assert _sender_mentions()[0]["rkind"] == "desconocido"
+    with connection() as c:
+        aff = c.execute(
+            text("SELECT count(*) FROM mod_identidades_person_orgs WHERE user_id = 1")
+        ).scalar()
+    assert aff == 0  # free-mail no tiene org → sin afiliación
+
+
 # --- social ------------------------------------------------------------------------------ #
 
 
-def test_social_desconocido_crea_org_y_coocurre() -> None:
+def test_social_desconocido_crea_cuenta_y_coocurre() -> None:
+    # cuenta social nueva → DESCONOCIDO (no se adivina org; el tipo se define luego). Co-ocurre.
     src = _source("apify_instagram", "ig")
     mid = _inbox(src, "m1", _social_payload("instagram", "LaCuenta"))
     fin = _finance("Tienda", [mid])
@@ -471,10 +571,11 @@ def test_social_desconocido_crea_org_y_coocurre() -> None:
     assert n == 1
     ids = _identities()
     assert len(ids) == 1
-    org_id, display = ids[0]
+    acc_id, display = ids[0]
     assert display == "LaCuenta"
-    assert ("instagram", "handle", "lacuenta") in _identifiers_of(org_id)
-    assert _pair(edges[0]) == {("finance", fin), ("identidades:org", org_id)}
+    assert _identity_kinds() == ["desconocido"]
+    assert ("instagram", "handle", "lacuenta") in _identifiers_of(acc_id)
+    assert _pair(edges[0]) == {("finance", fin), ("identidades:desconocido", acc_id)}
 
 
 def test_social_conocido_resuelve() -> None:
@@ -494,7 +595,7 @@ def test_social_conocido_resuelve() -> None:
 
 def test_social_platform_unknown_no_resuelve_crea_nueva() -> None:
     # un handle manual con platform='unknown' NO resuelve el post de instagram (estricto por
-    # plataforma): se crea una org nueva con el handle en la plataforma real.
+    # plataforma): se crea una cuenta nueva (DESCONOCIDO) con el handle en la plataforma real.
     p = _person("La Cuenta")
     _identifier(p, "unknown", "handle", "lacuenta")
     src = _source("apify_instagram", "ig")
@@ -506,10 +607,10 @@ def test_social_platform_unknown_no_resuelve_crea_nueva() -> None:
         edges = list_edges(c, 1, producer="inbox")
     assert n == 1
     ids = _identities()
-    assert len(ids) == 2  # la persona manual + la org nueva
-    new_org = next(i for i, _ in ids if i != p)
-    assert ("instagram", "handle", "lacuenta") in _identifiers_of(new_org)
-    assert _pair(edges[0]) == {("finance", fin), ("identidades:org", new_org)}
+    assert len(ids) == 2  # la persona manual + la cuenta nueva (desconocido)
+    new_acc = next(i for i, _ in ids if i != p)
+    assert ("instagram", "handle", "lacuenta") in _identifiers_of(new_acc)
+    assert _pair(edges[0]) == {("finance", fin), ("identidades:desconocido", new_acc)}
 
 
 # --- dispatcher -------------------------------------------------------------------------- #
@@ -523,5 +624,6 @@ def test_dispatcher_rutea_por_kind() -> None:
         weave_sender_structure(c, 1, [me], SourceKind.EMAIL)
         weave_sender_structure(c, 1, [mc], SourceKind.CHAT)
         weave_sender_structure(c, 1, [ms], SourceKind.SOCIAL)
-    assert sorted(_identity_kinds()) == ["organizacion", "organizacion", "persona"]
+    # email genérico→org; chat→persona; social→desconocido (cuenta sin tipo definido).
+    assert sorted(_identity_kinds()) == ["desconocido", "organizacion", "persona"]
     assert len(_sender_mentions()) == 3

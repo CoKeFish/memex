@@ -1,5 +1,5 @@
-"""Resolución DETERMINISTA de una mención a una identidad canónica (persona, organización o
-producto).
+"""Resolución DETERMINISTA de una mención a una identidad canónica (persona, organización,
+producto o desconocido).
 
 Señales FUERTES de la MENCIÓN MISMA, en orden de prioridad (sin LLM; el difuso y el desempate LLM
 viven en `fuzzy.py` / `dedup_llm.py`). El remitente del mensaje NO se usa como señal: que el correo
@@ -30,16 +30,27 @@ from memex.modules.identidades.schema import IdentityItem
 KIND_PERSONA = "persona"
 KIND_ORG = "organizacion"
 KIND_PRODUCTO = "producto"
-#: Los kinds canónicos del directorio (sin el escape 'unknown' del extractor).
-_CANONICAL_KINDS = (KIND_PERSONA, KIND_ORG, KIND_PRODUCTO)
+#: «Pendiente de clasificación»: sabemos que la entidad existe (un correo/handle real) pero su tipo
+#: aún no se definió (lo fija set-kind manual, un clasificador futuro, o una extracción posterior).
+KIND_DESCONOCIDO = "desconocido"
+#: Los kinds canónicos del directorio (sin el escape 'unknown' del extractor, que es vocabulario de
+#: la MENCIÓN, no del directorio). Incluye `desconocido`.
+_CANONICAL_KINDS = (KIND_PERSONA, KIND_ORG, KIND_PRODUCTO, KIND_DESCONOCIDO)
 
 
 def _match_group(kind: str) -> str:
     """Grupo de match del nombre/alias exacto. PERSONA es su propio grupo; ORGANIZACIÓN y PRODUCTO
     comparten grupo ("entity"): suelen ser la MISMA entidad (Steam/Claude = org Y producto), así
-    que una mención producto resuelve a la org homónima y viceversa. Lo que NO se cruza es
-    persona↔org/producto — el colapso dañino (persona con correo corporativo u homónima)."""
-    return KIND_PERSONA if kind == KIND_PERSONA else "entity"
+    que una mención producto resuelve a la org homónima y viceversa. DESCONOCIDO es su PROPIO grupo:
+    un placeholder de tipo incierto no se funde por nombre con una persona/org (sería adivinar el
+    tipo) — una mención de kind definido SÍ puede RECLAMARLO por nombre (sin promover su tipo), pero
+    no al revés. Lo que NUNCA se cruza es persona↔org/producto — el colapso dañino (persona con
+    correo corporativo u homónima)."""
+    if kind == KIND_PERSONA:
+        return KIND_PERSONA
+    if kind == KIND_DESCONOCIDO:
+        return KIND_DESCONOCIDO
+    return "entity"
 
 
 @dataclass(frozen=True)
@@ -56,7 +67,7 @@ class KnownIdentity:
     """Una identidad conocida, reducida a las llaves de match (nombre, alias, identificadores)."""
 
     id: int
-    kind: str  # 'persona' | 'organizacion' | 'producto'
+    kind: str  # 'persona' | 'organizacion' | 'producto' | 'desconocido'
     display_name: str
     aliases: Sequence[str] = ()
     identifiers: Sequence[KnownIdentifier] = field(default_factory=tuple)
@@ -66,7 +77,7 @@ class KnownIdentity:
 class Resolution:
     """Resultado de atar una mención a una identidad canónica (o no)."""
 
-    kind: str | None  # 'persona' | 'organizacion' | 'producto' | None
+    kind: str | None  # 'persona' | 'organizacion' | 'producto' | 'desconocido' | None
     identity_id: int | None
     #: email/domain/handle/exact_name/alias/sender_email/fuzzy/llm/created/unresolved
     method: str
@@ -153,7 +164,7 @@ class KnownIndex:
         return self._handle_by_platform.get((platform, value_norm))
 
     def kind_of(self, identity_id: int) -> str | None:
-        """kind canónico (persona|organizacion|producto) de una identidad del índice, si está."""
+        """kind canónico (persona|organizacion|producto|desconocido) de una identidad, si está."""
         return self._kind.get(identity_id)
 
     def _res(self, identity_id: int, method: str) -> Resolution:
@@ -219,8 +230,9 @@ class KnownIndex:
                     ids = self._handle_any.get(hk)
                     if ids and len(ids) == 1:
                         return self._res(next(iter(ids)), "handle")
-        # 5/6. nombre exacto / alias, ACOTADO POR GRUPO (persona ∥ org+producto): no funde homónimos
-        # persona↔org. Con kind desconocido matchea cross-grupo solo si el nombre/alias es ÚNICO.
+        # 5/6. nombre exacto / alias, ACOTADO POR GRUPO (persona ∥ org+producto ∥ desconocido): no
+        # funde homónimos persona↔org. Con el escape 'unknown' del extractor (probe_kind None)
+        # matchea cross-grupo solo si el nombre/alias es ÚNICO.
         name_key = normalize_match(item.name)
         if name_key:
             if probe_kind is not None:
@@ -231,6 +243,18 @@ class KnownIndex:
                 iid = self._alias.get((grp, name_key))
                 if iid is not None:
                     return self._res(iid, "alias")
+                # Reclamo de placeholder: una mención de kind DEFINIDO que no matcheó en su grupo se
+                # ata a un `desconocido` homónimo si lo hay (lo ABSORBE sin promover su tipo — el
+                # placeholder sigue `desconocido` hasta que un sistema lo defina; `_res` devuelve el
+                # kind de la ENTIDAD, no el de la mención). Asimétrico: el desconocido NO reclama
+                # hacia una persona/org (eso sería adivinar el tipo, justo lo que se evita).
+                if probe_kind != KIND_DESCONOCIDO:
+                    iid = self._name.get((KIND_DESCONOCIDO, name_key))
+                    if iid is not None:
+                        return self._res(iid, "exact_name")
+                    iid = self._alias.get((KIND_DESCONOCIDO, name_key))
+                    if iid is not None:
+                        return self._res(iid, "alias")
             else:
                 nids = self._name_any.get(name_key)
                 if nids and len(nids) == 1:

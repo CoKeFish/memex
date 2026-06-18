@@ -112,3 +112,18 @@ def test_directorio_sano_sin_hallazgos(conn: Any) -> None:
     assert rep.total == 1
     assert rep.by_kind == {"organizacion": 1}
     assert rep.suspicious == 0
+
+
+def test_pending_classification_lista_desconocidos(conn: Any) -> None:
+    # las entidades `desconocido` salen en pending_classification (backlog de set-kind). Con mención
+    # NO son huérfanas y NO inflan `suspicious` (es un estado esperado, no una anomalía a corregir).
+    d1 = _id(conn, "desconocido", "ielec")
+    d2 = _id(conn, "desconocido", "viceacad")
+    p = _id(conn, "persona", "Ana")
+    _mention(conn, d1)
+    _mention(conn, d2)
+    _mention(conn, p)
+    rep = vertex_health(conn, 1)
+    assert {e.id for e in rep.pending_classification} == {d1, d2}
+    assert all(e.kind == "desconocido" for e in rep.pending_classification)
+    assert rep.suspicious == 0  # el backlog de clasificación no cuenta como hallazgo anómalo

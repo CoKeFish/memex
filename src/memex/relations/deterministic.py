@@ -57,20 +57,30 @@ _IDENTITY_KIND_CASE = " ".join(f"WHEN '{k}' THEN '{v}'" for k, v in IDENTITY_SLU
 def _afiliacion_pairs(
     conn: Connection, user_id: int, *, person_ids: Sequence[int] | None = None
 ) -> Iterator[tuple[Ref, Ref]]:
-    """Los pares persona→org que el directorio enlaza explícitamente HOY (read-only). Con
-    `person_ids` acota a esas personas; sin él, todas. Base del tejido y de la reconciliación."""
-    scope = "" if person_ids is None else " AND person_id = ANY(:pids)"
+    """Los pares «afiliado»→org que el directorio enlaza explícitamente HOY (read-only). El lado
+    afiliado suele ser una PERSONA, pero también puede ser un `desconocido`: un remitente de dominio
+    corporativo cuyo tipo aún no se definió queda afiliado a la org del dominio («pertenece a este
+    dominio» vale aunque el tipo sea incierto). Por eso el slug del origen sale del kind REAL (no se
+    asume persona) — si no, una afiliación de un desconocido proyectaría un vértice inexistente que
+    la poda de huérfanas barrería. Con `person_ids` acota a esos afiliados; sin él, todas. Base del
+    tejido y de la reconciliación."""
+    scope = "" if person_ids is None else " AND po.person_id = ANY(:pids)"
     params: dict[str, Any] = {"u": user_id}
     if person_ids is not None:
         params["pids"] = list(person_ids)
     for r in conn.execute(
         text(
-            f"SELECT person_id, org_id FROM mod_identidades_person_orgs WHERE user_id = :u{scope}"
+            f"""
+            SELECT po.person_id AS person_id, po.org_id AS org_id, p.kind AS person_kind
+            FROM mod_identidades_person_orgs po
+            JOIN mod_identidades p ON p.id = po.person_id AND p.user_id = po.user_id
+            WHERE po.user_id = :u{scope}
+            """
         ),
         params,
     ).mappings():
         yield (
-            Ref("identidades:person", int(r["person_id"])),
+            Ref(IDENTITY_SLUG_BY_KIND[str(r["person_kind"])], int(r["person_id"])),
             Ref("identidades:org", int(r["org_id"])),
         )
 

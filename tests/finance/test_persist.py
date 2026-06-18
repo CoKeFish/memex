@@ -220,6 +220,24 @@ def test_persist_counterparty_producto_vetado_fk_null(conn: Connection) -> None:
     assert fk is None
 
 
+def test_persist_counterparty_desconocido_vetado_fk_null(conn: Connection) -> None:
+    # la contraparte resuelve a un DESCONOCIDO (tipo aún sin definir) → veto de finanzas: FK NULL
+    # (la contraparte es válida solo si es persona u org, igual que se veta el producto).
+    conn.execute(
+        text(
+            "INSERT INTO mod_identidades (user_id, kind, display_name) "
+            "VALUES (1,'desconocido','Buzon X')"
+        )
+    )
+    asyncio.run(
+        FinanceModule().dedup(_ctx_with_identidades(conn, (1,)), [_item(counterparty="Buzon X")])
+    )
+    fk = conn.execute(
+        text("SELECT counterparty_identity_id FROM mod_finance_transactions")
+    ).scalar_one()
+    assert fk is None
+
+
 def test_persist_without_identidades_leaves_fk_null(conn: Connection) -> None:
     # identidades apagado (deps vacío) → corre igual, FK NULL (best-effort).
     asyncio.run(FinanceModule().dedup(_ctx(conn, (1,)), [_item(counterparty="Rappi")]))

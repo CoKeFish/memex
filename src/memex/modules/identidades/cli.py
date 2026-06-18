@@ -12,7 +12,7 @@ Subcomandos del AGENTE (expuestos vía `memex identidad <cmd>`):
   set-parent   — cuelga una identidad de su padre (o lo quita con --clear); marca
                  `parent_source='agent'` para que el organizador LLM no lo pise.
   confirm-parent — consolida el padre actual como confirmado (parent_source=agent) sin re-tipearlo.
-  set-kind     — reclasifica el tipo (persona/organizacion/producto).
+  set-kind     — reclasifica el tipo (persona/organizacion/producto/desconocido).
   add-id       — agrega un identificador (email/phone/handle/domain/url).
   affiliate    — teje una persona con una organización (afiliación).
   unify        — funde dos identidades del mismo kind sin pasar por la cola de candidatos.
@@ -104,7 +104,7 @@ Comandos del agente:
   tree         jerarquía de pertenencia: quién pertenece a quién (opcional --id como raíz)
   set-parent   cuelga --id de --parent («pertenece a»), o quita el padre con --clear
   confirm-parent  consolida el padre actual como confirmado (parent_source=agent)
-  set-kind     reclasifica --id a --kind (persona|organizacion|producto)
+  set-kind     reclasifica --id a --kind (persona|organizacion|producto|desconocido)
   add-id       agrega un identificador (--kind email|phone|handle|domain|url --value)
   affiliate    teje una persona (--person) con una organización (--org), opcional --role
   unify        funde dos identidades del mismo kind: --into sobrevive, --from se absorbe
@@ -260,8 +260,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sk_p.add_argument(
         "--kind",
         required=True,
-        choices=["persona", "organizacion", "producto"],
-        help="Nuevo tipo.",
+        choices=["persona", "organizacion", "producto", "desconocido"],
+        help="Nuevo tipo ('desconocido' = marcar pendiente de clasificación).",
     )
     sk_p.add_argument(
         "--json", dest="as_json", action="store_true", help="Emite la fila como JSON."
@@ -1652,7 +1652,14 @@ def _cmd_health(args: argparse.Namespace) -> int:
     if rep.cycles:
         _say(f"\n⚠ Ciclos de jerarquía — {len(rep.cycles)}: {rep.cycles}")
     if rep.suspicious == 0:
-        _say("Sin hallazgos. Directorio sano.")
+        _say("Sin anomalías. Directorio sano.")
+    if rep.pending_classification:
+        _say(
+            f"\nPendientes de clasificación (kind desconocido) — "
+            f"{len(rep.pending_classification)} (backlog, no anomalía):"
+        )
+        for e in rep.pending_classification:
+            _say(f"  #{e.id} {e.display_name!r} → set-kind para definir su tipo")
     _say("")
     return 0
 

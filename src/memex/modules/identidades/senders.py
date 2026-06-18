@@ -20,13 +20,17 @@ POLÍTICA DE CREACIÓN asimétrica por medio (resolver es uniforme; lo que cambi
 - **email:** un dominio NUNCA identifica a una persona; identifica a lo sumo a UNA organización
   (keyed por el dominio → no fragmenta aunque el `from.name` varíe) y para sus usuarios es
   AFILIACIÓN. Quién es el remitente lo decide el LOCAL-PART: rol/genérico (`noreply@`/`info@`) →
-  la ORG del dominio habla; individuo (`juan.perez@`) → la PERSONA por su correo + arista `afiliado`
-  a la org (se preservan persona, org y la relación; NO se funde la persona en la org). El email
-  exacto ya conocido gana. En **free-mail** (gmail/outlook…) el dominio no representa a nadie:
-  persona por su correo si hay nombre de individuo, si no NO se crea (ruido). Default → persona.
+  la ORG del dominio habla; individuo → su correo es la clave estable + arista `afiliado` a la org
+  del dominio. Pero el TIPO del individuo NO se adivina: es PERSONA solo si el `from.name` parece un
+  nombre humano O el local-part deriva de él (`uribej` ← "Jose Luis Uribe"); si es AMBIGUO (un buzón
+  de dependencia como `ielec@` «Carrera de Ingeniería Electrónica») queda DESCONOCIDO — y se le teje
+  igual la afiliación («pertenece a este dominio» vale aunque el tipo sea incierto). El email exacto
+  ya conocido gana. En **free-mail** (gmail/outlook…) el dominio no representa a nadie: con un
+  nombre de persona → persona por su correo; tipo-org → desconocido; sin nombre usable → NO se crea
+  (ruido).
 - **social:** la CUENTA (`account`) se resuelve por handle acotado a la plataforma real; si no
-  existe se crea como ORGANIZACIÓN con su handle en la plataforma real (default establecido; se
-  reclasifica a persona a mano si toca). Las cuentas monitoreadas son curadas (allowlist).
+  existe se crea como DESCONOCIDO con su handle en la plataforma real (el tipo no se adivina; se
+  define luego con set-kind o un clasificador). Las cuentas monitoreadas son curadas (allowlist).
 
 Idempotencia: el alta de identidad usa `NOT EXISTS`/`ON CONFLICT DO NOTHING`; la mención usa un
 `INSERT … WHERE NOT EXISTS` (no re-inserta si ya hay una mención 'sender' para ese mensaje).
@@ -52,9 +56,12 @@ from memex.modules.identidades.normalize import (
     is_freemail,
     is_generic_localpart,
     is_role_email,
+    local_part_matches_name,
+    looks_like_person_name,
     norm_identifier,
 )
 from memex.modules.identidades.resolve import (
+    KIND_DESCONOCIDO,
     KIND_ORG,
     KIND_PERSONA,
     KnownIdentifier,
@@ -67,6 +74,14 @@ from memex.relations.canales import sync_canales
 from memex.relations.deterministic import weave_afiliacion, weave_participa_en
 
 _log = get_logger("memex.modules.identidades.senders")
+
+
+def _mentioned_kind(resolved_kind: str) -> str:
+    """`mentioned_kind` válido (vocabulario del EXTRACTOR: persona|organizacion|producto|unknown,
+    CHECK de 0057) para la mención de un remitente. El remitente no «afirma» un tipo, lo inferimos:
+    el kind resuelto pasa tal cual, salvo `desconocido` (no es vocab. de mención) → 'unknown'
+    (`resolved_kind` sí guarda 'desconocido')."""
+    return "unknown" if resolved_kind == KIND_DESCONOCIDO else resolved_kind
 
 
 # --- avistamiento del remitente (mención 'sender', idempotente) -------------------------- #
@@ -370,18 +385,62 @@ def _person_by_email(
     return pid
 
 
+def _unknown_by_email(
+    conn: Connection,
+    user_id: int,
+    email: str,
+    from_name: str,
+    email_norm: str,
+    index: KnownIndex,
+) -> int:
+    """Resuelve/crea la entidad DESCONOCIDO («pendiente de clasificación») dueña de un correo, keyed
+    por el EMAIL. Si el email ya es conocido, esa identidad (sea cual sea su kind). Si no, crea una
+    entidad `desconocido` (INSERT directo — `IdentityItem.kind` NO admite 'desconocido': es
+    vocabulario del directorio, no del extractor) nombrada por el `from.name` o, si falta, por el
+    email; le ata el email para que el próximo correo resuelva exacto. La afiliación a la org del
+    dominio la teje el caller (`_resolve_email_sender`)."""
+    iid = index.email_identity(email_norm)
+    if iid is not None:
+        return iid
+    name = from_name.strip() or email
+    eid = int(
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_identidades (user_id, kind, display_name, source, interest)
+                VALUES (:u, 'desconocido', :n, 'extraction', FALSE)
+                RETURNING id
+                """
+            ),
+            {"u": user_id, "n": name},
+        ).scalar_one()
+    )
+    _insert_identifier(conn, user_id, eid, "email", "email", email, email_norm, source="extraction")
+    index.add(
+        KnownIdentity(
+            id=eid,
+            kind=KIND_DESCONOCIDO,
+            display_name=name,
+            identifiers=(KnownIdentifier("email", "email", email_norm),),
+        )
+    )
+    return eid
+
+
 def _resolve_email_sender(
     conn: Connection, user_id: int, email: str, domain: str, from_name: str, index: KnownIndex
 ) -> Resolution | None:
     """Resuelve el remitente de un correo (política GENERAL, domain-agnóstica). Un dominio NUNCA
     identifica a una persona: identifica a lo sumo a UNA org (keyed por el dominio) y para sus
-    usuarios es AFILIACIÓN. Quién es el remitente lo decide el LOCAL-PART:
+    usuarios es AFILIACIÓN. Quién es el remitente lo decide el LOCAL-PART, y su TIPO no se adivina:
     - email exacto ya conocido → esa identidad;
-    - free-mail (no representa a nadie) → persona por su correo si hay nombre, si no None;
+    - free-mail (no representa a nadie) → persona si el nombre parece humano; desconocido si el
+      nombre es tipo-org; None si no hay nombre usable (ruido);
     - dominio propio + rol/genérico (`noreply@`/`info@`/`ventas@`) → la ORG del dominio habla;
-    - dominio propio + individuo (`juan.perez@`) → la PERSONA por su correo + arista `afiliado` a la
-      org del dominio (se preservan persona, org y la relación; NO se funde la persona en la org).
-    Default ante la duda → persona. Devuelve la `Resolution` ('sender') o None (no se crea)."""
+    - dominio propio + individuo → su correo es la clave; PERSONA si el `from.name` parece humano o
+      el local-part deriva de él, si no DESCONOCIDO («pendiente»); ambos con arista `afiliado` a la
+      org del dominio (se preservan entidad, org y la relación; NO se funde en la org).
+    Devuelve la `Resolution` ('sender') o None (no se crea)."""
     email_norm = norm_identifier("email", email)
     if not email_norm:
         return None
@@ -391,25 +450,39 @@ def _resolve_email_sender(
         iid = index.email_identity(email_norm)
         if iid is not None:
             return Resolution(index.kind_of(iid), iid, "sender")
+    local_part = email.split("@", 1)[0]
     generic = is_generic_localpart(email)
+    # ¿el individuo es CON SEGURIDAD persona? Si no → `desconocido` (no se adivina el tipo).
+    person = looks_like_person_name(from_name) or local_part_matches_name(local_part, from_name)
     if is_freemail(domain):
-        # el dominio no representa a nadie → la persona dueña de la dirección. Se crea solo con un
-        # nombre usable y un local-part de individuo (un free-mail rol/genérico/anónimo es ruido).
-        if from_name.strip() and not role and not generic:
+        # el dominio no representa a nadie; un free-mail rol/genérico/sin-nombre es ruido.
+        if not from_name.strip() or role or generic:
+            return None
+        # kind REAL del índice: si `_person_by_email` reusó/reclamó una entidad existente (incluido
+        # un `desconocido` homónimo, vía el reclamo de placeholder de resolve), se reporta su kind
+        # de verdad, no se promueve a persona.
+        if person:
             pid = _person_by_email(conn, user_id, email, from_name, email_norm, index)
-            return Resolution(KIND_PERSONA, pid, "sender")
-        return None
-    # dominio propio: rol/genérico → habla la ORG del dominio; individuo → PERSONA + afiliación.
+            return Resolution(index.kind_of(pid) or KIND_PERSONA, pid, "sender")
+        # nombre tipo-org en un free-mail (que no representa a una org del dominio) → desconocido.
+        eid = _unknown_by_email(conn, user_id, email, from_name, email_norm, index)
+        return Resolution(index.kind_of(eid) or KIND_DESCONOCIDO, eid, "sender")
+    # dominio propio: rol/genérico → habla la ORG; individuo → PERSONA|DESCONOCIDO + afiliación.
     if role or generic:
         org_id = _org_for_domain(conn, user_id, domain, from_name.strip(), index)
         return Resolution(index.kind_of(org_id) or KIND_ORG, org_id, "sender")
     org_id = _org_for_domain(
         conn, user_id, domain, "", index
-    )  # display = dominio, NUNCA la persona
-    pid = _person_by_email(conn, user_id, email, from_name, email_norm, index)
-    _affiliate(conn, user_id, pid, org_id, None, source="extraction")
-    weave_afiliacion(conn, user_id, pid)
-    return Resolution(KIND_PERSONA, pid, "sender")
+    )  # display = dominio, NUNCA el remitente
+    eid = (
+        _person_by_email(conn, user_id, email, from_name, email_norm, index)
+        if person
+        else _unknown_by_email(conn, user_id, email, from_name, email_norm, index)
+    )
+    _affiliate(conn, user_id, eid, org_id, None, source="extraction")
+    weave_afiliacion(conn, user_id, eid)
+    # kind REAL (ver arriba): persona si se creó/reusó una persona, desconocido si no se adivinó.
+    return Resolution(index.kind_of(eid) or KIND_DESCONOCIDO, eid, "sender")
 
 
 def weave_email_senders(conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
@@ -457,7 +530,7 @@ def weave_email_senders(conn: Connection, user_id: int, inbox_ids: Sequence[int]
             identity_id=res.identity_id,
             resolved_kind=res.kind or KIND_ORG,
             name=(from_name.strip() or domain),
-            mentioned_kind=res.kind or KIND_ORG,
+            mentioned_kind=_mentioned_kind(res.kind or KIND_ORG),
             email=email,
         ):
             inserted += 1
@@ -466,22 +539,23 @@ def weave_email_senders(conn: Connection, user_id: int, inbox_ids: Sequence[int]
     return inserted
 
 
-# --- social: organización por handle (creada en la plataforma real) ---------------------- #
+# --- social: cuenta por handle (creada como desconocido en la plataforma real) ----------- #
 
 
-def _create_social_org(
+def _create_social_account(
     conn: Connection, user_id: int, platform: str, account: str, handle_norm: str, index: KnownIndex
 ) -> int:
-    """Crea la ORG de una cuenta social desconocida con su handle en la PLATAFORMA REAL (no
-    'unknown' — así el próximo post de la misma cuenta resuelve por handle). Registra el mapeo en el
-    índice (dedup intra-lote). NO usa `_create_entity` (que guardaría platform='unknown'). Devuelve
-    el id."""
-    org_id = int(
+    """Crea una cuenta social desconocida como DESCONOCIDO («pendiente»: una cuenta monitoreada
+    puede ser persona, marca o medio — no se adivina el tipo; se define luego con set-kind o un
+    clasificador) con su handle en la PLATAFORMA REAL (no 'unknown' — así el próximo post de la
+    misma cuenta resuelve por handle). Registra el mapeo en el índice (dedup intra-lote). NO usa
+    `_create_entity` (que guardaría platform='unknown'). Devuelve el id."""
+    account_id = int(
         conn.execute(
             text(
                 """
                 INSERT INTO mod_identidades (user_id, kind, display_name, source, interest)
-                VALUES (:u, 'organizacion', :n, 'extraction', FALSE)
+                VALUES (:u, 'desconocido', :n, 'extraction', FALSE)
                 RETURNING id
                 """
             ),
@@ -489,17 +563,17 @@ def _create_social_org(
         ).scalar_one()
     )
     _insert_identifier(
-        conn, user_id, org_id, platform, "handle", account, handle_norm, source="extraction"
+        conn, user_id, account_id, platform, "handle", account, handle_norm, source="extraction"
     )
     index.add(
         KnownIdentity(
-            id=org_id,
-            kind=KIND_ORG,
+            id=account_id,
+            kind=KIND_DESCONOCIDO,
             display_name=account,
             identifiers=(KnownIdentifier(platform, "handle", handle_norm),),
         )
     )
-    return org_id
+    return account_id
 
 
 def weave_social_senders(conn: Connection, user_id: int, inbox_ids: Sequence[int]) -> int:
@@ -539,8 +613,8 @@ def weave_social_senders(conn: Connection, user_id: int, inbox_ids: Sequence[int
             continue
         iid = index.handle_identity(platform, handle_norm)
         if iid is None:
-            iid = _create_social_org(conn, user_id, platform, account, handle_norm, index)
-        rkind = index.kind_of(iid) or KIND_ORG
+            iid = _create_social_account(conn, user_id, platform, account, handle_norm, index)
+        rkind = index.kind_of(iid) or KIND_DESCONOCIDO
         if _insert_sender_mention(
             conn,
             user_id,
@@ -548,7 +622,7 @@ def weave_social_senders(conn: Connection, user_id: int, inbox_ids: Sequence[int
             identity_id=iid,
             resolved_kind=rkind,
             name=account,
-            mentioned_kind=rkind,
+            mentioned_kind=_mentioned_kind(rkind),
             handle=account,
         ):
             inserted += 1

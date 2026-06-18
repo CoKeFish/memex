@@ -1,6 +1,6 @@
 """Proyección de vértices (Fase 1): las tablas `mod_*` se leen como una lista uniforme de vértices
 `(slug, id, label, kind)`. calendar -> consolidado (sin borrados); identidades ->
-person/org/producto; inbox NO es vértice; scoping por usuario.
+person/org/producto/desconocido; inbox NO es vértice; scoping por usuario.
 """
 
 from __future__ import annotations
@@ -52,6 +52,11 @@ def _seed_all(user_id: int = 1) -> dict[str, int]:
         "VALUES (:u, 'producto', 'Steam') RETURNING id",
         u=user_id,
     )
+    desconocido = _exec(
+        "INSERT INTO mod_identidades (user_id, kind, display_name) "
+        "VALUES (:u, 'desconocido', 'Buzon X') RETURNING id",
+        u=user_id,
+    )
     return {
         "finance": int(fin),
         "hackathones": int(hack),
@@ -59,6 +64,7 @@ def _seed_all(user_id: int = 1) -> dict[str, int]:
         "identidades:person": int(person),
         "identidades:org": int(org),
         "identidades:producto": int(producto),
+        "identidades:desconocido": int(desconocido),
     }
 
 
@@ -98,6 +104,9 @@ def test_proyecta_todos_los_tipos() -> None:
     assert by_slug["identidades:producto"].kind == "producto"
     assert by_slug["identidades:producto"].label == "Steam"
     assert by_slug["identidades:producto"].id == ids["identidades:producto"]
+    assert by_slug["identidades:desconocido"].kind == "desconocido"
+    assert by_slug["identidades:desconocido"].label == "Buzon X"
+    assert by_slug["identidades:desconocido"].id == ids["identidades:desconocido"]
     assert by_slug["bienestar"].kind == "registro"
     assert by_slug["bienestar"].label == "almuerzo"
     assert by_slug["bienestar:habito"].kind == "habito"
@@ -154,7 +163,7 @@ def test_get_vertex_y_no_vertices() -> None:
         assert v.ref == Ref("finance", ids["finance"])
         assert get_vertex(c, 1, Ref("finance", 999999)) is None  # no existe
         assert get_vertex(c, 1, Ref("inbox", 1)) is None  # inbox NO es vértice (atributo)
-        assert get_vertex(c, 1, Ref("desconocido", 1)) is None  # slug desconocido
+        assert get_vertex(c, 1, Ref("inexistente", 1)) is None  # slug no proyectable
 
 
 def test_scoped_por_usuario() -> None:

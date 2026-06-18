@@ -128,3 +128,42 @@ def test_producto_mention_resuelve_a_org_homonima() -> None:
     idx = KnownIndex([KnownIdentity(id=5, kind="organizacion", display_name="Steam")])
     res = idx.resolve(_probe(name="Steam", kind="producto"))
     assert (res.kind, res.identity_id, res.method) == ("organizacion", 5, "exact_name")
+
+
+# --- kind desconocido: grupo propio + reclamo de placeholder (Slice 6) ------------------- #
+
+
+def test_kind_definido_reclama_placeholder_desconocido() -> None:
+    # una mención de kind DEFINIDO sin match en su grupo se ata a un `desconocido` homónimo (lo
+    # ABSORBE sin promover el tipo: la Resolution reporta el kind de la ENTIDAD, aún desconocido).
+    idx = KnownIndex([KnownIdentity(id=5, kind="desconocido", display_name="Acme Foo")])
+    res = idx.resolve(_probe(name="Acme Foo", kind="organizacion"))
+    assert (res.identity_id, res.kind, res.method) == (5, "desconocido", "exact_name")
+
+
+def test_persona_reclama_placeholder_desconocido_por_alias() -> None:
+    idx = KnownIndex(
+        [KnownIdentity(id=6, kind="desconocido", display_name="Buzón X", aliases=("Juan Perez",))]
+    )
+    res = idx.resolve(_probe(name="Juan Perez", kind="persona"))
+    assert (res.identity_id, res.kind, res.method) == (6, "desconocido", "alias")
+
+
+def test_grupo_propio_gana_sobre_reclamo_de_desconocido() -> None:
+    # si existe una PERSONA homónima, la mención persona resuelve a ELLA (su grupo): reclamar un
+    # desconocido es solo el fallback cuando el grupo propio NO matchea.
+    idx = KnownIndex(
+        [
+            KnownIdentity(id=1, kind="persona", display_name="Foo Bar"),
+            KnownIdentity(id=2, kind="desconocido", display_name="Foo Bar"),
+        ]
+    )
+    res = idx.resolve(_probe(name="Foo Bar", kind="persona"))
+    assert (res.identity_id, res.kind, res.method) == (1, "persona", "exact_name")
+
+
+def test_escape_unknown_resuelve_a_desconocido_unico() -> None:
+    # el escape 'unknown' del extractor (probe sin kind) resuelve a un `desconocido` de nombre ÚNICO
+    # (los nombres son kind-agnósticos en la vista cross-kind, `_name_any`).
+    idx = KnownIndex([KnownIdentity(id=9, kind="desconocido", display_name="Lonely Placeholder")])
+    assert idx.resolve(_probe(name="Lonely Placeholder")).identity_id == 9

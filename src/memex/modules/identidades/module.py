@@ -46,6 +46,7 @@ from memex.modules.identidades.fuzzy import (
 from memex.modules.identidades.normalize import is_role_email, norm_identifier
 from memex.modules.identidades.prompt import IDENTIDADES_SYSTEM_PROMPT
 from memex.modules.identidades.resolve import (
+    KIND_DESCONOCIDO,
     KIND_ORG,
     KIND_PERSONA,
     KIND_PRODUCTO,
@@ -60,7 +61,8 @@ from memex.relations.deterministic import weave_afiliacion, weave_event
 _log = get_logger("memex.modules.identidades")
 
 #: kind de la mención → kind canónico del directorio. 'unknown' (el escape del extractor) y
-#: cualquier valor fuera del mapa pliegan a PERSONA, como siempre.
+#: cualquier valor fuera del mapa caen a DESCONOCIDO («pendiente de clasificación»): el extractor no
+#: afirmó un tipo → no se adivina persona, se deja que un sistema lo defina después.
 _IDENTITY_KIND_BY_MENTION = {
     "persona": KIND_PERSONA,
     "organizacion": KIND_ORG,
@@ -69,8 +71,9 @@ _IDENTITY_KIND_BY_MENTION = {
 
 
 def _identity_kind(mention_kind: str) -> str:
-    """Mapea el `kind` de la mención al `kind` canónico (persona|organizacion|producto)."""
-    return _IDENTITY_KIND_BY_MENTION.get(mention_kind, KIND_PERSONA)
+    """Mapea el `kind` de la mención al `kind` canónico (persona|organizacion|producto); lo no
+    afirmado por el extractor ('unknown' o fuera de mapa) → `desconocido` (no se adivina)."""
+    return _IDENTITY_KIND_BY_MENTION.get(mention_kind, KIND_DESCONOCIDO)
 
 
 @dataclass(frozen=True)

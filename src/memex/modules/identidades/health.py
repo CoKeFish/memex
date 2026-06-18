@@ -13,7 +13,9 @@ SOSPECHOSO que queda por debajo y conviene revisar (merge, set-kind, set-parent,
 - near-dup por CONTENCIÓN: un nombre es subconjunto estricto del otro (mismo kind) y el trigram lo
   pierde ('Jose David' ⊂ 'Jose David Reyes');
 - `org_core` vacío: org/producto cuyo núcleo quedó vacío → indeduplicable por difuso;
-- ciclo de jerarquía: un nodo que es su propio ancestro (el CHECK de la DB solo ve el self-loop).
+- ciclo de jerarquía: un nodo que es su propio ancestro (el CHECK de la DB solo ve el self-loop);
+- pendientes de clasificación: entidades `desconocido` (existen pero su tipo aún no se definió) —
+  un BACKLOG para set-kind / un clasificador, NO una anomalía (aparte, no cuentan como sospechosas).
 
 NO muta nada: arma un `HealthReport` para que el dueño/agente decida. Lo consume la CLI
 (`memex identidad health`) y puede engancharse al ciclo del scheduler como diagnóstico.
@@ -71,10 +73,14 @@ class HealthReport:
     containment_dups: list[Pair] = field(default_factory=list)
     empty_org_core: list[Entity] = field(default_factory=list)
     cycles: list[int] = field(default_factory=list)
+    #: `desconocido` (tipo aún sin definir): backlog para set-kind / un clasificador, no un defecto
+    #: → se surface aparte y NO suma a `suspicious`.
+    pending_classification: list[Entity] = field(default_factory=list)
 
     @property
     def suspicious(self) -> int:
-        """Total de hallazgos accionables (todas las categorías menos los conteos)."""
+        """Total de hallazgos ANÓMALOS accionables (las categorías de corrección; NO incluye
+        `pending_classification`, que es un backlog esperado de clasificación, no un defecto)."""
         return (
             len(self.orphans)
             + len(self.shared_identifiers)
@@ -202,6 +208,23 @@ def _empty_org_core(conn: Connection, user_id: int) -> list[Entity]:
     return [Entity(int(r[0]), str(r[1]), str(r[2])) for r in rows]
 
 
+def _pending_classification(conn: Connection, user_id: int) -> list[Entity]:
+    """Entidades `desconocido` («pendiente de clasificación»): existen (un correo/handle real) pero
+    su tipo aún no se definió. NO es un defecto — es un BACKLOG para que un sistema lo resuelva
+    (set-kind manual, un clasificador, o una extracción posterior que afirme el tipo)."""
+    rows = conn.execute(
+        text(
+            """
+            SELECT id, kind, display_name FROM mod_identidades
+            WHERE user_id = :u AND kind = 'desconocido'
+            ORDER BY id LIMIT :lim
+            """
+        ),
+        {"u": user_id, "lim": _LIMIT},
+    ).all()
+    return [Entity(int(r[0]), str(r[1]), str(r[2])) for r in rows]
+
+
 def _cycles(conn: Connection, user_id: int) -> list[int]:
     """Nodos que son su propio ancestro (ciclo de jerarquía). El CHECK de la DB solo atrapa el
     self-loop directo; este barrido recursivo (cota de profundidad) encuentra los multinivel."""
@@ -238,4 +261,5 @@ def vertex_health(conn: Connection, user_id: int) -> HealthReport:
         containment_dups=_containment_dups(conn, user_id),
         empty_org_core=_empty_org_core(conn, user_id),
         cycles=_cycles(conn, user_id),
+        pending_classification=_pending_classification(conn, user_id),
     )

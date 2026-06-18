@@ -304,7 +304,8 @@ async def test_sender_does_not_swallow_other_mentions() -> None:
 @pytest.mark.asyncio
 async def test_producto_mention_creates_producto_identity() -> None:
     # 'producto' ya NO se pliega a organizacion (0057): crea/resuelve kind='producto'.
-    # 'unknown' (el escape del extractor) sigue plegando a persona.
+    # 'unknown' (el escape del extractor) cae a DESCONOCIDO (Slice 6: no se adivina persona); la
+    # mención conserva mentioned_kind='unknown' y resuelve a un kind='desconocido'.
     items = [
         IdentityItem(source_inbox_ids=(5,), name="Hearthstone", kind="producto"),
         IdentityItem(source_inbox_ids=(6,), name="Misterio", kind="unknown"),
@@ -315,7 +316,8 @@ async def test_producto_mention_creates_producto_identity() -> None:
     assert m["Hearthstone"]["resolved_kind"] == "producto"
     hs = next(i for i in _identities("producto") if i["display_name"] == "Hearthstone")
     assert m["Hearthstone"]["resolved_identity_id"] == hs["id"]
-    assert m["Misterio"]["resolved_kind"] == "persona"
+    assert m["Misterio"]["mentioned_kind"] == "unknown"
+    assert m["Misterio"]["resolved_kind"] == "desconocido"
 
 
 @pytest.mark.asyncio
