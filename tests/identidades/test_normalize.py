@@ -11,8 +11,6 @@ from sqlalchemy import text
 
 from memex.modules.identidades.normalize import (
     is_role_email,
-    local_part_matches_name,
-    looks_like_person_name,
     norm_identifier,
     normalize_match,
     org_core,
@@ -113,57 +111,3 @@ def test_registrable_domain() -> None:
     # fallback: host sin sufijo público / vacío
     assert registrable_domain("localhost") == "localhost"
     assert registrable_domain("") == ""
-
-
-# --- gate de tipo del remitente (Slice 6: persona vs desconocido) ------------------------ #
-
-
-def test_looks_like_person_name_personas() -> None:
-    # nombres humanos reales (de los remitentes @javeriana): se reconocen como persona.
-    for n in [
-        "Jose Luis Uribe Aponte",
-        "Eduardo Andres Gerlein Reyes",
-        "Ana Lorena Martin Aldana",
-        "Juan de la Cruz",  # apellido compuesto (conectores no cuentan)
-        "María López",
-    ]:
-        assert looks_like_person_name(n), n
-
-
-def test_looks_like_person_name_dependencias() -> None:
-    # nombres de UNIDAD/dependencia (no personas): NO se adivinan persona (caen a desconocido).
-    # Cubre los buzones reales (ielec/viceacad/…) + casos límite (sin nombre, email, dígito).
-    for n in [
-        "Carrera de Ingeniería Electrónica",  # ielec@
-        "Vicerrectoría Académica PUJ",  # viceacad@
-        "Decanatura Facultad de Ingeniería",
-        "Semillero de Producción y Logística",
-        "Especializacion en Sistemas Gerenciales",
-        "Systems - OIT - Pontificia Universidad Javeriana",
-        "Agenda Cultural Javeriana",
-        "Movilidad Estudiantil",
-        "DTI Comunica",
-        "",  # sin nombre
-        "ACP_Notificacion@javeriana.edu.co",  # forma de email, no nombre
-        "Soporte 24/7",  # dígitos
-    ]:
-        assert not looks_like_person_name(n), n
-
-
-def test_local_part_matches_name_rescata_persona() -> None:
-    # el local-part deriva del nombre de la persona (apellido + inicial, etc.)
-    assert local_part_matches_name("uribej", "Jose Luis Uribe Aponte")
-    assert local_part_matches_name("egerlein", "Eduardo Andres Gerlein Reyes")
-    assert local_part_matches_name("rprada", "Rosa Marina Prada Reyes")
-
-
-def test_local_part_matches_name_no_rescata_dependencias() -> None:
-    # NO rescata dependencias: si el nombre trae un token-org se descarta de plano, aunque el
-    # local-part coincida con la DISCIPLINA (el caso traicionero: imecatronica ⊃ "Mecatrónica").
-    assert not local_part_matches_name("agendacultural", "Agenda Cultural Javeriana")
-    assert not local_part_matches_name("dti-comunica", "DTI Comunica")
-    assert not local_part_matches_name("ielec", "Carrera de Ingeniería Electrónica")
-    assert not local_part_matches_name("imecatronica", "Carrera de Ingeniería Mecatrónica")
-    # un from.name con forma de email / con dígitos no es un nombre → no se «coincide» consigo mismo
-    assert not local_part_matches_name("correo_cs92pro", "correo_cs92pro@javeriana.edu.co")
-    assert not local_part_matches_name("soporte24", "Soporte 24/7")

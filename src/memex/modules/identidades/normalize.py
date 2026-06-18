@@ -72,7 +72,6 @@ _ORG_SUFFIXES: tuple[str, ...] = (
 _ORG_SUFFIX_RE = re.compile(r"\b(?:" + "|".join(_ORG_SUFFIXES) + r")\b")
 _WS_RE = re.compile(r"\s+")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
-_LETTERS_SPLIT_RE = re.compile(r"[^a-z]+")  # tokeniza un nombre YA normalizado en palabras
 
 #: Tokens de local-part role/relay: la dirección NO identifica a una persona/entidad única.
 _ROLE_TOKENS = frozenset(
@@ -88,143 +87,6 @@ _ROLE_TOKENS = frozenset(
         "bounce",
         "bounces",
     }
-)
-
-#: Buzones GENÉRICOS/funcionales: habla la ORGANIZACIÓN, no una persona única (`info@`, `ventas@`,
-#: `soporte@`). Complementa `_ROLE_TOKENS` (relays). Lista CURADA de tokens que casi nunca son el
-#: nombre de un individuo — el sesgo a persona ante la duda (`is_generic_localpart`) cubre lo
-#: ambiguo, así que conviene precisión alta (no inflar con tokens que podrían ser un nombre).
-_GENERIC_LOCAL_TOKENS = frozenset(
-    {
-        "info",
-        "contacto",
-        "contact",
-        "ventas",
-        "sales",
-        "soporte",
-        "support",
-        "ayuda",
-        "help",
-        "admin",
-        "administracion",
-        "comercial",
-        "marketing",
-        "rrhh",
-        "facturacion",
-        "billing",
-        "cobranza",
-        "cobros",
-        "pagos",
-        "payments",
-        "compras",
-        "pedidos",
-        "orders",
-        "atencion",
-        "servicioalcliente",
-        "customerservice",
-        "newsletter",
-        "noticias",
-        "boletin",
-        "comunicaciones",
-        "comunicacion",
-        "prensa",
-        "press",
-        "eventos",
-        "events",
-        "webmaster",
-        "hostmaster",
-        "abuse",
-        "secretaria",
-        "recepcion",
-        "reception",
-        "gerencia",
-        "oficina",
-        "office",
-        "hola",
-        "hello",
-        "team",
-        "equipo",
-        "staff",
-        "notificaciones",
-        "notificacion",
-        "alertas",
-        "alerts",
-        "facturas",
-        "invoices",
-    }
-)
-
-#: Tokens que denotan una UNIDAD/FUNCIÓN organizacional (no el nombre de una persona): si el
-#: `from.name` de un remitente trae alguno, NO es una persona, es una dependencia/área que habla por
-#: la org. Lista CURADA — cada token es algo que un humano jamás se llama (un nombre/apellido nunca
-#: es "vicerrectoria" ni "facultad") → sus falsos positivos empujan hacia `desconocido`, nunca hacia
-#: una persona errónea. Van SIN tilde (se comparan tras `normalize_match`, que hace unaccent+lower).
-#: Extensible (`…`): si un departamento real cae a persona, se agrega su sustantivo de unidad acá
-#: (la integración sobre correos reales valida la cobertura — ver Slice 6).
-_ORG_NAME_TOKENS: frozenset[str] = frozenset(
-    {
-        # estructura institucional / académica
-        "universidad",
-        "universitario",
-        "universitaria",
-        "universitarios",
-        "facultad",
-        "decanatura",
-        "decanato",
-        "rectoria",
-        "vicerrectoria",
-        "direccion",
-        "departamento",
-        "coordinacion",
-        "secretaria",
-        "secretariado",
-        "gerencia",
-        "oficina",
-        "instituto",
-        "fundacion",
-        "centro",
-        "escuela",
-        "colegio",
-        "division",
-        "sede",
-        "campus",
-        "biblioteca",
-        "observatorio",
-        "laboratorio",
-        "consultorio",
-        "ministerio",
-        "gobernacion",
-        "alcaldia",
-        # programas / niveles
-        "carrera",
-        "programa",
-        "pregrado",
-        "posgrado",
-        "postgrado",
-        "especializacion",
-        "maestria",
-        "doctorado",
-        # áreas / funciones
-        "area",
-        "semillero",
-        "movilidad",
-        "estudiantil",
-        "agenda",
-        "cultural",
-        "comunicaciones",
-        "comunicacion",
-        "comunica",
-        "prensa",
-        "boletin",
-        "servicios",
-        "asuntos",
-    }
-)
-
-#: Conectores de nombre (preposiciones/artículos de apellidos compuestos): no cuentan como token de
-#: contenido al medir la «forma» de un nombre ("Juan de la Cruz" → 2 tokens de contenido, no 4).
-_NAME_CONNECTORS: frozenset[str] = frozenset(
-    {"de", "del", "la", "las", "los", "y", "e", "da", "das", "do", "dos", "van", "von", "der"}
 )
 
 #: Dominios de correo PERSONAL gratuito (free-mail). El dominio NO representa a una organización: el
@@ -292,16 +154,6 @@ def is_role_email(email: str) -> bool:
     return any(tok in _ROLE_TOKENS for tok in re.split(r"[._+-]", local))
 
 
-def is_generic_localpart(email: str) -> bool:
-    """True si el local-part es un buzón GENÉRICO/funcional de una organización (`info@`, `ventas@`,
-    `soporte@`): habla la ORG, no una persona única. Complementa `is_role_email` (relays
-    automáticos). Se parte el local-part por separadores (`. _ + -`) y se compara cada token contra
-    `_GENERIC_LOCAL_TOKENS`. Lo usa la resolución de remitente (`senders.py`) para decidir, en un
-    dominio corporativo, si el remitente es la org (rol/genérico) o una persona (individuo)."""
-    local = email.split("@", 1)[0].lower()
-    return any(tok in _GENERIC_LOCAL_TOKENS for tok in re.split(r"[._+-]", local) if tok)
-
-
 def _strip_accents(text: str) -> str:
     """Quita diacríticos por descomposición NFKD (≈ `unaccent` de Postgres para latín acentuado)."""
     decomposed = unicodedata.normalize("NFKD", text)
@@ -324,49 +176,6 @@ def org_core(name: str) -> str:
     base = _NON_ALNUM_RE.sub(" ", base)
     base = _ORG_SUFFIX_RE.sub("", base)
     return _WS_RE.sub(" ", base).strip()
-
-
-def looks_like_person_name(name: str) -> bool:
-    """True si `name` parece el nombre de una PERSONA humana (no una organización/dependencia).
-
-    Heurística CONSERVADORA para decidir el remitente de un dominio corporativo (`senders.py`): ante
-    la duda devuelve False y el llamador deja la identidad en `desconocido` en vez de adivinarla
-    persona. NO valida que sea un nombre REAL (no hay diccionario de nombres) — solo descarta lo que
-    claramente NO lo es: un token de unidad organizacional (`_ORG_NAME_TOKENS`), dígitos o forma de
-    email, o un número de palabras de contenido fuera del rango típico de un nombre (2..5)."""
-    norm = normalize_match(name)
-    if not norm or "@" in name or any(ch.isdigit() for ch in norm):
-        return False
-    tokens = [t for t in _LETTERS_SPLIT_RE.split(norm) if t]
-    if any(t in _ORG_NAME_TOKENS for t in tokens):
-        return False
-    content = [t for t in tokens if t not in _NAME_CONNECTORS]
-    return 2 <= len(content) <= 5
-
-
-def local_part_matches_name(local_part: str, name: str) -> bool:
-    """True si el local-part de un correo se DERIVA del nombre de una PERSONA: un token del nombre
-    (>= 3 letras, con vocal) aparece dentro del local-part (`uribej` ← "Jose Luis **Uribe**";
-    `egerlein` ← "Eduardo Andres **Gerlein**"). Señal de respaldo de `looks_like_person_name` que
-    rescata a una persona cuyo `from.name` es atípico (mononombre, muy largo).
-
-    NO rescata DEPENDENCIAS: si el nombre trae CUALQUIER token de unidad org (`_ORG_NAME_TOKENS`) es
-    una dependencia y se descarta de plano — aunque el local-part coincida con su DISCIPLINA, que es
-    el caso traicionero (`imecatronica` ⊃ "Mecatrónica" en "Carrera de Ingeniería Mecatrónica", o
-    `dti` en "DTI Comunica"). El gate de tipo es el blocklist de unidades, no el local-part. Un
-    `from.name` con forma de email o con dígitos NO es un nombre de persona (p.ej. un buzón cuyo
-    `from.name` es su propia dirección) → no rescata (si no, el local-part «coincidiría» consigo
-    mismo)."""
-    if "@" in name or any(ch.isdigit() for ch in name):
-        return False
-    name_tokens = [t for t in _LETTERS_SPLIT_RE.split(normalize_match(name)) if t]
-    if not name_tokens or any(t in _ORG_NAME_TOKENS for t in name_tokens):
-        return False
-    lp = _LETTERS_SPLIT_RE.sub("", normalize_match(local_part))
-    if len(lp) < 3:
-        return False
-    person_tokens = [t for t in name_tokens if len(t) >= 3 and any(v in t for v in "aeiou")]
-    return any(t in lp for t in person_tokens)
 
 
 def registrable_domain(host: str) -> str:

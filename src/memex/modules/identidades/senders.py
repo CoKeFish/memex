@@ -19,15 +19,14 @@ POLÍTICA DE CREACIÓN asimétrica por medio (resolver es uniforme; lo que cambi
   servicio (sender NULL) quedan fuera (un relay/automatización no identifica a una persona única).
 - **email:** un dominio NUNCA identifica a una persona; identifica a lo sumo a UNA organización
   (keyed por el dominio → no fragmenta aunque el `from.name` varíe) y para sus usuarios es
-  AFILIACIÓN. Quién es el remitente lo decide el LOCAL-PART: rol/genérico (`noreply@`/`info@`) →
-  la ORG del dominio habla; individuo → su correo es la clave estable + arista `afiliado` a la org
-  del dominio. Pero el TIPO del individuo NO se adivina: es PERSONA solo si el `from.name` parece un
-  nombre humano O el local-part deriva de él (`uribej` ← "Jose Luis Uribe"); si es AMBIGUO (un buzón
-  de dependencia como `ielec@` «Carrera de Ingeniería Electrónica») queda DESCONOCIDO — y se le teje
-  igual la afiliación («pertenece a este dominio» vale aunque el tipo sea incierto). El email exacto
-  ya conocido gana. En **free-mail** (gmail/outlook…) el dominio no representa a nadie: con un
-  nombre de persona → persona por su correo; tipo-org → desconocido; sin nombre usable → NO se crea
-  (ruido).
+  AFILIACIÓN. Quién es el remitente lo decide el LOCAL-PART: rol/relay (`noreply@`/`mailer-daemon@`)
+  → la ORG del dominio habla; individuo → su correo es la clave estable + arista `afiliado` a la org
+  del dominio. El TIPO del individuo NO se adivina con heurística (sin listas): el camino
+  determinista lo deja en DESCONOCIDO («pendiente») — y se le teje igual la afiliación («pertenece a
+  este dominio» vale aunque el tipo sea incierto). Un clasificador aparte (juez LLM + evidencia de
+  extracción) define después si es persona/org/etc. El email exacto ya conocido gana. En
+  **free-mail** (gmail/outlook…) el dominio no representa a nadie: con nombre usable → DESCONOCIDO
+  por su correo; sin nombre o rol/genérico → NO se crea (ruido).
 - **social:** la CUENTA (`account`) se resuelve por handle acotado a la plataforma real; si no
   existe se crea como DESCONOCIDO con su handle en la plataforma real (el tipo no se adivina; se
   define luego con set-kind o un clasificador). Las cuentas monitoreadas son curadas (allowlist).
@@ -54,10 +53,7 @@ from memex.modules.identidades.module import (
 )
 from memex.modules.identidades.normalize import (
     is_freemail,
-    is_generic_localpart,
     is_role_email,
-    local_part_matches_name,
-    looks_like_person_name,
     norm_identifier,
 )
 from memex.modules.identidades.resolve import (
@@ -349,42 +345,6 @@ def _org_for_domain(
     return org_id
 
 
-def _person_by_email(
-    conn: Connection,
-    user_id: int,
-    email: str,
-    from_name: str,
-    email_norm: str,
-    index: KnownIndex,
-) -> int:
-    """Resuelve/crea la PERSONA dueña de un correo, keyed por el EMAIL (su identificador estable).
-    Si el email ya es conocido, esa identidad. Si no, resuelve/crea por NOMBRE (reusa el dedup del
-    módulo: exacto + difuso) y le ata el email para que el próximo correo resuelva exacto. El email
-    es la clave estable de la persona; su dominio queda como AFILIACIÓN aparte, nunca la funde."""
-    iid = index.email_identity(email_norm)
-    if iid is not None:
-        return iid
-    name = from_name.strip() or email
-    item = IdentityItem.model_validate(
-        {"source_inbox_ids": (), "name": name, "kind": "persona", "email": email}
-    )
-    res = index.resolve(item)
-    if res.identity_id is None:
-        res, _hint = _resolve_fuzzy_or_create(conn, user_id, item, index, source="extraction")
-    pid = res.identity_id
-    assert pid is not None  # _resolve_fuzzy_or_create siempre ata o crea
-    _insert_identifier(conn, user_id, pid, "email", "email", email, email_norm, source="extraction")
-    index.add(
-        KnownIdentity(
-            id=pid,
-            kind=KIND_PERSONA,
-            display_name=name,
-            identifiers=(KnownIdentifier("email", "email", email_norm),),
-        )
-    )
-    return pid
-
-
 def _unknown_by_email(
     conn: Connection,
     user_id: int,
@@ -432,14 +392,15 @@ def _resolve_email_sender(
 ) -> Resolution | None:
     """Resuelve el remitente de un correo (política GENERAL, domain-agnóstica). Un dominio NUNCA
     identifica a una persona: identifica a lo sumo a UNA org (keyed por el dominio) y para sus
-    usuarios es AFILIACIÓN. Quién es el remitente lo decide el LOCAL-PART, y su TIPO no se adivina:
-    - email exacto ya conocido → esa identidad;
-    - free-mail (no representa a nadie) → persona si el nombre parece humano; desconocido si el
-      nombre es tipo-org; None si no hay nombre usable (ruido);
-    - dominio propio + rol/genérico (`noreply@`/`info@`/`ventas@`) → la ORG del dominio habla;
-    - dominio propio + individuo → su correo es la clave; PERSONA si el `from.name` parece humano o
-      el local-part deriva de él, si no DESCONOCIDO («pendiente»); ambos con arista `afiliado` a la
-      org del dominio (se preservan entidad, org y la relación; NO se funde en la org).
+    usuarios es AFILIACIÓN. El TIPO de un individuo NO se adivina con heurística — sin listas, el
+    camino determinista del remitente deja al individuo en `desconocido` («pendiente»); un
+    clasificador aparte (juez LLM + evidencia de extracción) define después si es persona/org/etc:
+    - email exacto ya conocido → esa identidad (con el kind que ya tenga definido);
+    - dominio propio + rol/relay (`noreply@`/`mailer-daemon@`) → la ORG del dominio habla;
+    - dominio propio + individuo → su correo es la clave + arista `afiliado` a la org del dominio,
+      con tipo DESCONOCIDO («pertenece a este dominio» vale aunque el tipo sea incierto);
+    - free-mail (no representa a nadie) → con nombre usable, DESCONOCIDO por su correo; sin nombre o
+      rol/genérico, None (ruido).
     Devuelve la `Resolution` ('sender') o None (no se crea)."""
     email_norm = norm_identifier("email", email)
     if not email_norm:
@@ -450,38 +411,24 @@ def _resolve_email_sender(
         iid = index.email_identity(email_norm)
         if iid is not None:
             return Resolution(index.kind_of(iid), iid, "sender")
-    local_part = email.split("@", 1)[0]
-    generic = is_generic_localpart(email)
-    # ¿el individuo es CON SEGURIDAD persona? Si no → `desconocido` (no se adivina el tipo).
-    person = looks_like_person_name(from_name) or local_part_matches_name(local_part, from_name)
     if is_freemail(domain):
-        # el dominio no representa a nadie; un free-mail rol/genérico/sin-nombre es ruido.
-        if not from_name.strip() or role or generic:
+        # el dominio no representa a nadie; rol/relay o sin-nombre = ruido. Un individuo NO se
+        # adivina persona (sin listas) → queda `desconocido` hasta que el clasificador lo defina.
+        if not from_name.strip() or role:
             return None
-        # kind REAL del índice: si `_person_by_email` reusó/reclamó una entidad existente (incluido
-        # un `desconocido` homónimo, vía el reclamo de placeholder de resolve), se reporta su kind
-        # de verdad, no se promueve a persona.
-        if person:
-            pid = _person_by_email(conn, user_id, email, from_name, email_norm, index)
-            return Resolution(index.kind_of(pid) or KIND_PERSONA, pid, "sender")
-        # nombre tipo-org en un free-mail (que no representa a una org del dominio) → desconocido.
         eid = _unknown_by_email(conn, user_id, email, from_name, email_norm, index)
         return Resolution(index.kind_of(eid) or KIND_DESCONOCIDO, eid, "sender")
-    # dominio propio: rol/genérico → habla la ORG; individuo → PERSONA|DESCONOCIDO + afiliación.
-    if role or generic:
+    # dominio propio: SOLO un relay/rol (`noreply@`/`mailer-daemon@`) habla por la ORG; cualquier
+    # otro local-part es un individuo → DESCONOCIDO + afiliación (el juez define el tipo después).
+    if role:
         org_id = _org_for_domain(conn, user_id, domain, from_name.strip(), index)
         return Resolution(index.kind_of(org_id) or KIND_ORG, org_id, "sender")
     org_id = _org_for_domain(
         conn, user_id, domain, "", index
     )  # display = dominio, NUNCA el remitente
-    eid = (
-        _person_by_email(conn, user_id, email, from_name, email_norm, index)
-        if person
-        else _unknown_by_email(conn, user_id, email, from_name, email_norm, index)
-    )
+    eid = _unknown_by_email(conn, user_id, email, from_name, email_norm, index)
     _affiliate(conn, user_id, eid, org_id, None, source="extraction")
     weave_afiliacion(conn, user_id, eid)
-    # kind REAL (ver arriba): persona si se creó/reusó una persona, desconocido si no se adivinó.
     return Resolution(index.kind_of(eid) or KIND_DESCONOCIDO, eid, "sender")
 
 

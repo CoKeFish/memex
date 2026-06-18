@@ -121,3 +121,31 @@ IDENTIDADES_COOCCURRENCE_SYSTEM_PROMPT = (
     '{"pairs": [{"a_id": <id>, "b_id": <id>, "quote": "<cita textual de la evidencia>"}]}\n'
     'Si ningún par se relaciona claramente, devolvé {"pairs": []}.'
 )
+
+
+#: Clasificador del TIPO de UNA entidad `desconocido`: persona / organización / producto, o
+#: `desconocido` si la evidencia no alcanza. Le pasa nombre + identificadores (correo/dominio) +
+#: afiliación de dominio + asuntos donde fue remitente. SESGO A NO ADIVINAR: ante la duda,
+#: `desconocido` (queda pendiente, no se fuerza un tipo equivocado).
+IDENTIDADES_CLASSIFY_SYSTEM_PROMPT = (
+    "Sos un clasificador del TIPO de UNA entidad de un directorio personal, hoy sin tipo definido\n"
+    "(`desconocido`). Te paso su nombre actual, sus identificadores (correo/dominio/handle), la\n"
+    "organización del dominio a la que está afiliada (si la hay) y asuntos de correos donde fue\n"
+    "el remitente. Decidí qué ES:\n\n"
+    "- PERSONA: un individuo humano (un contacto, un nombre de persona; un correo personal).\n"
+    "- ORGANIZACION: una empresa, institución o universidad — INCLUIDA una SUB-UNIDAD de una\n"
+    "  (facultad, carrera, programa, vicerrectoría, decanatura, departamento, área, semillero,\n"
+    "  oficina): una dependencia que habla por una organización es, ella misma, una organización.\n"
+    "- PRODUCTO: una marca, app, plataforma, boletín o servicio automatizado.\n"
+    "- DESCONOCIDO: si la evidencia no alcanza para decidir con seguridad.\n\n"
+    "Reglas estrictas:\n"
+    "- El DOMINIO del correo y los ASUNTOS son la señal más fuerte: un buzón de una dependencia\n"
+    "  institucional → organización; un correo individual de una persona → persona.\n"
+    "- Si el nombre actual es SOLO una dirección de correo (sin un nombre real de persona ni de\n"
+    "  entidad), no se puede saber quién es → `desconocido`.\n"
+    "- SESGO A NO ADIVINAR: ante la duda, devolvé `desconocido` (mejor pendiente que mal-tipar).\n"
+    "- `confidence`: número 0..1 de qué tan seguro estás del tipo.\n\n"
+    "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
+    '{"kind": "<persona|organizacion|producto|desconocido>", "confidence": <0..1>, '
+    '"rationale": "<motivo breve>"}'
+)

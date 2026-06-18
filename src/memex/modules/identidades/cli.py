@@ -31,6 +31,8 @@ Subcomandos de MANTENIMIENTO (solo `memex-identidades` directo):
   accounts     — lista las cuentas de proveedor de un user.
   interest     — `add` / `list` / `remove` de la lista manual de organizaciones de interés.
   merge        — desempate LLM (FASE 2) de los candidatos de merge de la zona gris del difuso.
+  classify     — clasifica con LLM las identidades `desconocido` (les asigna persona/org/producto).
+  organize     — organiza con LLM la jerarquía de pertenencia (sub-unidad → institución).
 
 La AUTORIZACIÓN de Google NO se hace acá: se conecta la cuenta desde el dashboard (/cuenta), que
 guarda el token cifrado en el vault (Decisión 6). Server-side: habla con la DB vía `connection()`,
@@ -55,8 +57,9 @@ from sqlalchemy.engine import Connection
 from memex.cli.provider_flags import add_provider_flags, client_from_flags
 from memex.db import connection
 from memex.logging import get_logger, setup_logging
+from memex.modules.identidades.classify import run_classify
 from memex.modules.identidades.dedup_llm import run_merge_phase2
-from memex.modules.identidades.hierarchy import would_create_cycle
+from memex.modules.identidades.hierarchy import run_organize, would_create_cycle
 from memex.modules.identidades.merge import merge_identities
 from memex.modules.identidades.module import register_card
 from memex.modules.identidades.normalize import norm_identifier
@@ -397,6 +400,34 @@ def _build_parser() -> argparse.ArgumentParser:
     merge_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     merge_p.add_argument("--limit", type=int, default=200, help="Máximo de pares a resolver.")
     add_provider_flags(merge_p)
+
+    classify_p = sub.add_parser(
+        "classify", help="Clasifica con LLM las identidades `desconocido` (les asigna su tipo)."
+    )
+    classify_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    classify_p.add_argument(
+        "--limit", type=int, default=200, help="Máximo de entidades a clasificar."
+    )
+    classify_p.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.7,
+        dest="min_confidence",
+        help="Umbral para promover (default 0.7); por debajo queda desconocido.",
+    )
+    add_provider_flags(classify_p)
+
+    organize_p = sub.add_parser(
+        "organize", help="Organiza con LLM la jerarquía de pertenencia (sub→institución)."
+    )
+    organize_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    organize_p.add_argument("--limit", type=int, default=500, help="Máximo de entradas.")
+    organize_p.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Además limpia el nombre de las sub-unidades (deja el original como alias).",
+    )
+    add_provider_flags(organize_p)
 
     cand_p = sub.add_parser("candidates", help="Lista los candidatos de merge pendientes.")
     cand_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -1580,6 +1611,39 @@ def _cmd_merge(args: argparse.Namespace) -> int:
     return 1 if stats.errors else 0
 
 
+def _cmd_classify(args: argparse.Namespace) -> int:
+    stats = asyncio.run(
+        run_classify(
+            args.user,
+            limit=args.limit,
+            min_confidence=args.min_confidence,
+            client=client_from_flags(args),
+        )
+    )
+    _say(
+        f"\nidentidades classify: items={stats.items} promovidos={stats.promoted} "
+        f"pendientes={stats.pending} errores={stats.errors} (costo LLM ${stats.cost.cost_usd})\n"
+    )
+    return 1 if stats.errors else 0
+
+
+def _cmd_organize(args: argparse.Namespace) -> int:
+    stats = asyncio.run(
+        run_organize(
+            args.user,
+            limit=args.limit,
+            apply_cleanup=args.cleanup,
+            client=client_from_flags(args),
+        )
+    )
+    _say(
+        f"\nidentidades organize: orgs={stats.orgs} colgadas={stats.linked} "
+        f"padres-creados={stats.created} nombres-limpiados={stats.cleaned} "
+        f"saltadas={stats.skipped} (costo LLM ${stats.cost.cost_usd})\n"
+    )
+    return 0
+
+
 def _cmd_candidates(args: argparse.Namespace) -> int:
     with connection() as conn:
         rows = (
@@ -1719,6 +1783,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_accounts(args)
         if args.cmd == "merge":
             return _cmd_merge(args)
+        if args.cmd == "classify":
+            return _cmd_classify(args)
+        if args.cmd == "organize":
+            return _cmd_organize(args)
         if args.cmd == "candidates":
             return _cmd_candidates(args)
         if args.cmd == "health":
