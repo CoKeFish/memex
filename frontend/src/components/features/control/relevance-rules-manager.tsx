@@ -12,6 +12,13 @@ import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import {
   createGateRule,
@@ -21,7 +28,7 @@ import {
   patchGateRule,
   resolveReview,
 } from "@/data"
-import type { GateRule, ReviewItem, RuleEffect } from "@/data"
+import type { GateRule, MatchField, ReviewItem, RuleEffect } from "@/data"
 import { ApiError } from "@/lib/api"
 import { useAsync } from "@/lib/use-async"
 
@@ -35,11 +42,11 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? String(e.detail) : e instanceof Error ? e.message : String(e)
 }
 
-/** Texto de los predicados de una regla compuesta (remitente y/o asunto). */
+/** Texto de los predicados de una regla compuesta (remitente y/o regex sobre un campo). */
 function rulePredicates(rule: GateRule): string {
   const parts: string[] = []
   if (rule.senderKind) parts.push(`${SENDER_KIND_LABEL[rule.senderKind]}=${rule.senderValue}`)
-  if (rule.subjectPattern) parts.push(`asunto~"${rule.subjectPattern}"`)
+  if (rule.pattern) parts.push(`${rule.matchField}~"${rule.pattern}"`)
   return parts.join(" & ") || "(sin predicados)"
 }
 
@@ -125,7 +132,8 @@ export function RelevanceRulesManager() {
   const review = useAsync<ReviewItem[]>(() => fetchReviewQueue(), [])
   const [busy, setBusy] = useState(false)
   const [senderValue, setSenderValue] = useState("")
-  const [subjectPattern, setSubjectPattern] = useState("")
+  const [pattern, setPattern] = useState("")
+  const [matchField, setMatchField] = useState<MatchField>("subject")
 
   async function mutate(fn: () => Promise<void>, ok: string, reload: () => void) {
     setBusy(true)
@@ -147,16 +155,17 @@ export function RelevanceRulesManager() {
     void mutate(
       async () => {
         const sv = senderValue.trim().toLowerCase()
-        const sp = subjectPattern.trim()
+        const pat = pattern.trim()
         await createGateRule({
           effect,
           senderKind: sv ? (sv.includes("@") ? "sender_email" : "sender_domain") : null,
           senderValue: sv || null,
-          subjectPattern: sp || null,
+          pattern: pat || null,
+          matchField: pat ? matchField : null,
           rationale: "manual desde /filtros",
         })
         setSenderValue("")
-        setSubjectPattern("")
+        setPattern("")
       },
       effect === "block" ? "Regla de bloqueo creada" : "Regla de interés creada",
       rules.reload,
@@ -192,14 +201,14 @@ export function RelevanceRulesManager() {
       review.reload,
     )
 
-  const noPredicate = !senderValue.trim() && !subjectPattern.trim()
+  const noPredicate = !senderValue.trim() && !pattern.trim()
 
   return (
     <Panel className="overflow-hidden">
       <PanelHeader
         eyebrow="filtros · gate de relevancia"
         title="Reglas automáticas y revisión"
-        sub="reglas compuestas (remitente y/o asunto) y bipolares (bloquear / permitir), validadas con dry run contra el histórico (atrapar un correo del lado contrario = rechazada); la cola junta los correos donde el gate no pudo decidir"
+        sub="reglas compuestas (remitente y/o patrón regex sobre asunto/cuerpo) y bipolares (bloquear / permitir), validadas con dry run contra el histórico (atrapar un correo del lado contrario = rechazada); la cola junta los correos donde el gate no pudo decidir"
         right={
           <Button size="sm" variant="outline" disabled={busy} onClick={mine}>
             {busy ? (
@@ -222,11 +231,27 @@ export function RelevanceRulesManager() {
               className="h-8 min-w-[160px] flex-1"
             />
             <Input
-              placeholder="patrón de asunto (opcional)"
-              value={subjectPattern}
-              onChange={(e) => setSubjectPattern(e.target.value)}
+              placeholder="patrón regex (minúscula, opcional)"
+              value={pattern}
+              onChange={(e) => setPattern(e.target.value)}
               className="h-8 min-w-[160px] flex-1"
             />
+            <Select value={matchField} onValueChange={(v) => setMatchField(v as MatchField)}>
+              <SelectTrigger className="h-8 w-auto min-w-[110px] text-xs" aria-label="Campo">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="subject" className="text-xs">
+                  asunto
+                </SelectItem>
+                <SelectItem value="body" className="text-xs">
+                  cuerpo
+                </SelectItem>
+                <SelectItem value="subject_or_body" className="text-xs">
+                  asunto o cuerpo
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -248,7 +273,7 @@ export function RelevanceRulesManager() {
               Marcar como de interés
             </Button>
             <span className="text-[11px] text-muted-foreground">
-              remitente y/o asunto — el dry run valida contra el histórico
+              remitente y/o patrón regex — el dry run valida contra el histórico
             </span>
           </div>
         </div>

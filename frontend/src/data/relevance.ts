@@ -87,6 +87,7 @@ export async function deleteInterest(id: number): Promise<void> {
 export type SenderKind = "sender_email" | "sender_domain" | "list_id"
 export type RuleEffect = "block" | "allow"
 export type GateRuleStatus = "active" | "disabled" | "rejected"
+export type MatchField = "subject" | "body" | "subject_or_body"
 
 /** Reporte del dry run de una regla contra el histórico (la auditoría de su activación). */
 export interface DryRunReport {
@@ -107,7 +108,8 @@ export interface GateRule {
   effect: RuleEffect
   senderKind: SenderKind | null
   senderValue: string | null
-  subjectPattern: string | null
+  pattern: string | null
+  matchField: MatchField | null
   status: GateRuleStatus
   proposedBy: "llm" | "manual"
   rationale: string
@@ -136,7 +138,8 @@ interface GateRuleApi {
   effect: RuleEffect
   sender_kind: SenderKind | null
   sender_value: string | null
-  subject_pattern: string | null
+  pattern: string | null
+  match_field: MatchField | null
   status: GateRuleStatus
   proposed_by: "llm" | "manual"
   rationale: string
@@ -169,7 +172,8 @@ function toRule(it: GateRuleApi): GateRule {
     effect: it.effect,
     senderKind: it.sender_kind,
     senderValue: it.sender_value,
-    subjectPattern: it.subject_pattern,
+    pattern: it.pattern,
+    matchField: it.match_field,
     status: it.status,
     proposedBy: it.proposed_by,
     rationale: it.rationale,
@@ -190,12 +194,13 @@ export async function fetchGateRules(status = "all", effect = "all"): Promise<Ga
   return data.items.map(toRule)
 }
 
-/** Predicados de una regla nueva: ≥1 (remitente y/o asunto); lo valida el motor. */
+/** Predicados de una regla nueva: ≥1 (remitente y/o patrón regex); lo valida el motor. */
 export interface NewRule {
   effect: RuleEffect
   senderKind?: SenderKind | null
   senderValue?: string | null
-  subjectPattern?: string | null
+  pattern?: string | null
+  matchField?: MatchField | null
   rationale?: string
 }
 
@@ -206,7 +211,8 @@ export async function createGateRule(rule: NewRule): Promise<GateRule> {
       effect: rule.effect,
       sender_kind: rule.senderKind ?? null,
       sender_value: rule.senderValue ?? null,
-      subject_pattern: rule.subjectPattern ?? null,
+      pattern: rule.pattern ?? null,
+      match_field: rule.matchField ?? null,
       rationale: rule.rationale ?? "",
     }),
   )

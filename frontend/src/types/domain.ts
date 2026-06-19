@@ -215,7 +215,7 @@ export interface RelevanceMark {
 
 /** Veredicto del gate de relevancia para un mensaje (`relevance_verdicts`): la CONCLUSIÓN del gate
  *  (¿se procesa?), distinta del tier (dial de costo) y de la marca manual (override). `method` = cómo
- *  se decidió; si fue por regla, la regla compuesta (`ruleEffect` + remitente + asunto) la
+ *  se decidió; si fue por regla, la regla compuesta (`ruleEffect` + remitente + patrón) la
  *  identifica. Solo en el detalle. */
 export interface RelevanceVerdict {
   verdict: "relevant" | "not_relevant" | "insufficient"
@@ -227,7 +227,8 @@ export interface RelevanceVerdict {
   ruleEffect: "block" | "allow" | null
   ruleSenderKind: string | null
   ruleSenderValue: string | null
-  ruleSubjectPattern: string | null
+  rulePattern: string | null
+  ruleMatchField: string | null
   createdAt: string | null
 }
 

@@ -91,7 +91,7 @@ function VerdictLine({ v }: { v: RelevanceVerdict }) {
       ? [
           v.ruleSenderKind &&
             `${RULE_KIND_LABEL[v.ruleSenderKind] ?? v.ruleSenderKind}=${v.ruleSenderValue}`,
-          v.ruleSubjectPattern && `asunto~"${v.ruleSubjectPattern}"`,
+          v.rulePattern && `${v.ruleMatchField ?? "patrón"}~"${v.rulePattern}"`,
         ]
           .filter(Boolean)
           .join(" & ") || "regla"
