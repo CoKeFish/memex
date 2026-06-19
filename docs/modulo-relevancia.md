@@ -10,7 +10,8 @@ usado tanto al frente como en la re-evaluación. El tier queda solo como **dial 
 
 > Esto **enmienda el ADR-020** (los ADR no son inmutables). Migración del esquema:
 > `0071_unify_relevance` (sistema unificado) + `0072_relevance_composite_rules` (reglas COMPUESTAS
-> remitente+asunto y BIPOLARES block/allow — ver «Reglas del gate» abajo).
+> remitente+asunto y BIPOLARES block/allow) + `0077_relevance_regex_rules` (el patrón pasa a REGEX
+> sobre asunto/cuerpo — ver «Reglas del gate» abajo).
 
 Su motivación, en una frase: el router de extracción descartaba promos «porque son publicidad» con
 varianza entre corridas (experimento 2026-06-12: 3 de 8 wishlists idénticos de Steam pasaron) —
@@ -25,7 +26,7 @@ que entre directo sin revisarlo.
 
 ## Reglas del gate (compuestas + bipolares)
 
-Una regla es **COMPUESTA** (un remitente Y/O un patrón del asunto, combinados con AND) y tiene una
+Una regla es **COMPUESTA** (un remitente Y/O un patrón REGEX sobre asunto/cuerpo, con AND) y tiene una
 **POLARIDAD** `effect`:
 
 - `block`: matchea → veredicto `not_relevant` (el correo NO pasa, sin juez ni revisión).
@@ -33,9 +34,13 @@ Una regla es **COMPUESTA** (un remitente Y/O un patrón del asunto, combinados c
 
 Ambas son **cortocircuitos deterministas que saltan el juez y la cola manual**; la diferencia es el
 veredicto. Predicados (al menos uno): remitente (`sender_kind` ∈ `sender_email`/`sender_domain`/
-`list_id` + `sender_value`) y/o `subject_pattern` (substring del asunto, case-insensitive). El
-remitente solo es **demasiado grueso** (a veces relevante, a veces no): el patrón del asunto
-desambigua, así que las reglas **mineadas por el LLM llevan siempre los dos**. La creación manual
+`list_id` + `sender_value`) y/o un **patrón REGEX** (`pattern`) sobre `match_field`
+(`subject`/`body`/`subject_or_body`). El remitente solo es **demasiado grueso** (a veces relevante, a
+veces no): el patrón desambigua, así que las reglas **mineadas por el LLM llevan siempre los dos**. El
+regex es de un **dialecto restringido** que coincide EXACTO en Python `re` y Postgres `~` (el espejo
+runtime↔dry-run): case por `lower()` en ambos lados (patrones en minúscula), haystack de una sola
+línea, y prohíbe los constructos divergentes/ReDoS (`\b`, `\w`, lookaround, backreferences). La
+creación manual
 admite un solo predicado (bloquear/permitir un remitente entero). **Precedencia**: marca manual >
 regla > juez. Un correo que matchea reglas de **ambas** polaridades es un **conflicto**: no se
 cortocircuita, cae al juez (y se loguea).
@@ -46,7 +51,7 @@ cortocircuita, cae al juez (y se loguea).
 flowchart TB
   cls["Clasificación three-tier<br/>(cabeceras = SEÑAL de bulk, ya NO excluye)"]
   mark{"¿Marca manual?<br/>(relevance_marks)"}
-  rules{"Reglas del gate: COMPUESTAS (remitente+asunto)<br/>y BIPOLARES (block/allow), sin LLM"}
+  rules{"Reglas del gate: COMPUESTAS (remitente + regex asunto/cuerpo)<br/>y BIPOLARES (block/allow), sin LLM"}
   llm{"MOTOR ÚNICO: juez LLM + intereses<br/>(per_window o per_message)"}
   rel["relevant"]
   norel["not_relevant<br/>(queda en /datos, NO se procesa)"]
@@ -84,7 +89,7 @@ strings, sin LLM). NO es «juzgar 750 y después minar».
 El ciclo de automejora es cerrado y seguro: toda regla propuesta —por el LLM o a mano— pasa un
 **dry run determinista contra TODO el histórico**; una `block` que atraparía un solo correo de
 relevancia efectiva TRUE (o una `allow`, uno FALSE) queda `rejected` con su reporte persistido. Si
-pasa, se auto-activa, auditada y reversible. La **precisión la da el patrón** del asunto, no una
+pasa, se auto-activa, auditada y reversible. La **precisión la da el patrón**, no una
 tolerancia de ratio: la regla compuesta carva el subconjunto exacto. El LLM puede declararse «datos
 insuficientes» (no propone) si no ve un patrón claro. La minería solo analiza remitentes con
 `mining_min_messages`+ correos del mismo veredicto acumulados (default **3**, el disparador por
@@ -137,8 +142,12 @@ Desde la cola: **re-evaluar** (motor único sobre la muestra), **confirmar ruido
   bulk rescatado se procesa como `batch` barato (normalización `blacklist→batch` en los worksets,
   por la trampa de `plan_windows`).
 - **Regla compuesta, no solo-remitente.** Un remitente puede ser a veces relevante y a veces no; el
-  patrón del asunto delimita el subconjunto. Por eso las reglas mineadas exigen los dos predicados y
-  el dry run es estricto (cero contaminación) — la precisión sale del patrón, no de aflojar el umbral.
+  patrón regex (sobre asunto/cuerpo) delimita el subconjunto. Por eso las reglas mineadas exigen los
+  dos predicados y el dry run es estricto (cero contaminación) — la precisión sale del patrón.
+- **Patrón = regex, no substring (0077).** El substring corto reintroducía el footgun (`off` matcheaba
+  `official`) y no capturaba remitentes cuyo asunto varía pero el cuerpo repite (footers). El regex
+  anclado lo mata y habilita reglas de cuerpo; la garantía es el **espejo EXACTO Python `re` ↔
+  Postgres `~`** (batería de paridad en tests) — una divergencia volvería a abrir el footgun.
 - **UN solo motor de juicio.** El juez advisory del ex-`quality` (`judge_llm.py`, consumer
   `quality_judge`, columna `llm_verdict`, endpoint `/candidates/judge`) se **borró**. La
   re-evaluación corre el MISMO `run_relevance_gate`.
@@ -157,12 +166,12 @@ Desde la cola: **re-evaluar** (motor único sobre la muestra), **confirmar ruido
   se emitió cada veredicto.
 - **Proveedor intercambiable** (codex / deepseek / anthropic) — ver abajo.
 
-## Tablas (base `0065`, unificación `0071_unify_relevance`, reglas compuestas `0072_relevance_composite_rules`)
+## Tablas (base `0065`, unificación `0071`, reglas compuestas `0072`, regex `0077_relevance_regex_rules`)
 
 | Tabla | Qué guarda |
 |---|---|
 | `personal_interests` | Intereses en texto libre (UNIQUE por user+texto, `enabled`). La lista de rescate del motor único. |
-| `relevance_gate_rules` | Reglas COMPUESTAS y BIPOLARES **(0072)**: `effect` (`block`/`allow`), predicado de remitente (`sender_kind` ∈ `sender_email`/`sender_domain`/`list_id` + `sender_value`) y/o `subject_pattern` (≥1, CHECK), status `active/disabled/rejected`, `proposed_by` (`llm`/`manual`), `dry_run_report` JSONB (auditoría), modelo. Dedup único por `(user, effect, predicados)` case-insensitive. |
+| `relevance_gate_rules` | Reglas COMPUESTAS y BIPOLARES **(0072+0077)**: `effect` (`block`/`allow`), predicado de remitente (`sender_kind` ∈ `sender_email`/`sender_domain`/`list_id` + `sender_value`) y/o un patrón **REGEX** `pattern` + `match_field` (`subject`/`body`/`subject_or_body`) (≥1, CHECK pareados), status `active/disabled/rejected`, `proposed_by` (`llm`/`manual`), `dry_run_report` JSONB (auditoría), modelo. Dedup único por `(user, effect, predicados)` (remitente case-insensitive, patrón case-sensitive). |
 | `relevance_verdicts` | El cursor del gate: una fila por mensaje (UNIQUE inbox_id), `verdict`, `method` (`rule/llm/manual`), `rule_id`, `mode`. NO cambia con 0072: el veredicto + `rule_id` ya codifican la polaridad. |
 | `relevance_marks` | Override manual por-mensaje (gana sobre la heurística y el veredicto). |
 | `relevance_candidates` | **Reframe (0071)**: salida de los PROCEDIMIENTOS. `+ procedure`, `+ unit_type`; UNIQUE `(user_id, procedure, sender_key)`; `- llm_verdict`. `status` open/confirmed/dismissed; `snapshot` JSONB (métricas + `sample_inbox_ids`). |
@@ -192,7 +201,7 @@ en `/secrets/codex`; `MEMEX_CODEX_SANDBOX=danger-full-access` solo en docker).
   `run_rule_mining_cycle`) y `relevance` (detección de candidatos), fuera de `enabled_jobs` por default.
 - **CLI** `memex-relevance`: `run | mine | settings | interests | rules | review | detect |
   candidates`. `mine --effect {block,allow,all}`; `rules add --effect {block,allow} [--sender-kind
-  --sender-value] [--subject-contains]`. `--provider` = override por corrida.
+  --sender-value] [--pattern --match-field]`. `--provider` = override por corrida.
 - **API** `/relevance/*`: settings; interests (+ `suggestions`, `mine`, `suggestions/{id}/resolve`);
   rules (GET con filtro `effect`, POST con `effect`+predicados, `mine?effect=`); review (+
   `{id}/resolve`); **senders** (+ `tier`, `tiers`); **candidates** (+ `status`, `reevaluate`). La
@@ -200,7 +209,7 @@ en `/secrets/codex`; `MEMEX_CODEX_SANDBOX=danger-full-access` solo en docker).
 - **UI**: `/relevancia` = capa de SEÑALES (remitentes ruido-primero, filtro por procedimiento,
   **Re-evaluar**, **Bloquear remitente**, **Descartar**) + el gestor de reglas. `/filtros` = tier
   (dial de costo batch/individual), reglas del gate (alta compuesta **Bloquear** / **Marcar como de
-  interés** por remitente y/o asunto, minar las dos polaridades, cola de revisión, badge de efecto),
+  interés** por remitente y/o patrón regex (campo asunto/cuerpo), minar las dos polaridades, cola de revisión, badge de efecto),
   intereses (+ **panel de sugerencias**, minar/aplicar/descartar). **`/calidad` (inbox_feedback) es
   un eje distinto** (precisión de procesamiento) y NO se toca.
 
@@ -208,7 +217,7 @@ en `/secrets/codex`; `MEMEX_CODEX_SANDBOX=danger-full-access` solo en docker).
 
 Sin `trace_nodes` (crear roots pisaría la traza de extracción): la traza de la decisión es el
 veredicto persistido (`reason`, `rule_id`, `model`, `mode`) + la llm_call correlacionada. En /datos
-el detalle surfacea la regla compuesta que filtró (`rule_effect` + remitente + asunto).
+el detalle surfacea la regla compuesta que filtró (`rule_effect` + remitente + patrón).
 `llm_calls.purpose`: `relevance_gate` (veredictos), `relevance_rules` (minería de reglas, con
 `metadata.effect` block/allow) y `relevance_interests` (sugerencias), con `source_id`, conteos por
 veredicto en metadata y `response_text` crudo. Codex no factura por token (suscripción) → costo $0
