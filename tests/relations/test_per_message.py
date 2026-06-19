@@ -24,9 +24,11 @@ from memex.relations.edges import (
     RELTYPE_COOCURRENCIA,
     Ref,
     get_edge,
+    list_edges,
     propose_edge,
 )
 from memex.relations.per_message import parse_confirm, run_per_message_confirm
+from tests.relations._graph_seed import calendar, finance, mention, pair, person
 
 
 class FakeLLM:
@@ -333,3 +335,37 @@ async def test_batch_con_pares_lo_resume_run_summaries_no_el_juicio() -> None:
     assert summ is not None
     assert summ[1] == "batch"  # lote, no individual
     assert summ[2]["origin"] == "summarize"  # run_summaries, no el juicio (graph_confirm)
+
+
+# --- FASE 2b: PROPUESTA en correos densos (all-type; reemplazo del relevo) --------- #
+
+
+@pytest.mark.asyncio
+async def test_propuesta_densa_emite_aristas_all_type() -> None:
+    """Un correo DENSO (más vértices que el cap) lo saltea `generate_cooccurrence` (sin pistas que
+    juzgar); la fase de PROPUESTA le pide al LLM los pares relacionados ALL-TYPE y emite aristas
+    confirmed/`producer='llm'` que pasen el grounder. Acá un par calendar↔finance (tipos MIXTOS,
+    lo que el relevo solo-identidad jamás haría) se emite; un par con cita ausente se descarta."""
+    body = "La reunión del evento se pagó con Uber para la cena; gracias a todos por venir."
+    with connection() as c:
+        iid = _inbox(c, body)
+    fin = finance("Uber", [iid])
+    cal = calendar("Reunión del evento", [iid])
+    for k in range(7):  # calendar + finance + 7 personas = 9 vértices de contenido > cap (8)
+        mention(person(f"P{k}"), [iid])
+    # Orden canónico por (slug, id): 1=calendar, 2=finance, 3..9=personas.
+    fake = FakeLLM(
+        '{"pairs": ['
+        '{"a": 1, "b": 2, "relation": "pago del evento", "quote": "se pagó con Uber"}, '
+        '{"a": 2, "b": 3, "relation": "involucra", "quote": "cita que no figura en el cuerpo"}'
+        "]}"
+    )
+    stats = await run_per_message_confirm(1, client=fake)
+    assert (stats.dense_messages, stats.proposed_edges, stats.proposed_ungrounded) == (1, 1, 1)
+    with connection() as c:
+        llm_edges = list_edges(c, 1, producer="llm")
+    assert len(llm_edges) == 1
+    e = llm_edges[0]
+    assert e.verdict == "confirmed" and e.provenance == "inferred"
+    assert e.relation_type == "co-ocurrencia" and e.relation == "pago del evento"
+    assert pair(e) == {("calendar", cal), ("finance", fin)}  # tipos MIXTOS conectados

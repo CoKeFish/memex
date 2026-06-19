@@ -93,36 +93,6 @@ IDENTIDADES_HIERARCHY_SYSTEM_PROMPT = (
 )
 
 
-#: Analista de CO-OCURRENCIA: para UN correo denso (muchas identidades mencionadas), decide qué
-#: PARES de identidades están genuinamente relacionados EN ESE mensaje e ignora las de ruido
-#: (firmas, pies, listas). Solo aplica al overflow (correos que el paso determinista descarta por
-#: el tope de fan-out): ahí el todos-contra-todos sería ruido, el LLM filtra. SESGO A PRECISIÓN.
-IDENTIDADES_COOCCURRENCE_SYSTEM_PROMPT = (
-    "Sos un analista de RELACIONES entre identidades (personas, organizaciones y productos)\n"
-    "dentro de UN mismo mensaje (correo/chat/post). Te paso las identidades mencionadas en ESE\n"
-    "mensaje, cada una con un `id` numérico, su tipo, su nombre y un fragmento de evidencia de\n"
-    "dónde aparece.\n"
-    "El mensaje menciona MUCHAS identidades; tu tarea es decidir qué PARES están genuinamente\n"
-    "relacionados en el CONTEXTO de este mensaje (trabajan juntos, una pertenece a la otra, se\n"
-    "co-organizan, participan del mismo asunto) e IGNORAR las identidades de RUIDO (firmas, pies\n"
-    "de página, avisos legales, listas de no-relacionados, publicidad).\n\n"
-    "Reglas estrictas:\n"
-    "- `a_id` y `b_id`: dos `id` DISTINTOS de la lista. El par NO es dirigido (a-b = b-a).\n"
-    "- SESGO A PRECISIÓN: incluí un par SOLO si la evidencia del mensaje muestra que esas dos\n"
-    "  identidades se relacionan ENTRE SÍ. Ante la duda, NO lo incluyas.\n"
-    "- La sola CO-APARICIÓN en el mensaje NO basta para relacionar (por eso filtrás vos): dos\n"
-    "  identidades nombradas de pasada, sin vínculo entre ellas, NO van.\n"
-    "- NO inventes pares para llenar; muchas identidades no se relacionan y eso está bien. Una\n"
-    "  identidad de ruido no aparece en ningún par.\n"
-    "- `quote`: la prueba del par. Copiá TEXTUAL (carácter a carácter, sin parafrasear ni\n"
-    "  corregir tildes/puntuación) un fragmento de la evidencia de a o de b que muestre el\n"
-    "  vínculo. Si no podés citar un fragmento que lo pruebe, NO incluyas el par.\n\n"
-    "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
-    '{"pairs": [{"a_id": <id>, "b_id": <id>, "quote": "<cita textual de la evidencia>"}]}\n'
-    'Si ningún par se relaciona claramente, devolvé {"pairs": []}.'
-)
-
-
 #: Clasificador del TIPO de UNA entidad `desconocido`: persona / organización / producto, o
 #: `desconocido` si la evidencia no alcanza. Le pasa nombre + identificadores (correo/dominio) +
 #: afiliación de dominio + asuntos donde fue remitente. SESGO A NO ADIVINAR: ante la duda,

@@ -10,7 +10,7 @@ arman acá (las tejen los módulos al escribir): los tests que necesitan una rea
 from __future__ import annotations
 
 from memex.db import connection
-from memex.relations.cooccurrence import generate_cooccurrence
+from memex.relations.cooccurrence import dense_message_vertices, generate_cooccurrence
 from memex.relations.decisions import edge_sources, latest_decisions
 from memex.relations.deterministic import weave_afiliacion, weave_finance_consolidated
 from memex.relations.edges import list_edges, resolve_edge
@@ -118,6 +118,34 @@ def test_cooccurrence_respeta_cap() -> None:
     assert skipped == 1
     assert pistas == 0
     assert edges == []
+
+
+def test_dense_message_vertices_devuelve_los_salteados() -> None:
+    # 3 vértices del mismo correo con cap=2 → DENSO: `dense_message_vertices` devuelve sus vértices
+    # (los que generate_cooccurrence saltea) para que la fase de PROPUESTA les pida pares al LLM.
+    a = person("A")
+    b = person("B")
+    d = person("C")
+    mention(a, [40])
+    mention(b, [40])
+    mention(d, [40])
+    with connection() as c:
+        dense = dense_message_vertices(c, 1, cap=2)
+    assert set(dense) == {40}
+    assert {(r.slug, r.id) for r in dense[40]} == {
+        ("identidades:person", a),
+        ("identidades:person", b),
+        ("identidades:person", d),
+    }
+
+
+def test_dense_message_vertices_ignora_no_densos() -> None:
+    # 2 vértices con cap=8 → NO denso (lo cubre la co-ocurrencia normal) → no lo devuelve.
+    mention(person("A"), [41])
+    mention(person("B"), [41])
+    with connection() as c:
+        dense = dense_message_vertices(c, 1, cap=8)
+    assert dense == {}
 
 
 def test_cooccurrence_producto_sobrevive_reconcile() -> None:

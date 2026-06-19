@@ -141,6 +141,14 @@ def vertex_inbox_ids(conn: Connection, user_id: int) -> dict[Ref, set[int]]:
     return dict(prov)
 
 
+def _eff_cap(mid: int, chat_ids: set[int], cap: int) -> int:
+    """Cap efectivo de un mensaje: el chat usa el MÍNIMO entre `cap` y `chat_cooccurrence_cap`
+    (genera muchas co-ocurrencias y aporta menos). Único punto compartido por el salto de
+    `_materialize_cooccurrence` y la detección de densos de `dense_message_vertices`: que el
+    predicado de densidad NO pueda divergir entre el que SALTA y el que PROPONE."""
+    return min(cap, settings.chat_cooccurrence_cap) if mid in chat_ids else cap
+
+
 def _materialize_cooccurrence(
     conn: Connection,
     user_id: int,
@@ -157,18 +165,17 @@ def _materialize_cooccurrence(
     real); los pares de un mensaje no saltado se emiten canal incluido. PROCEDENCIA: cada
     par-mensaje se acumula en `relation_edge_sources` (también para aristas ya terminales — el
     `evidence='inbox:N'` conserva solo el primero por idempotencia, esta tabla los conserva
-    TODOS). DIFERIDO: un mensaje saltado pierde también sus pares cross-type — el relevo LLM
-    (`relations_llm`) solo cubre identidad↔identidad; un relevo mixto queda pendiente. Devuelve
-    (pistas, saltados)."""
+    TODOS). Un mensaje saltado pierde sus pistas; `dense_message_vertices` lo expone y la fase de
+    PROPUESTA de `relations.per_message` le pide al LLM sus pares relacionados ALL-TYPE (reemplazó
+    al relevo solo-identidad). Devuelve (pistas, saltados)."""
     by_msg: dict[int, set[Ref]] = defaultdict(set)
     for ref, ids in prov.items():
         for mid in ids:
             by_msg[mid].add(ref)
 
-    # Reglas para chats: generan muchas co-ocurrencias y suelen aportar menos → cap más bajo (el
-    # MÍNIMO entre el cap general y `chat_cooccurrence_cap`), así nacen menos pares de un chat.
+    # Reglas para chats: generan muchas co-ocurrencias y suelen aportar menos → cap más bajo
+    # (`_eff_cap`, MÍNIMO entre el cap general y `chat_cooccurrence_cap`), así nacen menos pares.
     chat_ids = _chat_message_ids(conn, user_id, by_msg.keys())
-    chat_cap = min(cap, settings.chat_cooccurrence_cap)
 
     # Aristas cooc ya materializadas (cualquier status): la procedencia sigue creciendo sobre
     # ellas sin re-proponer. El par canónico (slug, id) coincide con cómo se crearon.
@@ -188,7 +195,7 @@ def _materialize_cooccurrence(
         if len(uniq) < 2:
             continue
         content = sum(1 for r in uniq if r.slug != CANAL_SLUG)
-        eff_cap = chat_cap if mid in chat_ids else cap  # chat_cap = min(cap, chat_cooccurrence_cap)
+        eff_cap = _eff_cap(mid, chat_ids, cap)
         if content > eff_cap:
             skipped += 1
             _log.info(
@@ -316,3 +323,26 @@ def generate_cooccurrence(
         redundant_resolved=redundant,
     )
     return pistas, skipped, redundant
+
+
+def dense_message_vertices(
+    conn: Connection, user_id: int, *, cap: int = DEFAULT_COOCCURRENCE_CAP
+) -> dict[int, list[Ref]]:
+    """Por cada mensaje DENSO (más de `_eff_cap` vértices de CONTENIDO — el que
+    `_materialize_cooccurrence` SALTEA por fan-out, perdiendo sus pares), sus vértices de contenido
+    (CANAL excluido), ordenados canónicamente. Es la entrada de la fase de PROPUESTA del juez
+    relacional (`relations.per_message`): para estos mensajes NO hay pistas dibujadas que juzgar,
+    así que el LLM PROPONE los pares all-type desde esta lista. Mismo predicado de densidad que el
+    salto (vía `_eff_cap`), para no divergir. Solo lectura (no escribe ni dispara nada)."""
+    prov = vertex_inbox_ids(conn, user_id)
+    by_msg: dict[int, set[Ref]] = defaultdict(set)
+    for ref, ids in prov.items():
+        for mid in ids:
+            by_msg[mid].add(ref)
+    chat_ids = _chat_message_ids(conn, user_id, by_msg.keys())
+    out: dict[int, list[Ref]] = {}
+    for mid, refs in by_msg.items():
+        content = sorted((r for r in refs if r.slug != CANAL_SLUG), key=lambda r: (r.slug, r.id))
+        if len(content) > _eff_cap(mid, chat_ids, cap):
+            out[mid] = content
+    return out

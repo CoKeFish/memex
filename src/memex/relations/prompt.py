@@ -1,5 +1,5 @@
-"""Prompts LLM del grafo: el PARTIDOR de cúmulos (`clusters_llm`) y la CONFIRMACIÓN por-mensaje
-(`per_message`).
+"""Prompts LLM del grafo: el PARTIDOR de cúmulos (`clusters_llm`), la CONFIRMACIÓN por-mensaje y la
+PROPUESTA en correos densos (`per_message`).
 
 Partidor: el LLM recibe DOS bloques de UN blob detectado: los VÉRTICES miembros y las ARISTAS entre
 ellos (tipo, productor, nivel, evidencia). Devuelve una PARTICIÓN: los N contextos coherentes que el
@@ -83,4 +83,34 @@ GRAPH_CONFIRM_SYSTEM_PROMPT = (
     '{"verdicts": [{"pair": <id del par>, "verdict": "confirm|reject|dejar", '
     '"relation": "<nombre corto o vacío>", "confidence": <0..1>}, ...], '
     '"summary": "<resumen del correo>"}'
+)
+
+# --- PROPUESTA por-mensaje DENSO (all-type): un mensaje + sus entidades → pares relacionados --- #
+# Para un correo con MUCHAS entidades (el que la co-ocurrencia determinista SALTEA por fan-out, sin
+# dibujar pistas), el LLM PROPONE qué pares se relacionan — de CUALQUIER tipo, no solo identidades
+# (reemplaza al relevo solo-identidad). SESGO A PRECISIÓN + cita textual (la verifica el grounder).
+GRAPH_PROPOSE_SYSTEM_PROMPT = (
+    "Sos un analista de un grafo de conocimiento personal. Te paso UN mensaje real del dueño "
+    "(correo/chat/post) y la lista NUMERADA de ENTIDADES que aparecieron en él, de cualquier tipo: "
+    "personas, organizaciones, productos, pagos, eventos de agenda, hábitos, registros, canales.\n"
+    "El mensaje menciona MUCHAS entidades; tu tarea es decidir qué PARES están genuinamente "
+    "relacionados EN EL CONTEXTO de este mensaje (una compra o factura de ese producto/servicio, "
+    "personas coordinando algo, una entidad que es parte de otra, un pago de ese evento...) e "
+    "IGNORAR las entidades de RUIDO (firmas, pies de página, avisos legales, listas de "
+    "no-relacionados, publicidad).\n\n"
+    "Reglas estrictas:\n"
+    "- `a` y `b`: dos `id` DISTINTOS de la lista. El par NO es dirigido (a-b = b-a).\n"
+    "- SESGO A PRECISIÓN: incluí un par SOLO si el mensaje muestra que esas dos entidades se "
+    "relacionan ENTRE SÍ. Ante la duda, NO lo incluyas. La sola CO-APARICIÓN no basta.\n"
+    "- NO inventes pares para llenar; muchas entidades no se relacionan y eso está bien.\n"
+    "- `relation`: un nombre CORTO en español para la relación, derivado de cómo el texto la "
+    "muestra — no hay vocabulario fijo, nombrala como el texto la describa.\n"
+    "- `quote`: la prueba del par. Copiá TEXTUAL (carácter a carácter, sin parafrasear ni corregir "
+    "tildes/puntuación) un fragmento del mensaje que muestre el vínculo. Si no podés citar un "
+    "fragmento que lo pruebe, NO incluyas el par.\n"
+    "Juzgá SOLO lo que el mensaje muestra: no uses conocimiento externo sobre las entidades.\n\n"
+    "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
+    '{"pairs": [{"a": <id>, "b": <id>, "relation": "<nombre corto>", '
+    '"quote": "<cita textual del mensaje>"}]}\n'
+    'Si ningún par se relaciona claramente, devolvé {"pairs": []}.'
 )

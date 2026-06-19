@@ -18,6 +18,10 @@ Cascada determinista-primero (FrugalGPT/Snorkel):
    finanzas) se confirma por regla `extracted` — el dato real ya vouchó la relación.
 2. LLM por mensaje (presupuestado): el resto. Confirm exige confianza ≥ `per_message_min_confidence`
    (0.85) Y pasar la compuerta alias-aware; si no, degrada a ambiguo.
+3. PROPUESTA en correos DENSOS (over-cap): los que `generate_cooccurrence` saltea por fan-out no
+   tienen pistas que juzgar; el LLM PROPONE sus pares relacionados ALL-TYPE (cualquier tipo de
+   vértice, no solo identidades), emitidos `confirmed`/`producer=llm` con grounder de cita.
+   Reemplaza al relevo solo-identidad retirado; comparte el presupuesto LLM con el paso 2.
 
 Aristas soportadas por varios mensajes: el juicio es por-mensaje, la arista es una. Agregación
 MONÓTONA, confirm gana: un confirm grounded en cualquier mensaje confirma (la mejor confianza, su
@@ -50,9 +54,14 @@ from memex.core.trace import attach_to_root
 from memex.db import connection
 from memex.llm import ChatMessage, LLMClient, LLMResult, aclose_llm, build_llm_client
 from memex.llm.client import LLMQuotaError
+from memex.llm.grounding import DEFAULT_MIN_QUOTE_NORM_LEN, grounded
 from memex.logging import get_logger
 from memex.processing.render import render_payload
-from memex.relations.cooccurrence import generate_cooccurrence, vertex_inbox_ids
+from memex.relations.cooccurrence import (
+    dense_message_vertices,
+    generate_cooccurrence,
+    vertex_inbox_ids,
+)
 from memex.relations.decisions import (
     METHOD_LLM,
     METHOD_REGLA,
@@ -67,6 +76,7 @@ from memex.relations.decisions import (
 from memex.relations.edges import (
     CANAL_SLUG,
     PRODUCER_INBOX,
+    PRODUCER_LLM,
     PROVENANCE_EXTRACTED,
     PROVENANCE_INFERRED,
     RELTYPE_COOCURRENCIA,
@@ -80,7 +90,8 @@ from memex.relations.edges import (
     resolve_edge,
 )
 from memex.relations.gate import both_endpoints_present, normalize_body, vertex_surface_forms
-from memex.relations.prompt import GRAPH_CONFIRM_SYSTEM_PROMPT
+from memex.relations.graph_writer import add_edge
+from memex.relations.prompt import GRAPH_CONFIRM_SYSTEM_PROMPT, GRAPH_PROPOSE_SYSTEM_PROMPT
 from memex.relations.summary import persist_summary, run_summaries
 from memex.relations.vertices import Vertex, list_vertices
 from memex.sources import kind_for_type
@@ -96,6 +107,11 @@ LABEL_DESCONOCIDO = "desconocido"  #: sin señal determinista
 RULE_RECIBO = "recibo"
 _MAX_RELATION_CHARS = 80
 _MAX_TOKENS = 4096
+#: Tope anti-absurdo de vértices de un correo denso en la fase de PROPUESTA: por encima se saltea
+#: (espejo del `_MAX_IDENTITIES` del relevo retirado); cientos de entidades en un correo = ruido.
+_MAX_PROPOSE_VERTICES = 80
+#: Largo mínimo del `quote` NORMALIZADO para aceptar un par propuesto (grounder compartido).
+_MIN_QUOTE_NORM_LEN = DEFAULT_MIN_QUOTE_NORM_LEN
 _VALID_LLM_VERDICTS = frozenset({VERDICT_CONFIRM, VERDICT_REJECT, VERDICT_DEJAR})
 _BULK_NOTE = (
     "[Señal determinista: el mensaje declara encabezados de correo masivo (lista/newsletter). "
@@ -117,6 +133,10 @@ class ConfirmStats:
     llm_rejected: int = 0  # rechazadas por el LLM (todos sus mensajes lo rechazan)
     llm_dejar: int = 0  # memo `dejar` del LLM (evaluada completa, sin veredicto)
     gated: int = 0  # confirms del LLM degradados: un extremo no aparece en el cuerpo
+    dense_messages: int = 0  # correos densos (over-cap) procesados por la fase de PROPUESTA
+    proposed_edges: int = 0  # aristas confirmed all-type emitidas por la propuesta densa
+    proposed_ungrounded: int = 0  # pares propuestos descartados por el grounder (cita no hallada)
+    propose_skipped: int = 0  # correos densos saltados por exceso de vértices (anti-absurdo)
     summaries: int = 0  # resúmenes persistidos (individual del juicio + lotes de run_summaries)
     budget_exhausted: bool = False
     estimated_calls: int = 0  # dry-run: llamadas que haría
@@ -348,6 +368,82 @@ async def judge_message(
     return verdicts, summary, result
 
 
+# --- PROPUESTA en correos densos (all-type; reemplaza el relevo solo-identidad) -------- #
+
+
+def _parse_proposals(content: str, n: int) -> list[tuple[int, int, str, str]]:
+    """Parsea `{"pairs":[{a, b, relation, quote}]}` de la PROPUESTA densa. ULTRA-DEFENSIVO (molde
+    `parse_confirm`): basura → `[]`; ids fuera de 1..n o bool-como-int fuera; self-par fuera; par
+    canónico `a<b`; dedup primero-gana; `relation` truncada; `quote` ausente → `""` (lo descarta el
+    grounder después). Devuelve `(a, b, relation, quote)` con ids LOCALES 1..n."""
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("pairs")
+    if not isinstance(raw, list):
+        return []
+    out: list[tuple[int, int, str, str]] = []
+    seen: set[tuple[int, int]] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        a = item.get("a")
+        b = item.get("b")
+        if not (isinstance(a, int) and not isinstance(a, bool) and 1 <= a <= n):
+            continue
+        if not (isinstance(b, int) and not isinstance(b, bool) and 1 <= b <= n):
+            continue
+        if a == b:
+            continue
+        pair = (a, b) if a < b else (b, a)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        rel = item.get("relation")
+        relation = rel.strip()[:_MAX_RELATION_CHARS] if isinstance(rel, str) else ""
+        q = item.get("quote")
+        quote = q.strip() if isinstance(q, str) else ""
+        out.append((pair[0], pair[1], relation, quote))
+    return out
+
+
+def _serialize_propose(rendered: str, vertices: list[Vertex], note: str) -> str:
+    """Cuerpo del prompt de PROPUESTA: nota (si hay) + MENSAJE renderizado + ENTIDADES numeradas
+    (id LOCAL 1..n, tipo, etiqueta). El LLM propone pares por esos ids locales."""
+    lines: list[str] = []
+    if note:
+        lines.append(note)
+        lines.append("")
+    lines.append("MENSAJE:")
+    lines.append(rendered if rendered else "(mensaje vacío o purgado)")
+    lines.append("")
+    lines.append("ENTIDADES (id: tipo — etiqueta):")
+    for i, v in enumerate(vertices, start=1):
+        lines.append(f"{i}: {v.kind} — {v.label}")
+    return "\n".join(lines)
+
+
+async def propose_message(
+    llm: LLMClient, rendered: str, vertices: list[Vertex], note: str = ""
+) -> tuple[list[tuple[int, int, str, str]], LLMResult]:
+    """UNA llamada que PROPONE los pares relacionados entre las entidades de UN correo denso
+    (all-type, no solo identidades). Devuelve (propuestas `[(a, b, relation, quote)]` por id local
+    1..n, LLMResult). El grounder verifica la cita después; acá solo se parsea."""
+    result = await llm.complete(
+        [
+            ChatMessage("system", GRAPH_PROPOSE_SYSTEM_PROMPT),
+            ChatMessage("user", _serialize_propose(rendered, vertices, note)),
+        ],
+        response_format="json_object",
+        temperature=0.0,
+        max_tokens=_MAX_TOKENS,
+    )
+    return _parse_proposals(result.content, len(vertices)), result
+
+
 # --- agregación de votos por arista --------------------------------------------------- #
 
 
@@ -418,7 +514,11 @@ async def run_per_message_confirm(
             work = work[:limit]
         stats.edges = len(work)
         all_msgs = {m for e in work for m in evidence[e.id]}
-        labeler = MessageLabeler(conn, user_id, all_msgs)
+        # Correos DENSOS (over-cap) que generate_cooccurrence salteó por fan-out: van a la fase de
+        # PROPUESTA (no tienen pistas dibujadas que juzgar). Se suman al labeler para respetar
+        # `confirm_judge_chats` también en la propuesta.
+        dense = dense_message_vertices(conn, user_id, cap=settings.cooccurrence_cap)
+        labeler = MessageLabeler(conn, user_id, all_msgs | set(dense))
         vmap = {v.ref: v for v in list_vertices(conn, user_id)}
 
     # --- FASE 1: a priori (recibo) — sin LLM, sin compuerta -------------------------- #
@@ -447,7 +547,11 @@ async def run_per_message_confirm(
 
     if dry_run:
         stats.confirmed_recibo = len(recibo_edges)
-        stats.estimated_calls = min(len(by_msg), budget) if not no_llm else 0
+        dense_judgeable = sum(
+            1 for m in dense if settings.confirm_judge_chats or labeler.label(m) != LABEL_CHAT
+        )
+        stats.dense_messages = dense_judgeable
+        stats.estimated_calls = min(len(by_msg) + dense_judgeable, budget) if not no_llm else 0
         _log.info(
             "relation.confirm.dry_run",
             user_id=user_id,
@@ -502,6 +606,20 @@ async def run_per_message_confirm(
             client=client,
         )
 
+    # --- FASE 2b: PROPUESTA en correos densos (reemplaza el relevo solo-identidad) ---- #
+    # Los correos densos (que generate_cooccurrence salteó por fan-out) NO tienen pistas dibujadas:
+    # el LLM PROPONE sus pares relacionados ALL-TYPE. Budget COMPARTIDO con la Fase 2 (lo restante).
+    if dense and not no_llm:
+        await _run_llm_propose_dense(
+            user_id,
+            dense,
+            vmap,
+            labeler,
+            budget=budget - stats.llm_calls,
+            stats=stats,
+            client=client,
+        )
+
     # --- FASE 3: resumen de las unidades sin resumir (único productor de `summaries`) - #
     # Cubre lo que la Fase 2 no resumió: lotes (chat / email batch) e individuales sin pares de
     # co-ocurrencia. El `client` inyectado (test fake) se reusa; en producción `run_summaries` arma
@@ -529,6 +647,9 @@ async def run_per_message_confirm(
         llm_rejected=stats.llm_rejected,
         llm_dejar=stats.llm_dejar,
         gated=stats.gated,
+        dense_messages=stats.dense_messages,
+        proposed_edges=stats.proposed_edges,
+        proposed_ungrounded=stats.proposed_ungrounded,
         summaries=stats.summaries,
         budget_exhausted=stats.budget_exhausted,
         errors=stats.errors,
@@ -651,10 +772,19 @@ async def _run_llm_phase(
 
 
 def _record_call_cost(
-    user_id: int, mid: int, n_pairs: int, gated: int, result: LLMResult, stats: ConfirmStats
+    user_id: int,
+    mid: int,
+    n_pairs: int,
+    gated: int,
+    result: LLMResult,
+    stats: ConfirmStats,
+    *,
+    label: str = "confirmación co-ocurrencia",
 ) -> None:
-    """Telemetría de la llamada: `record_llm_call` (purpose='graph_confirm', inbox en metadata —la
-    FK puede purgarse) + el costo colgado del ROOT de traza del mensaje si existe."""
+    """Telemetría de la llamada: `record_llm_call` (purpose='graph_confirm', inbox en metadata, la
+    FK puede purgarse) + el costo colgado del ROOT de traza del mensaje si existe. `label` distingue
+    en la traza el JUICIO de la PROPUESTA densa; `gated` cuenta los descartados (la compuerta en el
+    juicio, el grounder en la propuesta)."""
     call_id = record_llm_call(
         user_id=user_id,
         purpose="graph_confirm",
@@ -673,7 +803,7 @@ def _record_call_cost(
         if node is not None:
             node.llm(
                 call_id,
-                label="confirmación co-ocurrencia",
+                label=label,
                 status="ok",
                 detail={"pairs": n_pairs, "gated": gated},
             )
@@ -681,6 +811,107 @@ def _record_call_cost(
     stats.cost.prompt_tokens += result.usage.prompt_tokens
     stats.cost.completion_tokens += result.usage.completion_tokens
     stats.cost.cost_usd += result.cost_usd
+
+
+async def _run_llm_propose_dense(
+    user_id: int,
+    dense: dict[int, list[Ref]],
+    vmap: dict[Ref, Vertex],
+    labeler: MessageLabeler,
+    *,
+    budget: int,
+    stats: ConfirmStats,
+    client: LLMClient | None,
+) -> None:
+    """Fase de PROPUESTA: por cada correo DENSO (el que `generate_cooccurrence` salteó por fan-out,
+    sin pistas dibujadas que juzgar), el LLM PROPONE los pares relacionados entre TODOS sus vértices
+    (all-type) y se emiten aristas `confirmed`/`producer='llm'` que pasen el grounder (cita en el
+    cuerpo). Reemplaza al relevo solo-identidad retirado. Tope `budget` llamadas (lo que sobró del
+    juicio). Best-effort por mensaje; `LLMQuotaError` propaga tras aplicar lo pagado. Respeta
+    `confirm_judge_chats` y un tope anti-absurdo de vértices (`_MAX_PROPOSE_VERTICES`)."""
+    if budget <= 0 or not dense:
+        return
+    order = sorted(dense)  # estable por inbox_id
+    calls = 0
+    quota: LLMQuotaError | None = None
+    owns_client = client is None
+    llm: LLMClient = client or build_llm_client("relations_confirm", user_id=user_id)
+    _log.info("relation.confirm.propose.start", user_id=user_id, dense=len(dense), budget=budget)
+    try:
+        for mid in order:
+            if not settings.confirm_judge_chats and labeler.label(mid) == LABEL_CHAT:
+                continue
+            vertices = [vmap[r] for r in dense[mid] if r in vmap]
+            if len(vertices) < 2:
+                continue
+            if len(vertices) > _MAX_PROPOSE_VERTICES:
+                stats.propose_skipped += 1
+                _log.info(
+                    "relation.confirm.propose.skip_too_many", inbox_id=mid, vertices=len(vertices)
+                )
+                continue
+            if calls >= budget:
+                stats.budget_exhausted = True
+                _log.info("relation.confirm.propose.budget_exhausted", calls=calls, budget=budget)
+                break
+            stats.dense_messages += 1
+            with connection() as conn:
+                rendered = load_rendered(conn, user_id, mid)
+            try:
+                proposals, result = await propose_message(llm, rendered, vertices)
+            except LLMQuotaError as exc:
+                quota = exc
+                break
+            except Exception as exc:  # best-effort: un mensaje fallido no frena los demás
+                stats.errors += 1
+                _log.error(
+                    "relation.confirm.propose_failed",
+                    inbox_id=mid,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc),
+                )
+                continue
+            calls += 1
+            ungrounded_msg = 0
+            with connection() as conn:
+                for a, b, relation, quote in proposals:
+                    if not grounded(quote, rendered, min_len=_MIN_QUOTE_NORM_LEN):
+                        ungrounded_msg += 1
+                        stats.proposed_ungrounded += 1
+                        _log.info(
+                            "relation.confirm.propose.ungrounded",
+                            inbox_id=mid,
+                            quote_len=len(quote),
+                        )
+                        continue
+                    add_edge(
+                        conn,
+                        user_id,
+                        vertices[a - 1].ref,
+                        vertices[b - 1].ref,
+                        producer=PRODUCER_LLM,
+                        relation_type=RELTYPE_COOCURRENCIA,
+                        verdict=VERDICT_CONFIRMED,
+                        provenance=PROVENANCE_INFERRED,
+                        relation=relation,
+                        evidence=f"inbox:{mid} | {quote}",
+                    )
+                    stats.proposed_edges += 1
+            _record_call_cost(
+                user_id,
+                mid,
+                len(proposals),
+                ungrounded_msg,
+                result,
+                stats,
+                label="propuesta co-ocurrencia",
+            )
+    finally:
+        if owns_client:
+            await aclose_llm(llm)
+    stats.llm_calls += calls
+    if quota is not None:
+        raise quota
 
 
 def _apply_votes(

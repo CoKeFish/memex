@@ -29,7 +29,6 @@ from memex.modules.finance.consolidate import run_consolidation as run_finance_c
 from memex.modules.finance.dedup_llm import run_dedup_phase2 as run_finance_dedup_phase2
 from memex.modules.identidades.dedup_llm import run_merge_phase2
 from memex.modules.identidades.hierarchy import run_organize
-from memex.modules.identidades.relations_llm import run_cooccurrence_llm
 from memex.modules.identidades.sync import run_sync as run_identidades_sync
 from memex.modules.orchestrator import run_extraction
 from memex.ocr.worker import run_ocr
@@ -278,7 +277,6 @@ class IdentidadesCycleStats:
     synced: int = 0
     merged: int = 0
     linked: int = 0  # pertenencias («sub») seteadas por el organizador LLM
-    cooccurrence_edges: int = 0  # aristas confirmed identidad↔identidad del handler de overflow
     errors: int = 0
     steps_failed: list[str] = field(default_factory=list)
 
@@ -340,22 +338,9 @@ async def run_identidades_cycle(user_id: int) -> IdentidadesCycleStats:
         cycle.errors += 1
         cycle.steps_failed.append("organize")
         _log.warning("scheduler.identidades.step_failed", step="organize", error=str(e))
-    # Co-ocurrencia identidad↔identidad de los correos densos (overflow del tope de fan-out): el
-    # LLM decide qué pares se relacionan. ÚLTIMO paso a propósito: corre DESPUÉS del dedup para no
-    # emitir aristas a ids que se van a fundir. El tope es configurable (MEMEX_COOCCURRENCE_CAP).
-    from memex.config import settings  # import local: estilo del módulo (evita ciclos al importar)
-
-    try:
-        cooc_stats = await run_cooccurrence_llm(user_id, cap=settings.cooccurrence_cap)
-        cycle.cooccurrence_edges += cooc_stats.edges
-        cycle.errors += cooc_stats.errors
-    except LLMQuotaError:
-        cycle.steps_failed.append("cooccurrence:no_quota")
-        _log.error("scheduler.identidades.aborted_no_quota", step="cooccurrence")
-    except Exception as e:
-        cycle.errors += 1
-        cycle.steps_failed.append("cooccurrence")
-        _log.warning("scheduler.identidades.step_failed", step="cooccurrence", error=str(e))
+    # La co-ocurrencia (incl. los correos densos, ALL-TYPE) la maneja ahora la confirmación
+    # por-mensaje (`relations.per_message`, fase de PROPUESTA del job `graph_confirm`); el relevo
+    # solo-identidad (`relations_llm`) se retiró.
     return cycle
 
 
