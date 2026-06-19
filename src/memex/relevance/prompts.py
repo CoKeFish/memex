@@ -160,19 +160,31 @@ def parse_gate_verdicts(content: str, expected_ids: set[int]) -> dict[int, tuple
     return {iid: raw_by_id.get(iid, ("insufficient", _FALLBACK_REASON)) for iid in expected_ids}
 
 
-#: Espec común del formato de regla COMPUESTA (remitente + asunto, los dos obligatorios) + salida.
+#: Espec común del formato de regla COMPUESTA (remitente + patrón REGEX) + salida.
 _COMPOSITE_RULE_SPEC = (
-    "Cada regla DEBE combinar un REMITENTE y un PATRÓN DE ASUNTO (los dos, con AND):\n"
+    "Cada regla combina un REMITENTE y un PATRÓN (REGEX), los dos con AND:\n"
     "- `sender_kind`: 'sender_email' (remitente exacto) | 'sender_domain' (dominio exacto) | "
     "'list_id' (List-Id exacto); `sender_value`: el valor.\n"
-    "- `subject_pattern`: substring del asunto que delimita ESA clase de correos (ej. 'oferta', "
-    "'práctica profesional').\n"
-    "El remitente solo es demasiado grueso: el patrón del asunto acota el subconjunto. Si para un "
-    "remitente NO ves un patrón de asunto claro y recurrente, NO propongas regla (datos "
+    "- `pattern`: un REGEX que delimita ESA clase; `match_field`: 'subject' | 'body' | "
+    "'subject_or_body' (contra qué se aplica).\n"
+    "REGLAS DEL REGEX (se valida y se rechaza si no cumple):\n"
+    "- En MINÚSCULA y ANCLADO/ESTRUCTURAL (`^`, `$`, estructura del dominio): el texto se compara "
+    "en minúscula.\n"
+    "- NUNCA un fragmento corto suelto dentro de palabra ('off' matchearía 'official'); usá "
+    "límites explícitos como `(^|[^a-z])off([^a-z]|$)`.\n"
+    "- Permitido: literales, `.` `^` `$` `*` `+` `?` `{n,m}`, clases `[...]`, `\\d` `\\s`, `|`, "
+    "grupos `(...)` `(?:...)`. PROHIBIDO: `\\b` `\\w`, lookahead/lookbehind, backreferences, flags "
+    "`(?i)` (para «palabra entera» usá clases explícitas, no `\\b`).\n"
+    "- Preferí `match_field`='body' cuando el ASUNTO varía pero el cuerpo repite una estructura "
+    "(ej. un footer de notificación).\n"
+    "Si para un remitente NO ves un patrón claro y recurrente, NO propongas regla (datos "
     "insuficientes para esa clase).\n"
+    "Ejemplos de `pattern`: `^re: \\[.+/.+\\]` (hilos de github, en subject); "
+    "`you are receiving this because you are subscribed` (footer, en body).\n"
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
-    '{"rules": [{"sender_kind": "<kind>", "sender_value": "<valor>", "subject_pattern": '
-    '"<substring del asunto>", "rationale": "<por qué, max 200 chars>"}, ...]}\n'
+    '{"rules": [{"sender_kind": "<kind>", "sender_value": "<valor>", "pattern": "<regex en '
+    'minúscula>", "match_field": "subject|body|subject_or_body", "rationale": "<por qué, max 200 '
+    'chars>"}, ...]}\n'
     'Si no hay patrones claros, devolvé {"rules": []}.'
 )
 
@@ -208,15 +220,20 @@ def build_rules_user_content(aggregates_json: str) -> str:
     return f"Correos agrupados por remitente (JSON):\n{aggregates_json}"
 
 
+#: Piso de longitud del patrón mineado: descarta fragmentos de 2-3 chars (el footgun del substring).
+_MIN_PATTERN_LEN = 4
+
+
 def parse_rule_proposals(content: str) -> list[dict[str, str]] | None:
-    """Parsea `{"rules": [...]}` → [{sender_kind, sender_value, subject_pattern, rationale}].
+    """Parsea `{"rules": [...]}` → [{sender_kind, sender_value, pattern, match_field, rationale}].
 
     None si el JSON es inválido. Las reglas mineadas son COMPUESTAS: una propuesta sin remitente
-    válido (kind+value) Y sin patrón de asunto se descarta (no rompe la corrida) — incluye el caso
-    «datos insuficientes» (el LLM devuelve `{"rules": []}`). La validación REAL es el dry run del
-    caller; acá solo se sanea el shape.
+    válido (kind+value) Y patrón+campo válidos se descarta (no rompe la corrida) — incluye el caso
+    «datos insuficientes» (`{"rules": []}`). Exige un patrón de longitud razonable (sin
+    fragmentos de 2-3 chars). La validación REAL (dialecto + dry run) la hace el caller; acá solo
+    se sanea el shape.
     """
-    from memex.relevance.rules import SENDER_KINDS
+    from memex.relevance.rules import MATCH_FIELDS, SENDER_KINDS
 
     try:
         data = json.loads(_strip_fences(content))
@@ -230,14 +247,21 @@ def parse_rule_proposals(content: str) -> list[dict[str, str]] | None:
             continue
         sender_kind = str(item.get("sender_kind", "")).strip()
         sender_value = str(item.get("sender_value", "")).strip()
-        subject_pattern = str(item.get("subject_pattern", "")).strip()
-        if sender_kind not in SENDER_KINDS or not sender_value or not subject_pattern:
+        pattern = str(item.get("pattern", "")).strip()
+        match_field = str(item.get("match_field", "")).strip()
+        if (
+            sender_kind not in SENDER_KINDS
+            or not sender_value
+            or len(pattern) < _MIN_PATTERN_LEN
+            or match_field not in MATCH_FIELDS
+        ):
             continue
         proposals.append(
             {
                 "sender_kind": sender_kind,
                 "sender_value": sender_value,
-                "subject_pattern": subject_pattern,
+                "pattern": pattern,
+                "match_field": match_field,
                 "rationale": str(item.get("rationale", "")).strip(),
             }
         )

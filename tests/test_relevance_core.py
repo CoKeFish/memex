@@ -4,6 +4,7 @@ filtro que aplican los worksets de summarize/extract. Sin LLM (todo determinista
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -40,9 +41,10 @@ from memex.relevance import (
 from memex.relevance.rules import (
     EmailFields,
     extract_email_fields,
+    match_pattern,
     match_sender,
-    match_subject,
     rule_matches,
+    validate_pattern,
 )
 
 
@@ -113,7 +115,8 @@ def _mk_rule(
     effect: str = "block",
     sender_kind: str | None = None,
     sender_value: str | None = None,
-    subject_pattern: str | None = None,
+    pattern: str | None = None,
+    match_field: str | None = None,
     proposed_by: str = "manual",
     rationale: str = "",
 ) -> dict[str, Any] | None:
@@ -124,7 +127,8 @@ def _mk_rule(
         effect=effect,
         sender_kind=sender_kind,
         sender_value=sender_value,
-        subject_pattern=subject_pattern,
+        pattern=pattern,
+        match_field=match_field,
     )
     return create_rule(
         c,
@@ -132,7 +136,8 @@ def _mk_rule(
         effect=effect,
         sender_kind=sender_kind,
         sender_value=sender_value,
-        subject_pattern=subject_pattern,
+        pattern=pattern,
+        match_field=match_field,
         proposed_by=proposed_by,
         report=report,
         rationale=rationale,
@@ -210,16 +215,22 @@ def test_interests_crud_and_duplicate() -> None:
 
 def test_extract_email_fields_normalizes() -> None:
     f = extract_email_fields(
-        {"from": {"email": "Promo@Steam.COM"}, "subject": "GRAN Oferta", "list_id": "L.steam"}
+        {
+            "from": {"email": "Promo@Steam.COM"},
+            "subject": "GRAN Oferta",
+            "list_id": "L.steam",
+            "body_text": "Cuerpo  CON   espacios\nY salto",
+        }
     )
     assert f == EmailFields(
         sender_email="promo@steam.com",
         sender_domain="steam.com",
-        subject="GRAN Oferta",
         list_id="l.steam",
+        subject="gran oferta",  # normalizado: 1 línea + minúscula
+        body="cuerpo con espacios y salto",  # invisibles fuera, ws colapsado, minúscula
     )
     empty = extract_email_fields({})
-    assert empty == EmailFields("", "", "", "")
+    assert empty == EmailFields("", "", "", "", "")
 
 
 @pytest.mark.parametrize(
@@ -234,27 +245,32 @@ def test_extract_email_fields_normalizes() -> None:
     ],
 )
 def test_match_sender_per_kind(sender_kind: str, sender_value: str, expected: bool) -> None:
-    fields = EmailFields("promo@steam.com", "steam.com", "Gran OFERTA de verano", "l.steam")
+    fields = EmailFields("promo@steam.com", "steam.com", "l.steam", "gran oferta de verano", "")
     assert match_sender(sender_kind, sender_value, fields) is expected
 
 
-def test_match_subject_substring_case_insensitive() -> None:
-    fields = EmailFields("promo@steam.com", "steam.com", "Gran OFERTA de verano", "l.steam")
-    assert match_subject("oferta", fields) is True
-    assert match_subject("factura", fields) is False
+def test_match_pattern_regex_over_field() -> None:
+    fields = EmailFields(
+        "promo@steam.com", "steam.com", "l.steam", "gran oferta de verano", "cuerpo del correo"
+    )
+    assert match_pattern(re.compile("oferta", re.ASCII), "subject", fields) is True
+    assert match_pattern(re.compile("factura", re.ASCII), "subject", fields) is False
+    assert match_pattern(re.compile("cuerpo", re.ASCII), "body", fields) is True
+    assert match_pattern(re.compile("cuerpo", re.ASCII), "subject", fields) is False
+    assert match_pattern(re.compile("oferta|cuerpo", re.ASCII), "subject_or_body", fields) is True
 
 
 def test_rule_matches_composite_is_and_of_predicates() -> None:
-    fields = EmailFields("prof@uni.edu", "uni.edu", "Notas del parcial", "")
-    # remitente + asunto: matchea solo si los DOS coinciden
-    assert rule_matches("sender_domain", "uni.edu", "notas", fields) is True
-    assert rule_matches("sender_domain", "uni.edu", "oferta", fields) is False  # asunto no
-    assert rule_matches("sender_domain", "otra.edu", "notas", fields) is False  # remitente no
+    fields = EmailFields("prof@uni.edu", "uni.edu", "", "notas del parcial", "")
+    # remitente + patrón: matchea solo si los DOS coinciden
+    assert rule_matches("sender_domain", "uni.edu", "notas", "subject", fields) is True
+    assert rule_matches("sender_domain", "uni.edu", "oferta", "subject", fields) is False
+    assert rule_matches("sender_domain", "otra.edu", "notas", "subject", fields) is False
     # un solo predicado: matchea por ese solo
-    assert rule_matches("sender_domain", "uni.edu", None, fields) is True
-    assert rule_matches(None, None, "notas", fields) is True
+    assert rule_matches("sender_domain", "uni.edu", None, None, fields) is True
+    assert rule_matches(None, None, "notas", "subject", fields) is True
     # sin predicados → False (defensivo: una regla vacía no matchea todo)
-    assert rule_matches(None, None, None, fields) is False
+    assert rule_matches(None, None, None, None, fields) is False
 
 
 def test_apply_active_rules_block_first_match_wins_and_ignores_disabled() -> None:
@@ -264,7 +280,7 @@ def test_apply_active_rules_block_first_match_wins_and_ignores_disabled() -> Non
     assert [r.inbox_id for r in rows] == [iid]
     with connection() as c:
         r1 = _mk_rule(c, sender_kind="sender_domain", sender_value="steam.com")
-        r2 = _mk_rule(c, subject_pattern="oferta")
+        r2 = _mk_rule(c, pattern="oferta", match_field="subject")
         assert r1 is not None and r2 is not None
         app = apply_active_rules(c, 1, rows)
         assert app.conflicts == []
@@ -286,7 +302,8 @@ def test_apply_active_rules_allow_marks_relevant() -> None:
             effect="allow",
             sender_kind="sender_domain",
             sender_value="uni.edu",
-            subject_pattern="notas",
+            pattern="notas",
+            match_field="subject",
         )
         assert rule is not None and rule["status"] == "active"
         app = apply_active_rules(c, 1, rows)
@@ -301,7 +318,7 @@ def test_apply_active_rules_conflict_goes_to_judge() -> None:
     iid = _seed_msg(sid, "m1", sender="prof@uni.edu", subject="Oferta y notas")
     rows = load_gate_workset(1)
     with connection() as c:
-        block = _mk_rule(c, effect="block", subject_pattern="oferta")
+        block = _mk_rule(c, effect="block", pattern="oferta", match_field="subject")
         allow = _mk_rule(c, effect="allow", sender_kind="sender_domain", sender_value="uni.edu")
         assert block is not None and allow is not None
         app = apply_active_rules(c, 1, rows)
@@ -352,13 +369,14 @@ def test_dry_run_allow_passes_only_when_no_not_relevant() -> None:
         coarse = dry_run_rule(  # solo-remitente: atrapa el not_relevant → rechazada
             c, 1, effect="allow", sender_kind="sender_domain", sender_value="uni.edu"
         )
-        precise = dry_run_rule(  # compuesta (remitente + asunto): solo el relevante → pasa
+        precise = dry_run_rule(  # compuesta (remitente + patrón): solo el relevante → pasa
             c,
             1,
             effect="allow",
             sender_kind="sender_domain",
             sender_value="uni.edu",
-            subject_pattern="notas",
+            pattern="notas",
+            match_field="subject",
         )
     assert coarse.matched_not_relevant == 1
     assert coarse.contaminating_sample_ids == (bad,)  # allow: el lado malo es el no-relevante
@@ -414,14 +432,16 @@ def test_block_and_allow_same_predicates_coexist() -> None:
             effect="block",
             sender_kind="sender_domain",
             sender_value="x.com",
-            subject_pattern="oferta",
+            pattern="oferta",
+            match_field="subject",
         )
         a = _mk_rule(
             c,
             effect="allow",
             sender_kind="sender_domain",
             sender_value="x.com",
-            subject_pattern="oferta",
+            pattern="oferta",
+            match_field="subject",
         )
         assert b is not None and a is not None
         assert {r["effect"] for r in list_rules(c, 1)} == {"block", "allow"}
@@ -450,13 +470,100 @@ def test_create_rule_rejects_invalid_predicates() -> None:
             dry_run_rule(c, 1, effect="allow", sender_kind="sender_domain")
 
 
-def test_dry_run_subject_contains_escapes_like_metachars() -> None:
+def test_dry_run_regex_anchored_kills_off_official_footgun() -> None:
+    # El footgun original: substring 'off' matcheaba 'official'. Un regex anclado con límites
+    # explícitos (\b está prohibido por divergente) matchea 'off' como palabra, NO 'official'.
     sid = _seed_source()
-    _seed_msg(sid, "m1", subject="descuento 100% real")
-    _seed_msg(sid, "m2", subject="sin porcentaje", minute=1)
+    _seed_msg(sid, "m1", subject="20% off hoy")
+    _seed_msg(sid, "m2", subject="official release v2", minute=1)
     with connection() as c:
-        report = dry_run_rule(c, 1, effect="block", subject_pattern="100% real")
-    assert report.matched == 1  # el % es literal, no comodín
+        report = dry_run_rule(
+            c, 1, effect="block", pattern=r"(^|[^a-z])off([^a-z]|$)", match_field="subject"
+        )
+    assert report.matched == 1  # solo el promo; 'official' NO matchea
+
+
+#: Batería de paridad: (pattern, match_field, subject, body, expected). El MISMO regex DEBE matchear
+#: idéntico en Python `re` (runtime) y en Postgres `~` (dry run) — esa igualdad es la garantía del
+#: rediseño (una divergencia reintroduce el footgun: el dry run pasa pero el runtime difiere).
+_PARITY_CASES = [
+    (r"^re: \[.+/.+\]", "subject", "Re: [louthy/language-ext] Bug #42", "x", True),
+    (r"^re: \[.+/.+\]", "subject", "Re: language-ext sin corchetes", "x", False),
+    (r"(^|[^a-z])off([^a-z]|$)", "subject", "20% off hoy", "x", True),
+    (r"(^|[^a-z])off([^a-z]|$)", "subject", "official release v2", "x", False),
+    # acentos: el patrón en minúscula con ó matchea el asunto en MAYÚSCULA en AMBOS motores
+    # (str.lower() ≡ lower() en latín; sin plegado del motor, que divergiría).
+    ("inscripción", "subject", "INSCRIPCIÓN ABIERTA 2026", "x", True),
+    (r"pedido \d{4}", "subject", "Pedido 2026 confirmado", "x", True),  # \d ASCII en ambos
+    # cuerpo: footer recurrente; la normalización colapsa saltos/espacios igual en Py y SQL
+    (
+        "you are receiving this because",
+        "body",
+        "Asunto cualquiera",
+        "Hola\n\nYou  are   receiving\nthis because you subscribed",
+        True,
+    ),
+    (
+        "you are receiving this because",
+        "subject",
+        "Asunto cualquiera",
+        "Hola\n\nYou  are   receiving\nthis because you subscribed",
+        False,
+    ),
+    ("suscripción", "subject_or_body", "Asunto X", "gestioná tu suscripción acá", True),
+    # soft hyphen (U+00AD) dentro de la palabra: se quita en ambos lados → matchea
+    ("suscripción", "body", "Asunto X", "sus­cripción activa", True),
+]
+
+
+@pytest.mark.parametrize(("pattern", "match_field", "subject", "body", "expected"), _PARITY_CASES)
+def test_dialect_parity_python_eq_postgres(
+    pattern: str, match_field: str, subject: str, body: str, expected: bool
+) -> None:
+    sid = _seed_source()
+    _seed_msg(sid, "m1", subject=subject, body=body)
+    fields = extract_email_fields({"subject": subject, "body_text": body})
+    py = rule_matches(None, None, pattern, match_field, fields)
+    with connection() as c:
+        report = dry_run_rule(c, 1, effect="block", pattern=pattern, match_field=match_field)
+    pg = report.matched == 1
+    assert py == pg, f"divergencia Py={py} != PG={pg} para {pattern!r}/{match_field}"
+    assert py is expected
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "oferta",
+        r"^re: \[.+/.+\]",
+        r"(^|[^a-z])off([^a-z]|$)",
+        "inscripción",
+        r"pedido \d{4}",
+        "(?:ab)+",  # grupo cuantificado SIN cuantificador interno → seguro
+        "a{2,5}",  # repetición acotada
+    ],
+)
+def test_validate_pattern_accepts_safe_dialect(pattern: str) -> None:
+    assert validate_pattern(pattern) == pattern.strip()
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "",  # vacío
+        "a" * 300,  # supera el cap de longitud
+        r"\boff\b",  # límite de palabra (diverge entre motores)
+        r"fact\w+",  # \w (diverge locale/unicode)
+        "(?=secret)",  # lookahead
+        r"(a)\1",  # backreference
+        "Oferta",  # mayúscula literal (el haystack se compara en minúscula)
+        ".*",  # matchea la cadena vacía → matchearía todos los correos
+        "(a+)+",  # cuantificador anidado no acotado → ReDoS
+    ],
+)
+def test_validate_pattern_rejects_unsafe(pattern: str) -> None:
+    with pytest.raises(ValueError):
+        validate_pattern(pattern)
 
 
 # ---------------------------------------------------------------- veredictos + cola manual

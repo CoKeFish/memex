@@ -381,7 +381,7 @@ class RelevanceVerdictInfo(BaseModel):
     """Veredicto del gate de relevancia para un mensaje (`relevance_verdicts`). Es la CONCLUSIÓN del
     gate —distinta del tier (dial de costo) y de la marca manual (override)—: relevant /
     not_relevant / insufficient, CÓMO se decidió (`method` rule/llm/manual), por qué (`reason`), con
-    qué `mode` y, si fue por regla, qué regla compuesta (`rule_effect` + remitente + asunto).
+    qué `mode` y, si fue por regla, qué regla compuesta (`rule_effect` + remitente + patrón).
     Solo en el detalle (GET /inbox/{id})."""
 
     verdict: str  # relevant | not_relevant | insufficient
@@ -393,7 +393,8 @@ class RelevanceVerdictInfo(BaseModel):
     rule_effect: str | None = None  # block | allow (si method='rule')
     rule_sender_kind: str | None = None
     rule_sender_value: str | None = None
-    rule_subject_pattern: str | None = None
+    rule_pattern: str | None = None
+    rule_match_field: str | None = None
     created_at: datetime | None = None
 
 
@@ -2328,6 +2329,7 @@ GateProvider = Literal["anthropic", "codex"]
 SenderKind = Literal["sender_email", "sender_domain", "list_id"]
 RuleEffect = Literal["block", "allow"]
 GateRuleStatus = Literal["active", "disabled", "rejected"]
+MatchField = Literal["subject", "body", "subject_or_body"]
 
 
 class RelevanceGateSettings(BaseModel):
@@ -2388,7 +2390,8 @@ class GateRuleInfo(BaseModel):
     effect: RuleEffect
     sender_kind: SenderKind | None
     sender_value: str | None
-    subject_pattern: str | None
+    pattern: str | None
+    match_field: MatchField | None
     status: GateRuleStatus
     proposed_by: Literal["llm", "manual"]
     rationale: str
@@ -2408,13 +2411,14 @@ class GateRuleCreateRequest(BaseModel):
     """Alta manual de una regla compuesta (≥1 predicado): corre el dry run; si no pasa → 422.
 
     `effect` default 'block'. Predicados: remitente (`sender_kind` + `sender_value`) y/o
-    `subject_pattern`; al menos uno (lo valida el motor).
+    `pattern`+`match_field` (regex); al menos uno (lo valida el motor).
     """
 
     effect: RuleEffect = "block"
     sender_kind: SenderKind | None = None
     sender_value: str | None = None
-    subject_pattern: str | None = None
+    pattern: str | None = None
+    match_field: MatchField | None = None
     rationale: str = ""
 
 

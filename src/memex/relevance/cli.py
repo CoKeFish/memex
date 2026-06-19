@@ -42,6 +42,7 @@ from memex.relevance.interests import (
 )
 from memex.relevance.rules import (
     EFFECTS,
+    MATCH_FIELDS,
     SENDER_KINDS,
     create_rule,
     dry_run_rule,
@@ -214,12 +215,12 @@ def cmd_interests(args: argparse.Namespace) -> int:
 
 
 def _rule_predicates_str(r: dict[str, object]) -> str:
-    """Texto de los predicados de una regla compuesta (remitente y/o asunto)."""
+    """Texto de los predicados de una regla compuesta (remitente y/o regex sobre un campo)."""
     parts = []
     if r.get("sender_kind"):
         parts.append(f"{r['sender_kind']}={r['sender_value']!r}")
-    if r.get("subject_pattern"):
-        parts.append(f"subject~{r['subject_pattern']!r}")
+    if r.get("pattern"):
+        parts.append(f"{r['match_field']}=~{r['pattern']!r}")
     return " & ".join(parts) or "(sin predicados)"
 
 
@@ -260,7 +261,8 @@ def cmd_rules(args: argparse.Namespace) -> int:
                 effect=args.effect,
                 sender_kind=args.sender_kind,
                 sender_value=args.sender_value,
-                subject_pattern=args.subject_contains,
+                pattern=args.pattern,
+                match_field=args.match_field,
             )
         except ValueError as e:
             print(f"predicados inválidos: {e}", file=sys.stderr)
@@ -282,7 +284,8 @@ def cmd_rules(args: argparse.Namespace) -> int:
             effect=args.effect,
             sender_kind=args.sender_kind,
             sender_value=args.sender_value,
-            subject_pattern=args.subject_contains,
+            pattern=args.pattern,
+            match_field=args.match_field,
             proposed_by="manual",
             report=report,
             rationale=args.rationale or "",
@@ -460,7 +463,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--sender-value", default=None, help="valor del remitente (requiere --sender-kind)"
     )
     p_radd.add_argument(
-        "--subject-contains", default=None, help="substring del asunto (patrón de contenido)"
+        "--pattern", default=None, help="regex del patrón (en minúscula; ver dialecto del gate)"
+    )
+    p_radd.add_argument(
+        "--match-field",
+        choices=list(MATCH_FIELDS),
+        default=None,
+        help="contra qué se aplica el patrón: subject|body|subject_or_body (requiere --pattern)",
     )
     p_radd.add_argument("--rationale", default=None)
     for sp in rules_sub.choices.values():

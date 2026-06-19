@@ -194,7 +194,8 @@ async def create_rule_endpoint(user_id: UserID, body: GateRuleCreateRequest) -> 
                 effect=body.effect,
                 sender_kind=body.sender_kind,
                 sender_value=body.sender_value,
-                subject_pattern=body.subject_pattern,
+                pattern=body.pattern,
+                match_field=body.match_field,
             )
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
@@ -206,7 +207,8 @@ async def create_rule_endpoint(user_id: UserID, body: GateRuleCreateRequest) -> 
             effect=body.effect,
             sender_kind=body.sender_kind,
             sender_value=body.sender_value,
-            subject_pattern=body.subject_pattern,
+            pattern=body.pattern,
+            match_field=body.match_field,
             proposed_by="manual",
             report=report,
             rationale=body.rationale,
@@ -220,7 +222,8 @@ async def create_rule_endpoint(user_id: UserID, body: GateRuleCreateRequest) -> 
         effect=body.effect,
         sender_kind=body.sender_kind,
         sender_value=body.sender_value,
-        subject_pattern=body.subject_pattern,
+        pattern=body.pattern,
+        match_field=body.match_field,
     )
     return row
 

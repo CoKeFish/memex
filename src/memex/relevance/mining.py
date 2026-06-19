@@ -34,7 +34,7 @@ from memex.relevance.prompts import (
     rules_system_prompt,
 )
 from memex.relevance.providers import build_gate_client
-from memex.relevance.rules import EFFECTS, create_rule, dry_run_rule
+from memex.relevance.rules import EFFECTS, create_rule, dry_run_rule, norm_body_sql
 from memex.relevance.settings import get_settings
 from memex.relevance.verdicts import EMAIL_TYPES
 
@@ -46,6 +46,9 @@ _DEFAULT_LIMIT = 500
 _SENDER_SAMPLES = 5
 #: Asuntos de ejemplo por dominio: holgados para que el LLM vea el patrón recurrente.
 _SUBJECT_SAMPLES = 12
+#: Cuerpos de ejemplo por dominio + largo de cada muestra (head+tail) para que el LLM vea footers.
+_BODY_SAMPLES = 4
+_BODY_SAMPLE_LEN = 250
 _MAX_TOKENS = 2048
 
 #: Correos "fuente" de cada polaridad (los que acumulan hacia una regla):
@@ -94,9 +97,10 @@ def _aggregate_by_sender(
     conn: Connection, user_id: int, effect: str, limit: int, min_messages: int
 ) -> list[dict[str, Any]]:
     """Agrega los correos fuente de la polaridad por DOMINIO del remitente (la «clase» que acumula):
-    conteo + remitentes y asuntos de ejemplo + list_id. Solo clases con `min_messages`+ correos
-    entran (un solo correo nunca propone nada; los que varían el local-part cuentan juntos). Toma
-    los `limit` más recientes (dedup por inbox) para acotar el prompt.
+    conteo + remitentes, asuntos y CUERPOS de ejemplo + list_id. Los cuerpos van normalizados (igual
+    que el matcheo) y recortados head+tail (los footers suelen ir al final). Solo clases con
+    `min_messages`+ correos entran (un solo correo nunca propone nada; los que varían el local-part
+    cuentan juntos). Toma los `limit` más recientes (dedup por inbox) para acotar el prompt.
     """
     qualifying = _ALLOW_QUALIFYING_SQL if effect == "allow" else _BLOCK_QUALIFYING_SQL
     rows = (
@@ -118,13 +122,20 @@ def _aggregate_by_sender(
                                lower(COALESCE(payload->'from'->>'email', '')), '@', 2
                            ) AS sender_domain,
                            COALESCE(payload->>'subject', '') AS subject,
-                           lower(payload->>'list_id') AS list_id
+                           lower(payload->>'list_id') AS list_id,
+                           {norm_body_sql("payload")} AS body_norm
                     FROM limited
                 )
                 SELECT sender_domain,
                        COUNT(*) AS messages,
                        (ARRAY_AGG(DISTINCT sender_email))[1:{_SENDER_SAMPLES}] AS sender_emails,
                        (ARRAY_AGG(DISTINCT subject))[1:{_SUBJECT_SAMPLES}] AS subject_samples,
+                       (ARRAY_AGG(DISTINCT CASE
+                           WHEN length(body_norm) > {2 * _BODY_SAMPLE_LEN}
+                           THEN left(body_norm, {_BODY_SAMPLE_LEN}) || ' […] '
+                                || right(body_norm, {_BODY_SAMPLE_LEN})
+                           ELSE body_norm END)
+                           FILTER (WHERE body_norm <> ''))[1:{_BODY_SAMPLES}] AS body_samples,
                        (ARRAY_AGG(DISTINCT list_id)
                            FILTER (WHERE list_id IS NOT NULL))[1:3] AS list_ids
                 FROM per_mail
@@ -150,6 +161,7 @@ def _aggregate_by_sender(
             "messages": int(r["messages"]),
             "sender_emails": list(r["sender_emails"] or []),
             "subject_samples": list(r["subject_samples"] or []),
+            "body_samples": list(r["body_samples"] or []),
             "list_ids": list(r["list_ids"] or []),
         }
         for r in rows
@@ -244,9 +256,10 @@ async def run_rule_mining(
                     effect=effect,
                     sender_kind=prop["sender_kind"],
                     sender_value=prop["sender_value"],
-                    subject_pattern=prop["subject_pattern"],
+                    pattern=prop["pattern"],
+                    match_field=prop["match_field"],
                 )
-            except ValueError:  # propuesta mal formada que pasó el saneo de shape
+            except ValueError:  # propuesta mal formada / regex inválido que pasó el saneo de shape
                 stats.skipped += 1
                 continue
             row = create_rule(
@@ -255,7 +268,8 @@ async def run_rule_mining(
                 effect=effect,
                 sender_kind=prop["sender_kind"],
                 sender_value=prop["sender_value"],
-                subject_pattern=prop["subject_pattern"],
+                pattern=prop["pattern"],
+                match_field=prop["match_field"],
                 proposed_by="llm",
                 report=report,
                 rationale=prop["rationale"],
@@ -274,7 +288,8 @@ async def run_rule_mining(
                 rule_id=row["id"],
                 sender_kind=prop["sender_kind"],
                 sender_value=prop["sender_value"],
-                subject_pattern=prop["subject_pattern"],
+                pattern=prop["pattern"],
+                match_field=prop["match_field"],
                 status=row["status"],
                 matched=report.matched,
                 matched_relevant=report.matched_relevant,

@@ -138,13 +138,14 @@ def test_rules_allow_effect_create_and_filter(client: Any, seed_source: dict[str
             "effect": "allow",
             "sender_kind": "sender_domain",
             "sender_value": "uni.edu",
-            "subject_pattern": "notas",
+            "pattern": "notas",
+            "match_field": "subject",
             "rationale": "calificaciones",
         },
     )
     assert ok.status_code == 201
     rule = ok.json()
-    assert (rule["effect"], rule["sender_kind"], rule["subject_pattern"], rule["status"]) == (
+    assert (rule["effect"], rule["sender_kind"], rule["pattern"], rule["status"]) == (
         "allow",
         "sender_domain",
         "notas",
@@ -157,7 +158,8 @@ def test_rules_allow_effect_create_and_filter(client: Any, seed_source: dict[str
             "effect": "block",
             "sender_kind": "sender_domain",
             "sender_value": "uni.edu",
-            "subject_pattern": "notas",
+            "pattern": "notas",
+            "match_field": "subject",
         },
     )
     assert blk.status_code == 201

@@ -268,7 +268,8 @@ def test_gate_allow_rule_marks_relevant_without_llm() -> None:
             effect="allow",
             sender_kind="sender_domain",
             sender_value="uni.edu",
-            subject_pattern="notas",
+            pattern="notas",
+            match_field="subject",
             proposed_by="manual",
             report=dry_run_rule(
                 conn,
@@ -276,7 +277,8 @@ def test_gate_allow_rule_marks_relevant_without_llm() -> None:
                 effect="allow",
                 sender_kind="sender_domain",
                 sender_value="uni.edu",
-                subject_pattern="notas",
+                pattern="notas",
+                match_field="subject",
             ),
         )
         assert rule is not None and rule["status"] == "active"
@@ -298,9 +300,10 @@ def test_gate_rule_conflict_falls_to_judge() -> None:
             conn,
             1,
             effect="block",
-            subject_pattern="oferta",
+            pattern="oferta",
+            match_field="subject",
             proposed_by="manual",
-            report=dry_run_rule(conn, 1, effect="block", subject_pattern="oferta"),
+            report=dry_run_rule(conn, 1, effect="block", pattern="oferta", match_field="subject"),
         )
         allow = create_rule(
             conn,
@@ -465,19 +468,22 @@ def test_mining_activates_good_rejects_bad_skips_dup() -> None:
         {
             "sender_kind": "sender_domain",
             "sender_value": "spam.io",
-            "subject_pattern": "oferta",
+            "pattern": "oferta",
+            "match_field": "subject",
             "rationale": "todo ruido",
         },
         {
             "sender_kind": "sender_domain",
             "sender_value": "bank.com",
-            "subject_pattern": "oferta",
+            "pattern": "oferta",
+            "match_field": "subject",
             "rationale": "promos",
         },
         {
             "sender_kind": "sender_domain",
             "sender_value": "spam.io",
-            "subject_pattern": "oferta",
+            "pattern": "oferta",
+            "match_field": "subject",
             "rationale": "duplicada",
         },
     ]
@@ -493,7 +499,7 @@ def test_mining_activates_good_rejects_bad_skips_dup() -> None:
     with connection() as conn:
         rows = conn.execute(
             text(
-                "SELECT sender_value, subject_pattern, status, proposed_by "
+                "SELECT sender_value, pattern, status, proposed_by "
                 "FROM relevance_gate_rules ORDER BY id"
             )
         ).all()
@@ -542,7 +548,8 @@ def test_mining_accumulation_threshold_and_rule_method_excluded() -> None:
             {
                 "sender_kind": "sender_domain",
                 "sender_value": "spam.io",
-                "subject_pattern": "oferta",
+                "pattern": "oferta",
+                "match_field": "subject",
                 "rationale": "x",
             }
         ]
@@ -572,7 +579,8 @@ def test_mining_allow_proposes_from_relevant_and_rescues() -> None:
         {
             "sender_kind": "sender_domain",
             "sender_value": "uni.edu",
-            "subject_pattern": "notas",
+            "pattern": "notas",
+            "match_field": "subject",
             "rationale": "calificaciones",
         },
     ]
@@ -582,7 +590,7 @@ def test_mining_allow_proposes_from_relevant_and_rescues() -> None:
     assert stats.proposed == 1 and stats.activated == 1
     with connection() as conn:
         row = conn.execute(
-            text("SELECT effect, sender_value, subject_pattern, status FROM relevance_gate_rules")
+            text("SELECT effect, sender_value, pattern, status FROM relevance_gate_rules")
         ).first()
     assert row is not None and tuple(row) == ("allow", "uni.edu", "notas", "active")
 
