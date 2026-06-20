@@ -77,6 +77,7 @@ class ResolverStats:
     linked: int = 0
     contacts: int = 0  # emails de remitente atados a una org (buzón)
     persons: int = 0  # personas del remitente creadas/resueltas
+    affiliated: int = 0  # personas del CUERPO afiliadas a su org vía org_hint (no remitentes)
     errors: int = 0
 
 
@@ -335,6 +336,44 @@ def _mark_resolved(conn: Connection, user_id: int, inbox_id: int) -> None:
     )
 
 
+def _affiliate_mentioned_people(conn: Connection, user_id: int, inbox_id: int) -> int:
+    """Afilia las PERSONAS mencionadas en el cuerpo (no el remitente) a su org, usando el `org_hint`
+    extraído (+ `role_hint` como rol). Determinista, sin LLM: `_dispose_sender` ya cuelga al
+    remitente; esto cubre a las personas del CUERPO (p.ej. «Valeria, Presidenta de RAS»). Resuelve
+    el `org_hint` a una org EXISTENTE por nombre normalizado; si no existe, OMITE (no crea orgs
+    desde hints, para no fragmentar). Idempotente (`_affiliate` hace upsert)."""
+    rows = (
+        conn.execute(
+            text(
+                "SELECT DISTINCT m.resolved_identity_id AS pid, m.org_hint AS oh, "
+                "m.role_hint AS rh "
+                "FROM mod_identidades_mentions m "
+                "JOIN mod_identidades i ON i.id = m.resolved_identity_id "
+                "WHERE m.user_id = :u AND :inbox = ANY(m.source_inbox_ids) AND i.kind = 'persona' "
+                "AND m.resolution_method <> 'sender' "
+                "AND m.org_hint IS NOT NULL AND m.org_hint <> ''"
+            ),
+            {"u": user_id, "inbox": inbox_id},
+        )
+        .mappings()
+        .all()
+    )
+    n = 0
+    for r in rows:
+        org_id = conn.execute(
+            text(
+                "SELECT id FROM mod_identidades WHERE user_id = :u AND kind = 'organizacion' "
+                "AND memex_norm(:h) <> '' AND name_norm = memex_norm(:h) ORDER BY id LIMIT 1"
+            ),
+            {"u": user_id, "h": r["oh"]},
+        ).scalar()
+        if org_id is None or int(org_id) == int(r["pid"]):
+            continue
+        _affiliate(conn, user_id, int(r["pid"]), int(org_id), r["rh"], source=_SOURCE)
+        n += 1
+    return n
+
+
 def apply_resolution(
     conn: Connection,
     user_id: int,
@@ -383,8 +422,6 @@ async def run_resolver_window(
         if not settings.resolver_enabled:
             return stats
         pending = [i for i in inbox_ids if email_needs_resolution(conn, user_id, i)]
-    if not pending:
-        return stats
     owns = client is None
     llm = client or build_llm_client("identidades_resolve", user_id=user_id)
     calls = 0
@@ -443,6 +480,12 @@ async def run_resolver_window(
     finally:
         if owns:
             await aclose_llm(llm)
+    # Afiliación determinista de las PERSONAS del cuerpo a su org (vía `org_hint`) — TODA la
+    # ventana, tras los merges del LLM (resuelve contra orgs vivas). Cubre lo que la disposición
+    # del remitente no toca (p.ej. la presidenta de un semillero nombrada en el cuerpo).
+    with connection() as conn:
+        for iid in inbox_ids:
+            stats.affiliated += _affiliate_mentioned_people(conn, user_id, iid)
     _log.info(
         "identidades.resolver.window_done",
         user_id=user_id,
@@ -451,6 +494,7 @@ async def run_resolver_window(
         linked=stats.linked,
         contacts=stats.contacts,
         persons=stats.persons,
+        affiliated=stats.affiliated,
         errors=stats.errors,
     )
     return stats

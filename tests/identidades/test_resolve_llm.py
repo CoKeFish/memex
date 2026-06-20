@@ -17,6 +17,7 @@ from memex.modules.identidades.resolve_llm import (
     Parent,
     ResolverDecision,
     SenderDisposition,
+    _affiliate_mentioned_people,
     apply_resolution,
     parse_resolution,
     resolve_email,
@@ -340,3 +341,45 @@ async def test_resolve_email_calls_llm_and_parses(conn: Connection) -> None:
     assert llm.calls == 1
     assert result.model == "fake"
     assert decision.merges == () and decision.sender is None
+
+
+def _mention_with_hints(
+    c: Connection, inbox: int, person_id: int, org_hint: str, role: str
+) -> None:
+    c.execute(
+        text(
+            "INSERT INTO mod_identidades_mentions (user_id, source_inbox_ids, mentioned_name, "
+            "resolved_identity_id, resolved_kind, resolution_method, org_hint, role_hint) "
+            "VALUES (1, ARRAY[:i], 'p', :pid, 'persona', 'created', :oh, :rh)"
+        ),
+        {"i": inbox, "pid": person_id, "oh": org_hint, "rh": role},
+    )
+
+
+def test_affiliate_mentioned_people_uses_org_hint(conn: Connection) -> None:
+    # La presidenta sale del CUERPO (no remitente) con org_hint → se afilia a esa org, con su rol.
+    src = _source(conn)
+    mid = _inbox(conn, src)
+    org = _identity(conn, "organizacion", "RAS Javeriana IEEE")
+    person = _identity(conn, "persona", "Valeria Caycedo")
+    _mention_with_hints(conn, mid, person, "RAS Javeriana IEEE", "Presidenta")
+    assert _affiliate_mentioned_people(conn, 1, mid) == 1
+    row = conn.execute(
+        text("SELECT org_id, role FROM mod_identidades_person_orgs WHERE person_id = :p"),
+        {"p": person},
+    ).one()
+    assert int(row[0]) == org and row[1] == "Presidenta"
+
+
+def test_affiliate_mentioned_people_skips_when_org_absent(conn: Connection) -> None:
+    # org_hint que NO matchea ninguna org existente → no se crea nada (conservador, sin fragmentar).
+    src = _source(conn)
+    mid = _inbox(conn, src)
+    person = _identity(conn, "persona", "Juan Perez")
+    _mention_with_hints(conn, mid, person, "Org Que No Existe", "Miembro")
+    assert _affiliate_mentioned_people(conn, 1, mid) == 0
+    cnt = conn.execute(
+        text("SELECT count(*) FROM mod_identidades_person_orgs WHERE person_id = :p"),
+        {"p": person},
+    ).scalar()
+    assert cnt == 0
