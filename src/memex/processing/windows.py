@@ -26,7 +26,7 @@ from typing import Any
 #: PIERDE ítems de los correos del final); la RELEVANCIA tolera ventanas grandes (juicio
 #: por-mensaje, barato). El resumen va con la extracción (alimenta co-ocurrencia por unidad).
 GATE_WINDOW_SIZE = 40
-EXTRACT_WINDOW_SIZE = 20
+EXTRACT_WINDOW_SIZE = 10
 SUMMARY_WINDOW_SIZE = 20
 #: Default genérico de `plan_windows` cuando un caller no fija fase (los reales pasan su constante).
 MAX_WINDOW_SIZE = EXTRACT_WINDOW_SIZE
