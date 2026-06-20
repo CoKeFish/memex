@@ -15,7 +15,7 @@ Subcomandos del AGENTE (expuestos vía `memex identidad <cmd>`):
   set-kind     — reclasifica el tipo (persona/organizacion/producto/desconocido).
   add-id       — agrega un identificador (email/phone/handle/domain/url).
   affiliate    — teje una persona con una organización (afiliación).
-  unify        — funde dos identidades del mismo kind sin pasar por la cola de candidatos.
+  unify        — funde dos identidades (incluso de distinto tipo) sin pasar por la cola.
   annotate     — agrega alias y/o descripción (nota); la VE el desempate LLM.
   relate       — confirma una relación entre dos identidades (no reaparece como pista).
   confirm-relation — promueve una pista existente a confirmada.
@@ -110,7 +110,7 @@ Comandos del agente:
   set-kind     reclasifica --id a --kind (persona|organizacion|producto|desconocido)
   add-id       agrega un identificador (--kind email|phone|handle|domain|url --value)
   affiliate    teje una persona (--person) con una organización (--org), opcional --role
-  unify        funde dos identidades del mismo kind: --into sobrevive, --from se absorbe
+  unify        funde dos identidades (incluso de distinto tipo): --into sobrevive, --from se absorbe
   annotate     agrega --alias y/o --note a --id (la nota = descripción; la ve el desempate LLM)
   relate       confirma una relación entre --from y --to (--type libre); no reaparece como pista
   confirm-relation  promueve una pista existente a confirmada (--edge)
@@ -296,7 +296,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json", dest="as_json", action="store_true", help="Emite el resultado como JSON."
     )
 
-    uni_p = sub.add_parser("unify", help="Funde dos identidades del mismo kind (sin candidato).")
+    uni_p = sub.add_parser("unify", help="Funde dos identidades, incluso de distinto tipo.")
     uni_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
     uni_p.add_argument("--into", type=int, required=True, help="Identidad que SOBREVIVE.")
     uni_p.add_argument("--from", dest="from_id", type=int, required=True, help="La que se absorbe.")
@@ -1164,9 +1164,10 @@ def _cmd_affiliate(args: argparse.Namespace) -> int:
 
 
 def _cmd_unify(args: argparse.Namespace) -> int:
-    """Funde dos identidades del MISMO kind sin pasar por la cola de candidatos (cuando el agente/
-    dueño ya SABE que son la misma y el difuso no las encoló). `--into` sobrevive, `--from` se
-    absorbe. Reusa `merge_identities` (re-apunta aristas/menciones/finanzas/jerarquía/cúmulos)."""
+    """Funde dos identidades sin pasar por la cola de candidatos (cuando el agente/dueño ya SABE que
+    son la misma y el difuso no las encoló). `--into` sobrevive, `--from` se absorbe; admite
+    cross-kind (override manual). Reusa `merge_identities` (re-apunta aristas/menciones/finanzas/
+    jerarquía/cúmulos)."""
     log = get_logger("memex.modules.identidades.cli")
     if args.into == args.from_id:
         _say("\n--into y --from no pueden ser la misma identidad.\n", err=True)
@@ -1179,7 +1180,7 @@ def _cmd_unify(args: argparse.Namespace) -> int:
         if not merge_identities(conn, args.user, args.into, args.from_id):
             _say(
                 f"\nNo se pudo fundir #{args.from_id} en #{args.into} "
-                f"(no existen, distinto kind, o mismo id).\n",
+                f"(no existen o son el mismo id).\n",
                 err=True,
             )
             return 1

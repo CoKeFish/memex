@@ -201,6 +201,28 @@ def test_apply_merge_absorbs_and_keeps_alias(conn: Connection) -> None:
     assert "javeriana.edu.co" in list(aliases or [])
 
 
+def test_apply_cross_kind_merge_desconocido_into_org(conn: Connection) -> None:
+    # el resolvedor ahora puede fundir CROSS-KIND: una `desconocido` absorbida en la org.
+    src = _source(conn)
+    mid = _inbox(conn, src)
+    org = _identity(conn, "organizacion", "tusclases.co")
+    desc = _identity(conn, "desconocido", "info@tusclases.co")
+    _mention(conn, mid, org, "organizacion", "exact_name", None)
+    _mention(conn, mid, desc, "desconocido", "sender", "info@tusclases.co")
+    ctx = _ctx(
+        mid,
+        [_ei(org, "organizacion", "tusclases.co"), _ei(desc, "desconocido", "info@tusclases.co")],
+    )
+    decision = ResolverDecision(merges=(Merge(org, desc, 0.9),), parents=(), sender=None)
+    stats = apply_resolution(conn, 1, ctx, decision, min_merge=0.75, min_parent=0.8)
+    assert stats.merged == 1
+    assert not _exists(conn, desc)
+    assert (
+        conn.execute(text("SELECT kind FROM mod_identidades WHERE id=:o"), {"o": org}).scalar_one()
+        == "organizacion"
+    )
+
+
 def test_apply_low_confidence_merge_skipped(conn: Connection) -> None:
     src = _source(conn)
     mid = _inbox(conn, src)

@@ -400,11 +400,119 @@ def test_merge_desconocido_repunta_con_slug_desconocido(conn: Any) -> None:
     assert conn.execute(text("SELECT src_id FROM relation_edges")).scalar_one() == surv
 
 
-def test_merge_kind_distinto_rechaza(conn: Any) -> None:
-    # producto y org NUNCA se funden (mismo-kind es invariante del merge)
-    org = _mk_org(conn, "Valve")
-    prod = _mk_producto(conn, "Steam")
-    assert merge_identities(conn, 1, org, prod) is False
+def _mk_desc(conn: Any, name: str) -> int:
+    return int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'desconocido',:n) RETURNING id"
+            ),
+            {"n": name},
+        ).scalar_one()
+    )
+
+
+def test_merge_cross_kind_typed_funde(conn: Any) -> None:
+    # cross-kind entre tipos definidos: misma entidad tipada distinto (Notion org/producto) ahora SÍ
+    # funde (experimento «merges entre tipos»). Gana el `keep_id` (la org); el producto se absorbe.
+    org = _mk_org(conn, "Notion")
+    prod = _mk_producto(conn, "Notion")
+    assert merge_identities(conn, 1, org, prod) is True
+    assert (
+        conn.execute(
+            text("SELECT count(*) FROM mod_identidades WHERE id = :p"), {"p": prod}
+        ).scalar_one()
+        == 0
+    )
+    assert (
+        conn.execute(
+            text("SELECT kind FROM mod_identidades WHERE id = :o"), {"o": org}
+        ).scalar_one()
+        == "organizacion"
+    )
+
+
+def test_merge_cross_kind_desconocido_into_org(conn: Any) -> None:
+    # caso motivador: una `desconocido` (buzón con email + afiliación a la org, como deja el camino
+    # del remitente) se funde en la org. El email cuelga de la org, sin self-afiliación ni arista
+    # huérfana del slug `identidades:desconocido`.
+    org = _mk_org(conn, "tusclases.co")
+    desc = _mk_desc(conn, "info@tusclases.co")
+    conn.execute(
+        text(
+            "INSERT INTO mod_identidades_identifiers "
+            "(user_id, identity_id, platform, kind, value, value_norm) "
+            "VALUES (1,:i,'email','email','info@tusclases.co','info@tusclases.co')"
+        ),
+        {"i": desc},
+    )
+    conn.execute(
+        text(
+            "INSERT INTO mod_identidades_person_orgs (user_id, person_id, org_id) VALUES (1,:p,:o)"
+        ),
+        {"p": desc, "o": org},
+    )
+    conn.execute(
+        text(
+            "INSERT INTO relation_edges (user_id, src_slug, src_id, dst_slug, dst_id, producer) "
+            "VALUES (1,'identidades:desconocido',:a,'finance',99,'inbox')"
+        ),
+        {"a": desc},
+    )
+    assert merge_identities(conn, 1, org, desc) is True
+    assert (
+        conn.execute(
+            text("SELECT count(*) FROM mod_identidades WHERE id = :a"), {"a": desc}
+        ).scalar_one()
+        == 0
+    )
+    assert (
+        conn.execute(
+            text(
+                "SELECT count(*) FROM mod_identidades_identifiers "
+                "WHERE identity_id = :o AND value_norm = 'info@tusclases.co'"
+            ),
+            {"o": org},
+        ).scalar_one()
+        == 1
+    )
+    assert (
+        conn.execute(
+            text(
+                "SELECT count(*) FROM mod_identidades_person_orgs "
+                "WHERE person_id = :o AND org_id = :o"
+            ),
+            {"o": org},
+        ).scalar_one()
+        == 0
+    )
+    assert (
+        conn.execute(
+            text("SELECT count(*) FROM relation_edges WHERE src_slug = 'identidades:desconocido'")
+        ).scalar_one()
+        == 0
+    )
+
+
+def test_merge_cross_kind_desconocido_survivor_swaps(conn: Any) -> None:
+    # si el caller propone como superviviente la `desconocido`, se INVIERTE: gana el tipo definido.
+    org = _mk_org(conn, "Acme")
+    desc = _mk_desc(conn, "Acme (sin tipar)")
+    assert merge_identities(conn, 1, desc, org) is True  # survivor=desc, absorbed=org → se invierte
+    assert (
+        conn.execute(
+            text("SELECT count(*) FROM mod_identidades WHERE id = :d"), {"d": desc}
+        ).scalar_one()
+        == 0
+    )  # la `desconocido` es la que se absorbió
+    surv = conn.execute(
+        text("SELECT kind FROM mod_identidades WHERE id = :o"), {"o": org}
+    ).scalar_one()
+    assert surv == "organizacion"  # sobrevivió la org tipada
+    aliases = conn.execute(
+        text("SELECT aliases FROM mod_identidades WHERE id = :o"), {"o": org}
+    ).scalar_one()
+    assert "Acme (sin tipar)" in aliases  # el nombre de la desconocido quedó como alias
 
 
 def test_merge_marca_dirty_superviviente_y_vecino(conn: Any) -> None:

@@ -124,7 +124,7 @@ identidad (directorio de personas/organizaciones/productos + sus relaciones):
   memex identidad set-kind     reclasifica (persona|organizacion|producto)
   memex identidad add-id       agrega un identificador (email/handle/domain/…)
   memex identidad affiliate    teje una persona con una organización
-  memex identidad unify        funde dos identidades del mismo kind (--into/--from)
+  memex identidad unify        funde dos identidades, incluso de distinto tipo (--into/--from)
   memex identidad annotate     agrega alias/descripción (la ve el desempate LLM)
   memex identidad relate       confirma una relación entre dos identidades (--from/--to/--type)
   memex identidad confirm-relation  promueve una pista a relación confirmada (--edge)

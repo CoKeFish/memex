@@ -20,8 +20,13 @@ identidad, esta primitiva las colapsa en la superviviente y borra la absorbida, 
      `parent_identity_id`, sin crear self-parent);
   7. deja auditoría en `metadata.merged_from` y borra la absorbida.
 
-Solo funde identidades del MISMO `user_id` y MISMO `kind` (persona con persona, org con org,
-producto con producto).
+Funde identidades del MISMO `user_id`. Por defecto same-kind (el path automático —fuzzy/zona
+gris— solo propone pares del mismo tipo); ADEMÁS admite CROSS-KIND cuando un caller lo pide
+explícito (el resolvedor contextual; el merge manual): la misma entidad real tipada distinto
+—típico, una `desconocido` que resulta ser una org ya listada—. Invariante: `desconocido` NUNCA
+absorbe a un tipo definido (si el superviviente propuesto es `desconocido` y el absorbido tiene
+tipo, se invierten). En cross-kind las aristas del absorbido (de su propio slug) se DESCARTAN y se
+marca dirty al vecindario (no se trasladan: `merge_vertices` es same-slug); same-kind las mueve.
 Atómica sobre `conn` (no abre tx propia). Devuelve True si fundió (False si algún id no existe).
 """
 
@@ -32,15 +37,15 @@ from sqlalchemy.engine import Connection
 
 from memex.logging import get_logger
 from memex.relations.edges import Ref
-from memex.relations.graph_writer import merge_vertices
+from memex.relations.graph_writer import delete_vertex, mark_dirty, merge_vertices
 from memex.relations.vertices import IDENTITY_SLUG_BY_KIND
 
 _log = get_logger("memex.modules.identidades.merge")
 
 
 def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_id: int) -> bool:
-    """Funde `absorbed_id` en `survivor_id` (mismo user + mismo kind). Idempotente respecto a las
-    UNIQUE de identifiers/afiliaciones/aristas. Devuelve True si fundió."""
+    """Funde `absorbed_id` en `survivor_id` (mismo user; same-kind o cross-kind). Idempotente
+    respecto a las UNIQUE de identifiers/afiliaciones/aristas. Devuelve True si fundió."""
     if survivor_id == absorbed_id:
         return False
     rows = (
@@ -57,11 +62,27 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
     by_id = {int(r["id"]): r for r in rows}
     if survivor_id not in by_id or absorbed_id not in by_id:
         return False
-    if by_id[survivor_id]["kind"] != by_id[absorbed_id]["kind"]:
-        _log.warning("identidades.merge.kind_mismatch", survivor=survivor_id, absorbed=absorbed_id)
-        return False
-    slug = IDENTITY_SLUG_BY_KIND[str(by_id[survivor_id]["kind"])]
-    p = {"u": user_id, "surv": survivor_id, "absb": absorbed_id, "slug": slug}
+    surv_kind = str(by_id[survivor_id]["kind"])
+    absb_kind = str(by_id[absorbed_id]["kind"])
+    # Invariante: `desconocido` NUNCA absorbe a un tipo definido. Si el superviviente propuesto es
+    # `desconocido` y el absorbido tiene tipo, se INVIERTEN (gana el conocido) — así el cross-kind
+    # no degrada una identidad tipada a `desconocido`.
+    if surv_kind == "desconocido" and absb_kind != "desconocido":
+        survivor_id, absorbed_id = absorbed_id, survivor_id
+        surv_kind, absb_kind = absb_kind, surv_kind
+    cross_kind = surv_kind != absb_kind
+    surv_slug = IDENTITY_SLUG_BY_KIND[surv_kind]
+    absb_slug = IDENTITY_SLUG_BY_KIND[absb_kind]
+    if cross_kind:
+        # señal de monitoreo del experimento «merges entre tipos» (ver si genera ruido para revert).
+        _log.warning(
+            "identidades.merge.cross_kind",
+            survivor=survivor_id,
+            absorbed=absorbed_id,
+            survivor_kind=surv_kind,
+            absorbed_kind=absb_kind,
+        )
+    p = {"u": user_id, "surv": survivor_id, "absb": absorbed_id}
 
     # 1. identificadores (mover sin duplicar) + sedes.
     conn.execute(
@@ -113,6 +134,16 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
     conn.execute(
         text("UPDATE mod_identidades_person_orgs SET org_id = :surv WHERE org_id = :absb"), p
     )
+    # self-afiliación: al fundir tipos distintos el absorbido podía estar afiliado al superviviente
+    # (p.ej. una `desconocido` afiliada a la org en la que se funde) → tras re-apuntar quedaría
+    # (person_id = org_id = superviviente). Se limpia (no-op en same-kind).
+    conn.execute(
+        text(
+            "DELETE FROM mod_identidades_person_orgs "
+            "WHERE user_id = :u AND person_id = :surv AND org_id = :surv"
+        ),
+        p,
+    )
 
     # 3. menciones.
     conn.execute(
@@ -123,11 +154,21 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
         p,
     )
 
-    # 4 + 4d. aristas del grafo y membresía de cúmulos: re-apuntado vía el GraphWriter (único punto
-    #    de mutación del grafo). Además captura los ex-vecinos del absorbido y los marca `dirty`
-    #    (groundwork incremental, ADR-021) — antes este merge re-apuntaba sin avisar al grafo, y los
-    #    vecinos heredados quedaban stale hasta el próximo barrido completo.
-    merge_vertices(conn, user_id, absorbed=Ref(slug, absorbed_id), survivor=Ref(slug, survivor_id))
+    # 4 + 4d. grafo y membresía de cúmulos vía el GraphWriter (único punto de mutación del grafo),
+    #    capturando los ex-vecinos del absorbido y marcándolos `dirty` (groundwork ADR-021).
+    if cross_kind:
+        # El absorbido vive bajo OTRO slug: sus aristas son de su tipo y `merge_vertices` es
+        # same-slug → se BORRA su vértice (captura + marca dirty a sus vecinos) y se marca dirty al
+        # superviviente (absorbió identificadores/menciones). Lo stale lo reconsidera el dirty.
+        delete_vertex(conn, user_id, Ref(absb_slug, absorbed_id))
+        mark_dirty(conn, user_id, [Ref(surv_slug, survivor_id)])
+    else:
+        merge_vertices(
+            conn,
+            user_id,
+            absorbed=Ref(surv_slug, absorbed_id),
+            survivor=Ref(surv_slug, survivor_id),
+        )
 
     # 4b. jerarquía de pertenencia: los hijos del absorbido cuelgan del superviviente; si el
     #     superviviente colgaba del absorbido, ese link queda self-loop → se limpia (el fill-only de

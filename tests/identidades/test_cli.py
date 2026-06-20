@@ -559,11 +559,15 @@ def test_unify_funde_sin_candidato(capsys: pytest.CaptureFixture[str]) -> None:
             text("SELECT aliases FROM mod_identidades WHERE id = :i"), {"i": into}
         ).scalar_one()
     assert ids == [into] and "Claude AI" in aliases
-    # distinto kind → no funde
+    # cross-kind ahora SÍ funde (experimento «merges entre tipos»): override manual persona → org
     p = _mk("persona", "X")
     o = _mk("organizacion", "Y")
-    assert main(["unify", "--into", str(o), "--from", str(p)]) == 1
-    assert "No se pudo fundir" in capsys.readouterr().err
+    assert main(["unify", "--into", str(o), "--from", str(p)]) == 0
+    with connection() as c:
+        gone = c.execute(
+            text("SELECT count(*) FROM mod_identidades WHERE id = :p"), {"p": p}
+        ).scalar_one()
+    assert gone == 0  # la persona se absorbió en la org (gana el `--into`)
 
 
 def test_confirm_parent(capsys: pytest.CaptureFixture[str]) -> None:
