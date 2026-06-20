@@ -258,6 +258,33 @@ def test_apply_sender_mailbox_attaches_email_to_org(conn: Connection) -> None:
     assert ("email", "info@acme.com") in _ids(conn, org)
 
 
+def test_apply_sender_org_merged_away_no_crash(conn: Connection) -> None:
+    # regresión (smoke 100): si un merge de ESTE apply funde la org del remitente, la disposición
+    # re-lee la org VIVA del mention (no el id colgante de ctx) → no crashea con FK.
+    src = _source(conn)
+    mid = _inbox(conn, src)
+    a = _identity(conn, "organizacion", "Acme por dominio")
+    b = _identity(conn, "organizacion", "Acme")
+    _mention(conn, mid, a, "organizacion", "sender", "juan@acme.com")  # remitente → org A (prov.)
+    ctx = _ctx(
+        mid,
+        [_ei(a, "organizacion", "Acme por dominio", is_sender=True, sender_email="juan@acme.com")],
+    )
+    # merge A→B (A se borra; el mention se re-apunta a B) + disposición persona del remitente.
+    decision = ResolverDecision(
+        merges=(Merge(b, a, 0.9),),
+        parents=(),
+        sender=SenderDisposition(True, None, "Juan Pérez", 0.9),
+    )
+    stats = apply_resolution(conn, 1, ctx, decision, min_merge=0.75, min_parent=0.8)
+    assert stats.merged == 1 and stats.persons == 1
+    assert not _exists(conn, a)  # A fundida en B
+    aff = conn.execute(
+        text("SELECT org_id FROM mod_identidades_person_orgs WHERE user_id = 1")
+    ).scalar()
+    assert aff is not None and int(aff) == b  # afiliado a la org VIVA (B), no al colgante (A)
+
+
 def test_apply_sender_person_creates_ficha_and_repoints(conn: Connection) -> None:
     src = _source(conn)
     mid = _inbox(conn, src)

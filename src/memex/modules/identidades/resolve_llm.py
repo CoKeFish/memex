@@ -281,7 +281,21 @@ def _dispose_sender(
     vn = norm_identifier("email", email)
     if not vn:
         return stats
-    org_id = sender.identity_id  # la org provisional del dominio
+    # La org del remitente pudo ser FUNDIDA por los merges previos de este mismo apply → su id de
+    # `ctx` quedaría colgante (FK violation). Se RE-LEE del mention VIVO (merge re-apunta las
+    # menciones al superviviente); sin org viva, se omite (el email ya lo colgó el camino
+    # procedimental del remitente).
+    org_id = conn.execute(
+        text(
+            "SELECT resolved_identity_id FROM mod_identidades_mentions "
+            "WHERE user_id = :u AND :inbox = ANY(source_inbox_ids) "
+            "AND resolution_method = 'sender' AND resolved_identity_id IS NOT NULL LIMIT 1"
+        ),
+        {"u": user_id, "inbox": ctx.inbox_id},
+    ).scalar()
+    if org_id is None:
+        return stats
+    org_id = int(org_id)
     if sd.is_person and sd.person_name and sd.confidence >= min_person:
         person_id = _resolve_or_create_person(conn, user_id, sd.person_name)
         _insert_identifier(conn, user_id, person_id, "email", "email", email, vn, source=_SOURCE)
@@ -296,7 +310,10 @@ def _dispose_sender(
         )
         stats.persons += 1
     else:  # buzón de la org (o conf baja → default seguro: el email pertenece al dominio)
-        owner = sd.owner_id if sd.owner_id is not None else org_id
+        # `owner` del LLM puede estar fundido/muerto → cae a la org viva del mention.
+        owner = org_id
+        if sd.owner_id is not None and _alive(conn, user_id, {sd.owner_id}):
+            owner = sd.owner_id
         _insert_identifier(conn, user_id, owner, "email", "email", email, vn, source=_SOURCE)
         stats.contacts += 1
     return stats
