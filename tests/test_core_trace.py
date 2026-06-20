@@ -44,19 +44,32 @@ def _seed_inbox(ext: str = "trace") -> int:
     return int(iid)
 
 
-def _insert_call(inbox_id: int, purpose: str, cost: str, *, response: str = "") -> int:
+def _insert_call(
+    inbox_id: int,
+    purpose: str,
+    cost: str,
+    *,
+    response: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> int:
     with connection() as c:
         cid = c.execute(
             text(
                 """
                 INSERT INTO llm_calls
                   (user_id, inbox_id, purpose, model, prompt_tokens, completion_tokens, cost_usd,
-                   latency_ms, status, response_text)
-                VALUES (1, :i, :p, 'fake', 10, 5, :c, 100, 'ok', :r)
+                   latency_ms, status, response_text, metadata)
+                VALUES (1, :i, :p, 'fake', 10, 5, :c, 100, 'ok', :r, CAST(:md AS JSONB))
                 RETURNING id
                 """
             ),
-            {"i": inbox_id, "p": purpose, "c": cost, "r": response},
+            {
+                "i": inbox_id,
+                "p": purpose,
+                "c": cost,
+                "r": response,
+                "md": json.dumps(metadata) if metadata is not None else "{}",
+            },
         ).scalar_one()
     return int(cid)
 
@@ -186,6 +199,25 @@ def test_read_trace_scopes_grouped_response_to_message() -> None:
     assert [it["name"] for it in scoped["identidades"]] == ["Compartido"]  # incluye iid → se queda
     full = json.loads(leaf["llm"]["responseTextFull"])  # modo «Su lote»: el lote COMPLETO
     assert [it["title"] for it in full["calendar"]] == ["Mío", "Ajeno"]
+
+
+def test_read_trace_resolver_shows_label_and_decisions() -> None:
+    # La traza de RESOLUCIÓN: la llm_call `identidades_resolve` sale con label amigable y su
+    # metadata (lo que aplicó: merged/linked/persons/contacts) como detalle del nodo.
+    iid = _seed_inbox("resolve")
+    with connection() as c:
+        create_root(c, user_id=1, inbox_id=iid, label="msg")
+    _insert_call(
+        iid,
+        "identidades_resolve",
+        "0.0",
+        response='{"merges":[]}',
+        metadata={"merged": 1, "linked": 0, "persons": 0, "contacts": 1},
+    )
+    tree = read_trace(1, iid)
+    assert tree is not None
+    leaf = next(n for n in tree if n["kind"] == "llm" and n["label"] == "Resolución de identidades")
+    assert leaf["detail"] == {"merged": 1, "linked": 0, "persons": 0, "contacts": 1}
 
 
 def test_read_trace_excludes_calls_from_previous_runs() -> None:

@@ -352,6 +352,8 @@ def _purpose_label(purpose: str) -> str:
         return "Ruteo"
     if purpose == "extract_grouped":
         return "Extracción agrupada"
+    if purpose == "identidades_resolve":
+        return "Resolución de identidades"
     if purpose.startswith("extract_"):
         return f"Extracción · {purpose[len('extract_') :]}"
     if purpose == "ocr":
@@ -419,6 +421,18 @@ def _to_float(v: Any) -> float:
     return float(v) if isinstance(v, (Decimal, int, float)) else 0.0
 
 
+def _call_detail(c: Any) -> dict[str, Any]:
+    """`metadata` de la llm_call → detalle del nodo sintético (p.ej. resolución: lo que aplicó —
+    merged/linked/persons/contacts; ruteo/extracción: n; etc.). Tolera dict (JSONB) o str."""
+    md = c["metadata"]
+    if isinstance(md, str):
+        try:
+            md = json.loads(md)
+        except (ValueError, TypeError):
+            return {}
+    return md if isinstance(md, dict) else {}
+
+
 def read_trace(user_id: int, inbox_id: int) -> list[dict[str, Any]] | None:
     """Árbol de traza del inbox (`TraceNodeDto[]`, lista plana camelCase) para `GET /inbox/{id}`.
 
@@ -452,7 +466,7 @@ def read_trace(user_id: int, inbox_id: int) -> list[dict[str, Any]] | None:
         root_created = root_row["created_at"] if root_row else None
         call_sql = """
             SELECT id, purpose, model, prompt_tokens, completion_tokens, cost_usd,
-                   latency_ms, status, response_text, created_at
+                   latency_ms, status, response_text, metadata, created_at
             FROM llm_calls
             WHERE user_id = :u AND inbox_id = :i
         """
@@ -480,7 +494,7 @@ def read_trace(user_id: int, inbox_id: int) -> list[dict[str, Any]] | None:
                     text(
                         """
                         SELECT id, purpose, model, prompt_tokens, completion_tokens, cost_usd,
-                               latency_ms, status, response_text, created_at
+                               latency_ms, status, response_text, metadata, created_at
                         FROM llm_calls
                         WHERE user_id = :u AND id = ANY(CAST(:ids AS BIGINT[]))
                         """
@@ -557,7 +571,7 @@ def read_trace(user_id: int, inbox_id: int) -> list[dict[str, Any]] | None:
             "status": _node_status_from_llm(c["status"]),
             "ref": None,
             "llmCallId": int(c["id"]),
-            "detail": {},
+            "detail": _call_detail(c),
             "llm": _llm_payload(c, inbox_id),
         }
         own[nid] = _to_float(c["cost_usd"])
