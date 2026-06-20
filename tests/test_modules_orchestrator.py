@@ -483,6 +483,23 @@ def test_no_chunking_single_route_call(seed_source: dict[str, Any]) -> None:
     assert _count_purpose("module_route") == 1
 
 
+def test_routing_disabled_skips_route_and_runs_all(seed_source: dict[str, Any]) -> None:
+    """Perilla OFF → 0 llamadas de ruteo; un módulo que el router PODARÍA igual se extrae."""
+    sid = seed_source["id"]
+    _enable("finance")
+    _enable("calendar")
+    _seed(sid, "m1", "batch", {"body_text": "pagué $4500"})
+
+    # route_choose=["finance"]: si el ruteo corriera, calendar quedaría podado. Con la perilla OFF
+    # no hay ruteo → calendar se extrae igual (se mandan TODOS los candidatos juntos).
+    fake = FakeExtractLLM(route_choose=["finance"])
+    asyncio.run(run_extraction(1, routing_enabled=False, client=fake))
+
+    assert _count_purpose("module_route") == 0  # sin gasto de LLM en rutear
+    assert _count("mod_finance_transactions") == 1
+    assert _count("mod_calendar_events") == 1  # NO podado pese a route_choose=["finance"]
+
+
 # ----- Etapa B: extracción agrupada (grouped / all) ------------------------------ #
 
 

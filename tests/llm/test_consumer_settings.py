@@ -69,7 +69,7 @@ def test_list_only_configured_rows(conn: Any) -> None:
     ("kwargs", "marker"),
     [
         ({"consumer": "no-existe", "provider": "deepseek"}, "consumer"),
-        ({"consumer": "summarizer", "provider": "openai"}, "provider"),
+        ({"consumer": "summarizer", "provider": "mistral"}, "provider"),
         ({"consumer": "summarizer", "fallback": ["deepseek", "nope"]}, "fallback"),
     ],
 )

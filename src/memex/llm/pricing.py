@@ -112,6 +112,14 @@ _PRO = ModelPricing(Decimal("0.003625"), Decimal("0.435"), Decimal("0.87"))
 # 0. Off-peak no aplica (es un descuento de DeepSeek): off_peak_discount=0 default.
 _OPUS_4_8 = ModelPricing(Decimal("0.50"), Decimal("5.00"), Decimal("25.00"))
 
+# OpenAI API directa (verificado 2026-06-19 vs openai.com/api/pricing, USD por 1M):
+#   gpt-4o       input 2.50 / output 10.00 / cached-input 1.25 (50% del input)
+#   gpt-4o-mini  input 0.15 / output  0.60 / cached-input 0.075
+# `cache_hit` = cached-input, `cache_miss` = input normal. Sin estos el provider 'openai' emite $0
+# (mismo footgun que H-4: gpt-4o-mini estuvo meses en $0). Override-able vía MEMEX_LLM_PRICING.
+_GPT_4O = ModelPricing(Decimal("1.25"), Decimal("2.50"), Decimal("10.00"))
+_GPT_4O_MINI = ModelPricing(Decimal("0.075"), Decimal("0.15"), Decimal("0.60"))
+
 #: Tabla de precios pública por default (fallback si no hay overrides de entorno).
 MODEL_PRICING: dict[str, ModelPricing] = {
     "deepseek-chat": _FLASH,
@@ -120,6 +128,8 @@ MODEL_PRICING: dict[str, ModelPricing] = {
     "deepseek-v4-flash-preview": _FLASH,
     "deepseek-v4-pro": _PRO,
     "claude-opus-4-8": _OPUS_4_8,
+    "gpt-4o": _GPT_4O,
+    "gpt-4o-mini": _GPT_4O_MINI,
 }
 
 

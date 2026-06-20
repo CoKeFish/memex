@@ -165,8 +165,6 @@ def test_extract_cli_threads_tuning(monkeypatch: Any) -> None:
             "2",
             "--max-window-size",
             "5",
-            "--max-gap-hours",
-            "2",
             "--route-chunk-size",
             "3",
             "--batching-policy",
@@ -181,7 +179,6 @@ def test_extract_cli_threads_tuning(monkeypatch: Any) -> None:
         "source_id": None,
         "limit": 200,
         "max_window_size": 5,
-        "max_gap_seconds": 7200,
         "route_chunk_size": 3,
         "batching_policy": "grouped",
         "group_size": 4,
@@ -199,7 +196,6 @@ def test_extract_cli_defaults(monkeypatch: Any) -> None:
     monkeypatch.setattr("memex.modules.cli.run_extraction", fake_run)
     assert main(["run"]) == 0
     assert captured["max_window_size"] == 40
-    assert captured["max_gap_seconds"] == 21600  # 6 h por defecto
     assert captured["route_chunk_size"] == 0  # sin split
     assert captured["batching_policy"] == "grouped"  # default: una llamada para todos
     assert captured["group_size"] == 8  # _GROUP_SIZE_DEFAULT (headroom sobre los módulos actuales)
@@ -213,12 +209,9 @@ def test_process_cli_threads_tuning(monkeypatch: Any) -> None:
         return CombinedStats(summarize=SummarizeStats(), extract=ExtractStats())
 
     monkeypatch.setattr("memex.modules.cli.run_combined", fake_run)
-    rc = main_process(
-        ["run", "--max-window-size", "7", "--max-gap-hours", "1", "--batching-policy", "all"]
-    )
+    rc = main_process(["run", "--max-window-size", "7", "--batching-policy", "all"])
     assert rc == 0
     assert captured["max_window_size"] == 7
-    assert captured["max_gap_seconds"] == 3600
     assert captured["batching_policy"] == "all"
 
 
@@ -226,7 +219,6 @@ def test_process_cli_threads_tuning(monkeypatch: Any) -> None:
     "argv",
     [
         ["run", "--max-window-size", "0"],
-        ["run", "--max-gap-hours", "0"],
         ["run", "--route-chunk-size", "-1"],
         ["run", "--batching-policy", "bogus"],
     ],

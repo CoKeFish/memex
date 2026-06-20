@@ -1,8 +1,9 @@
-"""Agrupado del work-set en ventanas (ADR-003: ventanas conversacionales).
+"""Agrupado del work-set en ventanas.
 
-Función pura, sin DB ni LLM. `batch` se agrupa por `source_id` y se parte por gap temporal
-o tope de cantidad; `individual` es 1 ventana por mensaje. Los umbrales son la perilla de
-costo/granularidad.
+Función pura, sin DB ni LLM. `batch` se agrupa por `source_id` y se parte SOLO por tope de
+cantidad; `individual` es 1 ventana por mensaje. El agrupado NO mira los timestamps de los
+mensajes — la cadencia temporal (cada cuánto se procesa lo pendiente) es del daemon/scheduler,
+no del ventaneo. El tope es la perilla de costo/granularidad.
 
 Compartido por la fase de resumen (`memex.relations.summary`) y los módulos de extracción
 (`memex.modules`): ambos ventanean idéntico porque operan sobre los mismos mensajes
@@ -20,8 +21,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-#: Un hueco mayor a esto entre mensajes consecutivos abre una ventana nueva (6 h).
-MAX_GAP_SECONDS = 6 * 3600
 #: Tope de mensajes por ventana batch (evita prompts gigantes / degradación).
 MAX_WINDOW_SIZE = 40
 
@@ -55,19 +54,18 @@ def plan_windows(
     rows: Sequence[WorkRow],
     *,
     max_window_size: int = MAX_WINDOW_SIZE,
-    max_gap_seconds: int = MAX_GAP_SECONDS,
 ) -> list[Window]:
     """Agrupa el work-set en ventanas. `individual` → 1 por mensaje; todo lo demás → batch por
-    source + gap (>`max_gap_seconds`) + tope (`max_window_size`).
+    source + tope de cantidad (`max_window_size`).
 
     Batch = «todo lo que NO es individual», no solo el tier `batch`: con el gate de relevancia
     encendido, un correo `blacklist` (bulk) puede llegar al juez o, si se rescató, a la
     extracción — se procesa agrupado (barato), igual que un batch. `WorkRow.tier` conserva el
     valor crudo (la señal de bulk no se pierde); solo el AGRUPADO lo trata como batch.
 
-    `max_window_size`/`max_gap_seconds` son las perillas de costo/granularidad (defaults =
-    `MAX_WINDOW_SIZE`/`MAX_GAP_SECONDS`); se exponen como flags de CLI para experimentar. El tope
-    de tamaño es un MÁXIMO: el gap puede partir una ventana antes (ventanas conversacionales)."""
+    El agrupado NO mira los timestamps: empaca consecutivos del mismo `source_id` hasta el tope.
+    La cadencia temporal (cada cuánto corre el procesamiento) la decide el daemon/scheduler, no
+    esto. `max_window_size` es la perilla de costo/granularidad (default `MAX_WINDOW_SIZE`)."""
     windows: list[Window] = [
         Window("individual", r.source_id, (r,)) for r in rows if r.tier == "individual"
     ]
@@ -85,12 +83,7 @@ def plan_windows(
     for row in batch:
         if current:
             prev = current[-1]
-            gap = (row.occurred_at - prev.occurred_at).total_seconds()
-            if (
-                row.source_id != prev.source_id
-                or gap > max_gap_seconds
-                or len(current) >= max_window_size
-            ):
+            if row.source_id != prev.source_id or len(current) >= max_window_size:
                 flush()
                 current = []
         current.append(row)

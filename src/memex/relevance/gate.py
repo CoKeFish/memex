@@ -31,7 +31,6 @@ from memex.llm import AnthropicClient, ChatMessage, LLMClient, LLMQuotaError
 from memex.logging import bound_log_context, get_logger
 from memex.processing.render import render_payload
 from memex.processing.windows import (
-    MAX_GAP_SECONDS,
     MAX_WINDOW_SIZE,
     Window,
     WorkRow,
@@ -302,7 +301,6 @@ async def run_relevance_gate(
     source_id: int | None = None,
     limit: int = _DEFAULT_LIMIT,
     max_window_size: int = MAX_WINDOW_SIZE,
-    max_gap_seconds: int = MAX_GAP_SECONDS,
     inbox_ids: list[int] | None = None,
     force: bool = False,
     client: LLMClient | None = None,
@@ -330,7 +328,6 @@ async def run_relevance_gate(
     windows = plan_windows(
         load_gate_workset(user_id, source_id=source_id, limit=eff_limit, inbox_ids=inbox_ids),
         max_window_size=max_window_size,
-        max_gap_seconds=max_gap_seconds,
     )
     if not windows:
         _log.info("relevance.gate.run.empty", user_id=user_id, source_id=source_id)

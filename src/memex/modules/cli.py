@@ -25,9 +25,13 @@ from memex.db import connection
 from memex.llm import LLMError, LLMQuotaError
 from memex.logging import get_logger, setup_logging
 from memex.modules import known_modules
+from memex.modules.extraction_settings import (
+    get_extraction_settings,
+    upsert_extraction_settings,
+)
 from memex.modules.orchestrator import _GROUP_SIZE_DEFAULT, run_extraction
 from memex.modules.process import run_combined
-from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
+from memex.processing.windows import MAX_WINDOW_SIZE
 
 _LLM_ERR_MSG = "\nERROR LLM. ¿Corriste con `doppler run -- ...` (DEEPSEEK_API_KEY)?\n"
 _QUOTA_ERR_MSG = "\nSALDO AGOTADO (HTTP 402): corrida abortada. Recargá saldo del proveedor LLM.\n"
@@ -49,14 +53,6 @@ def _nonneg_int(value: str) -> int:
     return parsed
 
 
-def _positive_float(value: str) -> float:
-    """argparse `type` para floats > 0 (exit-2 estándar si no)."""
-    parsed = float(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("debe ser un número > 0")
-    return parsed
-
-
 def _add_run_tuning_args(parser: argparse.ArgumentParser) -> None:
     """Perillas de ventaneo + ruteo/batching comunes a los `run` de extract/process (ADR-015 §2)."""
     parser.add_argument(
@@ -64,12 +60,6 @@ def _add_run_tuning_args(parser: argparse.ArgumentParser) -> None:
         type=_positive_int,
         default=MAX_WINDOW_SIZE,
         help=f"Tope de mensajes por ventana batch (default {MAX_WINDOW_SIZE}).",
-    )
-    parser.add_argument(
-        "--max-gap-hours",
-        type=_positive_float,
-        default=MAX_GAP_SECONDS / 3600,
-        help=f"Gap horario que parte una ventana batch (default {MAX_GAP_SECONDS / 3600:g}).",
     )
     parser.add_argument(
         "--route-chunk-size",
@@ -113,6 +103,16 @@ def _build_extract_parser() -> argparse.ArgumentParser:
     mod_p = sub.add_parser("modules", help="Lista módulos registrados y su estado.")
     mod_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
 
+    set_p = sub.add_parser("settings", help="Muestra/ajusta el ruteo de extracción.")
+    set_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    set_p.add_argument(
+        "--routing",
+        choices=["on", "off"],
+        default=None,
+        help="Prende/apaga el ruteo LLM (off = extrae todos los módulos candidatos juntos, sin "
+        "llamada de ruteo). Omitir = solo mostrar.",
+    )
+
     rev_p = sub.add_parser("review", help="Lista mensajes en revisión (dead-letter).")
     rev_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
 
@@ -129,7 +129,6 @@ def _cmd_extract_run(args: argparse.Namespace) -> int:
             source_id=args.source,
             limit=args.limit,
             max_window_size=args.max_window_size,
-            max_gap_seconds=round(args.max_gap_hours * 3600),
             route_chunk_size=args.route_chunk_size,
             batching_policy=args.batching_policy,
             group_size=args.group_size,
@@ -202,6 +201,17 @@ def _cmd_modules(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_extract_settings(args: argparse.Namespace) -> int:
+    with connection() as conn:
+        if args.routing is not None:
+            s = upsert_extraction_settings(conn, args.user, routing_enabled=args.routing == "on")
+        else:
+            s = get_extraction_settings(conn, args.user)
+    estado = "ON (rutea por LLM)" if s.routing_enabled else "OFF (extrae todos los candidatos)"
+    print(f"\nextraction settings (user {args.user}): routing_enabled = {estado}\n")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     setup_logging()
@@ -216,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_enable(args)
         if args.cmd == "modules":
             return _cmd_modules(args)
+        if args.cmd == "settings":
+            return _cmd_extract_settings(args)
         if args.cmd == "review":
             return _cmd_extract_review(args)
         if args.cmd == "requeue":
@@ -256,7 +268,6 @@ def _cmd_process_run(args: argparse.Namespace) -> int:
             source_id=args.source,
             limit=args.limit,
             max_window_size=args.max_window_size,
-            max_gap_seconds=round(args.max_gap_hours * 3600),
             route_chunk_size=args.route_chunk_size,
             batching_policy=args.batching_policy,
             group_size=args.group_size,

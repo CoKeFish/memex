@@ -18,8 +18,8 @@ from typing import Any
 
 from sqlalchemy import Connection, text
 
-#: Proveedores válidos (claves del mapa de la fábrica). Mismo set que el CHECK de la 0068.
-LLM_PROVIDERS = ("deepseek", "anthropic", "codex")
+#: Proveedores válidos (claves de la fábrica). Mismo set que el CHECK (0068 + openai en 0079).
+LLM_PROVIDERS = ("deepseek", "anthropic", "codex", "openai")
 
 #: Fila comodín cuando no hay una específica para el consumer.
 DEFAULT_CONSUMER = "default"
@@ -41,6 +41,7 @@ LLM_CONSUMERS = (
     "identidades_cooccurrence",
     "identidades_hierarchy",
     "identidades_classify",
+    "identidades_resolve",
     "relations_confirm",
     "relations_clusters",
 )

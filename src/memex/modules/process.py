@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from memex.llm import LLMClient, aclose_llm, build_llm_client
 from memex.logging import get_logger
 from memex.modules.orchestrator import _GROUP_SIZE_DEFAULT, ExtractStats, run_extraction
-from memex.processing.windows import MAX_GAP_SECONDS, MAX_WINDOW_SIZE
+from memex.processing.windows import MAX_WINDOW_SIZE
 from memex.relations.summary import SummarizeStats, run_summaries
 from memex.relevance.gate import GateStats, run_relevance_gate
 
@@ -40,7 +40,6 @@ async def run_combined(
     source_id: int | None = None,
     limit: int = 200,
     max_window_size: int = MAX_WINDOW_SIZE,
-    max_gap_seconds: int = MAX_GAP_SECONDS,
     route_chunk_size: int = 0,  # 0 = sin split (mirror del default de run_extraction)
     batching_policy: str = "grouped",  # mirror de run_extraction: una llamada para todos
     group_size: int = _GROUP_SIZE_DEFAULT,
@@ -63,7 +62,6 @@ async def run_combined(
             source_id=source_id,
             limit=limit,
             max_window_size=max_window_size,
-            max_gap_seconds=max_gap_seconds,
             client=gate_client,
         )
         summarize = await run_summaries(
@@ -71,7 +69,6 @@ async def run_combined(
             source_id=source_id,
             limit=limit,
             max_window_size=max_window_size,
-            max_gap_seconds=max_gap_seconds,
             client=llm,
         )
         extract = await run_extraction(
@@ -79,7 +76,6 @@ async def run_combined(
             source_id=source_id,
             limit=limit,
             max_window_size=max_window_size,
-            max_gap_seconds=max_gap_seconds,
             route_chunk_size=route_chunk_size,
             batching_policy=batching_policy,
             group_size=group_size,

@@ -59,6 +59,7 @@ from memex.modules.contract import (
     parse_items,
     validate_item,
 )
+from memex.modules.extraction_settings import get_extraction_settings
 from memex.modules.grouping import (
     GROUPED_SYSTEM_PROMPT,
     build_grouped_user_content,
@@ -75,7 +76,6 @@ from memex.modules.routing import (
 from memex.modules.workset import load_module_workset
 from memex.processing.render import render_payload
 from memex.processing.windows import (
-    MAX_GAP_SECONDS,
     MAX_WINDOW_SIZE,
     Window,
     WorkRow,
@@ -262,17 +262,20 @@ async def _route(
     stats: ExtractStats,
     *,
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
+    routing_enabled: bool = True,
 ) -> tuple[list[str], list[int]]:
     """Devuelve (slugs a extraer en orden topológico, ids de las calls de ruteo). Short-circuit con
-    ≤1 candidato (sin LLM → sin ids).
+    ≤1 candidato o `routing_enabled=False` (sin LLM → sin ids; en OFF se extraen TODOS los
+    candidatos).
 
-    Con ≥2 candidatos rutea por LLM. Si `route_chunk_size>0` y hay más candidatos que ese tope, se
-    rutea en SUB-PASADAS (un chunk por llamada) y se UNEN los elegidos. Después `resolve_order`
-    corre UNA vez sobre el mapa completo, así que `depends_on` cross-chunk queda resuelto por el
-    cierre transitivo (una dep en otro chunk se arrastra aunque su router no la haya elegido)."""
+    Con ≥2 candidatos y la perilla ON rutea por LLM. Si `route_chunk_size>0` y hay más candidatos
+    que ese tope, se rutea en SUB-PASADAS (un chunk por llamada) y se UNEN los elegidos. Después
+    `resolve_order` corre UNA vez sobre el mapa completo, así que `depends_on` cross-chunk queda
+    resuelto por el cierre transitivo (una dep en otro chunk se arrastra aunque su router no la
+    haya elegido)."""
     route_call_ids: list[int] = []
-    if len(candidates) <= 1:
-        chosen: list[str] = [c.slug for c in candidates]  # short-circuit: sin LLM, sin call
+    if not routing_enabled or len(candidates) <= 1:
+        chosen: list[str] = [c.slug for c in candidates]  # sin LLM (perilla OFF o 1 candidato)
     else:
         messages_json, _ = _build_messages(window)
         if route_chunk_size <= 0 or len(candidates) <= route_chunk_size:
@@ -682,6 +685,7 @@ async def _process_window(
     stats: ExtractStats,
     *,
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
+    routing_enabled: bool = True,
     batching_policy: str = "grouped",
     group_size: int = _GROUP_SIZE_DEFAULT,
 ) -> None:
@@ -715,7 +719,14 @@ async def _process_window(
         }
 
     chosen, route_call_ids = await _route(
-        user_id, llm, window, candidates, active_by_slug, stats, route_chunk_size=route_chunk_size
+        user_id,
+        llm,
+        window,
+        candidates,
+        active_by_slug,
+        stats,
+        route_chunk_size=route_chunk_size,
+        routing_enabled=routing_enabled,
     )
     chosen_set = set(chosen)
     # Hojas de ruteo: la(s) call(s) de ruteo cubren TODA la ventana → un nodo `llm` bajo cada root;
@@ -800,6 +811,15 @@ async def _process_window(
                 user_id, llm, unit, outcome, stats, active_by_slug, trace_roots=trace_roots
             )
 
+    # Resolvedor contextual por-correo (interno a identidades, gated por `resolver_enabled`): tras
+    # extraer/persistir, dispone el remitente + funde/ubica con el contexto del correo. SIEMPRE hay
+    # al menos el remitente → corre para todo correo. No-op si el gate está apagado. Patrón gemelo
+    # del tejido del remitente (arriba): el orquestador gatilla la función de identidades y espera.
+    if "identidades" in active_by_slug:
+        from memex.modules.identidades.resolve_llm import run_resolver_window
+
+        await run_resolver_window(user_id, [r.inbox_id for r in window.rows])
+
     # Candidatos ruteados-fuera: marcar "considerado" para no re-rutearlos eternamente.
     for module in candidates:
         if module.slug in chosen_set:
@@ -827,8 +847,8 @@ async def run_extraction(
     source_id: int | None = None,
     limit: int = _DEFAULT_LIMIT,
     max_window_size: int = MAX_WINDOW_SIZE,
-    max_gap_seconds: int = MAX_GAP_SECONDS,
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
+    routing_enabled: bool | None = None,
     batching_policy: str = "grouped",
     group_size: int = _GROUP_SIZE_DEFAULT,
     inbox_ids: list[int] | None = None,
@@ -837,8 +857,10 @@ async def run_extraction(
 ) -> ExtractStats:
     """Corre la extracción sobre el work-set clasificado no-extraído del user.
 
-    Perillas (flags de CLI; ADR-015 §2): `max_window_size`/`max_gap_seconds` (ventaneo),
-    `route_chunk_size` (sub-pasadas de ruteo con muchos módulos), `batching_policy`
+    Perillas (flags de CLI; ADR-015 §2): `max_window_size` (ventaneo por cantidad),
+    `route_chunk_size` (sub-pasadas de ruteo con muchos módulos), `routing_enabled`
+    (None = lee `extraction_settings`; False = sin ruteo LLM → extrae todos los candidatos),
+    `batching_policy`
     (`per_module`/`grouped`/`all`) + `group_size` (módulos por llamada de extracción).
     `inbox_ids` acota a un set explícito (reproceso por lote, vía `reprocess`): respeta los mismos
     tiers que el daemon (el work-set ya filtra blacklist). `force` re-extrae esos ids aunque ya
@@ -853,6 +875,10 @@ async def run_extraction(
         _log.info("extract.run.no_modules", user_id=user_id)
         return stats
     active_by_slug = {m.slug: m for m in active}
+
+    if routing_enabled is None:  # None = resolver desde la perilla persistida (default ON)
+        with connection() as conn:
+            routing_enabled = get_extraction_settings(conn, user_id).routing_enabled
 
     if force and inbox_ids:
         with connection() as conn:
@@ -871,9 +897,7 @@ async def run_extraction(
         workset = load_module_workset(
             conn, user_id, source_id=source_id, modules=active, limit=eff_limit, inbox_ids=inbox_ids
         )
-    windows = plan_windows(
-        workset, max_window_size=max_window_size, max_gap_seconds=max_gap_seconds
-    )
+    windows = plan_windows(workset, max_window_size=max_window_size)
     if not windows:
         _log.info("extract.run.empty", user_id=user_id, source_id=source_id)
         return stats
@@ -897,6 +921,7 @@ async def run_extraction(
                     active_by_slug,
                     stats,
                     route_chunk_size=route_chunk_size,
+                    routing_enabled=routing_enabled,
                     batching_policy=batching_policy,
                     group_size=group_size,
                 )

@@ -388,7 +388,14 @@ def _unknown_by_email(
 
 
 def _resolve_email_sender(
-    conn: Connection, user_id: int, email: str, domain: str, from_name: str, index: KnownIndex
+    conn: Connection,
+    user_id: int,
+    email: str,
+    domain: str,
+    from_name: str,
+    index: KnownIndex,
+    *,
+    defer: bool = False,
 ) -> Resolution | None:
     """Resuelve el remitente de un correo (política GENERAL, domain-agnóstica). Un dominio NUNCA
     identifica a una persona: identifica a lo sumo a UNA org (keyed por el dominio) y para sus
@@ -426,6 +433,12 @@ def _resolve_email_sender(
     org_id = _org_for_domain(
         conn, user_id, domain, "", index
     )  # display = dominio, NUNCA el remitente
+    if defer:
+        # Resolvedor contextual ON: NO se crea la ficha del individuo. La mención apunta
+        # provisionalmente a la ORG del dominio y lleva el email crudo (señal pendiente); el
+        # resolvedor por-correo decide después —con contexto— si es un buzón de la org (email →
+        # contacto) o una persona (ficha propia), y re-apunta la mención.
+        return Resolution(index.kind_of(org_id) or KIND_ORG, org_id, "sender")
     eid = _unknown_by_email(conn, user_id, email, from_name, email_norm, index)
     _affiliate(conn, user_id, eid, org_id, None, source="extraction")
     weave_afiliacion(conn, user_id, eid)
@@ -458,6 +471,11 @@ def weave_email_senders(conn: Connection, user_id: int, inbox_ids: Sequence[int]
     if not rows:
         return 0
     index = load_known_index(conn, user_id)
+    # Resolvedor contextual ON → diferir la disposición del individuo de dominio corporativo (no se
+    # crea su ficha; la mención apunta a la org y lleva el email crudo, que el resolvedor dispone).
+    from memex.modules.identidades.settings import get_settings
+
+    defer = get_settings(conn, user_id).resolver_enabled
     inserted = 0
     for r in rows:
         email = str(r["email"] or "").strip()
@@ -467,7 +485,7 @@ def weave_email_senders(conn: Connection, user_id: int, inbox_ids: Sequence[int]
         if not domain:
             continue
         from_name = str(r["name"] or "")
-        res = _resolve_email_sender(conn, user_id, email, domain, from_name, index)
+        res = _resolve_email_sender(conn, user_id, email, domain, from_name, index, defer=defer)
         if res is None or res.identity_id is None:
             continue
         if _insert_sender_mention(

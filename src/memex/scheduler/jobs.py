@@ -315,6 +315,16 @@ async def run_identidades_cycle(user_id: int) -> IdentidadesCycleStats:
                 account_id=account_id,
                 error=str(e),
             )
+    # El mantenimiento por lotes (dedup phase-2 + jerarquía) está APAGADO por default: lo reemplaza
+    # el resolvedor contextual por-correo (`identidades.module.dedup`). Se prende con
+    # `batch_maintenance_enabled` cuando se reformule para convivir con el resolvedor. La
+    # sincronización de contactos (arriba) NO se gatea.
+    from memex.modules.identidades.settings import get_settings as get_resolver_settings
+
+    with connection() as conn:
+        if not get_resolver_settings(conn, user_id).batch_maintenance_enabled:
+            _log.info("scheduler.identidades.batch_disabled", user_id=user_id)
+            return cycle
     try:
         merge_stats = await run_merge_phase2(user_id)
         cycle.merged += merge_stats.merged

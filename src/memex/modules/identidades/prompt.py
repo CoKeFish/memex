@@ -119,3 +119,36 @@ IDENTIDADES_CLASSIFY_SYSTEM_PROMPT = (
     '{"kind": "<persona|organizacion|producto|desconocido>", "confidence": <0..1>, '
     '"rationale": "<motivo breve>"}'
 )
+
+
+#: Resolvedor CONTEXTUAL por-correo: con el asunto+cuerpo de UN correo decide, de una, tres cosas
+#: sobre las identidades de ese correo (extraídas + remitente) y sus candidatas del directorio:
+#: FUSIONES (la misma entidad, incluso si los nombres no se parecen — dominio↔nombre), JERARQUÍA
+#: (sub→contenedora) y la DISPOSICIÓN DEL REMITENTE (buzón de una org vs persona). Reusa los sesgos
+#: del dedup (coexistir) y del organizador (precisión).
+IDENTIDADES_RESOLVE_SYSTEM_PROMPT = (
+    "Sos un consolidador de IDENTIDADES de un directorio personal, con el CONTEXTO de UN\n"
+    "correo (asunto + cuerpo). Te paso las identidades del correo (las extraídas del cuerpo +\n"
+    "el REMITENTE, marcado) y CANDIDATAS del directorio que podrían ser la misma o el\n"
+    "contenedor de alguna. Cada entrada trae `id`, tipo, nombre, alias, dominios y su padre\n"
+    "actual. Con el contexto del correo decidí TRES cosas:\n\n"
+    "1) FUSIONES — qué entradas son la MISMA entidad y deben unirse. Usá el contexto: p. ej.\n"
+    "   el dominio `javeriana.edu.co` y `Pontificia Universidad Javeriana` son la MISMA\n"
+    "   universidad aunque los nombres no se parezcan. SESGO A COEXISTIR: ante la duda, NO\n"
+    "   fusiones. NUNCA fusiones tipos distintos (persona/organización/producto).\n"
+    "2) JERARQUÍA — qué entrada es SUB-PARTE de otra y debería colgar de ella («pertenece\n"
+    "   a»): carrera/facultad→universidad, producto→empresa, área→org. SESGO A PRECISIÓN.\n"
+    "3) REMITENTE — el email del remitente (te lo marco) ¿es un BUZÓN de una organización\n"
+    "   (`info@`, `jobs@`, `contacto@` — habla la org, no una persona) o de una PERSONA? Si\n"
+    "   es buzón, indicá la org dueña en `owner_id`. Si es persona, su nombre en `person_name`.\n\n"
+    "Reglas:\n"
+    "- Todos los `id` que uses deben venir de las listas que te paso (correo o candidatas).\n"
+    "- `confidence`: número 0..1 por cada decisión.\n\n"
+    "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
+    '{"merges": [{"keep_id": <id>, "drop_id": <id>, "confidence": <0..1>}], '
+    '"parents": [{"child_id": <id>, "parent_id": <id|null>, "parent_name": "<nombre|null>", '
+    '"confidence": <0..1>}], '
+    '"sender": {"is_person": <true|false>, "owner_id": <id|null>, "person_name": "<nombre|null>", '
+    '"confidence": <0..1>}}\n'
+    "Listas vacías si no hay; `sender` en null si el correo no tiene remitente a disponer."
+)

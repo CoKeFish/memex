@@ -433,6 +433,37 @@ def test_email_individuo_corporativo_es_desconocido_afiliado() -> None:
     assert int(aff[0][1]) == int(org_dom)  # ...a la org del dominio
 
 
+def test_email_individuo_corporativo_difiere_con_resolvedor_on() -> None:
+    # Con el resolvedor contextual ON, el individuo de dominio corporativo NO crea ficha: la mención
+    # apunta a la ORG del dominio y lleva el email crudo (señal pendiente); el resolvedor dispone.
+    from memex.modules.identidades.settings import upsert_settings
+
+    src = _source("imap", "mail")
+    mid = _inbox(src, "m1", _email_payload("juan.perez@acme.com", "Juan Pérez"))
+    with connection() as c:
+        upsert_settings(c, 1, resolver_enabled=True)
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+    assert n == 1
+    assert _identity_kinds() == ["organizacion"]  # SOLO la org del dominio; NO se crea desconocido
+    mentions = _sender_mentions()
+    assert len(mentions) == 1 and mentions[0]["rkind"] == "organizacion"
+    org_id = mentions[0]["rid"]
+    # el email NO se ata todavía (lo dispone el resolvedor); en la org solo está el dominio
+    assert ("email", "email", "juan.perez@acme.com") not in _identifiers_of(org_id)
+    assert ("domain", "domain", "acme.com") in _identifiers_of(org_id)
+    # el email crudo viaja en la mención para que el resolvedor lo disponga
+    with connection() as c:
+        carried = c.execute(
+            text(
+                "SELECT email FROM mod_identidades_mentions "
+                "WHERE :m = ANY(source_inbox_ids) AND resolution_method = 'sender'"
+            ),
+            {"m": mid},
+        ).scalar()
+    assert carried == "juan.perez@acme.com"
+
+
 def test_email_varios_individuos_mismo_dominio_una_org() -> None:
     # varios individuos distintos @acme.com → varios DESCONOCIDO + UNA sola org (keyed por dominio,
     # no fragmenta); un relay (notifications@) es la org. Ningún individuo se colapsa en la org.

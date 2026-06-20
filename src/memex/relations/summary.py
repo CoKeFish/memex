@@ -42,7 +42,6 @@ from memex.llm import ChatMessage, LLMClient, LLMQuotaError, aclose_llm, build_l
 from memex.logging import get_logger
 from memex.processing.render import render_payload
 from memex.processing.windows import (
-    MAX_GAP_SECONDS,
     MAX_WINDOW_SIZE,
     Window,
     WorkRow,
@@ -442,7 +441,6 @@ async def run_summaries(
     tier: str | None = None,
     limit: int = _DEFAULT_LIMIT,
     max_window_size: int = MAX_WINDOW_SIZE,
-    max_gap_seconds: int = MAX_GAP_SECONDS,
     inbox_ids: list[int] | None = None,
     force: bool = False,
     client: LLMClient | None = None,
@@ -462,7 +460,6 @@ async def run_summaries(
     windows = plan_windows(
         _load_workset(user_id, source_id, tier, eff_limit, load_ids),
         max_window_size=max_window_size,
-        max_gap_seconds=max_gap_seconds,
     )
     if not windows:
         _log.info("summary.run.empty", user_id=user_id, source_id=source_id, tier=tier)

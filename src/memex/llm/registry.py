@@ -21,6 +21,7 @@ from memex.llm.codex import CodexClient, CodexError
 from memex.llm.config import LLMConfig, LLMConfigError
 from memex.llm.deepseek import DeepSeekClient
 from memex.llm.fallback import FallbackClient
+from memex.llm.openai import OpenAIClient, openai_config
 from memex.llm.settings import LLMConsumerSettings, get_consumer_settings
 from memex.logging import get_logger
 
@@ -36,6 +37,8 @@ def _build_one(provider: str, settings: LLMConsumerSettings) -> LLMClient:
         return AnthropicClient(config)
     if provider == "codex":
         return CodexClient(model=settings.codex_model)
+    if provider == "openai":
+        return OpenAIClient(openai_config(default_model=settings.model))
     # deepseek (default y hardcode de último recurso)
     return DeepSeekClient(LLMConfig.from_env(default_model=settings.model))
 
