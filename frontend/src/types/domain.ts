@@ -171,7 +171,10 @@ export interface TraceNodeDto {
     completionTokens: number
     latencyMs: number
     status: string
+    /** Output acotado a ESTE mensaje (modo «solo este»). */
     responseText: string | null
+    /** Output COMPLETO del lote (modo «Su lote»); null si no difiere (llamada de 1 mensaje). */
+    responseTextFull?: string | null
   } | null
 }
 

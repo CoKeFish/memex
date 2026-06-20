@@ -717,7 +717,7 @@ function PipelinePanel({ row, onProcessed }: { row: InboxRow; onProcessed: () =>
               no tiene árbol — procesado antes de la traza por lote). */}
           <div className="min-w-0 space-y-4 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-1">
             {trace ? (
-              <TraceTree nodes={trace} />
+              <TraceTree nodes={trace} scope={scope} />
             ) : (
               <p className="num text-[11px] text-muted-foreground">
                 Sin árbol de traza para este mensaje (procesado antes de la traza por lote). Re-extraé

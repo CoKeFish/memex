@@ -37,8 +37,8 @@ export function ProcessingWindow({ row, source }: { row: InboxRow; source?: Sour
         }
         sub={
           data.mode === "summary"
-            ? "El resumen de la fase «Resumen» cubre TODOS estos mensajes (comparten ventana conversacional)."
-            : "Ventana prospectiva: lo que armaría «Resumir su lote» hoy (corte por gap de 6 h o tope de 40)."
+            ? "El resumen de la fase «Resumen» cubre TODOS estos mensajes (comparten ventana de procesamiento)."
+            : "Ventana prospectiva: lo que armaría «Resumir su lote» hoy (agrupa por cantidad de mensajes del mismo origen; sin corte por tiempo)."
         }
         right={<Layers className="size-4 text-muted-foreground" />}
       />

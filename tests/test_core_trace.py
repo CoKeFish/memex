@@ -152,6 +152,7 @@ def test_read_trace_attaches_calls_under_root_and_rolls_up_cost() -> None:
         "latencyMs": 100,
         "status": "ok",
         "responseText": '{"items":[]}',
+        "responseTextFull": None,  # no difiere (sin source_inbox_ids) → solo responseText
     }
     # Roll-up jerárquico: el root acumula el costo de su subárbol (ruteo + extracción).
     root = by_kind["root"][0]
@@ -183,6 +184,8 @@ def test_read_trace_scopes_grouped_response_to_message() -> None:
     scoped = json.loads(leaf["llm"]["responseText"])
     assert [it["title"] for it in scoped["calendar"]] == ["Mío"]  # el ítem ajeno se filtró
     assert [it["name"] for it in scoped["identidades"]] == ["Compartido"]  # incluye iid → se queda
+    full = json.loads(leaf["llm"]["responseTextFull"])  # modo «Su lote»: el lote COMPLETO
+    assert [it["title"] for it in full["calendar"]] == ["Mío", "Ajeno"]
 
 
 def test_read_trace_excludes_calls_from_previous_runs() -> None:

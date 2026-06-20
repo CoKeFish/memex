@@ -27,6 +27,9 @@ import { fmtCost } from "./llm-trace-runs"
 import type { Tone } from "@/lib/status"
 import type { TraceNodeDto, TraceNodeKind } from "@/types/domain"
 
+/** Alcance de la vista de traza: "individual" = solo este mensaje; "window" = todo su lote. */
+type TraceScope = "individual" | "window"
+
 // --- presentación por `kind` (única tabla de estilo; el resto es agnóstico) -------------------- //
 const KIND_ICON: Record<TraceNodeKind, LucideIcon> = {
   root: ScrollText,
@@ -129,8 +132,11 @@ function parseJsonLoose(text: string): object | undefined {
   }
 }
 
-function LlmLeaf({ llm }: { llm: NonNullable<TraceNodeDto["llm"]> }) {
-  const parsed = llm.responseText ? parseJsonLoose(llm.responseText) : undefined
+function LlmLeaf({ llm, scope }: { llm: NonNullable<TraceNodeDto["llm"]>; scope: TraceScope }) {
+  // «Su lote» (window) → salida COMPLETA del lote si la llamada es compartida; si no, la acotada.
+  const raw =
+    scope === "window" && llm.responseTextFull != null ? llm.responseTextFull : llm.responseText
+  const parsed = raw ? parseJsonLoose(raw) : undefined
   return (
     <div className="space-y-1 py-0.5">
       <div className="num flex flex-wrap items-center gap-x-2 text-[10px] text-muted-foreground">
@@ -147,9 +153,9 @@ function LlmLeaf({ llm }: { llm: NonNullable<TraceNodeDto["llm"]> }) {
           <JsonView data={parsed} shouldExpandNode={allExpanded} style={darkStyles} />
         </div>
       ) : (
-        llm.responseText && (
+        raw && (
           <pre className="num max-h-44 overflow-auto rounded border border-border bg-muted/30 p-2 text-[10px] leading-relaxed text-muted-foreground">
-            {llm.responseText}
+            {raw}
           </pre>
         )
       )}
@@ -171,10 +177,12 @@ function NodeRow({
   node,
   expanded,
   toggle,
+  scope,
 }: {
   node: TreeNode
   expanded: Set<number>
   toggle: (id: number) => void
+  scope: TraceScope
 }) {
   const open = expanded.has(node.id)
   const expandable = isExpandable(node)
@@ -212,9 +220,9 @@ function NodeRow({
       {open && expandable && (
         <div className="ml-[5px] space-y-0.5 border-l border-border/50 pl-3">
           {hasDetail(node) && <DetailKv detail={node.detail} />}
-          {node.kind === "llm" && node.llm && <LlmLeaf llm={node.llm} />}
+          {node.kind === "llm" && node.llm && <LlmLeaf llm={node.llm} scope={scope} />}
           {node.children.map((c) => (
-            <NodeRow key={c.id} node={c} expanded={expanded} toggle={toggle} />
+            <NodeRow key={c.id} node={c} expanded={expanded} toggle={toggle} scope={scope} />
           ))}
         </div>
       )}
@@ -222,7 +230,13 @@ function NodeRow({
   )
 }
 
-export function TraceTree({ nodes }: { nodes: TraceNodeDto[] }) {
+export function TraceTree({
+  nodes,
+  scope = "individual",
+}: {
+  nodes: TraceNodeDto[]
+  scope?: TraceScope
+}) {
   const forest = useMemo(() => buildForest(nodes), [nodes])
   // Un único `root` por mensaje es redundante mostrarlo: rendereamos sus hijos al tope.
   const topLevel = forest.length === 1 && forest[0].kind === "root" ? forest[0].children : forest
@@ -274,7 +288,7 @@ export function TraceTree({ nodes }: { nodes: TraceNodeDto[] }) {
       </div>
       <div className="space-y-0.5">
         {topLevel.map((n) => (
-          <NodeRow key={n.id} node={n} expanded={expanded} toggle={toggle} />
+          <NodeRow key={n.id} node={n} expanded={expanded} toggle={toggle} scope={scope} />
         ))}
       </div>
     </div>

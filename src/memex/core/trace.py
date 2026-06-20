@@ -401,13 +401,17 @@ def _scope_response_to_inbox(response_text: Any, inbox_id: int) -> Any:
 
 
 def _llm_payload(c: Any, inbox_id: int) -> dict[str, Any]:
+    full = c["response_text"]
+    scoped = _scope_response_to_inbox(full, inbox_id)
     return {
         "model": c["model"],
         "promptTokens": int(c["prompt_tokens"]),
         "completionTokens": int(c["completion_tokens"]),
         "latencyMs": int(c["latency_ms"]),
         "status": c["status"],
-        "responseText": _scope_response_to_inbox(c["response_text"], inbox_id),
+        "responseText": scoped,  # acotado a ESTE mensaje (modo «solo este»)
+        # salida COMPLETA del lote (modo «Su lote»); None si no difiere (llamada de 1 msg).
+        "responseTextFull": full if scoped != full else None,
     }
 
 
