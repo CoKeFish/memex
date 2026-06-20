@@ -367,14 +367,47 @@ def _node_status_from_llm(s: str) -> str:
     return "info"  # filtered / omitido
 
 
-def _llm_payload(c: Any) -> dict[str, Any]:
+def _scope_response_to_inbox(response_text: Any, inbox_id: int) -> Any:
+    """Acota la salida cruda de una llamada COMPARTIDA del lote (extracción agrupada / per-módulo) a
+    los ítems de ESTE mensaje. La traza es por-mensaje: mostrar el JSON del lote entero filtra otros
+    correos (`source_inbox_ids:[otro]`) en el modo «solo este». Filtra toda lista de ítems-dict que
+    traiga `source_inbox_ids`, conservando los que incluyen `inbox_id`; el resto (ruteo, prosa, no
+    JSON) pasa intacto."""
+    if not response_text:
+        return response_text
+    try:
+        data = json.loads(response_text)
+    except (ValueError, TypeError):
+        return response_text
+    if not isinstance(data, dict):
+        return response_text
+    out: dict[str, Any] = {}
+    scoped = False
+    for key, val in data.items():
+        if isinstance(val, list) and any(
+            isinstance(it, dict) and "source_inbox_ids" in it for it in val
+        ):
+            out[key] = [
+                it
+                for it in val
+                if isinstance(it, dict) and inbox_id in (it.get("source_inbox_ids") or [])
+            ]
+            scoped = True
+        else:
+            out[key] = val
+    if not scoped:
+        return response_text
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _llm_payload(c: Any, inbox_id: int) -> dict[str, Any]:
     return {
         "model": c["model"],
         "promptTokens": int(c["prompt_tokens"]),
         "completionTokens": int(c["completion_tokens"]),
         "latencyMs": int(c["latency_ms"]),
         "status": c["status"],
-        "responseText": c["response_text"],
+        "responseText": _scope_response_to_inbox(c["response_text"], inbox_id),
     }
 
 
@@ -488,7 +521,7 @@ def read_trace(user_id: int, inbox_id: int) -> list[dict[str, Any]] | None:
             if c is not None:
                 # cost/N si la call es compartida (N nodos la referencian); N=1 → costo completo.
                 own_cost = _to_float(c["cost_usd"]) / share_by_call.get(int(r["llm_call_id"]), 1)
-                payload = _llm_payload(c)
+                payload = _llm_payload(c, inbox_id)
         node = {
             "id": int(r["id"]),
             "parentId": int(r["parent_id"]) if r["parent_id"] is not None else None,
@@ -521,7 +554,7 @@ def read_trace(user_id: int, inbox_id: int) -> list[dict[str, Any]] | None:
             "ref": None,
             "llmCallId": int(c["id"]),
             "detail": {},
-            "llm": _llm_payload(c),
+            "llm": _llm_payload(c, inbox_id),
         }
         own[nid] = _to_float(c["cost_usd"])
         out.append(node)

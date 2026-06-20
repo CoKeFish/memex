@@ -6,6 +6,7 @@ llamadas LLM se insertan directo en `llm_calls` para ejercitar el enganche por `
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -158,6 +159,30 @@ def test_read_trace_attaches_calls_under_root_and_rolls_up_cost() -> None:
     # La entidad no tiene LLM debajo (en el slice síncrono el desempate es worker async) → costo 0.
     entity = by_kind["entity"][0]
     assert entity["cost"]["calls"] == 0
+
+
+def test_read_trace_scopes_grouped_response_to_message() -> None:
+    # La traza es por-mensaje: la salida de una extracción agrupada (lote) se acota a los ítems de
+    # ESTE inbox; los de otros correos (source_inbox_ids:[otro]) NO se muestran (modo «solo este»).
+    iid = _seed_inbox("scope")
+    with connection() as c:
+        create_root(c, user_id=1, inbox_id=iid, label="msg")
+    grouped = json.dumps(
+        {
+            "calendar": [
+                {"source_inbox_ids": [iid], "title": "Mío"},
+                {"source_inbox_ids": [999], "title": "Ajeno"},
+            ],
+            "identidades": [{"source_inbox_ids": [iid, 999], "name": "Compartido"}],
+        }
+    )
+    _insert_call(iid, "extract_grouped", "0.006", response=grouped)
+    tree = read_trace(1, iid)
+    assert tree is not None
+    leaf = next(n for n in tree if n["kind"] == "llm" and n["label"] == "Extracción agrupada")
+    scoped = json.loads(leaf["llm"]["responseText"])
+    assert [it["title"] for it in scoped["calendar"]] == ["Mío"]  # el ítem ajeno se filtró
+    assert [it["name"] for it in scoped["identidades"]] == ["Compartido"]  # incluye iid → se queda
 
 
 def test_read_trace_excludes_calls_from_previous_runs() -> None:
