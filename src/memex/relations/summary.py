@@ -53,7 +53,7 @@ _log = get_logger("memex.relations.summary")
 
 # El LIMIT corta a nivel de MENSAJE (no de ventana): una secuencia batch contigua más larga que
 # el límite se fragmenta entre corridas (ineficiencia, NO incorrectitud — todo se resume igual por
-# idempotencia). Default múltiplo de MAX_WINDOW_SIZE (40) para minimizar cortes.
+# idempotencia). Default múltiplo de MAX_WINDOW_SIZE para minimizar cortes.
 _DEFAULT_LIMIT = 200
 # Tope de tokens de salida del resumen. Si el modelo trunca (finish_reason="length") se persiste
 # igual pero se marca truncated=true en metadata para auditar/re-hacer después.

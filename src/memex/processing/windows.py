@@ -21,8 +21,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-#: Tope de mensajes por ventana batch (evita prompts gigantes / degradación).
-MAX_WINDOW_SIZE = 40
+#: Tope de mensajes por ventana batch. 20 (no 40): ventanas más chicas = extracción más enfocada —
+#: con 40, el budget de output del LLM truncaba/perdía ítems de los correos del final de la ventana.
+MAX_WINDOW_SIZE = 20
 
 
 @dataclass(frozen=True)

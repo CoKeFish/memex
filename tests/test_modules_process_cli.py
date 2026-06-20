@@ -195,7 +195,7 @@ def test_extract_cli_defaults(monkeypatch: Any) -> None:
 
     monkeypatch.setattr("memex.modules.cli.run_extraction", fake_run)
     assert main(["run"]) == 0
-    assert captured["max_window_size"] == 40
+    assert captured["max_window_size"] == 20  # MAX_WINDOW_SIZE (ventana enfocada)
     assert captured["route_chunk_size"] == 0  # sin split
     assert captured["batching_policy"] == "grouped"  # default: una llamada para todos
     assert captured["group_size"] == 8  # _GROUP_SIZE_DEFAULT (headroom sobre los módulos actuales)
