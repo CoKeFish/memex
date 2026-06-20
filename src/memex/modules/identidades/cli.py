@@ -61,7 +61,7 @@ from memex.modules.identidades.classify import run_classify
 from memex.modules.identidades.dedup_llm import run_merge_phase2
 from memex.modules.identidades.hierarchy import run_organize, would_create_cycle
 from memex.modules.identidades.merge import merge_identities
-from memex.modules.identidades.module import register_card
+from memex.modules.identidades.module import identifier_owner, register_card
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.providers import known_providers
 from memex.modules.identidades.providers.base import ContactsProviderError
@@ -1087,6 +1087,16 @@ def _cmd_add_id(args: argparse.Namespace) -> int:
         if owns is None:
             _say(f"\nNo existe la identidad id={args.id} para el user {args.user}.\n", err=True)
             return 1
+        vn = norm_identifier(args.kind, args.value)
+        # Unicidad global de identificadores fuertes: no colgar uno que ya es de otra ficha (0081).
+        other = identifier_owner(conn, args.user, args.kind, vn)
+        if other is not None and other != args.id:
+            _say(
+                f"\nEl {args.kind} {args.value!r} ya pertenece a la identidad #{other}. "
+                f"Fundilas con `unify` si son la misma.\n",
+                err=True,
+            )
+            return 1
         conn.execute(
             text(
                 """
@@ -1102,7 +1112,7 @@ def _cmd_add_id(args: argparse.Namespace) -> int:
                 "pl": platform,
                 "k": args.kind,
                 "v": args.value,
-                "vn": norm_identifier(args.kind, args.value),
+                "vn": vn,
             },
         )
     result = {
@@ -1532,6 +1542,12 @@ def _cmd_interest_add(args: argparse.Namespace) -> int:
         for d in args.domain:
             if not d.strip():
                 continue
+            dvn = norm_identifier("domain", d)
+            # Unicidad global del dominio: si ya es de otra ficha, no lo cuelga acá (0081).
+            other = identifier_owner(conn, args.user, "domain", dvn)
+            if other is not None and other != org_id:
+                _say(f"\nDominio {d!r} ya pertenece a #{other}; no se colgó.\n", err=True)
+                continue
             conn.execute(
                 text(
                     """
@@ -1541,7 +1557,7 @@ def _cmd_interest_add(args: argparse.Namespace) -> int:
                     ON CONFLICT (identity_id, platform, kind, value_norm) DO NOTHING
                     """
                 ),
-                {"u": args.user, "id": org_id, "v": d, "vn": norm_identifier("domain", d)},
+                {"u": args.user, "id": org_id, "v": d, "vn": dvn},
             )
     _say(f"\nEn la lista de interés: id={org_id} {args.name!r}.\n")
     return 0

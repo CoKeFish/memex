@@ -366,24 +366,20 @@ def test_email_freemail_conocido_resuelve_persona() -> None:
     assert _pair(edges[0]) == {("finance", fin), ("identidades:person", p)}
 
 
-def test_email_freemail_con_nombre_es_desconocido() -> None:
-    # free-mail con nombre de individuo → DESCONOCIDO por su correo (el tipo no se adivina sin
-    # lista; el clasificador decide si es persona). NO se crea org (gmail.com no es una org).
+def test_email_freemail_con_nombre_es_leftover() -> None:
+    # free-mail con nombre → NO se crea stub (un email no es identidad). Queda como leftover: lo
+    # crea/decide el resolver. El dedup no inventa la persona ni una org del free-mail.
     src = _source("imap", "mail")
     mid = _inbox(src, "m1", _email_payload("ana.garcia@gmail.com", "Ana García"))
-    fin = _finance("Tienda", [mid])
+    _finance("Tienda", [mid])
     with connection() as c:
         n = weave_email_senders(c, 1, [mid])
         generate_cooccurrence(c, 1)
         edges = list_edges(c, 1, producer="inbox")
-    assert n == 1
-    ids = _identities()
-    assert len(ids) == 1  # solo la entidad; NO se crea org del free-mail
-    eid = ids[0][0]
-    assert _identity_kinds() == ["desconocido"]
-    # value_norm plegado por Gmail (los puntos se ignoran): ana.garcia → anagarcia
-    assert ("email", "email", "anagarcia@gmail.com") in _identifiers_of(eid)
-    assert _pair(edges[0]) == {("finance", fin), ("identidades:desconocido", eid)}
+    assert n == 0
+    assert _identities() == []  # free-mail no crea stub
+    assert _sender_mentions() == []
+    assert edges == []
 
 
 def test_email_freemail_sin_nombre_no_crea() -> None:
@@ -401,41 +397,30 @@ def test_email_freemail_sin_nombre_no_crea() -> None:
     assert edges == []  # un solo vértice (finance) → sin pares
 
 
-def test_email_individuo_corporativo_es_desconocido_afiliado() -> None:
-    # un individuo de dominio propio, aunque el nombre PAREZCA persona, NO se adivina: queda
-    # DESCONOCIDO + afiliación a la org del dominio. El tipo lo define el clasificador (juez LLM).
+def test_email_individuo_corporativo_cuelga_en_org() -> None:
+    # un individuo de dominio propio NO crea ficha (un email es ATRIBUTO): la ORG del dominio + su
+    # email colgado como CONTACTO de la org. Sin desconocido, sin afiliación a una ficha aparte.
     src = _source("imap", "mail")
     mid = _inbox(src, "m1", _email_payload("juan.perez@acme.com", "Juan Pérez"))
     with connection() as c:
         n = weave_email_senders(c, 1, [mid])
     assert n == 1
-    assert sorted(_identity_kinds()) == [
-        "desconocido",
-        "organizacion",
-    ]  # el remitente (pendiente) + la org del dominio
+    assert _identity_kinds() == ["organizacion"]  # SOLO la org del dominio
     mentions = _sender_mentions()
-    assert len(mentions) == 1 and mentions[0]["rkind"] == "desconocido"
-    eid = mentions[0]["rid"]
-    assert ("email", "email", "juan.perez@acme.com") in _identifiers_of(eid)
+    assert len(mentions) == 1 and mentions[0]["rkind"] == "organizacion"
+    org_id = mentions[0]["rid"]
+    assert ("email", "email", "juan.perez@acme.com") in _identifiers_of(org_id)  # email = contacto
+    assert ("domain", "domain", "acme.com") in _identifiers_of(org_id)
     with connection() as c:
         aff = c.execute(
-            text("SELECT person_id, org_id FROM mod_identidades_person_orgs WHERE user_id = 1")
-        ).all()
-        org_dom = c.execute(
-            text(
-                "SELECT identity_id FROM mod_identidades_identifiers "
-                "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'acme.com'"
-            )
+            text("SELECT count(*) FROM mod_identidades_person_orgs WHERE user_id = 1")
         ).scalar()
-    assert org_dom is not None
-    assert len(aff) == 1
-    assert int(aff[0][0]) == eid  # la afiliación va de la entidad (pendiente)...
-    assert int(aff[0][1]) == int(org_dom)  # ...a la org del dominio
+    assert aff == 0  # no hay individuo aparte → sin afiliación
 
 
-def test_email_individuo_corporativo_difiere_con_resolvedor_on() -> None:
-    # Con el resolvedor contextual ON, el individuo de dominio corporativo NO crea ficha: la mención
-    # apunta a la ORG del dominio y lleva el email crudo (señal pendiente); el resolvedor dispone.
+def test_email_sender_no_depende_de_resolver_enabled() -> None:
+    # Se quitó el `defer`: el remitente corporativo se resuelve igual con `resolver_enabled` ON/OFF
+    # (siempre org del dominio + email colgado). Guarda contra re-acoplar el sender al resolver.
     from memex.modules.identidades.settings import upsert_settings
 
     src = _source("imap", "mail")
@@ -445,35 +430,21 @@ def test_email_individuo_corporativo_difiere_con_resolvedor_on() -> None:
     with connection() as c:
         n = weave_email_senders(c, 1, [mid])
     assert n == 1
-    assert _identity_kinds() == ["organizacion"]  # SOLO la org del dominio; NO se crea desconocido
-    mentions = _sender_mentions()
-    assert len(mentions) == 1 and mentions[0]["rkind"] == "organizacion"
-    org_id = mentions[0]["rid"]
-    # el email NO se ata todavía (lo dispone el resolvedor); en la org solo está el dominio
-    assert ("email", "email", "juan.perez@acme.com") not in _identifiers_of(org_id)
-    assert ("domain", "domain", "acme.com") in _identifiers_of(org_id)
-    # el email crudo viaja en la mención para que el resolvedor lo disponga
-    with connection() as c:
-        carried = c.execute(
-            text(
-                "SELECT email FROM mod_identidades_mentions "
-                "WHERE :m = ANY(source_inbox_ids) AND resolution_method = 'sender'"
-            ),
-            {"m": mid},
-        ).scalar()
-    assert carried == "juan.perez@acme.com"
+    assert _identity_kinds() == ["organizacion"]
+    org_id = _sender_mentions()[0]["rid"]
+    assert ("email", "email", "juan.perez@acme.com") in _identifiers_of(org_id)
 
 
 def test_email_varios_individuos_mismo_dominio_una_org() -> None:
-    # varios individuos distintos @acme.com → varios DESCONOCIDO + UNA sola org (keyed por dominio,
-    # no fragmenta); un relay (notifications@) es la org. Ningún individuo se colapsa en la org.
+    # varios remitentes @acme.com (individuos + relay) → UNA sola org (keyed por dominio); los
+    # emails no-rol cuelgan como contactos de esa org. Ningún stub por individuo.
     src = _source("imap", "mail")
     m1 = _inbox(src, "m1", _email_payload("juan.perez@acme.com", "Juan Pérez"))
     m2 = _inbox(src, "m2", _email_payload("maria.lopez@acme.com", "María López"))
     m3 = _inbox(src, "m3", _email_payload("notifications@acme.com", "Acme"))  # relay → la org
     with connection() as c:
         weave_email_senders(c, 1, [m1, m2, m3])
-    assert sorted(_identity_kinds()) == ["desconocido", "desconocido", "organizacion"]
+    assert _identity_kinds() == ["organizacion"]  # una sola org para todos
     with connection() as c:
         domains = c.execute(
             text(
@@ -481,44 +452,28 @@ def test_email_varios_individuos_mismo_dominio_una_org() -> None:
                 "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'acme.com'"
             )
         ).all()
-    assert len(domains) == 1  # una sola org tiene el dominio
-    assert sorted(m["rkind"] for m in _sender_mentions()) == [
-        "desconocido",
-        "desconocido",
-        "organizacion",
-    ]
+    assert len(domains) == 1
+    idf = _identifiers_of(int(domains[0][0]))
+    assert ("email", "email", "juan.perez@acme.com") in idf  # individuos cuelgan como contacto
+    assert ("email", "email", "maria.lopez@acme.com") in idf
+    assert ("email", "email", "notifications@acme.com") not in idf  # el relay no es clave
 
 
-def test_email_individuo_corporativo_ambiguo_es_desconocido_afiliado() -> None:
-    # un buzón de DEPENDENCIA (local-part ambiguo + from.name de unidad org) en dominio propio NO se
-    # adivina persona: queda DESCONOCIDO, afiliado a la org. La arista `afiliado` proyecta bajo su
-    # slug (identidades:desconocido), no huérfana (fix _afiliacion_pairs).
+def test_email_buzon_dependencia_cuelga_en_org() -> None:
+    # un buzón de dependencia (local-part de unidad org) en dominio propio → la org del dominio + su
+    # email colgado como contacto. Sin desconocido ni arista `afiliado` a una ficha aparte.
     src = _source("imap", "mail")
     mid = _inbox(
         src, "m1", _email_payload("ielec@javeriana.edu.co", "Carrera de Ingeniería Electrónica")
     )
     with connection() as c:
         n = weave_email_senders(c, 1, [mid])
-        edges = list_edges(c, 1)  # solo la arista afiliado (sin co-ocurrencia)
+        edges = list_edges(c, 1)
     assert n == 1
-    assert sorted(_identity_kinds()) == ["desconocido", "organizacion"]  # el buzón + la org dominio
-    mentions = _sender_mentions()
-    assert len(mentions) == 1 and mentions[0]["rkind"] == "desconocido"
-    eid = mentions[0]["rid"]
-    assert ("email", "email", "ielec@javeriana.edu.co") in _identifiers_of(eid)
-    with connection() as c:
-        org_dom = c.execute(
-            text(
-                "SELECT identity_id FROM mod_identidades_identifiers "
-                "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'javeriana.edu.co'"
-            )
-        ).scalar()
-    assert org_dom is not None
-    assert len(edges) == 1
-    assert _pair(edges[0]) == {
-        ("identidades:desconocido", eid),
-        ("identidades:org", int(org_dom)),
-    }
+    assert _identity_kinds() == ["organizacion"]
+    org_id = _sender_mentions()[0]["rid"]
+    assert ("email", "email", "ielec@javeriana.edu.co") in _identifiers_of(org_id)
+    assert edges == []  # el email es atributo de la org; no hay afiliado a una ficha aparte
 
 
 def test_email_egerlein_reusa_persona_existente() -> None:
@@ -538,7 +493,7 @@ def test_email_egerlein_reusa_persona_existente() -> None:
 
 
 def test_email_varios_buzones_depto_mismo_dominio_una_org() -> None:
-    # dos buzones de dependencia distintos del mismo dominio → DOS desconocidos + UNA sola org.
+    # dos buzones de dependencia del mismo dominio → UNA sola org; ambos emails cuelgan de ella.
     src = _source("imap", "mail")
     m1 = _inbox(
         src, "m1", _email_payload("ielec@javeriana.edu.co", "Carrera de Ingeniería Electrónica")
@@ -548,7 +503,7 @@ def test_email_varios_buzones_depto_mismo_dominio_una_org() -> None:
     )
     with connection() as c:
         weave_email_senders(c, 1, [m1, m2])
-    assert sorted(_identity_kinds()) == ["desconocido", "desconocido", "organizacion"]
+    assert _identity_kinds() == ["organizacion"]  # una sola org para ambos buzones
     with connection() as c:
         domains = c.execute(
             text(
@@ -556,23 +511,21 @@ def test_email_varios_buzones_depto_mismo_dominio_una_org() -> None:
                 "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'javeriana.edu.co'"
             )
         ).all()
-    assert len(domains) == 1  # una sola org para ambos deptos
+    assert len(domains) == 1
+    idf = _identifiers_of(int(domains[0][0]))
+    assert ("email", "email", "ielec@javeriana.edu.co") in idf
+    assert ("email", "email", "viceacad@javeriana.edu.co") in idf
 
 
-def test_email_freemail_nombre_tipo_org_es_desconocido() -> None:
-    # free-mail con nombre tipo-ORG (no representa a una org del dominio) → DESCONOCIDO, sin afil.
+def test_email_freemail_nombre_tipo_org_es_leftover() -> None:
+    # free-mail (gmail) aunque el nombre parezca org → NO se crea stub; leftover para el resolver.
     src = _source("imap", "mail")
     mid = _inbox(src, "m1", _email_payload("rh.global@gmail.com", "Departamento de Gestión Humana"))
     with connection() as c:
         n = weave_email_senders(c, 1, [mid])
-    assert n == 1
-    assert _identity_kinds() == ["desconocido"]  # ni persona ni org del free-mail
-    assert _sender_mentions()[0]["rkind"] == "desconocido"
-    with connection() as c:
-        aff = c.execute(
-            text("SELECT count(*) FROM mod_identidades_person_orgs WHERE user_id = 1")
-        ).scalar()
-    assert aff == 0  # free-mail no tiene org → sin afiliación
+    assert n == 0
+    assert _identities() == []  # free-mail no crea stub
+    assert _sender_mentions() == []
 
 
 # --- social ------------------------------------------------------------------------------ #

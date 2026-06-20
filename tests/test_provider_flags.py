@@ -42,4 +42,4 @@ def test_codex_prints_notice(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> No
 
 def test_argparse_rejects_unknown_provider() -> None:
     with pytest.raises(SystemExit):
-        _parse(["--provider", "openai"])
+        _parse(["--provider", "mistral"])  # 'openai' ya es válido (provider agregado)

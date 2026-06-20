@@ -23,7 +23,7 @@ from memex.modules.identidades.classify import (
     _parse_classification,
     run_classify,
 )
-from memex.modules.identidades.senders import weave_email_senders
+from memex.relations.deterministic import weave_afiliacion
 from memex.relations.edges import list_edges
 
 
@@ -61,9 +61,11 @@ def _exec(sql: str, **params: Any) -> Any:
 
 
 def _seed_desconocido(email: str, name: str, subject: str = "asunto de prueba") -> int:
-    """Siembra un correo de un individuo de dominio propio y lo resuelve con `weave_email_senders`
-    (camino real → crea un `desconocido` + la org del dominio + afiliación + la mención 'sender').
-    Devuelve el id de la entidad `desconocido` (la dueña del email)."""
+    """Siembra una entidad `desconocido` (con su email, la org del dominio, su afiliación —arista
+    `afiliado` incluida— y un correo donde fue remitente) directamente. El camino del remitente ya
+    NO crea `desconocido` para correo corporativo (cuelga el email en la org); el clasificador opera
+    sobre `desconocido` de cualquier origen — esto recrea ese estado de entrada."""
+    domain = email.split("@", 1)[1]
     src = int(
         _exec(
             "INSERT INTO sources (user_id, name, type) VALUES (1, :n, 'imap') RETURNING id",
@@ -80,15 +82,62 @@ def _seed_desconocido(email: str, name: str, subject: str = "asunto de prueba") 
             p=json.dumps(payload),
         )
     )
-    with connection() as c:
-        weave_email_senders(c, 1, [mid])
-    return int(
+    # org del dominio (reusar si ya existe; varios seeds comparten dominio), nombrada por el dominio
+    org = _exec(
+        "SELECT identity_id FROM mod_identidades_identifiers "
+        "WHERE user_id = 1 AND kind = 'domain' AND value_norm = :d",
+        d=domain,
+    )
+    if org is None:
+        org = int(
+            _exec(
+                "INSERT INTO mod_identidades (user_id, kind, display_name, source, interest) "
+                "VALUES (1, 'organizacion', :n, 'extraction', FALSE) RETURNING id",
+                n=domain,
+            )
+        )
         _exec(
-            "SELECT identity_id FROM mod_identidades_identifiers "
-            "WHERE user_id = 1 AND kind = 'email' AND value_norm = :e",
-            e=email,
+            "INSERT INTO mod_identidades_identifiers "
+            "(user_id, identity_id, platform, kind, value, value_norm, source) "
+            "VALUES (1, :i, 'domain', 'domain', :d, :d, 'extraction')",
+            i=org,
+            d=domain,
+        )
+    org = int(org)
+    eid = int(
+        _exec(
+            "INSERT INTO mod_identidades (user_id, kind, display_name, source, interest) "
+            "VALUES (1, 'desconocido', :n, 'extraction', FALSE) RETURNING id",
+            n=name,
         )
     )
+    _exec(
+        "INSERT INTO mod_identidades_identifiers "
+        "(user_id, identity_id, platform, kind, value, value_norm, source) "
+        "VALUES (1, :i, 'email', 'email', :e, :e, 'extraction')",
+        i=eid,
+        e=email,
+    )
+    _exec(
+        "INSERT INTO mod_identidades_person_orgs (user_id, person_id, org_id, role, source) "
+        "VALUES (1, :p, :o, NULL, 'extraction')",
+        p=eid,
+        o=org,
+    )
+    _exec(
+        "INSERT INTO mod_identidades_mentions "
+        "(user_id, source_inbox_ids, mentioned_name, mentioned_kind, resolved_kind, "
+        " resolved_identity_id, resolution_method, email) "
+        "VALUES (1, ARRAY[:m], :n, 'unknown', 'desconocido', :i, 'sender', :e)",
+        m=mid,
+        n=name,
+        i=eid,
+        e=email,
+    )
+    # arista `afiliado` en el grafo (la que el clasificador re-proyecta al promover el kind).
+    with connection() as c:
+        weave_afiliacion(c, 1, eid)
+    return eid
 
 
 def _kind(identity_id: int) -> str:

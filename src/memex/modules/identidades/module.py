@@ -334,6 +334,27 @@ def _create_entity(
     return new_id
 
 
+#: Identificadores FUERTES: pertenecen a UNA sola identidad (unicidad global, índice 0081). `handle`
+#: NO entra (es por-plataforma: @foo en X ≠ @foo en Instagram).
+STRONG_ID_KINDS = frozenset({"email", "phone", "domain"})
+
+
+def identifier_owner(conn: Connection, user_id: int, kind: str, value_norm: str) -> int | None:
+    """La identidad dueña de un identificador FUERTE (email/phone/domain), o None. Única fuente de
+    verdad para la unicidad global (índice 0081): el dedup la usa para no duplicar; api/cli la usan
+    para rechazar un alta manual que pisaría a otra ficha."""
+    if kind not in STRONG_ID_KINDS:
+        return None
+    owner = conn.execute(
+        text(
+            "SELECT identity_id FROM mod_identidades_identifiers "
+            "WHERE user_id = :u AND kind = :k AND value_norm = :vn LIMIT 1"
+        ),
+        {"u": user_id, "k": kind, "vn": value_norm},
+    ).scalar()
+    return int(owner) if owner is not None else None
+
+
 def _insert_identifier(
     conn: Connection,
     user_id: int,
@@ -345,6 +366,20 @@ def _insert_identifier(
     *,
     source: str = "extraction",
 ) -> None:
+    # Unicidad global de identificadores fuertes: un email/teléfono/dominio pertenece a UNA
+    # identidad. Si el valor ya es de OTRA ficha, NO se cuelga acá (su dueña ya existe; la mención
+    # se resuelve hacia ella). Evita el dup cross-ficha (bug bafs) y respeta el índice único 0081.
+    # El re-insert sobre la MISMA ficha lo absorbe el ON CONFLICT de abajo.
+    owner = identifier_owner(conn, user_id, kind, vn)
+    if owner is not None and owner != identity_id:
+        _log.info(
+            "identidades.identifier.owned_by_other",
+            kind=kind,
+            value_norm=vn,
+            owner=owner,
+            attempted=identity_id,
+        )
+        return
     conn.execute(
         text(
             """

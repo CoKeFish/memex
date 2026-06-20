@@ -10,7 +10,7 @@ def test_get_lists_keys_and_providers(client: Any) -> None:
     assert r.status_code == 200
     body = r.json()
     assert "summarizer" in body["consumers"] and "default" in body["consumers"]
-    assert set(body["providers"]) == {"deepseek", "anthropic", "codex"}
+    assert set(body["providers"]) == {"deepseek", "anthropic", "codex", "openai"}
     assert body["configured"] == []  # sin filas configuradas todavía
 
 
@@ -46,7 +46,7 @@ def test_patch_invalid_consumer_is_422(client: Any) -> None:
 
 
 def test_patch_invalid_provider_is_422(client: Any) -> None:
-    r = client.patch("/llm/consumers/summarizer", json={"provider": "openai"})
+    r = client.patch("/llm/consumers/summarizer", json={"provider": "mistral"})
     assert r.status_code == 422
 
 

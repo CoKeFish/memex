@@ -39,6 +39,7 @@ from memex.llm.client import LLMQuotaError
 from memex.logging import get_logger
 from memex.modules.identidades.hierarchy import run_organize, would_create_cycle
 from memex.modules.identidades.merge import merge_identities
+from memex.modules.identidades.module import identifier_owner
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.sync import run_sync
 from memex.relations.deterministic import weave_pertenencia
@@ -596,6 +597,15 @@ async def add_identifier(
         ).first()
         if owns is None:
             raise HTTPException(status_code=404, detail="identidad no encontrada")
+        # Unicidad global de identificadores fuertes (email/phone/domain): no se puede colgar uno
+        # que ya pertenece a OTRA identidad (índice 0081). Fundí las fichas (POST /merge) si son la
+        # misma entidad.
+        other = identifier_owner(conn, user_id, body.kind, vn)
+        if other is not None and other != identity_id:
+            raise HTTPException(
+                status_code=409,
+                detail=f"el {body.kind} ya pertenece a la identidad #{other}",
+            )
         row = (
             conn.execute(
                 text(

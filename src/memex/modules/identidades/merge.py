@@ -84,21 +84,29 @@ def merge_identities(conn: Connection, user_id: int, survivor_id: int, absorbed_
         )
     p = {"u": user_id, "surv": survivor_id, "absb": absorbed_id}
 
-    # 1. identificadores (mover sin duplicar) + sedes.
+    # 1. identificadores: re-apuntar del absorbido al superviviente. Se DESCARTAN primero los que el
+    #    superviviente YA tiene (per-ficha dup, p.ej. handles compartidos) y se re-apunta el resto
+    #    por UPDATE — NO INSERT+DELETE: así no hay un instante con DOS filas del mismo identificador
+    #    fuerte (email/phone/domain), que violaría el índice único global (0081). + sedes.
     conn.execute(
         text(
             """
-            INSERT INTO mod_identidades_identifiers
-              (user_id, identity_id, platform, kind, value, value_norm,
-               is_primary, source, metadata)
-            SELECT user_id, :surv, platform, kind, value, value_norm, FALSE, source, metadata
-            FROM mod_identidades_identifiers WHERE identity_id = :absb
-            ON CONFLICT (identity_id, platform, kind, value_norm) DO NOTHING
+            DELETE FROM mod_identidades_identifiers a
+            WHERE a.identity_id = :absb AND EXISTS (
+              SELECT 1 FROM mod_identidades_identifiers s
+              WHERE s.identity_id = :surv AND s.platform = a.platform
+                AND s.kind = a.kind AND s.value_norm = a.value_norm)
             """
         ),
         p,
     )
-    conn.execute(text("DELETE FROM mod_identidades_identifiers WHERE identity_id = :absb"), p)
+    conn.execute(
+        text(
+            "UPDATE mod_identidades_identifiers SET identity_id = :surv, is_primary = FALSE "
+            "WHERE identity_id = :absb"
+        ),
+        p,
+    )
     conn.execute(
         text("UPDATE mod_identidades_sites SET identity_id = :surv WHERE identity_id = :absb"), p
     )

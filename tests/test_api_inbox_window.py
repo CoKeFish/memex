@@ -1,7 +1,7 @@
 """GET /inbox/{id}/window — el lote de procesamiento de un mensaje (sin LLM, contra DB sembrada).
 
-Cubre los tres modos (`summary` / `prospective` / `none`), el corte por gap, el aislamiento
-por fuente y por tenant, y el shape de fila de lista en `members`.
+Cubre los tres modos (`summary` / `prospective` / `none`), que el ventaneo NO corta por gap
+temporal, el aislamiento por fuente y por tenant, y el shape de fila de lista en `members`.
 """
 
 from __future__ import annotations
@@ -100,15 +100,17 @@ def test_prospective_groups_contiguous_batch(client: Any, seed_source: dict[str,
     assert "payload" in first
 
 
-def test_prospective_gap_splits_windows(client: Any, seed_source: dict[str, Any]) -> None:
+def test_prospective_window_no_corta_por_gap(client: Any, seed_source: dict[str, Any]) -> None:
+    # El ventaneo ya NO corta por gap temporal (la cadencia es del daemon, no del agrupado): dos
+    # batch del mismo source caen en la MISMA ventana prospectiva aunque estén lejos en el tiempo.
     sid = seed_source["id"]
     a = _seed(sid, "a", "batch", minutes=0)
-    b = _seed(sid, "b", "batch", minutes=7 * 60)  # gap > 6h → ventana aparte
+    b = _seed(sid, "b", "batch", minutes=7 * 60)  # gap grande: ya NO separa
 
     ra = client.get(f"/inbox/{a}/window").json()
     rb = client.get(f"/inbox/{b}/window").json()
-    assert [m["id"] for m in ra["members"]] == [a]
-    assert [m["id"] for m in rb["members"]] == [b]
+    assert [m["id"] for m in ra["members"]] == [a, b]
+    assert [m["id"] for m in rb["members"]] == [a, b]
 
 
 def test_summary_mode_returns_co_members(client: Any, seed_source: dict[str, Any]) -> None:

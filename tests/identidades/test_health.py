@@ -56,14 +56,16 @@ def test_orphan_detectada(conn: Any) -> None:
 
 
 def test_shared_identifier_detectado(conn: Any) -> None:
+    # un identificador FUERTE (email/phone/domain) ya NO puede compartirse (índice 0081). El check
+    # sigue cazando los que SÍ pueden: un handle por-plataforma reclamado por dos identidades.
     a = _id(conn, "persona", "A")
     b = _id(conn, "persona", "B")
-    _idf(conn, a, "x@gmail.com")
-    _idf(conn, b, "x@gmail.com")  # mismo email en dos identidades → resolución ambigua
+    _idf(conn, a, "foo", kind="handle", platform="twitter")
+    _idf(conn, b, "foo", kind="handle", platform="twitter")  # mismo handle en dos identidades
     _mention(conn, a)
     _mention(conn, b)
     rep = vertex_health(conn, 1)
-    assert any(set(s.ids) == {a, b} and s.key == "x@gmail.com" for s in rep.shared_identifiers)
+    assert any(set(s.ids) == {a, b} and s.key == "foo" for s in rep.shared_identifiers)
 
 
 def test_cross_kind_homonym_detectado(conn: Any) -> None:
