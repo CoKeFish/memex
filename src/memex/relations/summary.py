@@ -42,7 +42,7 @@ from memex.llm import ChatMessage, LLMClient, LLMQuotaError, aclose_llm, build_l
 from memex.logging import get_logger
 from memex.processing.render import render_payload
 from memex.processing.windows import (
-    MAX_WINDOW_SIZE,
+    SUMMARY_WINDOW_SIZE,
     Window,
     WorkRow,
     plan_windows,
@@ -53,7 +53,7 @@ _log = get_logger("memex.relations.summary")
 
 # El LIMIT corta a nivel de MENSAJE (no de ventana): una secuencia batch contigua más larga que
 # el límite se fragmenta entre corridas (ineficiencia, NO incorrectitud — todo se resume igual por
-# idempotencia). Default múltiplo de MAX_WINDOW_SIZE para minimizar cortes.
+# idempotencia). Default múltiplo de SUMMARY_WINDOW_SIZE para minimizar cortes.
 _DEFAULT_LIMIT = 200
 # Tope de tokens de salida del resumen. Si el modelo trunca (finish_reason="length") se persiste
 # igual pero se marca truncated=true en metadata para auditar/re-hacer después.
@@ -440,7 +440,7 @@ async def run_summaries(
     source_id: int | None = None,
     tier: str | None = None,
     limit: int = _DEFAULT_LIMIT,
-    max_window_size: int = MAX_WINDOW_SIZE,
+    max_window_size: int = SUMMARY_WINDOW_SIZE,
     inbox_ids: list[int] | None = None,
     force: bool = False,
     client: LLMClient | None = None,
@@ -619,7 +619,10 @@ def inbox_window(user_id: int, inbox_id: int) -> dict[str, Any]:
     if row.tier not in ("batch", "individual"):
         return {"mode": "none", "summary_id": None, "member_ids": []}
 
-    windows = plan_windows(_load_workset(user_id, row.source_id, None, _WINDOW_SCAN_LIMIT))
+    windows = plan_windows(
+        _load_workset(user_id, row.source_id, None, _WINDOW_SCAN_LIMIT),
+        max_window_size=SUMMARY_WINDOW_SIZE,
+    )
     window = next((w for w in windows if any(r.inbox_id == inbox_id for r in w.rows)), None)
     member_ids = [r.inbox_id for r in window.rows] if window is not None else [inbox_id]
     return {"mode": "prospective", "summary_id": None, "member_ids": member_ids}

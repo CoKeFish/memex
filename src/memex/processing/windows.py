@@ -5,9 +5,9 @@ cantidad; `individual` es 1 ventana por mensaje. El agrupado NO mira los timesta
 mensajes — la cadencia temporal (cada cuánto se procesa lo pendiente) es del daemon/scheduler,
 no del ventaneo. El tope es la perilla de costo/granularidad.
 
-Compartido por la fase de resumen (`memex.relations.summary`) y los módulos de extracción
-(`memex.modules`): ambos ventanean idéntico porque operan sobre los mismos mensajes
-clasificados originales (etapa combinada, ADR-015 §9).
+Usado por relevancia, resumen y extracción sobre los mismos mensajes clasificados, pero cada
+fase fija su PROPIO tope (no es una sola perilla compartida): ver `GATE_WINDOW_SIZE` /
+`SUMMARY_WINDOW_SIZE` / `EXTRACT_WINDOW_SIZE` abajo.
 
 `WorkRow.source_type` (el `sources.type`: imap/telegram/...) es opcional: relations/summary.py no lo
 usa (default `""`); los módulos lo pueblan para derivar el `SourceKind` y pre-filtrar por
@@ -21,9 +21,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-#: Tope de mensajes por ventana batch. 20 (no 40): ventanas más chicas = extracción más enfocada —
-#: con 40, el budget de output del LLM truncaba/perdía ítems de los correos del final de la ventana.
-MAX_WINDOW_SIZE = 20
+#: Topes de mensajes por ventana batch, POR FASE — el dueño los quiere DISTINTOS (no una sola
+#: perilla): la EXTRACCIÓN necesita ventanas chicas (con 40, el budget de output del LLM trunca y
+#: PIERDE ítems de los correos del final); la RELEVANCIA tolera ventanas grandes (juicio
+#: por-mensaje, barato). El resumen va con la extracción (alimenta co-ocurrencia por unidad).
+GATE_WINDOW_SIZE = 40
+EXTRACT_WINDOW_SIZE = 20
+SUMMARY_WINDOW_SIZE = 20
+#: Default genérico de `plan_windows` cuando un caller no fija fase (los reales pasan su constante).
+MAX_WINDOW_SIZE = EXTRACT_WINDOW_SIZE
 
 
 @dataclass(frozen=True)

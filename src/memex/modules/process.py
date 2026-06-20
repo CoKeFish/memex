@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from memex.llm import LLMClient, aclose_llm, build_llm_client
 from memex.logging import get_logger
 from memex.modules.orchestrator import _GROUP_SIZE_DEFAULT, ExtractStats, run_extraction
-from memex.processing.windows import MAX_WINDOW_SIZE
+from memex.processing.windows import EXTRACT_WINDOW_SIZE
 from memex.relations.summary import SummarizeStats, run_summaries
 from memex.relevance.gate import GateStats, run_relevance_gate
 
@@ -39,7 +39,7 @@ async def run_combined(
     *,
     source_id: int | None = None,
     limit: int = 200,
-    max_window_size: int = MAX_WINDOW_SIZE,
+    extract_window_size: int = EXTRACT_WINDOW_SIZE,
     route_chunk_size: int = 0,  # 0 = sin split (mirror del default de run_extraction)
     batching_policy: str = "grouped",  # mirror de run_extraction: una llamada para todos
     group_size: int = _GROUP_SIZE_DEFAULT,
@@ -48,10 +48,12 @@ async def run_combined(
 ) -> CombinedStats:
     """Corre el gate de relevancia, luego resumen y extracción sobre los mismos mensajes.
 
-    Las perillas de ventaneo van a los TRES pasos; las de ruteo/batching (`route_chunk_size`,
-    `batching_policy`, `group_size`) solo aplican a la extracción. El gate usa su PROPIO
-    cliente LLM (Anthropic/Opus por default, NO el del resto —configurable por consumidor);
-    `gate_client` es inyectable para tests. Gate apagado → no-op (worksets sin filtro).
+    Cada fase fija su PROPIO tope de ventana (relevancia/resumen usan su default; ver
+    `windows.py`); `extract_window_size` solo overridea la EXTRACCIÓN (la que más sufre ventanas
+    grandes). Las de ruteo/batching (`route_chunk_size`, `batching_policy`, `group_size`) solo
+    aplican a la extracción. El gate usa su PROPIO cliente LLM (Anthropic/Opus por default, NO el
+    del resto —configurable por consumidor); `gate_client` es inyectable para tests. Gate apagado →
+    no-op (worksets sin filtro).
     """
     owns_client = client is None
     llm: LLMClient = client or build_llm_client("process", user_id=user_id)
@@ -61,21 +63,19 @@ async def run_combined(
             user_id,
             source_id=source_id,
             limit=limit,
-            max_window_size=max_window_size,
             client=gate_client,
         )
         summarize = await run_summaries(
             user_id,
             source_id=source_id,
             limit=limit,
-            max_window_size=max_window_size,
             client=llm,
         )
         extract = await run_extraction(
             user_id,
             source_id=source_id,
             limit=limit,
-            max_window_size=max_window_size,
+            max_window_size=extract_window_size,
             route_chunk_size=route_chunk_size,
             batching_policy=batching_policy,
             group_size=group_size,

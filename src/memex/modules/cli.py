@@ -31,7 +31,7 @@ from memex.modules.extraction_settings import (
 )
 from memex.modules.orchestrator import _GROUP_SIZE_DEFAULT, run_extraction
 from memex.modules.process import run_combined
-from memex.processing.windows import MAX_WINDOW_SIZE
+from memex.processing.windows import EXTRACT_WINDOW_SIZE
 
 _LLM_ERR_MSG = "\nERROR LLM. ¿Corriste con `doppler run -- ...` (DEEPSEEK_API_KEY)?\n"
 _QUOTA_ERR_MSG = "\nSALDO AGOTADO (HTTP 402): corrida abortada. Recargá saldo del proveedor LLM.\n"
@@ -58,8 +58,9 @@ def _add_run_tuning_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--max-window-size",
         type=_positive_int,
-        default=MAX_WINDOW_SIZE,
-        help=f"Tope de mensajes por ventana batch (default {MAX_WINDOW_SIZE}).",
+        default=EXTRACT_WINDOW_SIZE,
+        help=f"Tope de mensajes por ventana de EXTRACCIÓN (default {EXTRACT_WINDOW_SIZE}; "
+        "relevancia y resumen tienen su propio tope).",
     )
     parser.add_argument(
         "--route-chunk-size",
@@ -267,7 +268,7 @@ def _cmd_process_run(args: argparse.Namespace) -> int:
             args.user,
             source_id=args.source,
             limit=args.limit,
-            max_window_size=args.max_window_size,
+            extract_window_size=args.max_window_size,
             route_chunk_size=args.route_chunk_size,
             batching_policy=args.batching_policy,
             group_size=args.group_size,

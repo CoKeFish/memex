@@ -211,7 +211,8 @@ def test_process_cli_threads_tuning(monkeypatch: Any) -> None:
     monkeypatch.setattr("memex.modules.cli.run_combined", fake_run)
     rc = main_process(["run", "--max-window-size", "7", "--batching-policy", "all"])
     assert rc == 0
-    assert captured["max_window_size"] == 7
+    # combinado: --max-window-size overridea SOLO la extracción (relevancia/resumen usan su tope).
+    assert captured["extract_window_size"] == 7
     assert captured["batching_policy"] == "all"
 
 

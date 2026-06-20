@@ -76,7 +76,7 @@ from memex.modules.routing import (
 from memex.modules.workset import load_module_workset
 from memex.processing.render import render_payload
 from memex.processing.windows import (
-    MAX_WINDOW_SIZE,
+    EXTRACT_WINDOW_SIZE,
     Window,
     WorkRow,
     plan_windows,
@@ -846,7 +846,7 @@ async def run_extraction(
     *,
     source_id: int | None = None,
     limit: int = _DEFAULT_LIMIT,
-    max_window_size: int = MAX_WINDOW_SIZE,
+    max_window_size: int = EXTRACT_WINDOW_SIZE,
     route_chunk_size: int = _ROUTE_CHUNK_DEFAULT,
     routing_enabled: bool | None = None,
     batching_policy: str = "grouped",
