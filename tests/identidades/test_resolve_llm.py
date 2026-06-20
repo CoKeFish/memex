@@ -18,6 +18,7 @@ from memex.modules.identidades.resolve_llm import (
     ResolverDecision,
     SenderDisposition,
     _affiliate_mentioned_people,
+    _serialize,
     apply_resolution,
     parse_resolution,
     resolve_email,
@@ -165,6 +166,9 @@ def _ei(identity_id: int, kind: str, name: str, **kw: Any) -> EmailIdentity:
         is_sender=kw.get("is_sender", False),
         sender_email=kw.get("sender_email"),
         resolved_context=False,
+        identifiers=kw.get("identifiers", ()),
+        parent_name=kw.get("parent_name"),
+        children=kw.get("children", ()),
     )
 
 
@@ -354,6 +358,27 @@ def _mention_with_hints(
         ),
         {"i": inbox, "pid": person_id, "oh": org_hint, "rh": role},
     )
+
+
+def test_serialize_shows_identity_data_and_hierarchy() -> None:
+    # El resolver recibe la identidad REAL con sus DATOS (email/dominio = atributos) + su jerarquía.
+    ctx = _ctx(
+        1,
+        [
+            _ei(
+                1,
+                "organizacion",
+                "javeriana.edu.co",
+                identifiers=("domain:javeriana.edu.co", "email:a@x"),
+                children=("RAS Javeriana IEEE",),
+            ),
+            _ei(5, "organizacion", "RAS Javeriana IEEE", parent_name="javeriana.edu.co"),
+        ],
+    )
+    out = _serialize(ctx)
+    assert "datos=[domain:javeriana.edu.co, email:a@x]" in out  # el correo es DATO de la identidad
+    assert "hijos=[RAS Javeriana IEEE]" in out  # jerarquía hacia abajo
+    assert "padre='javeriana.edu.co'" in out  # jerarquía hacia arriba
 
 
 def test_affiliate_mentioned_people_uses_org_hint(conn: Connection) -> None:

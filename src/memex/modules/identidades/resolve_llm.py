@@ -200,7 +200,11 @@ def _serialize(ctx: ResolverInput) -> str:
     lines = [f"ASUNTO: {ctx.subject}", f"CUERPO: {ctx.body}", "", "IDENTIDADES DEL CORREO:"]
     for i in ctx.identities:
         mark = f"  [REMITENTE: {i.sender_email}]" if i.is_sender and i.sender_email else ""
-        lines.append(f"  id={i.identity_id} tipo={i.kind} nombre={i.display_name!r}{mark}")
+        datos = f" datos=[{', '.join(i.identifiers)}]" if i.identifiers else ""
+        padre = f" padre={i.parent_name!r}" if i.parent_name else ""
+        hijos = f" hijos=[{', '.join(i.children)}]" if i.children else ""
+        base = f"  id={i.identity_id} tipo={i.kind} nombre={i.display_name!r}"
+        lines.append(f"{base}{datos}{padre}{hijos}{mark}")
     lines += ["", "CANDIDATAS DEL DIRECTORIO:"]
     if not ctx.candidates:
         lines.append("  (ninguna)")

@@ -27,11 +27,25 @@ from memex.processing.render import render_payload
 _CANDIDATE_LIMIT = 6
 #: Cuerpo recortado que ve el LLM (señal de contexto, no el correo entero).
 _BODY_CHARS = 2000
+#: Topes de datos/jerarquía por identidad en el contexto (acota tokens; el resto se resume "+N").
+_ID_ATTRS_CAP = 6
+_CHILDREN_CAP = 8
+
+
+def _capped(items: list[str], cap: int) -> tuple[str, ...]:
+    """Primeros `cap` ítems; si hay más, agrega un marcador "…(+N)"."""
+    if len(items) <= cap:
+        return tuple(items)
+    return (*items[:cap], f"…(+{len(items) - cap})")
 
 
 @dataclass(frozen=True)
 class EmailIdentity:
-    """Una identidad que aparece en el correo: extraída del cuerpo o el remitente."""
+    """Una identidad que aparece en el correo: extraída del cuerpo o el remitente.
+
+    Lleva la identidad REAL con sus DATOS (identificadores: email/dominio/handle son atributos de
+    la identidad, no identidades) y su posición en la jerarquía (padre + hijos, si los hay), para
+    que el resolvedor decida sobre la identidad consolidada, no sobre un nombre pelado."""
 
     identity_id: int
     kind: str
@@ -39,6 +53,9 @@ class EmailIdentity:
     is_sender: bool
     sender_email: str | None  # email crudo del remitente (solo si `is_sender`)
     resolved_context: bool  # ya pasó por el resolvedor (`metadata.resolved_context_at`)
+    identifiers: tuple[str, ...] = ()  # datos de la identidad ("email:x", "domain:y", "handle:z")
+    parent_name: str | None = None  # padre en la jerarquía (si lo hay)
+    children: tuple[str, ...] = ()  # hijos en la jerarquía (si los hay)
 
 
 @dataclass(frozen=True)
@@ -65,18 +82,59 @@ class ResolverInput:
     candidates: tuple[Candidate, ...]
 
 
-def _email_identities(conn: Connection, user_id: int, inbox_id: int) -> list[EmailIdentity]:
-    """Identidades resueltas que aparecen en el correo (extraídas + remitente), dedup por id (una
-    fila por identidad; `is_sender` True si ALGUNA mención de esa identidad fue el remitente)."""
+def _identifiers_by_identity(
+    conn: Connection, user_id: int, ids: list[int]
+) -> dict[int, tuple[str, ...]]:
+    """{identity_id → ("email:x", "domain:y", ...)} — los DATOS de cada identidad (acotados)."""
+    if not ids:
+        return {}
     rows = conn.execute(
+        text(
+            "SELECT identity_id, kind, value_norm FROM mod_identidades_identifiers "
+            "WHERE user_id = :u AND identity_id = ANY(:ids) ORDER BY identity_id, kind, value_norm"
+        ),
+        {"u": user_id, "ids": ids},
+    ).mappings()
+    acc: dict[int, list[str]] = {}
+    for r in rows:
+        acc.setdefault(int(r["identity_id"]), []).append(f"{r['kind']}:{r['value_norm']}")
+    return {k: _capped(v, _ID_ATTRS_CAP) for k, v in acc.items()}
+
+
+def _children_by_identity(
+    conn: Connection, user_id: int, ids: list[int]
+) -> dict[int, tuple[str, ...]]:
+    """{parent_id → (nombre_hijo, ...)} — la jerarquía hacia abajo de cada identidad (acotada)."""
+    if not ids:
+        return {}
+    rows = conn.execute(
+        text(
+            "SELECT parent_identity_id AS pid, display_name FROM mod_identidades "
+            "WHERE user_id = :u AND parent_identity_id = ANY(:ids) ORDER BY parent_identity_id, id"
+        ),
+        {"u": user_id, "ids": ids},
+    ).mappings()
+    acc: dict[int, list[str]] = {}
+    for r in rows:
+        acc.setdefault(int(r["pid"]), []).append(str(r["display_name"]))
+    return {k: _capped(v, _CHILDREN_CAP) for k, v in acc.items()}
+
+
+def _email_identities(conn: Connection, user_id: int, inbox_id: int) -> list[EmailIdentity]:
+    """Identidades resueltas del correo (extraídas + remitente), dedup por id, con sus DATOS
+    (identificadores) y posición en la jerarquía (padre + hijos). `is_sender` True si ALGUNA
+    mención de esa identidad fue el remitente."""
+    result = conn.execute(
         text(
             """
             SELECT m.resolved_identity_id AS id, i.kind, i.display_name,
                    bool_or(m.resolution_method = 'sender') AS is_sender,
                    max(CASE WHEN m.resolution_method = 'sender' THEN m.email END) AS sender_email,
-                   bool_or(i.metadata->>'resolved_context_at' IS NOT NULL) AS resolved_ctx
+                   bool_or(i.metadata->>'resolved_context_at' IS NOT NULL) AS resolved_ctx,
+                   max(p.display_name) AS parent_name
             FROM mod_identidades_mentions m
             JOIN mod_identidades i ON i.id = m.resolved_identity_id
+            LEFT JOIN mod_identidades p ON p.id = i.parent_identity_id
             WHERE m.user_id = :uid AND :inbox = ANY(m.source_inbox_ids)
               AND m.resolved_identity_id IS NOT NULL
             GROUP BY m.resolved_identity_id, i.kind, i.display_name
@@ -84,7 +142,11 @@ def _email_identities(conn: Connection, user_id: int, inbox_id: int) -> list[Ema
             """
         ),
         {"uid": user_id, "inbox": inbox_id},
-    ).mappings()
+    )
+    rows = result.mappings().all()
+    ids = [int(r["id"]) for r in rows]
+    attrs = _identifiers_by_identity(conn, user_id, ids)
+    kids = _children_by_identity(conn, user_id, ids)
     return [
         EmailIdentity(
             identity_id=int(r["id"]),
@@ -93,6 +155,9 @@ def _email_identities(conn: Connection, user_id: int, inbox_id: int) -> list[Ema
             is_sender=bool(r["is_sender"]),
             sender_email=str(r["sender_email"]) if r["sender_email"] is not None else None,
             resolved_context=bool(r["resolved_ctx"]),
+            identifiers=attrs.get(int(r["id"]), ()),
+            parent_name=str(r["parent_name"]) if r["parent_name"] is not None else None,
+            children=kids.get(int(r["id"]), ()),
         )
         for r in rows
     ]
