@@ -123,30 +123,44 @@ def _parse_merges(raw: object, valid: set[int]) -> tuple[Merge, ...]:
     return tuple(out)
 
 
-def _parse_parents(raw: object, valid: set[int]) -> tuple[Parent, ...]:
+def _parse_relations(
+    raw: object, valid: set[int], kinds: dict[int, str]
+) -> tuple[tuple[Parent, ...], tuple[Affiliation, ...]]:
+    """RELACIONES de pertenencia (forma unificada) ruteadas por KIND: `source` persona → AFILIACIÓN;
+    `source` org/producto → JERARQUÍA. El `target` es SIEMPRE una org (por id, o por `target_name`
+    para crearla, solo en jerarquía). El sistema deduce el tipo (no lo decide el LLM). Descarta lo
+    incoherente (ids fuera de lista, target que no es org)."""
     if not isinstance(raw, list):
-        return ()
-    out: list[Parent] = []
-    seen: set[int] = set()
+        return (), ()
+    parents: list[Parent] = []
+    affils: list[Affiliation] = []
+    seen_child: set[int] = set()  # un hijo cuelga de un solo padre
     for it in raw:
         if not isinstance(it, dict):
             continue
-        child = _as_int(it.get("child_id"))
-        if child is None or child not in valid or child in seen:
+        src = _as_int(it.get("source_id"))
+        if src is None or src not in valid:
             continue
-        pid = _as_int(it.get("parent_id"))
-        if pid is not None and (pid not in valid or pid == child):
-            pid = None  # id inválido/alucinado/self → caé al parent_name si lo hay
-        raw_name = it.get("parent_name")
-        pname = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
-        # El LLM suele mandar AMBOS (parent_id + parent_name); `_apply_links` prefiere el id. Solo
-        # se descarta si NO quedó ninguno válido (antes un XOR tiraba todo lo que traía ambos).
-        if pid is None and pname is None:
-            continue
-        seen.add(child)
+        skind = kinds.get(src)
+        tid = _as_int(it.get("target_id"))
+        target_is_org = (
+            tid is not None and tid != src and tid in valid and kinds.get(tid) == "organizacion"
+        )
         conf = _as_conf(it.get("confidence"))
-        out.append(Parent(child_id=child, parent_id=pid, parent_name=pname, confidence=conf))
-    return tuple(out)
+        if skind == "persona":  # afiliación: persona → org EXISTENTE (con rol opcional)
+            if target_is_org and tid is not None:
+                role = it.get("role")
+                affils.append(Affiliation(src, tid, str(role) if role else None, conf))
+        elif skind in ("organizacion", "producto") and src not in seen_child:  # jerarquía
+            raw_name = it.get("target_name")
+            tname = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+            if target_is_org:
+                seen_child.add(src)
+                parents.append(Parent(src, tid, None, conf))
+            elif tname:  # org target por nombre (no está en las listas) → la crea el apply
+                seen_child.add(src)
+                parents.append(Parent(src, None, tname, conf))
+    return tuple(parents), tuple(affils)
 
 
 def _parse_sender(raw: object, valid: set[int]) -> SenderDisposition | None:
@@ -177,52 +191,34 @@ def _dropped(raw: object, kept: tuple[object, ...]) -> int:
     return max((len(raw) if isinstance(raw, list) else 0) - len(kept), 0)
 
 
-def _parse_affiliations(raw: object, valid: set[int]) -> tuple[Affiliation, ...]:
-    """Afiliaciones persona→org del LLM. Descarta las que referencian ids fuera de las listas o
-    self-afiliación; el kind (persona→organizacion) se valida al aplicar (sobre ids vivos)."""
-    if not isinstance(raw, list):
-        return ()
-    out: list[Affiliation] = []
-    for a in raw:
-        if not isinstance(a, dict):
-            continue
-        pid = _as_int(a.get("person_id"))
-        oid = _as_int(a.get("org_id"))
-        if pid is None or oid is None or pid == oid or pid not in valid or oid not in valid:
-            continue
-        role = a.get("role")
-        conf = _as_conf(a.get("confidence"))
-        out.append(Affiliation(pid, oid, str(role) if role else None, conf))
-    return tuple(out)
+def parse_resolution(
+    content: str, valid_ids_set: set[int], kinds: dict[int, str]
+) -> ResolverDecision:
+    """Parsea la respuesta del LLM; cualquier cosa rara → decisión vacía (no hace nada). Las
+    RELACIONES (forma unificada) se rutean por `kinds` a jerarquía/afiliación.
 
-
-def parse_resolution(content: str, valid_ids_set: set[int]) -> ResolverDecision:
-    """Parsea la respuesta del LLM; cualquier cosa rara → decisión vacía (no hace nada).
-
-    Si el LLM propuso fusiones/jerarquías que el parser descartó, emite un WARNING
-    (`parse_dropped`) — sin esto los drops eran SILENCIOSOS y escondieron el bug del XOR de
-    parents. El detalle crudo queda en `llm_calls.response_text` para inspeccionar."""
+    Lo que el LLM propuso y el parser descartó (ids fuera de lista, target que no es org…) se
+    emite como WARNING (`parse_dropped`); el crudo queda en `llm_calls.response_text`."""
     try:
         data = json.loads(content)
     except (json.JSONDecodeError, TypeError):
         return ResolverDecision((), (), None)
     if not isinstance(data, dict):
         return ResolverDecision((), (), None)
+    parents, affiliations = _parse_relations(data.get("relations"), valid_ids_set, kinds)
     decision = ResolverDecision(
         merges=_parse_merges(data.get("merges"), valid_ids_set),
-        parents=_parse_parents(data.get("parents"), valid_ids_set),
+        parents=parents,
         sender=_parse_sender(data.get("sender"), valid_ids_set),
-        affiliations=_parse_affiliations(data.get("affiliations"), valid_ids_set),
+        affiliations=affiliations,
     )
     dropped_m = _dropped(data.get("merges"), decision.merges)
-    dropped_p = _dropped(data.get("parents"), decision.parents)
-    dropped_a = _dropped(data.get("affiliations"), decision.affiliations)
-    if dropped_m or dropped_p or dropped_a:
+    dropped_r = _dropped(data.get("relations"), parents + affiliations)
+    if dropped_m or dropped_r:
         _log.warning(
             "identidades.resolver.parse_dropped",
             dropped_merges=dropped_m,
-            dropped_parents=dropped_p,
-            dropped_affiliations=dropped_a,
+            dropped_relations=dropped_r,
         )
     return decision
 
@@ -268,7 +264,10 @@ async def resolve_email(llm: LLMClient, ctx: ResolverInput) -> tuple[ResolverDec
         temperature=0.0,
         max_tokens=_MAX_TOKENS,
     )
-    return parse_resolution(result.content, valid_ids(ctx)), result
+    # kinds (id→tipo) para rutear las RELACIONES: persona→org afiliación; org→org jerarquía.
+    kinds = {i.identity_id: i.kind for i in ctx.identities}
+    kinds.update({c.identity_id: c.kind for c in ctx.candidates})
+    return parse_resolution(result.content, valid_ids(ctx), kinds), result
 
 
 # --- aplicación -------------------------------------------------------------------- #

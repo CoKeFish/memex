@@ -53,51 +53,59 @@ class FakeLLM:
 # --- parseo (puro) ----------------------------------------------------------------- #
 
 
-def test_parse_valid() -> None:
+def test_parse_relations_routes_by_kind() -> None:
+    # RELACIONES unificadas, ruteadas por kind: org→org = jerarquía; persona→org = afiliación.
     content = json.dumps(
         {
             "merges": [{"keep_id": 1, "drop_id": 2, "confidence": 0.9}],
-            "parents": [{"child_id": 2, "parent_id": 1, "confidence": 0.8}],
+            "relations": [
+                {"source_id": 3, "target_id": 1, "confidence": 0.8},
+                {"source_id": 4, "target_id": 1, "role": "Presidenta", "confidence": 0.85},
+            ],
             "sender": {"is_person": False, "owner_id": 1, "confidence": 0.7},
         }
     )
-    d = parse_resolution(content, {1, 2})
+    kinds = {1: "organizacion", 2: "organizacion", 3: "organizacion", 4: "persona"}
+    d = parse_resolution(content, {1, 2, 3, 4}, kinds)
     assert d.merges == (Merge(1, 2, 0.9),)
-    assert d.parents == (Parent(2, 1, None, 0.8),)
+    assert d.parents == (Parent(3, 1, None, 0.8),)  # org→org
+    assert d.affiliations == (Affiliation(4, 1, "Presidenta", 0.85),)  # persona→org
     assert d.sender == SenderDisposition(False, 1, None, 0.7)
+
+
+def test_parse_relations_target_name_for_hierarchy() -> None:
+    # org source con target_name (la org padre no está en las listas) → Parent por nombre.
+    content = json.dumps(
+        {"relations": [{"source_id": 1, "target_name": "Universidad X", "confidence": 0.9}]}
+    )
+    d = parse_resolution(content, {1}, {1: "organizacion"})
+    assert d.parents == (Parent(1, None, "Universidad X", 0.9),)
+
+
+def test_parse_relations_persona_needs_existing_org() -> None:
+    # Afiliación exige org EXISTENTE: persona con solo target_name (sin org id) → se descarta.
+    content = json.dumps(
+        {"relations": [{"source_id": 1, "target_name": "Acme", "confidence": 0.9}]}
+    )
+    d = parse_resolution(content, {1}, {1: "persona"})
+    assert d.affiliations == () and d.parents == ()
+
+
+def test_parse_relations_target_must_be_org() -> None:
+    # target que no es organización → se descarta (el target siempre es una org).
+    content = json.dumps({"relations": [{"source_id": 1, "target_id": 2, "confidence": 0.9}]})
+    d = parse_resolution(content, {1, 2}, {1: "persona", 2: "persona"})
+    assert d.affiliations == () and d.parents == ()
 
 
 def test_parse_drops_ids_outside_valid_set() -> None:
     content = json.dumps({"merges": [{"keep_id": 1, "drop_id": 99, "confidence": 1}]})
-    assert parse_resolution(content, {1, 2}).merges == ()
-
-
-def test_parse_parent_both_fields_keeps_id() -> None:
-    # El LLM casi siempre manda parent_id Y parent_name; se CONSERVA (el apply prefiere el id).
-    # Antes un XOR descartaba todo lo que traía ambos → escondía la jerarquía (bug).
-    content = json.dumps(
-        {"parents": [{"child_id": 1, "parent_id": 2, "parent_name": "X", "confidence": 1}]}
-    )
-    assert parse_resolution(content, {1, 2}).parents == (Parent(1, 2, "X", 1.0),)
-
-
-def test_parse_parent_invalid_id_falls_to_name() -> None:
-    # parent_id fuera de la lista (alucinado) pero con parent_name → cae al nombre, no se pierde.
-    content = json.dumps(
-        {"parents": [{"child_id": 1, "parent_id": 99, "parent_name": "Acme", "confidence": 0.9}]}
-    )
-    assert parse_resolution(content, {1, 2}).parents == (Parent(1, None, "Acme", 0.9),)
-
-
-def test_parse_parent_neither_id_nor_name_dropped() -> None:
-    # Sin id válido ni nombre → no hay a quién apuntar → se descarta.
-    content = json.dumps({"parents": [{"child_id": 1, "parent_id": 99, "confidence": 0.9}]})
-    assert parse_resolution(content, {1, 2}).parents == ()
+    assert parse_resolution(content, {1, 2}, {1: "organizacion"}).merges == ()
 
 
 def test_parse_garbage_is_empty() -> None:
-    d = parse_resolution("no soy json", {1})
-    assert d.merges == () and d.parents == () and d.sender is None
+    d = parse_resolution("no soy json", {1}, {1: "persona"})
+    assert d.merges == () and d.parents == () and d.sender is None and d.affiliations == ()
 
 
 # --- aplicación (DB) --------------------------------------------------------------- #
@@ -339,7 +347,7 @@ def test_apply_marks_resolved_context(conn: Connection) -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_email_calls_llm_and_parses(conn: Connection) -> None:
-    llm = FakeLLM(json.dumps({"merges": [], "parents": [], "sender": None}))
+    llm = FakeLLM(json.dumps({"merges": [], "relations": [], "sender": None}))
     ctx = _ctx(1, [_ei(7, "organizacion", "Acme")])
     decision, result = await resolve_email(llm, ctx)
     assert llm.calls == 1
@@ -366,13 +374,6 @@ def test_serialize_shows_identity_data_and_hierarchy() -> None:
     assert "datos=[domain:javeriana.edu.co, email:a@x]" in out  # el correo es DATO de la identidad
     assert "hijos=[RAS Javeriana IEEE]" in out  # jerarquía hacia abajo
     assert "padre='javeriana.edu.co'" in out  # jerarquía hacia arriba
-
-
-def test_parse_affiliations() -> None:
-    content = json.dumps(
-        {"affiliations": [{"person_id": 5, "org_id": 1, "role": "Presidenta", "confidence": 0.9}]}
-    )
-    assert parse_resolution(content, {1, 5}).affiliations == (Affiliation(5, 1, "Presidenta", 0.9),)
 
 
 def test_apply_affiliation_persona_to_org(conn: Connection) -> None:

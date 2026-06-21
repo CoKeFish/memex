@@ -132,7 +132,7 @@ IDENTIDADES_RESOLVE_SYSTEM_PROMPT = (
     "el REMITENTE, marcado) y CANDIDATAS del directorio que podrían ser la misma o el\n"
     "contenedor de alguna. Cada entrada trae `id`, tipo, nombre, sus DATOS (identificadores como\n"
     "email/dominio/handle — son atributos de la identidad) y su jerarquía (padre e hijos, si los\n"
-    "hay); las candidatas traen sus alias. Con el contexto del correo decidí CUATRO cosas:\n\n"
+    "hay); las candidatas traen sus alias. Con el contexto del correo decidí TRES cosas:\n\n"
     "1) FUSIONES — qué entradas son la MISMA entidad real y deben unirse (`keep_id`\n"
     "   sobrevive, `drop_id` se absorbe). Usá el contexto: p. ej. el dominio\n"
     "   `javeriana.edu.co` y `Pontificia Universidad Javeriana` son la MISMA universidad\n"
@@ -140,28 +140,27 @@ IDENTIDADES_RESOLVE_SYSTEM_PROMPT = (
     "   entidad (típico: una `desconocido` que ya está como organización) — poné de\n"
     "   `keep_id` la de tipo DEFINIDO, nunca la `desconocido`. SESGO A COEXISTIR: ante la\n"
     "   duda NO fusiones (no juntes una persona con una empresa por compartir nombre).\n"
-    "2) JERARQUÍA — qué entrada es SUB-PARTE de otra y debería colgar de ella («pertenece\n"
-    "   a»): carrera/facultad→universidad, producto→empresa, área→org. SESGO A PRECISIÓN.\n"
-    "   SOLO org/producto cuelgan; una PERSONA NUNCA va en jerarquía (su vínculo con la org es\n"
-    "   una AFILIACIÓN, punto 4).\n"
+    "2) RELACIONES DE PERTENENCIA — qué identidad (`source_id`) PERTENECE A / ES MIEMBRO DE\n"
+    "   otra (`target_id`, SIEMPRE una organización). DOS casos, MISMA forma:\n"
+    "   • una organización/producto que es SUB-PARTE de otra org (carrera/facultad→universidad,\n"
+    "     producto→empresa, área→org); o\n"
+    "   • una PERSONA que es MIEMBRO de una org (trabaja/estudia/preside…), con su `role`.\n"
+    "   NO etiquetes el tipo: el sistema lo deduce por los tipos de source/target. `role` solo\n"
+    "   si `source` es persona. Mapeá la org por CONTEXTO aunque el nombre no calce exacto\n"
+    "   («Pontificia Universidad Javeriana» → la entrada cuyo dominio es javeriana.edu.co). Si la\n"
+    "   org `target` DEBERÍA existir pero NO está en las listas, indicá `target_name`. Incluí las\n"
+    "   relaciones razonables.\n"
     "3) REMITENTE — el email del remitente (te lo marco) ¿es un BUZÓN de una organización\n"
     "   (`info@`, `jobs@`, `contacto@` — habla la org, no una persona) o de una PERSONA? Si\n"
-    "   es buzón, indicá la org dueña en `owner_id`. Si es persona, su nombre en `person_name`.\n"
-    "4) AFILIACIONES — qué PERSONA del correo es MIEMBRO de qué ORGANIZACIÓN (trabaja en /\n"
-    "   estudia en / preside…), con su rol. Ej: «Valeria, Presidenta de RAS» → afiliación\n"
-    "   `person_id`=Valeria, `org_id`=RAS, `role`='Presidenta'. Mapeá la org por CONTEXTO aunque\n"
-    "   el nombre no calce exacto (p. ej. 'Pontificia Universidad Javeriana' → la entrada cuyo\n"
-    "   dominio es javeriana.edu.co). Esto NO es jerarquía: la persona NO cuelga, se AFILIA.\n\n"
+    "   es buzón, indicá la org dueña en `owner_id`. Si es persona, su nombre en `person_name`.\n\n"
     "Reglas:\n"
     "- Todos los `id` que uses deben venir de las listas que te paso (correo o candidatas).\n"
     "- `confidence`: número 0..1 por cada decisión.\n\n"
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
     '{"merges": [{"keep_id": <id>, "drop_id": <id>, "confidence": <0..1>}], '
-    '"parents": [{"child_id": <id>, "parent_id": <id|null>, "parent_name": "<nombre|null>", '
-    '"confidence": <0..1>}], '
+    '"relations": [{"source_id": <id>, "target_id": <id|null>, "target_name": "<nombre|null>", '
+    '"role": "<rol|null>", "confidence": <0..1>}], '
     '"sender": {"is_person": <true|false>, "owner_id": <id|null>, "person_name": "<nombre|null>", '
-    '"confidence": <0..1>}, '
-    '"affiliations": [{"person_id": <id>, "org_id": <id>, "role": "<rol|null>", '
-    '"confidence": <0..1>}]}\n'
+    '"confidence": <0..1>}}\n'
     "Listas vacías si no hay; `sender` en null si el correo no tiene remitente a disponer."
 )
