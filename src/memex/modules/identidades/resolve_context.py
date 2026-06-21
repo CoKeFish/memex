@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from sqlalchemy import Connection, text
 
 from memex.modules.identidades.fuzzy import find_containment_candidates, find_fuzzy_candidates
-from memex.modules.identidades.normalize import norm_identifier
+from memex.modules.identidades.normalize import is_freemail, norm_identifier
 from memex.processing.render import render_payload
 
 #: Vecinos de trigrama por identidad nueva (cota holgada; el LLM filtra).
@@ -258,6 +258,54 @@ def _candidates_for(conn: Connection, user_id: int, idents: list[EmailIdentity])
     return out
 
 
+def _candidates_by_domain(
+    conn: Connection, user_id: int, domain: str, exclude: set[int], cap: int = 6
+) -> list[Candidate]:
+    """Orgs que CO-OCURREN con un dominio (aparecen en correos enviados desde @domain), para que el
+    resolver tenga la org del dominio EN SCOPE POR ID y afilie/jerarquice por `target_id` (no por
+    nombre). Hace falta porque el dominio YA no es ficha (no se crea org-por-dominio): la org real
+    se infiere por co-ocurrencia. Se salta free-mail (gmail… no representa a una org)."""
+    if not domain or is_freemail(domain):
+        return []
+    rows = conn.execute(
+        text(
+            """
+            SELECT i.id, i.kind, i.display_name, i.aliases, p.display_name AS parent_name,
+                   COALESCE(
+                       array_agg(DISTINCT f.value_norm) FILTER (WHERE f.kind = 'domain'), '{}'
+                   ) AS domains
+            FROM inbox inb
+            JOIN mod_identidades_mentions m ON inb.id = ANY(m.source_inbox_ids)
+            JOIN mod_identidades i ON i.id = m.resolved_identity_id
+            LEFT JOIN mod_identidades p ON p.id = i.parent_identity_id
+            LEFT JOIN mod_identidades_identifiers f
+                   ON f.identity_id = i.id AND f.user_id = i.user_id AND f.kind = 'domain'
+            WHERE inb.user_id = :u AND i.user_id = :u AND i.kind = 'organizacion'
+              AND split_part(lower(inb.payload->'from'->>'email'), '@', 2) = :d
+            GROUP BY i.id, i.kind, i.display_name, i.aliases, p.display_name
+            LIMIT :cap
+            """
+        ),
+        {"u": user_id, "d": domain, "cap": cap},
+    ).mappings()
+    out: list[Candidate] = []
+    for r in rows:
+        if int(r["id"]) in exclude:
+            continue
+        out.append(
+            Candidate(
+                identity_id=int(r["id"]),
+                kind=str(r["kind"]),
+                display_name=str(r["display_name"]),
+                aliases=tuple(str(a) for a in (r["aliases"] or ())),
+                domains=tuple(str(x) for x in (r["domains"] or ())),
+                parent_name=str(r["parent_name"]) if r["parent_name"] is not None else None,
+                score=0.5,
+            )
+        )
+    return out
+
+
 def build_email_context(conn: Connection, user_id: int, inbox_id: int) -> ResolverInput | None:
     """Arma la entrada del resolvedor para un correo, o None si no hay nada que disponer (skip)."""
     idents = _email_identities(conn, user_id, inbox_id)
@@ -276,6 +324,15 @@ def build_email_context(conn: Connection, user_id: int, inbox_id: int) -> Resolv
     subject = str(payload.get("subject") or "")
     body = render_payload(payload)[:_BODY_CHARS]
     candidates = _candidates_for(conn, user_id, idents)
+    # Candidatos POR DOMINIO del remitente: la org real del dominio EN SCOPE POR ID, para que el
+    # resolver afilie/jerarquice por `target_id` (el dominio ya no es ficha → se infiere por
+    # co-ocurrencia). Sin esto el resolver propone la org por NOMBRE y la afiliación se descarta.
+    raw_from = payload.get("from")
+    from_email = str(raw_from.get("email") or "") if isinstance(raw_from, dict) else ""
+    sender_domain = norm_identifier("domain", from_email) if from_email else None
+    if sender_domain:
+        own = {i.identity_id for i in idents} | {c.identity_id for c in candidates}
+        candidates = [*candidates, *_candidates_by_domain(conn, user_id, sender_domain, own)]
     return ResolverInput(
         inbox_id=inbox_id,
         subject=subject,

@@ -115,3 +115,37 @@ def test_no_identities_no_resolution() -> None:
     with connection() as c:
         assert email_needs_resolution(c, 1, mid) is False
         assert build_email_context(c, 1, mid) is None
+
+
+def test_candidates_include_org_by_sender_domain() -> None:
+    # La org real CO-OCURRE con el dominio (aparece en un correo de @javeriana.edu.co) → debe entrar
+    # como CANDIDATA POR ID en el contexto de OTRO correo del mismo dominio, para afiliar por
+    # target_id (el dominio ya no es ficha). Sin esto el resolver la nombraría y se descartaría.
+    src = _source()
+    uni = _identity("organizacion", "Pontificia Universidad Javeriana", resolved=False)
+    a = _inbox(src, {"subject": "a", "body_text": "x", "from": {"email": "rec@javeriana.edu.co"}})
+    _mention(a, uni, "organizacion", method="exact_name", email=None)  # co-ocurre con el dominio
+    b = _inbox(
+        src, {"subject": "b", "body_text": "Eduardo", "from": {"email": "eduardo@javeriana.edu.co"}}
+    )
+    person = _identity("persona", "Eduardo", resolved=False)
+    _mention(b, person, "persona", method="exact_name", email=None)
+    with connection() as c:
+        ctx = build_email_context(c, 1, b)
+    assert ctx is not None
+    assert uni in {cand.identity_id for cand in ctx.candidates}  # la U. en scope POR ID
+
+
+def test_candidates_by_domain_skips_freemail() -> None:
+    # free-mail (gmail…) no representa a una org → no se agregan candidatos por ese dominio (ruido).
+    src = _source()
+    org = _identity("organizacion", "Algo", resolved=False)
+    a = _inbox(src, {"subject": "a", "body_text": "x", "from": {"email": "ana@gmail.com"}})
+    _mention(a, org, "organizacion", method="exact_name", email=None)
+    b = _inbox(src, {"subject": "b", "body_text": "Pepe", "from": {"email": "pepe@gmail.com"}})
+    person = _identity("persona", "Pepe", resolved=False)
+    _mention(b, person, "persona", method="exact_name", email=None)
+    with connection() as c:
+        ctx = build_email_context(c, 1, b)
+    assert ctx is not None
+    assert org not in {cand.identity_id for cand in ctx.candidates}  # gmail no aporta candidatos
