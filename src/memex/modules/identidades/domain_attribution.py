@@ -35,10 +35,12 @@ _log = get_logger("memex.modules.identidades.domain_attribution")
 _CAND_CAP = 12
 
 DOMAIN_OWNER_SYSTEM_PROMPT = (
-    "Te doy un DOMINIO (o URL) y una lista de IDENTIDADES candidatas del directorio (con alias).\n"
-    "Decidí si el dominio PERTENECE a una de ellas — si es su dominio institucional — y a CUÁL.\n"
-    "Un dominio es un ATRIBUTO de UNA organización, no una entidad. Si ninguna es claramente la "
-    "dueña, devolvé owner_id null (mejor no atar que atar mal).\n"
+    "Te doy un DOMINIO (o URL) y candidatas del directorio (con su alias y su `padre` en la "
+    "jerarquía). Decidí si el dominio PERTENECE a una de ellas — su dominio institucional — y a "
+    "CUÁL. Un dominio es un ATRIBUTO de UNA organización, no una entidad.\n"
+    "REGLA: el dominio pertenece a la org de MÁS ALTO NIVEL (la institución, p. ej. la U.), NO a "
+    "una sub-unidad/oficina. Si la dueña obvia es una sub-unidad, subí por su `padre` hasta la "
+    "RAÍZ y atribuí a esa. Si ninguna calza, owner_id null (mejor no atar que atar mal).\n"
     'Respondé SOLO con un objeto JSON: {"owner_id": <id|null>, "confidence": <0..1>}.'
 )
 
@@ -57,29 +59,65 @@ class DomainAttribution:
 
 def _candidates(
     conn: Connection, user_id: int, domain: str
-) -> list[tuple[int, str, tuple[str, ...]]]:
+) -> list[tuple[int, str, tuple[str, ...], str | None]]:
     """Identidades-org que podrían ser dueñas del dominio: orgs que CO-OCURREN (aparecen en correos
-    cuyo remitente es @domain) + fuzzy por la etiqueta del dominio. Dedup por id, acotado."""
-    rows = conn.execute(
-        text(
-            "SELECT DISTINCT i.id, i.display_name, i.aliases "
-            "FROM inbox inb "
-            "JOIN mod_identidades_mentions m ON inb.id = ANY(m.source_inbox_ids) "
-            "JOIN mod_identidades i ON i.id = m.resolved_identity_id "
-            "WHERE inb.user_id = :u AND i.user_id = :u AND i.kind = 'organizacion' "
-            "AND split_part(lower(inb.payload->'from'->>'email'), '@', 2) = :d"
-        ),
-        {"u": user_id, "d": domain},
-    ).all()
-    by_id: dict[int, tuple[str, tuple[str, ...]]] = {
-        int(r[0]): (str(r[1]), tuple(str(a) for a in (r[2] or ()))) for r in rows
+    cuyo remitente es @domain) + fuzzy por la etiqueta. MÁS su JERARQUÍA (ancestros): así el LLM
+    puede atribuir el dominio a la org RAÍZ (la universidad), no a una sub-unidad — igual que el
+    contexto del resolver muestra el padre. Devuelve (id, nombre, alias, padre)."""
+    direct = {
+        int(x)
+        for x in conn.execute(
+            text(
+                "SELECT DISTINCT i.id FROM inbox inb "
+                "JOIN mod_identidades_mentions m ON inb.id = ANY(m.source_inbox_ids) "
+                "JOIN mod_identidades i ON i.id = m.resolved_identity_id "
+                "WHERE inb.user_id = :u AND i.user_id = :u AND i.kind = 'organizacion' "
+                "AND split_part(lower(inb.payload->'from'->>'email'), '@', 2) = :d"
+            ),
+            {"u": user_id, "d": domain},
+        ).scalars()
     }
     label = domain.split(".")[0]
     if label:
         fuzzy = find_fuzzy_candidates(conn, user_id, kind=KIND_ORG, probe=label, limit=_CAND_CAP)
         for cand in fuzzy:
-            by_id.setdefault(cand.identity_id, (cand.display_name, ()))
-    return [(cid, nm, al) for cid, (nm, al) in list(by_id.items())[:_CAND_CAP]]
+            direct.add(cand.identity_id)
+    direct = set(list(direct)[:_CAND_CAP])
+    if not direct:
+        return []
+    # + ancestros (parte de la jerarquía) para OFRECER la raíz como candidata
+    all_ids = {
+        int(x)
+        for x in conn.execute(
+            text(
+                "WITH RECURSIVE chain(id, pid) AS ("
+                "  SELECT id, parent_identity_id FROM mod_identidades "
+                "  WHERE user_id = :u AND id = ANY(:ids) "
+                "  UNION "
+                "  SELECT p.id, p.parent_identity_id FROM mod_identidades p "
+                "  JOIN chain c ON p.id = c.pid WHERE p.user_id = :u"
+                ") SELECT DISTINCT id FROM chain"
+            ),
+            {"u": user_id, "ids": list(direct)},
+        ).scalars()
+    }
+    rows = conn.execute(
+        text(
+            "SELECT i.id, i.display_name, i.aliases, p.display_name AS parent_name "
+            "FROM mod_identidades i LEFT JOIN mod_identidades p ON p.id = i.parent_identity_id "
+            "WHERE i.user_id = :u AND i.id = ANY(:ids) AND i.kind = 'organizacion' ORDER BY i.id"
+        ),
+        {"u": user_id, "ids": list(all_ids)},
+    ).mappings()
+    return [
+        (
+            int(r["id"]),
+            str(r["display_name"]),
+            tuple(str(a) for a in (r["aliases"] or ())),
+            str(r["parent_name"]) if r["parent_name"] is not None else None,
+        )
+        for r in rows
+    ]
 
 
 def _parse_owner(content: str, valid: set[int]) -> tuple[int | None, float]:
@@ -127,8 +165,10 @@ async def attribute_domain(
     cands = _candidates(conn, user_id, dom)
     if not cands:
         return DomainAttribution(dom, None, None, 0.0, 0, False)
-    listing = "\n".join(f"  id={cid} nombre={nm!r} alias={list(al)}" for cid, nm, al in cands)
-    msg = f"DOMINIO: {dom}\n\nCANDIDATAS:\n{listing}"
+    listing = "\n".join(
+        f"  id={cid} nombre={nm!r} alias={list(al)} padre={pn or '-'}" for cid, nm, al, pn in cands
+    )
+    msg = f"DOMINIO: {dom}\n\nCANDIDATAS (con su padre en la jerarquía):\n{listing}"
     client = llm or build_llm_client("identidades_resolve", user_id=user_id)
     res = await client.complete(
         [ChatMessage("system", DOMAIN_OWNER_SYSTEM_PROMPT), ChatMessage("user", msg)],
@@ -136,8 +176,8 @@ async def attribute_domain(
         temperature=0.0,
         max_tokens=200,
     )
-    owner_id, conf = _parse_owner(res.content, {cid for cid, _, _ in cands})
-    owner_name = next((nm for cid, nm, _ in cands if cid == owner_id), None)
+    owner_id, conf = _parse_owner(res.content, {cid for cid, *_ in cands})
+    owner_name = next((nm for cid, nm, *_ in cands if cid == owner_id), None)
     applied = False
     if owner_id is not None and conf >= min_confidence and apply:
         _insert_identifier(

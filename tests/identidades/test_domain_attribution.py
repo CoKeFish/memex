@@ -163,6 +163,26 @@ async def test_attribute_domains_for_window_attaches_when_resolver_on() -> None:
 
 
 @pytest.mark.asyncio
+async def test_attribute_domain_offers_hierarchy_ancestor() -> None:
+    # Incluye los ANCESTROS: la RAÍZ (que no co-ocurre directo) se ofrece vía el padre de la
+    # sub-unidad → el LLM puede atribuir el dominio a la org de más alto nivel, no a la sub-unidad.
+    root = _org("Pontificia Universidad Javeriana")
+    sub = _org("Javeriana Secretaria General")
+    with connection() as c:
+        c.execute(
+            text("UPDATE mod_identidades SET parent_identity_id=:p WHERE id=:s"),
+            {"p": root, "s": sub},
+        )
+    _mention(_inbox_from("secretaria@javeriana.edu.co"), sub)  # solo la SUB co-ocurre
+    llm = FakeLLM(json.dumps({"owner_id": root, "confidence": 0.95}))  # el LLM elige la RAÍZ
+    with connection() as c:
+        res = await attribute_domain(c, 1, "javeriana.edu.co", llm=llm)
+    # si el ancestro NO se ofreciera, owner_id=root se descartaría (no candidata) → no ataría
+    assert res.owner_id == root and res.applied
+    assert "javeriana.edu.co" in _domains(root)
+
+
+@pytest.mark.asyncio
 async def test_attribute_domains_for_window_noop_when_resolver_off() -> None:
     with connection() as c:
         upsert_settings(c, 1, resolver_enabled=False)
