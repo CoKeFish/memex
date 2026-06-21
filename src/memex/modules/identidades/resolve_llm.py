@@ -65,10 +65,22 @@ class SenderDisposition:
 
 
 @dataclass(frozen=True)
+class Affiliation:
+    """Una PERSONA del correo es miembro de una ORGANIZACIÓN, con rol. Distinto de jerarquía:
+    persona→org es AFILIACIÓN (`person_orgs`), no «pertenece_a» (que es solo org/producto)."""
+
+    person_id: int
+    org_id: int
+    role: str | None
+    confidence: float
+
+
+@dataclass(frozen=True)
 class ResolverDecision:
     merges: tuple[Merge, ...]
     parents: tuple[Parent, ...]
     sender: SenderDisposition | None
+    affiliations: tuple[Affiliation, ...] = ()
 
 
 @dataclass
@@ -165,6 +177,25 @@ def _dropped(raw: object, kept: tuple[object, ...]) -> int:
     return max((len(raw) if isinstance(raw, list) else 0) - len(kept), 0)
 
 
+def _parse_affiliations(raw: object, valid: set[int]) -> tuple[Affiliation, ...]:
+    """Afiliaciones persona→org del LLM. Descarta las que referencian ids fuera de las listas o
+    self-afiliación; el kind (persona→organizacion) se valida al aplicar (sobre ids vivos)."""
+    if not isinstance(raw, list):
+        return ()
+    out: list[Affiliation] = []
+    for a in raw:
+        if not isinstance(a, dict):
+            continue
+        pid = _as_int(a.get("person_id"))
+        oid = _as_int(a.get("org_id"))
+        if pid is None or oid is None or pid == oid or pid not in valid or oid not in valid:
+            continue
+        role = a.get("role")
+        conf = _as_conf(a.get("confidence"))
+        out.append(Affiliation(pid, oid, str(role) if role else None, conf))
+    return tuple(out)
+
+
 def parse_resolution(content: str, valid_ids_set: set[int]) -> ResolverDecision:
     """Parsea la respuesta del LLM; cualquier cosa rara → decisión vacía (no hace nada).
 
@@ -181,14 +212,17 @@ def parse_resolution(content: str, valid_ids_set: set[int]) -> ResolverDecision:
         merges=_parse_merges(data.get("merges"), valid_ids_set),
         parents=_parse_parents(data.get("parents"), valid_ids_set),
         sender=_parse_sender(data.get("sender"), valid_ids_set),
+        affiliations=_parse_affiliations(data.get("affiliations"), valid_ids_set),
     )
     dropped_m = _dropped(data.get("merges"), decision.merges)
     dropped_p = _dropped(data.get("parents"), decision.parents)
-    if dropped_m or dropped_p:
+    dropped_a = _dropped(data.get("affiliations"), decision.affiliations)
+    if dropped_m or dropped_p or dropped_a:
         _log.warning(
             "identidades.resolver.parse_dropped",
             dropped_merges=dropped_m,
             dropped_parents=dropped_p,
+            dropped_affiliations=dropped_a,
         )
     return decision
 
@@ -248,6 +282,17 @@ def _alive(conn: Connection, user_id: int, ids: set[int]) -> set[int]:
         {"u": user_id, "ids": list(ids)},
     ).all()
     return {int(r[0]) for r in rows}
+
+
+def _kinds(conn: Connection, user_id: int, ids: set[int]) -> dict[int, str]:
+    """{id → kind} de los ids VIVOS (los muertos/fundidos quedan fuera → sirve de check de vida)."""
+    if not ids:
+        return {}
+    rows = conn.execute(
+        text("SELECT id, kind FROM mod_identidades WHERE user_id = :u AND id = ANY(:ids)"),
+        {"u": user_id, "ids": list(ids)},
+    )
+    return {int(r[0]): str(r[1]) for r in rows}
 
 
 def _resolve_or_create_person(conn: Connection, user_id: int, name: str) -> int:
@@ -340,44 +385,6 @@ def _mark_resolved(conn: Connection, user_id: int, inbox_id: int) -> None:
     )
 
 
-def _affiliate_mentioned_people(conn: Connection, user_id: int, inbox_id: int) -> int:
-    """Afilia las PERSONAS mencionadas en el cuerpo (no el remitente) a su org, usando el `org_hint`
-    extraído (+ `role_hint` como rol). Determinista, sin LLM: `_dispose_sender` ya cuelga al
-    remitente; esto cubre a las personas del CUERPO (p.ej. «Valeria, Presidenta de RAS»). Resuelve
-    el `org_hint` a una org EXISTENTE por nombre normalizado; si no existe, OMITE (no crea orgs
-    desde hints, para no fragmentar). Idempotente (`_affiliate` hace upsert)."""
-    rows = (
-        conn.execute(
-            text(
-                "SELECT DISTINCT m.resolved_identity_id AS pid, m.org_hint AS oh, "
-                "m.role_hint AS rh "
-                "FROM mod_identidades_mentions m "
-                "JOIN mod_identidades i ON i.id = m.resolved_identity_id "
-                "WHERE m.user_id = :u AND :inbox = ANY(m.source_inbox_ids) AND i.kind = 'persona' "
-                "AND m.resolution_method <> 'sender' "
-                "AND m.org_hint IS NOT NULL AND m.org_hint <> ''"
-            ),
-            {"u": user_id, "inbox": inbox_id},
-        )
-        .mappings()
-        .all()
-    )
-    n = 0
-    for r in rows:
-        org_id = conn.execute(
-            text(
-                "SELECT id FROM mod_identidades WHERE user_id = :u AND kind = 'organizacion' "
-                "AND memex_norm(:h) <> '' AND name_norm = memex_norm(:h) ORDER BY id LIMIT 1"
-            ),
-            {"u": user_id, "h": r["oh"]},
-        ).scalar()
-        if org_id is None or int(org_id) == int(r["pid"]):
-            continue
-        _affiliate(conn, user_id, int(r["pid"]), int(org_id), r["rh"], source=_SOURCE)
-        n += 1
-    return n
-
-
 def apply_resolution(
     conn: Connection,
     user_id: int,
@@ -387,21 +394,25 @@ def apply_resolution(
     min_merge: float,
     min_parent: float,
 ) -> ResolverStats:
-    """Aplica la decisión sobre `conn`. Orden: fusiones → jerarquía → remitente → marca."""
+    """Aplica la decisión sobre `conn`. Orden: fusiones → jerarquía → remitente → afiliaciones →
+    marca. Todo sobre ids VIVOS tras las fusiones (evita FK a un id absorbido)."""
     stats = ResolverStats()
     for m in decision.merges:
         if m.confidence < min_merge:
             continue
         if merge_identities(conn, user_id, m.survivor_id, m.absorbed_id):
             stats.merged += 1
-    # Jerarquía: solo links sobre ids vivos tras las fusiones (evita FK a un id absorbido).
+    # Jerarquía: SOLO org/producto cuelgan («pertenece_a»); una PERSONA nunca (su vínculo con la org
+    # es una afiliación, abajo). Sobre ids vivos tras las fusiones.
     kept = [p for p in decision.parents if p.confidence >= min_parent]
-    referenced = {p.child_id for p in kept} | {p.parent_id for p in kept if p.parent_id}
-    alive = _alive(conn, user_id, referenced)
+    ref_kinds = _kinds(
+        conn, user_id, {p.child_id for p in kept} | {p.parent_id for p in kept if p.parent_id}
+    )
     links = [
         HierarchyLink(p.child_id, p.parent_id, p.parent_name, None)
         for p in kept
-        if p.child_id in alive and (p.parent_id is None or p.parent_id in alive)
+        if ref_kinds.get(p.child_id) in ("organizacion", "producto")
+        and (p.parent_id is None or p.parent_id in ref_kinds)
     ]
     if links:
         linked, *_ = _apply_links(conn, user_id, links, apply_cleanup=False)
@@ -410,6 +421,19 @@ def apply_resolution(
         sender_stats = _dispose_sender(conn, user_id, ctx, decision.sender, min_merge)
         stats.contacts += sender_stats.contacts
         stats.persons += sender_stats.persons
+    # Afiliaciones persona→org que decidió el LLM (mapea la org por contexto aunque el nombre no
+    # calce exacto; reemplaza el viejo match exacto). Valida kind (persona→organizacion) + vida.
+    af_kinds = _kinds(
+        conn,
+        user_id,
+        {a.person_id for a in decision.affiliations} | {a.org_id for a in decision.affiliations},
+    )
+    for a in decision.affiliations:
+        if a.confidence < min_parent:
+            continue
+        if af_kinds.get(a.person_id) == "persona" and af_kinds.get(a.org_id) == "organizacion":
+            _affiliate(conn, user_id, a.person_id, a.org_id, a.role, source=_SOURCE)
+            stats.affiliated += 1
     _mark_resolved(conn, user_id, ctx.inbox_id)
     return stats
 
@@ -462,6 +486,7 @@ async def run_resolver_window(
             stats.linked += s.linked
             stats.contacts += s.contacts
             stats.persons += s.persons
+            stats.affiliated += s.affiliated
             record_llm_call(
                 user_id=user_id,
                 purpose="identidades_resolve",
@@ -479,17 +504,12 @@ async def run_resolver_window(
                     "linked": s.linked,
                     "contacts": s.contacts,
                     "persons": s.persons,
+                    "affiliated": s.affiliated,
                 },
             )
     finally:
         if owns:
             await aclose_llm(llm)
-    # Afiliación determinista de las PERSONAS del cuerpo a su org (vía `org_hint`) — TODA la
-    # ventana, tras los merges del LLM (resuelve contra orgs vivas). Cubre lo que la disposición
-    # del remitente no toca (p.ej. la presidenta de un semillero nombrada en el cuerpo).
-    with connection() as conn:
-        for iid in inbox_ids:
-            stats.affiliated += _affiliate_mentioned_people(conn, user_id, iid)
     _log.info(
         "identidades.resolver.window_done",
         user_id=user_id,

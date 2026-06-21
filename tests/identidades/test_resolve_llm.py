@@ -13,11 +13,11 @@ from sqlalchemy import Connection, text
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.identidades.resolve_context import EmailIdentity, ResolverInput
 from memex.modules.identidades.resolve_llm import (
+    Affiliation,
     Merge,
     Parent,
     ResolverDecision,
     SenderDisposition,
-    _affiliate_mentioned_people,
     _serialize,
     apply_resolution,
     parse_resolution,
@@ -347,19 +347,6 @@ async def test_resolve_email_calls_llm_and_parses(conn: Connection) -> None:
     assert decision.merges == () and decision.sender is None
 
 
-def _mention_with_hints(
-    c: Connection, inbox: int, person_id: int, org_hint: str, role: str
-) -> None:
-    c.execute(
-        text(
-            "INSERT INTO mod_identidades_mentions (user_id, source_inbox_ids, mentioned_name, "
-            "resolved_identity_id, resolved_kind, resolution_method, org_hint, role_hint) "
-            "VALUES (1, ARRAY[:i], 'p', :pid, 'persona', 'created', :oh, :rh)"
-        ),
-        {"i": inbox, "pid": person_id, "oh": org_hint, "rh": role},
-    )
-
-
 def test_serialize_shows_identity_data_and_hierarchy() -> None:
     # El resolver recibe la identidad REAL con sus DATOS (email/dominio = atributos) + su jerarquía.
     ctx = _ctx(
@@ -381,14 +368,22 @@ def test_serialize_shows_identity_data_and_hierarchy() -> None:
     assert "padre='javeriana.edu.co'" in out  # jerarquía hacia arriba
 
 
-def test_affiliate_mentioned_people_uses_org_hint(conn: Connection) -> None:
-    # La presidenta sale del CUERPO (no remitente) con org_hint → se afilia a esa org, con su rol.
-    src = _source(conn)
-    mid = _inbox(conn, src)
+def test_parse_affiliations() -> None:
+    content = json.dumps(
+        {"affiliations": [{"person_id": 5, "org_id": 1, "role": "Presidenta", "confidence": 0.9}]}
+    )
+    assert parse_resolution(content, {1, 5}).affiliations == (Affiliation(5, 1, "Presidenta", 0.9),)
+
+
+def test_apply_affiliation_persona_to_org(conn: Connection) -> None:
+    # El LLM decide la afiliación persona→org (con rol); apply_resolution la crea en person_orgs.
+    mid = _inbox(conn, _source(conn))
     org = _identity(conn, "organizacion", "RAS Javeriana IEEE")
     person = _identity(conn, "persona", "Valeria Caycedo")
-    _mention_with_hints(conn, mid, person, "RAS Javeriana IEEE", "Presidenta")
-    assert _affiliate_mentioned_people(conn, 1, mid) == 1
+    ctx = _ctx(mid, [_ei(org, "organizacion", "RAS"), _ei(person, "persona", "Valeria")])
+    decision = ResolverDecision((), (), None, (Affiliation(person, org, "Presidenta", 0.9),))
+    stats = apply_resolution(conn, 1, ctx, decision, min_merge=0.75, min_parent=0.8)
+    assert stats.affiliated == 1
     row = conn.execute(
         text("SELECT org_id, role FROM mod_identidades_person_orgs WHERE person_id = :p"),
         {"p": person},
@@ -396,15 +391,31 @@ def test_affiliate_mentioned_people_uses_org_hint(conn: Connection) -> None:
     assert int(row[0]) == org and row[1] == "Presidenta"
 
 
-def test_affiliate_mentioned_people_skips_when_org_absent(conn: Connection) -> None:
-    # org_hint que NO matchea ninguna org existente → no se crea nada (conservador, sin fragmentar).
-    src = _source(conn)
-    mid = _inbox(conn, src)
-    person = _identity(conn, "persona", "Juan Perez")
-    _mention_with_hints(conn, mid, person, "Org Que No Existe", "Miembro")
-    assert _affiliate_mentioned_people(conn, 1, mid) == 0
+def test_apply_affiliation_rejects_wrong_kinds(conn: Connection) -> None:
+    # Afiliación org→org (kinds equivocados) → se ignora; afiliación es estrictamente persona→org.
+    mid = _inbox(conn, _source(conn))
+    a = _identity(conn, "organizacion", "Acme")
+    b = _identity(conn, "organizacion", "Beta")
+    ctx = _ctx(mid, [_ei(a, "organizacion", "Acme"), _ei(b, "organizacion", "Beta")])
+    decision = ResolverDecision((), (), None, (Affiliation(a, b, None, 0.9),))
+    stats = apply_resolution(conn, 1, ctx, decision, min_merge=0.75, min_parent=0.8)
+    assert stats.affiliated == 0
     cnt = conn.execute(
-        text("SELECT count(*) FROM mod_identidades_person_orgs WHERE person_id = :p"),
-        {"p": person},
+        text("SELECT count(*) FROM mod_identidades_person_orgs WHERE user_id = 1")
     ).scalar()
     assert cnt == 0
+
+
+def test_apply_hierarchy_skips_persona_child(conn: Connection) -> None:
+    # Una PERSONA nunca cuelga en jerarquía (eso es afiliación) → su parent se ignora.
+    mid = _inbox(conn, _source(conn))
+    org = _identity(conn, "organizacion", "Javeriana")
+    person = _identity(conn, "persona", "Claudia")
+    ctx = _ctx(mid, [_ei(org, "organizacion", "Javeriana"), _ei(person, "persona", "Claudia")])
+    decision = ResolverDecision((), (Parent(person, org, None, 0.95),), None)
+    stats = apply_resolution(conn, 1, ctx, decision, min_merge=0.75, min_parent=0.8)
+    assert stats.linked == 0
+    parent = conn.execute(
+        text("SELECT parent_identity_id FROM mod_identidades WHERE id = :id"), {"id": person}
+    ).scalar()
+    assert parent is None

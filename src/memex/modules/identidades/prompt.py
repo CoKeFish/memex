@@ -131,7 +131,7 @@ IDENTIDADES_RESOLVE_SYSTEM_PROMPT = (
     "correo (asunto + cuerpo). Te paso las identidades del correo (las extraídas del cuerpo +\n"
     "el REMITENTE, marcado) y CANDIDATAS del directorio que podrían ser la misma o el\n"
     "contenedor de alguna. Cada entrada trae `id`, tipo, nombre, alias, dominios y su padre\n"
-    "actual. Con el contexto del correo decidí TRES cosas:\n\n"
+    "actual. Con el contexto del correo decidí CUATRO cosas:\n\n"
     "1) FUSIONES — qué entradas son la MISMA entidad real y deben unirse (`keep_id`\n"
     "   sobrevive, `drop_id` se absorbe). Usá el contexto: p. ej. el dominio\n"
     "   `javeriana.edu.co` y `Pontificia Universidad Javeriana` son la MISMA universidad\n"
@@ -141,9 +141,16 @@ IDENTIDADES_RESOLVE_SYSTEM_PROMPT = (
     "   duda NO fusiones (no juntes una persona con una empresa por compartir nombre).\n"
     "2) JERARQUÍA — qué entrada es SUB-PARTE de otra y debería colgar de ella («pertenece\n"
     "   a»): carrera/facultad→universidad, producto→empresa, área→org. SESGO A PRECISIÓN.\n"
+    "   SOLO org/producto cuelgan; una PERSONA NUNCA va en jerarquía (su vínculo con la org es\n"
+    "   una AFILIACIÓN, punto 4).\n"
     "3) REMITENTE — el email del remitente (te lo marco) ¿es un BUZÓN de una organización\n"
     "   (`info@`, `jobs@`, `contacto@` — habla la org, no una persona) o de una PERSONA? Si\n"
-    "   es buzón, indicá la org dueña en `owner_id`. Si es persona, su nombre en `person_name`.\n\n"
+    "   es buzón, indicá la org dueña en `owner_id`. Si es persona, su nombre en `person_name`.\n"
+    "4) AFILIACIONES — qué PERSONA del correo es MIEMBRO de qué ORGANIZACIÓN (trabaja en /\n"
+    "   estudia en / preside…), con su rol. Ej: «Valeria, Presidenta de RAS» → afiliación\n"
+    "   `person_id`=Valeria, `org_id`=RAS, `role`='Presidenta'. Mapeá la org por CONTEXTO aunque\n"
+    "   el nombre no calce exacto (p. ej. 'Pontificia Universidad Javeriana' → la entrada cuyo\n"
+    "   dominio es javeriana.edu.co). Esto NO es jerarquía: la persona NO cuelga, se AFILIA.\n\n"
     "Reglas:\n"
     "- Todos los `id` que uses deben venir de las listas que te paso (correo o candidatas).\n"
     "- `confidence`: número 0..1 por cada decisión.\n\n"
@@ -152,6 +159,8 @@ IDENTIDADES_RESOLVE_SYSTEM_PROMPT = (
     '"parents": [{"child_id": <id>, "parent_id": <id|null>, "parent_name": "<nombre|null>", '
     '"confidence": <0..1>}], '
     '"sender": {"is_person": <true|false>, "owner_id": <id|null>, "person_name": "<nombre|null>", '
-    '"confidence": <0..1>}}\n'
+    '"confidence": <0..1>}, '
+    '"affiliations": [{"person_id": <id>, "org_id": <id>, "role": "<rol|null>", '
+    '"confidence": <0..1>}]}\n'
     "Listas vacías si no hay; `sender` en null si el correo no tiene remitente a disponer."
 )
