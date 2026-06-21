@@ -1,9 +1,10 @@
 """Remitente como identidad de PRIMERA CLASE (Fase 2): el remitente de TODO mensaje se resuelve y se
 persiste como avistamiento (`mod_identidades_mentions`, `resolution_method='sender'`) en la
 extracción (paso 5), y co-ocurre con lo extraído por el brazo NORMAL de menciones (ya NO por un
-brazo derivado al vuelo). Política GENERAL por medio: chat→persona; email→un dominio NUNCA es una
-persona (rol/relay=org del dominio; individuo=DESCONOCIDO + afiliación, el tipo lo define un
-clasificador; free-mail=desconocido/nada según haya nombre); social→cuenta DESCONOCIDA por handle.
+brazo derivado al vuelo). Política GENERAL por medio: chat→persona; email→un dominio es ATRIBUTO,
+no identidad (NO se crea ficha-dominio): rol/relay CON nombre de org = org por NOMBRE + dominio
+atado; lo demás corporativo (individuo/buzón no-rol) = leftover, lo captura extracción/resolver;
+free-mail = leftover/nada según haya nombre; social→cuenta DESCONOCIDA por handle.
 Ver `modules/identidades/senders.py`."""
 
 from __future__ import annotations
@@ -397,34 +398,25 @@ def test_email_freemail_sin_nombre_no_crea() -> None:
     assert edges == []  # un solo vértice (finance) → sin pares
 
 
-def test_email_individuo_corporativo_cuelga_en_org() -> None:
-    # un individuo de dominio propio NO crea ficha (un email es ATRIBUTO): la ORG del dominio + su
-    # email colgado como CONTACTO de la org. Sin desconocido, sin afiliación a una ficha aparte.
+def test_email_individuo_corporativo_es_leftover() -> None:
+    # individuo de dominio propio NO-rol → leftover: el procedimental no adivina persona-vs-org ni
+    # crea ficha-dominio (un dominio es ATRIBUTO). Lo captura extracción/resolver con contexto.
     src = _source("imap", "mail")
     mid = _inbox(src, "m1", _email_payload("juan.perez@acme.com", "Juan Pérez"))
     with connection() as c:
         n = weave_email_senders(c, 1, [mid])
-    assert n == 1
-    assert _identity_kinds() == ["organizacion"]  # SOLO la org del dominio
-    mentions = _sender_mentions()
-    assert len(mentions) == 1 and mentions[0]["rkind"] == "organizacion"
-    org_id = mentions[0]["rid"]
-    assert ("email", "email", "juan.perez@acme.com") in _identifiers_of(org_id)  # email = contacto
-    assert ("domain", "domain", "acme.com") in _identifiers_of(org_id)
-    with connection() as c:
-        aff = c.execute(
-            text("SELECT count(*) FROM mod_identidades_person_orgs WHERE user_id = 1")
-        ).scalar()
-    assert aff == 0  # no hay individuo aparte → sin afiliación
+    assert n == 0
+    assert _identities() == []  # ni org-dominio ni persona
+    assert _sender_mentions() == []
 
 
 def test_email_sender_no_depende_de_resolver_enabled() -> None:
-    # Se quitó el `defer`: el remitente corporativo se resuelve igual con `resolver_enabled` ON/OFF
-    # (siempre org del dominio + email colgado). Guarda contra re-acoplar el sender al resolver.
+    # Se quitó el `defer`: un relay CON nombre de org se resuelve igual con resolver ON/OFF (org por
+    # nombre + dominio atado). Guarda contra re-acoplar el sender al resolver.
     from memex.modules.identidades.settings import upsert_settings
 
     src = _source("imap", "mail")
-    mid = _inbox(src, "m1", _email_payload("juan.perez@acme.com", "Juan Pérez"))
+    mid = _inbox(src, "m1", _email_payload("notifications@acme.com", "Acme"))  # rol + nombre de org
     with connection() as c:
         upsert_settings(c, 1, resolver_enabled=True)
     with connection() as c:
@@ -432,48 +424,39 @@ def test_email_sender_no_depende_de_resolver_enabled() -> None:
     assert n == 1
     assert _identity_kinds() == ["organizacion"]
     org_id = _sender_mentions()[0]["rid"]
-    assert ("email", "email", "juan.perez@acme.com") in _identifiers_of(org_id)
+    assert ("domain", "domain", "acme.com") in _identifiers_of(org_id)
 
 
-def test_email_varios_individuos_mismo_dominio_una_org() -> None:
-    # varios remitentes @acme.com (individuos + relay) → UNA sola org (keyed por dominio); los
-    # emails no-rol cuelgan como contactos de esa org. Ningún stub por individuo.
+def test_email_varios_individuos_corporativos_solo_el_relay_crea_org() -> None:
+    # varios @acme.com: los individuos NO-rol quedan leftover (no stub, no contacto); SOLO el relay
+    # CON nombre crea la org (por nombre + dominio atado).
     src = _source("imap", "mail")
     m1 = _inbox(src, "m1", _email_payload("juan.perez@acme.com", "Juan Pérez"))
     m2 = _inbox(src, "m2", _email_payload("maria.lopez@acme.com", "María López"))
     m3 = _inbox(src, "m3", _email_payload("notifications@acme.com", "Acme"))  # relay → la org
     with connection() as c:
         weave_email_senders(c, 1, [m1, m2, m3])
-    assert _identity_kinds() == ["organizacion"]  # una sola org para todos
-    with connection() as c:
-        domains = c.execute(
-            text(
-                "SELECT identity_id FROM mod_identidades_identifiers "
-                "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'acme.com'"
-            )
-        ).all()
-    assert len(domains) == 1
-    idf = _identifiers_of(int(domains[0][0]))
-    assert ("email", "email", "juan.perez@acme.com") in idf  # individuos cuelgan como contacto
-    assert ("email", "email", "maria.lopez@acme.com") in idf
-    assert ("email", "email", "notifications@acme.com") not in idf  # el relay no es clave
+    assert _identity_kinds() == ["organizacion"]  # solo la org del relay
+    org_id = _sender_mentions()[0]["rid"]
+    idf = _identifiers_of(org_id)
+    assert ("domain", "domain", "acme.com") in idf
+    assert ("email", "email", "juan.perez@acme.com") not in idf  # individuos no-rol → leftover
+    assert ("email", "email", "maria.lopez@acme.com") not in idf
 
 
-def test_email_buzon_dependencia_cuelga_en_org() -> None:
-    # un buzón de dependencia (local-part de unidad org) en dominio propio → la org del dominio + su
-    # email colgado como contacto. Sin desconocido ni arista `afiliado` a una ficha aparte.
+def test_email_buzon_dependencia_no_rol_es_leftover() -> None:
+    # buzón de dependencia con local-part que NO es rol genérico (ielec@) → leftover. El nombre de
+    # la dependencia ("Carrera de Ingeniería Electrónica") lo captura el extractor (el render ahora
+    # muestra el email, así que el dominio queda visible).
     src = _source("imap", "mail")
     mid = _inbox(
         src, "m1", _email_payload("ielec@javeriana.edu.co", "Carrera de Ingeniería Electrónica")
     )
     with connection() as c:
         n = weave_email_senders(c, 1, [mid])
-        edges = list_edges(c, 1)
-    assert n == 1
-    assert _identity_kinds() == ["organizacion"]
-    org_id = _sender_mentions()[0]["rid"]
-    assert ("email", "email", "ielec@javeriana.edu.co") in _identifiers_of(org_id)
-    assert edges == []  # el email es atributo de la org; no hay afiliado a una ficha aparte
+    assert n == 0
+    assert _identities() == []
+    assert _sender_mentions() == []
 
 
 def test_email_egerlein_reusa_persona_existente() -> None:
@@ -492,8 +475,9 @@ def test_email_egerlein_reusa_persona_existente() -> None:
     assert _sender_mentions()[0]["rid"] == p
 
 
-def test_email_varios_buzones_depto_mismo_dominio_una_org() -> None:
-    # dos buzones de dependencia del mismo dominio → UNA sola org; ambos emails cuelgan de ella.
+def test_email_varios_buzones_depto_no_rol_son_leftover() -> None:
+    # dos buzones de dependencia no-rol del mismo dominio → ambos leftover (no se crea ficha-dominio
+    # ni org por buzón). Las dependencias las captura el extractor por su nombre.
     src = _source("imap", "mail")
     m1 = _inbox(
         src, "m1", _email_payload("ielec@javeriana.edu.co", "Carrera de Ingeniería Electrónica")
@@ -502,19 +486,9 @@ def test_email_varios_buzones_depto_mismo_dominio_una_org() -> None:
         src, "m2", _email_payload("viceacad@javeriana.edu.co", "Vicerrectoría Académica PUJ")
     )
     with connection() as c:
-        weave_email_senders(c, 1, [m1, m2])
-    assert _identity_kinds() == ["organizacion"]  # una sola org para ambos buzones
-    with connection() as c:
-        domains = c.execute(
-            text(
-                "SELECT identity_id FROM mod_identidades_identifiers "
-                "WHERE user_id = 1 AND kind = 'domain' AND value_norm = 'javeriana.edu.co'"
-            )
-        ).all()
-    assert len(domains) == 1
-    idf = _identifiers_of(int(domains[0][0]))
-    assert ("email", "email", "ielec@javeriana.edu.co") in idf
-    assert ("email", "email", "viceacad@javeriana.edu.co") in idf
+        n = weave_email_senders(c, 1, [m1, m2])
+    assert n == 0
+    assert _identities() == []
 
 
 def test_email_freemail_nombre_tipo_org_es_leftover() -> None:
