@@ -180,9 +180,14 @@ def _ei(identity_id: int, kind: str, name: str, **kw: Any) -> EmailIdentity:
     )
 
 
-def _ctx(inbox: int, idents: list[EmailIdentity]) -> ResolverInput:
+def _ctx(inbox: int, idents: list[EmailIdentity], sender_email: str | None = None) -> ResolverInput:
     return ResolverInput(
-        inbox_id=inbox, subject="s", body="b", identities=tuple(idents), candidates=()
+        inbox_id=inbox,
+        subject="s",
+        body="b",
+        identities=tuple(idents),
+        candidates=(),
+        sender_email=sender_email,
     )
 
 
@@ -374,6 +379,13 @@ def test_serialize_shows_identity_data_and_hierarchy() -> None:
     assert "datos=[domain:javeriana.edu.co, email:a@x]" in out  # el correo es DATO de la identidad
     assert "hijos=[RAS Javeriana IEEE]" in out  # jerarquía hacia abajo
     assert "padre='javeriana.edu.co'" in out  # jerarquía hacia arriba
+
+
+def test_serialize_shows_sender_email() -> None:
+    # Las 3 partes del correo: el REMITENTE (email) va explícito aunque NO sea mención (sin atar) —
+    # su dominio dice de qué org viene.
+    out = _serialize(_ctx(1, [_ei(1, "organizacion", "X")], sender_email="rector@javeriana.edu.co"))
+    assert "REMITENTE DEL CORREO: rector@javeriana.edu.co" in out
 
 
 def test_apply_affiliation_persona_to_org(conn: Connection) -> None:

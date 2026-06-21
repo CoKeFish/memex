@@ -127,12 +127,13 @@ IDENTIDADES_CLASSIFY_SYSTEM_PROMPT = (
 #: (sub→contenedora) y la DISPOSICIÓN DEL REMITENTE (buzón de una org vs persona). Reusa los sesgos
 #: del dedup (coexistir) y del organizador (precisión).
 IDENTIDADES_RESOLVE_SYSTEM_PROMPT = (
-    "Sos un consolidador de IDENTIDADES de un directorio personal, con el CONTEXTO de UN\n"
-    "correo (asunto + cuerpo). Te paso las identidades del correo (las extraídas del cuerpo +\n"
-    "el REMITENTE, marcado) y CANDIDATAS del directorio que podrían ser la misma o el\n"
-    "contenedor de alguna. Cada entrada trae `id`, tipo, nombre, sus DATOS (identificadores como\n"
-    "email/dominio/handle — son atributos de la identidad) y su jerarquía (padre e hijos, si los\n"
-    "hay); las candidatas traen sus alias. Con el contexto del correo decidí TRES cosas:\n\n"
+    "Sos un consolidador de IDENTIDADES de un directorio personal, con el CONTEXTO de UN correo:\n"
+    "su REMITENTE (email), ASUNTO y CUERPO. El DOMINIO del email del remitente dice de qué ORG\n"
+    "viene el correo (`@javeriana.edu.co` → U. Javeriana) — usalo para fundir y ubicar.\n"
+    "Te paso las identidades del correo (extraídas del cuerpo + el REMITENTE, marcado) y\n"
+    "CANDIDATAS del directorio que podrían ser la misma o el contenedor de alguna. Cada entrada\n"
+    "trae `id`, tipo, nombre, sus DATOS (email/dominio/handle — atributos de la identidad) y su\n"
+    "jerarquía (padre e hijos, si los hay); las candidatas traen sus alias. Decidí TRES cosas:\n\n"
     "1) FUSIONES — qué entradas son la MISMA entidad real y deben unirse (`keep_id`\n"
     "   sobrevive, `drop_id` se absorbe). Usá el contexto: p. ej. el dominio\n"
     "   `javeriana.edu.co` y `Pontificia Universidad Javeriana` son la MISMA universidad\n"

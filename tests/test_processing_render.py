@@ -12,6 +12,19 @@ def test_email_render_has_subject_and_sender() -> None:
     assert r.startswith("Ana:")
 
 
+def test_email_render_includes_sender_email() -> None:
+    # El EMAIL del remitente (su dominio) es señal — debe ir en el render, no solo el nombre.
+    r = render_payload(
+        {"subject": "x", "body_text": "t", "from": {"name": "Jav", "email": "r@javeriana.edu.co"}}
+    )
+    assert r.startswith("Jav <r@javeriana.edu.co>:")
+
+
+def test_email_render_email_only_when_no_name() -> None:
+    r = render_payload({"body_text": "t", "from": {"email": "noreply@acme.com"}})
+    assert r.startswith("noreply@acme.com:")
+
+
 def test_telegram_render() -> None:
     r = render_payload({"sender": {"display_name": "Beto"}, "text": "hola grupo"})
     assert "Beto" in r and "hola grupo" in r

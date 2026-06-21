@@ -63,7 +63,11 @@ def render_payload(payload: dict[str, Any], ocr_text: str = "") -> str:
     sender = ""
     frm = payload.get("from")
     if isinstance(frm, dict):
-        sender = str(frm.get("name") or frm.get("email") or "")
+        # `Nombre <email>`: el EMAIL del remitente es señal (el dominio dice quién manda). Antes
+        # solo iba el nombre y el dominio quedaba invisible para extracción/resolución.
+        name = str(frm.get("name") or "").strip()
+        email = str(frm.get("email") or "").strip()
+        sender = f"{name} <{email}>" if name and email else (name or email)
     snd = payload.get("sender")
     if not sender and isinstance(snd, dict):
         sender = str(snd.get("display_name") or snd.get("username") or "")

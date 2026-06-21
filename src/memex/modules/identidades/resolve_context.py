@@ -80,6 +80,7 @@ class ResolverInput:
     body: str
     identities: tuple[EmailIdentity, ...]
     candidates: tuple[Candidate, ...]
+    sender_email: str | None = None  # email crudo del remitente (la 3a parte del correo)
 
 
 def _identifiers_by_identity(
@@ -339,4 +340,5 @@ def build_email_context(conn: Connection, user_id: int, inbox_id: int) -> Resolv
         body=body,
         identities=tuple(idents),
         candidates=tuple(candidates),
+        sender_email=from_email or None,
     )

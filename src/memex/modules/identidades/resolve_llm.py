@@ -227,7 +227,10 @@ def parse_resolution(
 
 
 def _serialize(ctx: ResolverInput) -> str:
-    lines = [f"ASUNTO: {ctx.subject}", f"CUERPO: {ctx.body}", "", "IDENTIDADES DEL CORREO:"]
+    # Las 3 partes del correo: REMITENTE (email) + ASUNTO + CUERPO. El email del remitente va aunque
+    # quede sin atar (no es mención): su dominio dice de qué org viene.
+    lines = [f"REMITENTE DEL CORREO: {ctx.sender_email}"] if ctx.sender_email else []
+    lines += [f"ASUNTO: {ctx.subject}", f"CUERPO: {ctx.body}", "", "IDENTIDADES DEL CORREO:"]
     for i in ctx.identities:
         mark = f"  [REMITENTE: {i.sender_email}]" if i.is_sender and i.sender_email else ""
         datos = f" datos=[{', '.join(i.identifiers)}]" if i.identifiers else ""
