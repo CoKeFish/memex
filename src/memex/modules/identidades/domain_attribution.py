@@ -13,18 +13,21 @@ que ya existen (crear la org por nombre lo hace el clasificador codex+web, apart
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
-from memex.llm import ChatMessage, LLMClient, build_llm_client
+from memex.db import connection
+from memex.llm import ChatMessage, LLMClient, aclose_llm, build_llm_client
 from memex.logging import get_logger
 from memex.modules.identidades.fuzzy import find_fuzzy_candidates
 from memex.modules.identidades.module import _insert_identifier
-from memex.modules.identidades.normalize import norm_identifier
+from memex.modules.identidades.normalize import is_freemail, norm_identifier
 from memex.modules.identidades.resolve import KIND_ORG
 from memex.modules.identidades.senders import weave_email_senders
+from memex.modules.identidades.settings import get_settings
 
 _log = get_logger("memex.modules.identidades.domain_attribution")
 
@@ -157,3 +160,46 @@ async def attribute_domain(
             "identidades.domain_attribution.applied", domain=dom, owner_id=owner_id, confidence=conf
         )
     return DomainAttribution(dom, owner_id, owner_name, conf, len(cands), applied)
+
+
+async def attribute_domains_for_window(
+    user_id: int, inbox_ids: Sequence[int], *, llm: LLMClient | None = None
+) -> int:
+    """CONECTA `attribute_domain` al pipeline: tras la resolución de una ventana, ata los DOMINIOS
+    corporativos de sus remitentes que quedaron SIN dueña a la identidad que el LLM elija. Gate =
+    `resolver_enabled` (corre junto al resolver); no-op si está apagado. best-effort por dominio:
+    uno que falle no frena al resto. Lo dispara el orquestador después de `run_resolver_window`."""
+    ids = list(inbox_ids)
+    if not ids:
+        return 0
+    with connection() as conn:
+        if not get_settings(conn, user_id).resolver_enabled:
+            return 0
+        rows = conn.execute(
+            text(
+                "SELECT DISTINCT split_part(lower(inb.payload->'from'->>'email'), '@', 2) AS dom "
+                "FROM inbox inb WHERE inb.user_id = :u AND inb.id = ANY(:ids) "
+                "AND inb.payload->'from'->>'email' IS NOT NULL"
+            ),
+            {"u": user_id, "ids": ids},
+        ).scalars()
+        domains = [d for d in rows if d and not is_freemail(d)]
+    if not domains:
+        return 0
+    client = llm or build_llm_client("identidades_resolve", user_id=user_id)
+    attached = 0
+    try:
+        for dom in domains:
+            try:
+                with connection() as conn:
+                    res = await attribute_domain(conn, user_id, dom, llm=client)
+                if res.applied:
+                    attached += 1
+            except Exception as e:  # un dominio que falla no frena la ventana
+                _log.warning(
+                    "identidades.domain_attribution.window_error", domain=dom, error=str(e)
+                )
+    finally:
+        if llm is None:
+            await aclose_llm(client)
+    return attached

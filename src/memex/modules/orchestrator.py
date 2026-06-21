@@ -816,9 +816,13 @@ async def _process_window(
     # al menos el remitente → corre para todo correo. No-op si el gate está apagado. Patrón gemelo
     # del tejido del remitente (arriba): el orquestador gatilla la función de identidades y espera.
     if "identidades" in active_by_slug:
+        from memex.modules.identidades.domain_attribution import attribute_domains_for_window
         from memex.modules.identidades.resolve_llm import run_resolver_window
 
         await run_resolver_window(user_id, [r.inbox_id for r in window.rows])
+        # Fallback conectado: ata a su org los dominios corporativos del remitente que la resolución
+        # dejó sin dueña (gated por `resolver_enabled`; no-op si está apagado).
+        await attribute_domains_for_window(user_id, [r.inbox_id for r in window.rows])
 
     # Candidatos ruteados-fuera: marcar "considerado" para no re-rutearlos eternamente.
     for module in candidates:

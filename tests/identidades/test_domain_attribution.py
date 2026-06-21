@@ -12,8 +12,12 @@ from sqlalchemy import text
 
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
-from memex.modules.identidades.domain_attribution import attribute_domain
+from memex.modules.identidades.domain_attribution import (
+    attribute_domain,
+    attribute_domains_for_window,
+)
 from memex.modules.identidades.module import _insert_identifier
+from memex.modules.identidades.settings import upsert_settings
 
 
 class FakeLLM:
@@ -142,3 +146,31 @@ async def test_attribute_domain_no_candidates_skips_llm() -> None:
         res = await attribute_domain(c, 1, "ghostxyz.com", llm=llm)
     assert llm.calls == 0  # sin candidatas → ni se llama al LLM
     assert res.owner_id is None and res.candidates == 0
+
+
+@pytest.mark.asyncio
+async def test_attribute_domains_for_window_attaches_when_resolver_on() -> None:
+    # CONECTADO al pipeline: con resolver ON, ata los dominios corporativos sin dueña de la ventana.
+    with connection() as c:
+        upsert_settings(c, 1, resolver_enabled=True)
+    org = _org("Pontificia Universidad Javeriana")
+    inb = _inbox_from("rector@javeriana.edu.co")
+    _mention(inb, org)  # co-ocurrencia con el dominio
+    llm = FakeLLM(json.dumps({"owner_id": org, "confidence": 0.95}))
+    attached = await attribute_domains_for_window(1, [inb], llm=llm)
+    assert attached == 1
+    assert "javeriana.edu.co" in _domains(org)
+
+
+@pytest.mark.asyncio
+async def test_attribute_domains_for_window_noop_when_resolver_off() -> None:
+    with connection() as c:
+        upsert_settings(c, 1, resolver_enabled=False)
+    org = _org("Acme")
+    inb = _inbox_from("info@acme.com")
+    _mention(inb, org)
+    llm = FakeLLM(json.dumps({"owner_id": org, "confidence": 0.95}))
+    attached = await attribute_domains_for_window(1, [inb], llm=llm)
+    assert attached == 0
+    assert llm.calls == 0  # gate apagado → ni se llama al LLM
+    assert "acme.com" not in _domains(org)
