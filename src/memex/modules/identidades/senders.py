@@ -17,14 +17,13 @@ POLÍTICA DE CREACIÓN asimétrica por medio (resolver es uniforme; lo que cambi
   quien escribe es gente real que vale tener en el directorio aunque el LLM nunca la extraiga. Se
   crea su persona + su identificador estable de plataforma (`platform_id`). Bots y mensajes de
   servicio (sender NULL) quedan fuera (un relay/automatización no identifica a una persona única).
-- **email:** un dominio NUNCA identifica a una persona; identifica a lo sumo a UNA organización
-  (keyed por el dominio → no fragmenta aunque el `from.name` varíe). El remitente se resuelve por
-  LOOKUP, SIN crear stubs de email/persona (un email es un ATRIBUTO, no una identidad): el email
-  exacto ya conocido gana; rol/relay (`noreply@`/`mailer-daemon@`) → la ORG del dominio habla;
-  no-rol de dominio corporativo → la ORG del dominio + el email colgado como CONTACTO de esa org
-  (unicidad por `_insert_identifier`). El individuo NO se crea acá: si es una persona, el RESOLVER
-  la separa después (con contexto). En **free-mail** (gmail/outlook…) el dominio no representa a
-  nadie → None (leftover: lo crea/decide el resolver).
+- **email:** un dominio NUNCA es una identidad (es un ATRIBUTO de una org) ni identifica a una
+  persona. Se resuelve por LOOKUP, SIN crear stubs ni fichas nombradas por el dominio: el email
+  exacto ya conocido gana; si el dominio YA pertenece a una org → esa (rol/relay → la org habla;
+  no-rol → además cuelga el email como CONTACTO, unicidad por `_insert_identifier`); si el rol/relay
+  trae el NOMBRE de la org → se crea por NOMBRE y se le ata el dominio. Sin org real conocida →
+  None (leftover): el individuo lo dispone el resolver, y el dominio sin atar lo atribuye a mano
+  `attribute_domain` (off/desconectado). En **free-mail** (gmail/outlook…) → None.
 - **social:** la CUENTA (`account`) se resuelve por handle acotado a la plataforma real; si no
   existe se crea como DESCONOCIDO con su handle en la plataforma real (el tipo no se adivina; se
   define luego con set-kind o un clasificador). Las cuentas monitoreadas son curadas (allowlist).
@@ -297,45 +296,35 @@ def weave_chat_structure(
 
 def _org_for_domain(
     conn: Connection, user_id: int, domain: str, display_hint: str, index: KnownIndex
-) -> int:
-    """Asegura la ORG de un dominio, keyed por el DOMINIO (no por el nombre): UNA org por dominio
-    registrable → no fragmenta aunque el `from.name` varíe entre remitentes. Si ya hay una org con
-    este identifier `domain`, esa. Si no, y el remitente da un nombre de org (habla la org), se
-    dedupea contra orgs ya conocidas por ese nombre (ej. "Nequi" extraída de un cuerpo); si no hay
-    nombre, se crea nombrada por el DOMINIO (nunca por una persona). Le ata el dominio. Devuelve el
-    id."""
+) -> int | None:
+    """Devuelve la ORG dueña del dominio, SOLO si ya se conoce o si el remitente trae un nombre de
+    org REAL — nunca crea una ficha nombrada por el dominio (UN DOMINIO NO ES UNA IDENTIDAD, es un
+    atributo):
+    - ya hay una org con este identifier `domain` → esa;
+    - el remitente da un nombre de org (rol/relay que habla por la org) → se dedupea/crea por NOMBRE
+      y se le ata el dominio como atributo;
+    - si no hay nombre real → None (leftover). El dominio queda sin atar; lo atribuye a mano el
+      fallback `attribute_domain` (off/desconectado), y de ahí en más el lookup lo ata solo."""
     oid = index.domain_identity(domain)
     if oid is not None:
         return oid
+    if not display_hint:
+        return None
     dvn = norm_identifier("domain", domain)
-    if display_hint:
-        item = IdentityItem.model_validate(
-            {"source_inbox_ids": (), "name": display_hint, "kind": "organizacion"}
-        )
-        res = index.resolve(item)
-        if res.identity_id is None:
-            res, _hint = _resolve_fuzzy_or_create(conn, user_id, item, index, source="extraction")
-        org_id = res.identity_id
-        assert org_id is not None  # _resolve_fuzzy_or_create siempre ata o crea
-    else:
-        org_id = int(
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO mod_identidades (user_id, kind, display_name, source, interest)
-                    VALUES (:u, 'organizacion', :n, 'extraction', FALSE)
-                    RETURNING id
-                    """
-                ),
-                {"u": user_id, "n": domain},
-            ).scalar_one()
-        )
+    item = IdentityItem.model_validate(
+        {"source_inbox_ids": (), "name": display_hint, "kind": "organizacion"}
+    )
+    res = index.resolve(item)
+    if res.identity_id is None:
+        res, _hint = _resolve_fuzzy_or_create(conn, user_id, item, index, source="extraction")
+    org_id = res.identity_id
+    assert org_id is not None  # _resolve_fuzzy_or_create siempre ata o crea
     _insert_identifier(conn, user_id, org_id, "domain", "domain", domain, dvn, source="extraction")
     index.add(
         KnownIdentity(
             id=org_id,
             kind=KIND_ORG,
-            display_name=display_hint or domain,
+            display_name=display_hint,
             identifiers=(KnownIdentifier("domain", "domain", dvn),),
         )
     )
@@ -371,10 +360,13 @@ def _resolve_email_sender(
     # free-mail no representa a nadie → no se crea stub; queda como leftover para el resolver.
     if is_freemail(domain):
         return None
-    # dominio corporativo: la ORG del dominio (rol → la org habla, hint = from_name). No-rol →
-    # además se cuelga el email como CONTACTO de la org (un email es atributo, no una ficha; la
-    # unicidad la garantiza `_insert_identifier`). El individuo lo dispone el resolver si aplica.
+    # dominio corporativo: la ORG REAL del dominio si se conoce, o si el rol/relay trae nombre de
+    # org. Sin nombre real → None (leftover): NO se crea ficha-dominio. No-rol con org → cuelga el
+    # email como CONTACTO de la org. El individuo lo dispone el resolver; el dominio sin atar lo
+    # atribuye a mano `attribute_domain`.
     org_id = _org_for_domain(conn, user_id, domain, from_name.strip() if role else "", index)
+    if org_id is None:
+        return None
     if not role:
         _insert_identifier(
             conn, user_id, org_id, "email", "email", email, email_norm, source="extraction"

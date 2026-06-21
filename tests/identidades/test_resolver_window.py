@@ -16,6 +16,7 @@ from sqlalchemy import text
 from memex.db import connection
 from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
 from memex.modules.identidades.resolve_llm import run_resolver_window
+from memex.modules.identidades.senders import weave_email_senders
 from memex.modules.identidades.settings import upsert_settings
 
 
@@ -171,3 +172,40 @@ async def test_merge_domain_org_into_named_org() -> None:
     stats = await run_resolver_window(1, [mid], client=FakeLLM(content))
     assert stats.merged == 1
     assert not _exists(dom)  # el domino-org se fundió en la org nombrada
+
+
+@pytest.mark.asyncio
+async def test_corporate_sender_without_known_org_is_leftover() -> None:
+    # UN DOMINIO NO ES UNA IDENTIDAD: sin org real conocida, el remitente corporativo queda LEFTOVER
+    # — NO se crea ficha nombrada por el dominio (el viejo "#1"). Lo ata luego `attribute_domain`.
+    mid = _seed_inbox("navarroff@javeriana.edu.co", "Felix Navarro")  # no-rol, nombre de persona
+    with connection() as c:
+        inserted = weave_email_senders(c, 1, [mid])
+    assert inserted == 0  # leftover → sin mención de remitente
+    with connection() as c:
+        n = c.execute(
+            text("SELECT count(*) FROM mod_identidades WHERE user_id=1 AND display_name=:d"),
+            {"d": "javeriana.edu.co"},
+        ).scalar()
+    assert n == 0  # no se creó ficha-dominio
+
+
+@pytest.mark.asyncio
+async def test_corporate_role_sender_with_org_name_creates_by_name() -> None:
+    # Rol/relay que trae el nombre de la org → se crea por NOMBRE (no por dominio), con el dominio
+    # atado como atributo.
+    mid = _seed_inbox("noreply@nequi.com.co", "Nequi")  # rol + nombre de org
+    with connection() as c:
+        weave_email_senders(c, 1, [mid])
+    with connection() as c:
+        names = {
+            str(r[0])
+            for r in c.execute(
+                text(
+                    "SELECT display_name FROM mod_identidades "
+                    "WHERE user_id=1 AND kind='organizacion'"
+                )
+            ).all()
+        }
+    assert "Nequi" in names  # por NOMBRE
+    assert "nequi.com.co" not in names  # NO por dominio

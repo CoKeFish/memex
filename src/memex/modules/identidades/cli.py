@@ -59,6 +59,7 @@ from memex.db import connection
 from memex.logging import get_logger, setup_logging
 from memex.modules.identidades.classify import run_classify
 from memex.modules.identidades.dedup_llm import run_merge_phase2
+from memex.modules.identidades.domain_attribution import DomainAttribution, attribute_domain
 from memex.modules.identidades.hierarchy import run_organize, would_create_cycle
 from memex.modules.identidades.merge import merge_identities
 from memex.modules.identidades.module import identifier_owner, register_card
@@ -428,6 +429,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Además limpia el nombre de las sub-unidades (deja el original como alias).",
     )
     add_provider_flags(organize_p)
+
+    ad_p = sub.add_parser(
+        "attribute-domain",
+        help="Fallback (off/desconectado): atribuye un dominio huérfano a su dueña vía LLM.",
+    )
+    ad_p.add_argument("domain", help="Dominio o URL a atribuir, ej. javeriana.edu.co.")
+    ad_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
+    ad_p.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.7,
+        dest="min_confidence",
+        help="Umbral para atar el dominio (default 0.7); por debajo no ata.",
+    )
+    ad_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="Solo indica el dueño propuesto, no ata nada.",
+    )
+    add_provider_flags(ad_p)
 
     cand_p = sub.add_parser("candidates", help="Lista los candidatos de merge pendientes.")
     cand_p.add_argument("--user", type=int, default=1, help="User id (default 1).")
@@ -1661,6 +1683,38 @@ def _cmd_organize(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_attribute_domain(args: argparse.Namespace) -> int:
+    async def _run() -> DomainAttribution:
+        with connection() as c:
+            return await attribute_domain(
+                c,
+                args.user,
+                args.domain,
+                llm=client_from_flags(args),
+                apply=not args.dry_run,
+                min_confidence=args.min_confidence,
+            )
+
+    res = asyncio.run(_run())
+    if res.owner_id is None:
+        _say(
+            f"\nattribute-domain {res.domain}: sin dueño claro "
+            f"(candidatas={res.candidates}, confianza={res.confidence:.2f}). No se ató.\n"
+        )
+        return 0
+    if not res.applied and res.candidates == 0:
+        estado = "YA era atributo de esta identidad"
+    elif res.applied:
+        estado = "ATADO (+ remitentes re-tejidos)"
+    else:
+        estado = "propuesto, no atado (dry-run o bajo umbral)"
+    _say(
+        f"\nattribute-domain {res.domain} → id={res.owner_id} {res.owner_name!r} "
+        f"[{estado}] confianza={res.confidence:.2f} candidatas={res.candidates}\n"
+    )
+    return 0
+
+
 def _cmd_candidates(args: argparse.Namespace) -> int:
     with connection() as conn:
         rows = (
@@ -1804,6 +1858,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_classify(args)
         if args.cmd == "organize":
             return _cmd_organize(args)
+        if args.cmd == "attribute-domain":
+            return _cmd_attribute_domain(args)
         if args.cmd == "candidates":
             return _cmd_candidates(args)
         if args.cmd == "health":
