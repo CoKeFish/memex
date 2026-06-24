@@ -334,6 +334,22 @@ def test_email_corporativo_dominio_conocido_no_duplica() -> None:
     assert _sender_mentions()[0]["rid"] == o
 
 
+def test_email_individuo_corporativo_dominio_conocido_es_leftover() -> None:
+    # aunque el dominio YA tenga dueña, un individuo/buzón NO-rol NO se resuelve por dominio (el
+    # match por dominio es relación BLANDA) → leftover. El email NO se cuelga en la org; su lugar lo
+    # decide el resolver con contexto (antes se pegaba → alimentaba la inversión de jerarquía).
+    o = _org("Pontificia Universidad Javeriana")
+    _identifier(o, "domain", "domain", "javeriana.edu.co")
+    src = _source("imap", "mail")
+    mid = _inbox(src, "m1", _email_payload("correo_cs92pro@javeriana.edu.co", "Evaluación"))
+    with connection() as c:
+        n = weave_email_senders(c, 1, [mid])
+    assert n == 0  # leftover: sin mención de remitente
+    assert _sender_mentions() == []
+    assert len(_identities()) == 1  # solo la org pre-existente; no nació nada
+    assert ("email", "email", "correo_cs92pro@javeriana.edu.co") not in _identifiers_of(o)
+
+
 def test_email_subdominio_corporativo_colapsa_al_registrable() -> None:
     # el identifier 'domain' guarda el dominio REGISTRABLE: un relay de un subdominio
     # (notifications@email.acme.com) crea la org «acme.com», y otro relay de OTRO subdominio

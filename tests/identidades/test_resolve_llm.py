@@ -266,7 +266,9 @@ def test_apply_sender_mailbox_attaches_email_to_org(conn: Connection) -> None:
     org = _identity(conn, "organizacion", "Acme")
     _mention(conn, mid, org, "organizacion", "sender", "info@acme.com")
     ctx = _ctx(
-        mid, [_ei(org, "organizacion", "Acme", is_sender=True, sender_email="info@acme.com")]
+        mid,
+        [_ei(org, "organizacion", "Acme", is_sender=True, sender_email="info@acme.com")],
+        sender_email="info@acme.com",
     )
     decision = ResolverDecision(
         merges=(), parents=(), sender=SenderDisposition(False, org, None, 0.9)
@@ -276,31 +278,37 @@ def test_apply_sender_mailbox_attaches_email_to_org(conn: Connection) -> None:
     assert ("email", "info@acme.com") in _ids(conn, org)
 
 
-def test_apply_sender_org_merged_away_no_crash(conn: Connection) -> None:
-    # regresión (smoke 100): si un merge de ESTE apply funde la org del remitente, la disposición
-    # re-lee la org VIVA del mention (no el id colgante de ctx) → no crashea con FK.
+def test_apply_sender_owner_merged_away_is_leftover(conn: Connection) -> None:
+    # regresión (smoke 100): si un merge de ESTE apply funde la org que el LLM eligió como dueña del
+    # remitente (`owner_id`), la disposición la DESCARTA (owner muerto) → el remitente queda sin
+    # afiliar (leftover), sin crash de FK ni afiliación al id colgante.
     src = _source(conn)
     mid = _inbox(conn, src)
     a = _identity(conn, "organizacion", "Acme por dominio")
     b = _identity(conn, "organizacion", "Acme")
-    _mention(conn, mid, a, "organizacion", "sender", "juan@acme.com")  # remitente → org A (prov.)
+    _mention(conn, mid, a, "organizacion", "sender", "juan@acme.com")
     ctx = _ctx(
         mid,
         [_ei(a, "organizacion", "Acme por dominio", is_sender=True, sender_email="juan@acme.com")],
+        sender_email="juan@acme.com",
     )
-    # merge A→B (A se borra; el mention se re-apunta a B) + disposición persona del remitente.
+    # merge A→B (A se borra) + persona del remitente cuyo `owner_id` es A (la que se funde).
     decision = ResolverDecision(
         merges=(Merge(b, a, 0.9),),
         parents=(),
-        sender=SenderDisposition(True, None, "Juan Pérez", 0.9),
+        sender=SenderDisposition(True, a, "Juan Pérez", 0.9),
     )
     stats = apply_resolution(conn, 1, ctx, decision, min_merge=0.75, min_parent=0.8)
-    assert stats.merged == 1 and stats.persons == 1
+    assert stats.merged == 1 and stats.persons == 1  # no crash; persona creada
     assert not _exists(conn, a)  # A fundida en B
-    aff = conn.execute(
-        text("SELECT org_id FROM mod_identidades_person_orgs WHERE user_id = 1")
+    person = conn.execute(
+        text("SELECT id FROM mod_identidades WHERE kind='persona' AND display_name='Juan Pérez'")
     ).scalar()
-    assert aff is not None and int(aff) == b  # afiliado a la org VIVA (B), no al colgante (A)
+    assert person is not None and ("email", "juan@acme.com") in _ids(conn, int(person))
+    aff = conn.execute(
+        text("SELECT count(*) FROM mod_identidades_person_orgs WHERE user_id = 1")
+    ).scalar()
+    assert aff == 0  # owner muerto → leftover, sin afiliación al colgante
 
 
 def test_apply_sender_person_creates_ficha_and_repoints(conn: Connection) -> None:
@@ -309,10 +317,13 @@ def test_apply_sender_person_creates_ficha_and_repoints(conn: Connection) -> Non
     org = _identity(conn, "organizacion", "Acme")
     _mention(conn, mid, org, "organizacion", "sender", "juan@acme.com")
     ctx = _ctx(
-        mid, [_ei(org, "organizacion", "Acme", is_sender=True, sender_email="juan@acme.com")]
+        mid,
+        [_ei(org, "organizacion", "Acme", is_sender=True, sender_email="juan@acme.com")],
+        sender_email="juan@acme.com",
     )
+    # el LLM dice: el remitente es una PERSONA, con su org (owner_id) = Acme (su afiliación).
     decision = ResolverDecision(
-        merges=(), parents=(), sender=SenderDisposition(True, None, "Juan Pérez", 0.9)
+        merges=(), parents=(), sender=SenderDisposition(True, org, "Juan Pérez", 0.9)
     )
     stats = apply_resolution(conn, 1, ctx, decision, min_merge=0.75, min_parent=0.8)
     assert stats.persons == 1
@@ -329,6 +340,10 @@ def test_apply_sender_person_creates_ficha_and_repoints(conn: Connection) -> Non
         {"i": mid},
     ).scalar()
     assert rid is not None and int(rid) == int(person)
+    aff = conn.execute(
+        text("SELECT org_id FROM mod_identidades_person_orgs WHERE user_id = 1")
+    ).scalar()
+    assert aff is not None and int(aff) == org  # afiliada a la org ELEGIDA por el LLM
 
 
 def test_apply_marks_resolved_context(conn: Connection) -> None:

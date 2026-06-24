@@ -26,6 +26,7 @@ from memex.modules.identidades.merge import merge_identities
 from memex.modules.identidades.module import _affiliate, _insert_identifier
 from memex.modules.identidades.normalize import norm_identifier
 from memex.modules.identidades.prompt import IDENTIDADES_RESOLVE_SYSTEM_PROMPT
+from memex.modules.identidades.resolve import KIND_ORG, KIND_PERSONA
 from memex.modules.identidades.resolve_context import (
     ResolverInput,
     build_email_context,
@@ -276,16 +277,6 @@ async def resolve_email(llm: LLMClient, ctx: ResolverInput) -> tuple[ResolverDec
 # --- aplicación -------------------------------------------------------------------- #
 
 
-def _alive(conn: Connection, user_id: int, ids: set[int]) -> set[int]:
-    if not ids:
-        return set()
-    rows = conn.execute(
-        text("SELECT id FROM mod_identidades WHERE user_id = :u AND id = ANY(:ids)"),
-        {"u": user_id, "ids": list(ids)},
-    ).all()
-    return {int(r[0]) for r in rows}
-
-
 def _kinds(conn: Connection, user_id: int, ids: set[int]) -> dict[int, str]:
     """{id → kind} de los ids VIVOS (los muertos/fundidos quedan fuera → sirve de check de vida)."""
     if not ids:
@@ -320,54 +311,71 @@ def _resolve_or_create_person(conn: Connection, user_id: int, name: str) -> int:
     )
 
 
+def _upsert_sender_mention(
+    conn: Connection, user_id: int, inbox_id: int, identity_id: int, kind: str, email: str
+) -> None:
+    """Re-apunta la mención 'sender' del correo a `identity_id` (la decisión del LLM); si no hay (el
+    remitente corporativo llega LEFTOVER), la inserta. Se hace POST-resolución → el remitente
+    co-ocurre sin haber sido FUENTE de la jerarquía (era lo que la invertía)."""
+    from memex.modules.identidades.senders import _insert_sender_mention, _mentioned_kind
+
+    mk = _mentioned_kind(kind)
+    updated = conn.execute(
+        text(
+            "UPDATE mod_identidades_mentions SET resolved_identity_id = :i, resolved_kind = :k, "
+            "mentioned_kind = :mk WHERE user_id = :u AND :inbox = ANY(source_inbox_ids) "
+            "AND resolution_method = 'sender'"
+        ),
+        {"i": identity_id, "k": kind, "mk": mk, "u": user_id, "inbox": inbox_id},
+    ).rowcount
+    if not updated:
+        _insert_sender_mention(
+            conn,
+            user_id,
+            inbox_id,
+            identity_id=identity_id,
+            resolved_kind=kind,
+            name=email,
+            mentioned_kind=mk,
+            email=email,
+        )
+
+
 def _dispose_sender(
     conn: Connection, user_id: int, ctx: ResolverInput, sd: SenderDisposition, min_person: float
 ) -> ResolverStats:
-    """Dispone el email del remitente: buzón → contacto de la org; persona (conf alta) → ficha
-    propia con el email + afiliada a la org + re-apunta la mención. Sin remitente → no-op."""
+    """Dispone el email del remitente según la DECISIÓN del LLM (no por dominio): persona (conf
+    alta) → ficha propia + email + afiliada a la org elegida; buzón → email como contacto de la
+    org ELEGIDA (`owner_id`). El remitente corporativo llega LEFTOVER (el procedimental ya no lo
+    resuelve por dominio); su lugar lo decide acá el LLM y se (re)graba su mención para co-ocurrir.
+    Si el LLM no eligió dueña viva → leftover (no se inventa nada)."""
     stats = ResolverStats()
-    sender = next((i for i in ctx.identities if i.is_sender and i.sender_email), None)
-    if sender is None or not sender.sender_email:
+    email = ctx.sender_email
+    if not email:
         return stats
-    email = sender.sender_email
     vn = norm_identifier("email", email)
     if not vn:
         return stats
-    # La org del remitente pudo ser FUNDIDA por los merges previos de este mismo apply → su id de
-    # `ctx` quedaría colgante (FK violation). Se RE-LEE del mention VIVO (merge re-apunta las
-    # menciones al superviviente); sin org viva, se omite (el email ya lo colgó el camino
-    # procedimental del remitente).
-    org_id = conn.execute(
-        text(
-            "SELECT resolved_identity_id FROM mod_identidades_mentions "
-            "WHERE user_id = :u AND :inbox = ANY(source_inbox_ids) "
-            "AND resolution_method = 'sender' AND resolved_identity_id IS NOT NULL LIMIT 1"
-        ),
-        {"u": user_id, "inbox": ctx.inbox_id},
-    ).scalar()
-    if org_id is None:
-        return stats
-    org_id = int(org_id)
+    # La org elegida por el LLM (`owner_id`) puede venir nula o haber sido fundida/muerta por los
+    # merges de este mismo apply → solo se usa si está VIVA (su kind sirve de check de vida).
+    owner: int | None = None
+    owner_kind = KIND_ORG
+    if sd.owner_id is not None:
+        alive = _kinds(conn, user_id, {sd.owner_id})
+        if sd.owner_id in alive:
+            owner, owner_kind = sd.owner_id, alive[sd.owner_id]
     if sd.is_person and sd.person_name and sd.confidence >= min_person:
         person_id = _resolve_or_create_person(conn, user_id, sd.person_name)
         _insert_identifier(conn, user_id, person_id, "email", "email", email, vn, source=_SOURCE)
-        _affiliate(conn, user_id, person_id, org_id, None, source=_SOURCE)
-        conn.execute(
-            text(
-                "UPDATE mod_identidades_mentions SET resolved_identity_id = :p, "
-                "resolved_kind = 'persona' WHERE user_id = :u AND :inbox = ANY(source_inbox_ids) "
-                "AND resolution_method = 'sender'"
-            ),
-            {"p": person_id, "u": user_id, "inbox": ctx.inbox_id},
-        )
+        if owner is not None:
+            _affiliate(conn, user_id, person_id, owner, None, source=_SOURCE)
+        _upsert_sender_mention(conn, user_id, ctx.inbox_id, person_id, KIND_PERSONA, email)
         stats.persons += 1
-    else:  # buzón de la org (o conf baja → default seguro: el email pertenece al dominio)
-        # `owner` del LLM puede estar fundido/muerto → cae a la org viva del mention.
-        owner = org_id
-        if sd.owner_id is not None and _alive(conn, user_id, {sd.owner_id}):
-            owner = sd.owner_id
+    elif owner is not None:  # buzón de la org ELEGIDA por el LLM
         _insert_identifier(conn, user_id, owner, "email", "email", email, vn, source=_SOURCE)
+        _upsert_sender_mention(conn, user_id, ctx.inbox_id, owner, owner_kind, email)
         stats.contacts += 1
+    # else: el LLM no eligió dueña viva → leftover (el email queda sin atar; nada que inventar)
     return stats
 
 

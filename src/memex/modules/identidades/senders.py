@@ -18,11 +18,11 @@ POLÍTICA DE CREACIÓN asimétrica por medio (resolver es uniforme; lo que cambi
   crea su persona + su identificador estable de plataforma (`platform_id`). Bots y mensajes de
   servicio (sender NULL) quedan fuera (un relay/automatización no identifica a una persona única).
 - **email:** un dominio NUNCA es una identidad (es un ATRIBUTO de una org) ni identifica a una
-  persona. Se resuelve por LOOKUP, SIN crear stubs ni fichas nombradas por el dominio: el email
-  exacto ya conocido gana; si el dominio YA pertenece a una org → esa (rol/relay → la org habla;
-  no-rol → además cuelga el email como CONTACTO, unicidad por `_insert_identifier`); si el rol/relay
-  trae el NOMBRE de la org → se crea por NOMBRE y se le ata el dominio. Sin org real conocida →
-  None (leftover): el individuo lo dispone el resolver, y el dominio sin atar lo atribuye a mano
+  persona, y el match por dominio es relación BLANDA (no resuelve el remitente). Se resuelve por
+  LOOKUP, SIN crear stubs: el email exacto ya conocido gana; el corporativo NO-rol queda LEFTOVER —
+  el resolver (LLM) decide a qué identidad va con el CONTEXTO (el dominio no lo pega a la org, que
+  hacía del remitente una FUENTE de jerarquía → inversión); rol/relay (`noreply@`) → la ORG del
+  dominio (por nombre si lo trae, o la dueña ya conocida). El dominio sin atar lo atribuye
   `attribute_domain` (off/desconectado). En **free-mail** (gmail/outlook…) → None.
 - **social:** la CUENTA (`account`) se resuelve por handle acotado a la plataforma real; si no
   existe se crea como DESCONOCIDO con su handle en la plataforma real (el tipo no se adivina; se
@@ -339,14 +339,15 @@ def _resolve_email_sender(
     from_name: str,
     index: KnownIndex,
 ) -> Resolution | None:
-    """Resuelve el remitente de un correo por LOOKUP — sin crear stubs de email/persona (un email es
-    un ATRIBUTO, nunca una identidad). Política domain-agnóstica: un dominio identifica a lo sumo a
-    UNA org (keyed por el dominio).
-    - email exacto ya conocido → esa identidad (con el kind que tenga);
-    - dominio propio (corporativo): la ORG del dominio. Rol/relay (`noreply@`) → la org habla.
-      No-rol → además se cuelga el email como CONTACTO de la org (consolidación). El individuo NO se
-      crea acá: si es una persona, el resolver la separa después (con contexto).
-    - free-mail (no representa a nadie) → None (leftover: lo crea/decide el resolver).
+    """Resuelve el remitente de un correo por LOOKUP — sin crear stubs ni resolver por DOMINIO a
+    ciegas (un email es un ATRIBUTO; el match por dominio es relación BLANDA, no resolución):
+    - email exacto ya conocido (no-rol) → esa identidad;
+    - corporativo NO-rol → None (LEFTOVER): el resolver (LLM) decide su identidad con el contexto.
+      El dominio NO lo resuelve a la org — eso pegaba el email y hacía del remitente una FUENTE de
+      jerarquía (inversión). Solo el lookup exacto resuelve un no-rol;
+    - rol/relay (`noreply@`, `info@`) → la ORG del dominio (el relay habla por la org): por nombre
+      si lo trae, o la dueña ya conocida;
+    - free-mail → None (leftover).
     Devuelve la `Resolution` ('sender') o None."""
     email_norm = norm_identifier("email", email)
     if not email_norm:
@@ -360,25 +361,16 @@ def _resolve_email_sender(
     # free-mail no representa a nadie → no se crea stub; queda como leftover para el resolver.
     if is_freemail(domain):
         return None
-    # dominio corporativo: la ORG REAL del dominio si se conoce, o si el rol/relay trae nombre de
-    # org. Sin nombre real → None (leftover): NO se crea ficha-dominio. No-rol con org → cuelga el
-    # email como CONTACTO de la org. El individuo lo dispone el resolver; el dominio sin atar lo
-    # atribuye a mano `attribute_domain`.
-    org_id = _org_for_domain(conn, user_id, domain, from_name.strip() if role else "", index)
+    # corporativo NO-rol: el match por DOMINIO es relación BLANDA, no resuelve el remitente a la org
+    # (eso pegaba el email y hacía del remitente una FUENTE de jerarquía → inversión). LEFTOVER → el
+    # resolver (LLM) decide a qué identidad pertenece, con el contexto del correo.
+    if not role:
+        return None
+    # rol/relay: el relay HABLA por la org → la ORG del dominio (por nombre si lo trae, o la dueña
+    # ya conocida). Sin nombre ni dueña → None (leftover).
+    org_id = _org_for_domain(conn, user_id, domain, from_name.strip(), index)
     if org_id is None:
         return None
-    if not role:
-        _insert_identifier(
-            conn, user_id, org_id, "email", "email", email, email_norm, source="extraction"
-        )
-        index.add(
-            KnownIdentity(
-                id=org_id,
-                kind=index.kind_of(org_id) or KIND_ORG,
-                display_name=from_name.strip() or domain,
-                identifiers=(KnownIdentifier("email", "email", email_norm),),
-            )
-        )
     return Resolution(index.kind_of(org_id) or KIND_ORG, org_id, "sender")
 
 

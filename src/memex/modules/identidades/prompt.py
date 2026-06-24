@@ -141,16 +141,20 @@ IDENTIDADES_RESOLVE_SYSTEM_PROMPT = (
     "   entidad (típico: una `desconocido` que ya está como organización) — poné de\n"
     "   `keep_id` la de tipo DEFINIDO, nunca la `desconocido`. SESGO A COEXISTIR: ante la\n"
     "   duda NO fusiones (no juntes una persona con una empresa por compartir nombre).\n"
-    "2) RELACIONES DE PERTENENCIA — qué identidad (`source_id`) PERTENECE A / ES MIEMBRO DE\n"
-    "   otra (`target_id`, SIEMPRE una organización). DOS casos, MISMA forma:\n"
-    "   • una organización/producto que es SUB-PARTE de otra org (carrera/facultad→universidad,\n"
-    "     producto→empresa, área→org); o\n"
-    "   • una PERSONA que es MIEMBRO de una org (trabaja/estudia/preside…), con su `role`.\n"
-    "   NO etiquetes el tipo: el sistema lo deduce por los tipos de source/target. `role` solo\n"
-    "   si `source` es persona. Mapeá la org por CONTEXTO aunque el nombre no calce exacto\n"
-    "   («Pontificia Universidad Javeriana» → la entrada cuyo dominio es javeriana.edu.co). Si la\n"
-    "   org `target` DEBERÍA existir pero NO está en las listas, indicá `target_name`. Incluí las\n"
-    "   relaciones razonables.\n"
+    "2) RELACIONES DE PERTENENCIA — quién PERTENECE A quién. `source` = la entidad que PERTENECE\n"
+    "   (la PARTE, la más específica, o la persona); `target` = la org que la CONTIENE (el TODO,\n"
+    "   la más general). DOS casos, MISMA forma:\n"
+    "   • org/producto SUB-PARTE de otra → `source`=la sub-parte, `target`=el contenedor\n"
+    "     (facultad/carrera/área/vicerrectoría → su UNIVERSIDAD; producto → su EMPRESA); o\n"
+    "   • PERSONA MIEMBRO de una org (trabaja/estudia/preside…) → `source`=la persona,\n"
+    "     `target`=la org, con su `role`.\n"
+    "   DIRECCIÓN — NO la inviertas: la institución GRANDE (universidad, empresa matriz) va\n"
+    "   SIEMPRE en `target`, NUNCA en `source`. Una UNIVERSIDAD jamás pertenece a su facultad,\n"
+    "   área o vicerrectoría — es al revés (la sub-unidad va en `source`, la universidad en\n"
+    "   `target`). Si dudás cuál contiene a cuál, la que tiene el DOMINIO (la institución) es el\n"
+    "   `target`. `role` solo si `source` es persona; el sistema deduce el tipo. Mapeá la org por\n"
+    "   CONTEXTO aunque el nombre no calce. Si la org `target` DEBERÍA existir pero NO está en\n"
+    "   las listas, indicá `target_name`.\n"
     "3) REMITENTE — el email del remitente (te lo marco) ¿es un BUZÓN de una organización\n"
     "   (`info@`, `jobs@`, `contacto@` — habla la org, no una persona) o de una PERSONA? Si\n"
     "   es buzón, indicá la org dueña en `owner_id`. Si es persona, su nombre en `person_name`.\n\n"
@@ -159,7 +163,8 @@ IDENTIDADES_RESOLVE_SYSTEM_PROMPT = (
     "- `confidence`: número 0..1 por cada decisión.\n\n"
     "Respondé SOLO con un objeto JSON con esta forma exacta:\n"
     '{"merges": [{"keep_id": <id>, "drop_id": <id>, "confidence": <0..1>}], '
-    '"relations": [{"source_id": <id>, "target_id": <id|null>, "target_name": "<nombre|null>", '
+    '"relations": [{"source_id": <id de la PARTE/persona>, '
+    '"target_id": <id del CONTENEDOR org|null>, "target_name": "<nombre del contenedor|null>", '
     '"role": "<rol|null>", "confidence": <0..1>}], '
     '"sender": {"is_person": <true|false>, "owner_id": <id|null>, "person_name": "<nombre|null>", '
     '"confidence": <0..1>}}\n'
