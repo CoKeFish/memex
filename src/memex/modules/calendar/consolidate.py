@@ -1,0 +1,842 @@
+"""Consolidación (ADR-015 §4, slice 3): de eventos crudos por-fuente a UN evento canónico.
+
+Dos partes:
+- PURO (testeable sin DB): `build_groups` (union-find sobre pares `confirmed` de la FASE 2 →
+  componentes conexos; la transitividad se materializa SOLO sobre confirmados, respetando que la
+  migración 0010 eligió pares no-grupos) + `pick_winner`/`merge_fields` (qué versión gana por
+  prioridad: `protected` > `priority_rank` > más reciente; `override_policy='fill_only'` rellena
+  los campos vacíos del ganador desde el resto).
+- DB (`run_consolidation`): materializa `mod_calendar_consolidated` + `mod_calendar_event_links`
+  de forma ESTABLE e idempotente — un `consolidated_id` no cambia entre corridas salvo merge de
+  grupos (re-linkea al id menor y tombstonea los otros). Los ecos (eventos que memex escribió en
+  un proveedor, con marcador `memex_consolidated_id`) se linkean a SU consolidado (evita el loop)
+  y no influyen en el ganador. Marca el `processing_outcome` final de cada evento.
+
+NO fusiona ni borra eventos crudos: `mod_calendar_events` es append/coexistencia; la consolidación
+es una capa de proyección por encima.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from datetime import date, datetime, time, timedelta
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+
+from memex.db import connection
+from memex.geo import GeoConfigError, GeoError, build_provider_from_env
+from memex.geo import places as geo_places
+from memex.geo.places import PlaceRecord
+from memex.logging import get_logger
+from memex.modules.calendar.commitment import (
+    ANUNCIO,
+    apply_upgrade_rules,
+    max_level,
+)
+from memex.modules.calendar.conflicts import ConflictEvent, find_conflicts_dated
+from memex.modules.calendar.recurrence import is_recurring, occurrences
+from memex.modules.calendar.settings import protection_rules
+from memex.modules.contract import normalize
+from memex.relations.deterministic import weave_calendar_consolidated
+
+_log = get_logger("memex.modules.calendar.consolidate")
+
+
+#: Horizonte de detección de choques para los maestros recurrentes (una regla sin fin no se
+#: expande entera): una semana atrás (lo ya pasado no se revisa) y tres meses adelante.
+CONFLICT_HORIZON_PAST = timedelta(days=7)
+CONFLICT_HORIZON_FUTURE = timedelta(days=90)
+
+
+@dataclass(frozen=True)
+class ConsEvent:
+    """Un evento crudo con lo necesario para consolidar (prioridad + recencia)."""
+
+    event_id: int
+    title: str
+    starts_on: date
+    ends_on: date | None
+    start_time: time | None
+    end_time: time | None
+    location: str
+    description: str
+    priority_rank: int
+    protected: bool
+    override_policy: str
+    recency: datetime  # provider_updated o created_at (para desempatar por más reciente)
+    #: Recurrencia (RFC 5545) si la fila es un MAESTRO; serie a la que pertenece (maestro o
+    #: excepción); ocurrencia original que una EXCEPCIÓN reemplaza.
+    recurrence: tuple[str, ...] = ()
+    series_id: str | None = None
+    original_start_on: date | None = None
+    original_start_time: time | None = None
+    #: Estado del crudo (confirmado|provisional|anuncio) y su evidencia.
+    commitment: str = ANUNCIO
+    commitment_evidence: str = ""
+
+
+@dataclass(frozen=True)
+class ConsolidatedFields:
+    """Los campos canónicos del evento consolidado + cuál evento crudo ganó."""
+
+    title: str
+    starts_on: date
+    ends_on: date | None
+    start_time: time | None
+    end_time: time | None
+    location: str
+    description: str
+    winner_event_id: int
+    recurrence: tuple[str, ...] = ()
+    series_id: str | None = None
+    original_start_on: date | None = None
+    original_start_time: time | None = None
+    #: El MÁXIMO de los miembros: una inscripción posterior confirma el grupo entero.
+    commitment: str = ANUNCIO
+    commitment_evidence: str = ""
+
+
+# --- PURO: agrupamiento + elección del ganador ------------------------------------- #
+
+
+def build_groups(event_ids: Sequence[int], pairs: Sequence[tuple[int, int]]) -> list[list[int]]:
+    """Union-find: agrupa `event_ids` por los `pairs` confirmados (componentes conexos).
+
+    Determinista: cada grupo viene ordenado y la lista de grupos ordenada por su menor id.
+    """
+    parent: dict[int, int] = {e: e for e in event_ids}
+
+    def find(x: int) -> int:
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:  # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    for a, b in pairs:
+        if a in parent and b in parent:
+            union(a, b)
+
+    groups: dict[int, list[int]] = {}
+    for e in event_ids:
+        groups.setdefault(find(e), []).append(e)
+    return [sorted(members) for _, members in sorted(groups.items())]
+
+
+def _winner_sort_key(e: ConsEvent) -> tuple[int, int, float, int]:
+    # Ascendente: el MEJOR primero. protegido > rank alto > más reciente > id menor (determinista).
+    return (0 if e.protected else 1, -e.priority_rank, -e.recency.timestamp(), e.event_id)
+
+
+def pick_winner(members: Sequence[ConsEvent]) -> ConsEvent:
+    """El evento que representa al grupo: `protected` > `priority_rank` > más reciente > id."""
+    return sorted(members, key=_winner_sort_key)[0]
+
+
+def merge_fields(members: Sequence[ConsEvent]) -> ConsolidatedFields:
+    """Campos canónicos: los del ganador; si su `override_policy='fill_only'`, rellena los vacíos
+    desde el resto (en orden de prioridad)."""
+    winner = pick_winner(members)
+    title, starts_on = winner.title, winner.starts_on
+    ends_on, start_time, end_time = winner.ends_on, winner.start_time, winner.end_time
+    location, description = winner.location, winner.description
+
+    if winner.override_policy == "fill_only":
+        for m in sorted(members, key=_winner_sort_key):
+            if not location and m.location:
+                location = m.location
+            if not description and m.description:
+                description = m.description
+            if end_time is None and m.end_time is not None:
+                end_time = m.end_time
+            if ends_on is None and m.ends_on is not None:
+                ends_on = m.ends_on
+
+    # La SERIE manda las fechas: si algún miembro es un maestro recurrente (un correo con la
+    # primera clase se fundió con el programa entero), el consolidado conserva la regla y arranca
+    # donde arranca la serie; título/lugar siguen siendo los del ganador.
+    recurrence: tuple[str, ...] = ()
+    series_id = winner.series_id
+    original_start_on, original_start_time = winner.original_start_on, winner.original_start_time
+    master = next(
+        (m for m in sorted(members, key=_winner_sort_key) if is_recurring(m.recurrence)), None
+    )
+    if master is not None:
+        recurrence = tuple(master.recurrence)
+        series_id = master.series_id or series_id
+        starts_on, ends_on = master.starts_on, master.ends_on
+        start_time = master.start_time if master.start_time is not None else start_time
+        end_time = master.end_time if master.end_time is not None else end_time
+        original_start_on, original_start_time = None, None
+    elif series_id is None:
+        exc = next((m for m in members if m.series_id), None)
+        if exc is not None:
+            series_id = exc.series_id
+            original_start_on, original_start_time = exc.original_start_on, exc.original_start_time
+
+    level = max_level([m.commitment for m in members])
+    evidence = next(
+        (
+            m.commitment_evidence
+            for m in sorted(members, key=_winner_sort_key)
+            if m.commitment == level and m.commitment_evidence
+        ),
+        "",
+    )
+    return ConsolidatedFields(
+        title=title,
+        starts_on=starts_on,
+        ends_on=ends_on,
+        start_time=start_time,
+        end_time=end_time,
+        location=location,
+        description=description,
+        winner_event_id=winner.event_id,
+        recurrence=recurrence,
+        series_id=series_id,
+        original_start_on=original_start_on,
+        original_start_time=original_start_time,
+        commitment=level,
+        commitment_evidence=evidence,
+    )
+
+
+# --- DB worker --------------------------------------------------------------------- #
+
+
+@dataclass
+class ConsolidationStats:
+    protected_by_rules: int = (
+        0  #: eventos crudos marcados protegidos por las reglas en esta corrida
+    )
+    groups: int = 0
+    commitment_upgraded: int = 0  #: provisional -> confirmado por corroboración (pago a la org)
+    consolidated: int = 0  # filas de mod_calendar_consolidated insertadas o actualizadas
+    merges: int = 0  # consolidados fusionados (tombstoneados) al unirse dos grupos
+    echoes: int = 0  # eventos eco linkeados a su consolidado (no forman uno nuevo)
+    orphans: int = 0  # consolidados tombstoneados por quedarse sin ningún miembro vivo
+    conflicts: int = 0  # pares de eventos consolidados de alta importancia que chocan (a revisar)
+
+
+def _load_events(
+    conn: Connection, user_id: int, existing_cons: set[int]
+) -> tuple[list[ConsEvent], dict[int, int]]:
+    """Carga los eventos NO cancelados. Devuelve (normales, ecos {event_id: consolidated_id}).
+
+    Un evento es ECO si su metadata trae `memex_consolidated_id` apuntando a un consolidado que YA
+    existe (lo escribió memex) → se linkea ahí, no forma grupo. Si el consolidado no existe, cae a
+    normal."""
+    rows = (
+        conn.execute(
+            text(
+                """
+                SELECT id, title, starts_on, ends_on, start_time, end_time, location, description,
+                       priority_rank, protected, override_policy,
+                       COALESCE(provider_updated, created_at) AS recency,
+                       metadata->>'memex_consolidated_id' AS mcid,
+                       recurrence, recurring_event_id, original_start_on, original_start_time,
+                       commitment, commitment_evidence
+                FROM mod_calendar_events
+                WHERE user_id = :uid AND provider_status IS DISTINCT FROM 'cancelled'
+                ORDER BY id
+                """
+            ),
+            {"uid": user_id},
+        )
+        .mappings()
+        .all()
+    )
+    normal: list[ConsEvent] = []
+    echo: dict[int, int] = {}
+    for r in rows:
+        eid = int(r["id"])
+        mcid_raw = r["mcid"]
+        if mcid_raw is not None and int(mcid_raw) in existing_cons:
+            echo[eid] = int(mcid_raw)
+            continue
+        normal.append(
+            ConsEvent(
+                event_id=eid,
+                title=str(r["title"]),
+                starts_on=r["starts_on"],
+                ends_on=r["ends_on"],
+                start_time=r["start_time"],
+                end_time=r["end_time"],
+                location=str(r["location"]),
+                description=str(r["description"]),
+                priority_rank=int(r["priority_rank"]),
+                protected=bool(r["protected"]),
+                override_policy=str(r["override_policy"]),
+                recency=r["recency"],
+                recurrence=tuple(r["recurrence"] or ()),
+                series_id=r["recurring_event_id"],
+                original_start_on=r["original_start_on"],
+                original_start_time=r["original_start_time"],
+                commitment=str(r["commitment"] or ANUNCIO),
+                commitment_evidence=str(r["commitment_evidence"] or ""),
+            )
+        )
+    return normal, echo
+
+
+def _confirmed_pairs(conn: Connection, user_id: int) -> list[tuple[int, int]]:
+    rows = conn.execute(
+        text(
+            "SELECT event_a_id, event_b_id FROM mod_calendar_dedup_candidates "
+            "WHERE user_id = :uid AND status = 'confirmed'"
+        ),
+        {"uid": user_id},
+    ).all()
+    return [(int(a), int(b)) for a, b in rows]
+
+
+def _pending_event_ids(conn: Connection, user_id: int) -> set[int]:
+    rows = conn.execute(
+        text(
+            "SELECT event_a_id, event_b_id FROM mod_calendar_dedup_candidates "
+            "WHERE user_id = :uid AND status = 'candidate'"
+        ),
+        {"uid": user_id},
+    ).all()
+    pending: set[int] = set()
+    for a, b in rows:
+        pending.update((int(a), int(b)))
+    return pending
+
+
+def _write_consolidated(
+    conn: Connection, user_id: int, cons_id: int | None, fields: ConsolidatedFields
+) -> int:
+    params = {
+        "uid": user_id,
+        "title": fields.title,
+        "starts_on": fields.starts_on,
+        "ends_on": fields.ends_on,
+        "start_time": fields.start_time,
+        "end_time": fields.end_time,
+        "location": fields.location,
+        "description": fields.description,
+        "winner": fields.winner_event_id,
+        "recurrence": list(fields.recurrence),
+        "series_id": fields.series_id,
+        "original_start_on": fields.original_start_on,
+        "original_start_time": fields.original_start_time,
+        "commitment": fields.commitment,
+        "commitment_evidence": fields.commitment_evidence[:300],
+    }
+    if cons_id is None:
+        return int(
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO mod_calendar_consolidated
+                      (user_id, title, starts_on, ends_on, start_time, end_time, location,
+                       description, winner_event_id, recurrence, series_id,
+                       original_start_on, original_start_time, commitment, commitment_evidence)
+                    VALUES
+                      (:uid, :title, :starts_on, :ends_on, :start_time, :end_time, :location,
+                       :description, :winner, :recurrence, :series_id,
+                       :original_start_on, :original_start_time, :commitment,
+                       :commitment_evidence)
+                    RETURNING id
+                    """
+                ),
+                params,
+            ).scalar_one()
+        )
+    # Resucita tombstones automáticos ('merge'/'orphaned': el grupo volvió a tener miembros) pero
+    # NUNCA un borrado por el usuario ('user'): un `memex calendario rm` es definitivo aunque la
+    # membresía del grupo cambie después.
+    conn.execute(
+        text(
+            """
+            UPDATE mod_calendar_consolidated SET
+              title = :title, starts_on = :starts_on, ends_on = :ends_on,
+              start_time = :start_time, end_time = :end_time, location = :location,
+              description = :description, winner_event_id = :winner,
+              recurrence = :recurrence, series_id = :series_id,
+              original_start_on = :original_start_on, original_start_time = :original_start_time,
+              commitment = :commitment, commitment_evidence = :commitment_evidence,
+              deleted = (deleted AND deleted_source = 'user'),
+              deleted_source = CASE WHEN deleted AND deleted_source = 'user' THEN 'user' END,
+              updated_at = NOW()
+            WHERE id = :id
+            """
+        ),
+        {**params, "id": cons_id},
+    )
+    return cons_id
+
+
+def _link(conn: Connection, user_id: int, cons_id: int, event_id: int) -> None:
+    conn.execute(
+        text(
+            """
+            INSERT INTO mod_calendar_event_links (user_id, consolidated_id, event_id)
+            VALUES (:uid, :cid, :eid)
+            ON CONFLICT (event_id) DO UPDATE SET consolidated_id = EXCLUDED.consolidated_id
+            """
+        ),
+        {"uid": user_id, "cid": cons_id, "eid": event_id},
+    )
+
+
+def _detect_conflicts(conn: Connection, user_id: int) -> int:
+    """Detecta pares de eventos CONSOLIDADOS de alta importancia que CHOCAN en el horario y los
+    encola en `mod_calendar_conflicts` (pendiente de revisión). La importancia sale del ganador de
+    cada consolidado. Reconcilia los 'pending' (borra los que ya no aplican); preserva las
+    decisiones humanas ('resolved'/'dismissed') con `ON CONFLICT DO NOTHING` al re-insertar."""
+    rows = (
+        conn.execute(
+            text(
+                """
+                SELECT c.id, c.starts_on, c.ends_on, c.start_time, c.end_time, c.recurrence,
+                       c.commitment, e.priority_rank, e.protected
+                FROM mod_calendar_consolidated c
+                JOIN mod_calendar_events e ON e.id = c.winner_event_id
+                WHERE c.user_id = :uid AND NOT c.deleted
+                """
+            ),
+            {"uid": user_id},
+        )
+        .mappings()
+        .all()
+    )
+    # Los maestros recurrentes entran EXPANDIDOS dentro del horizonte de conflictos (una
+    # ConflictEvent por ocurrencia): un recurrente choca en un día concreto, no «en general».
+    today = date.today()
+    h_lo, h_hi = today - CONFLICT_HORIZON_PAST, today + CONFLICT_HORIZON_FUTURE
+    events: list[ConflictEvent] = []
+    for r in rows:
+        base = ConflictEvent(
+            consolidated_id=int(r["id"]),
+            starts_on=r["starts_on"],
+            ends_on=r["ends_on"],
+            start_time=r["start_time"],
+            end_time=r["end_time"],
+            priority_rank=int(r["priority_rank"]),
+            protected=bool(r["protected"]),
+            commitment=str(r["commitment"] or ANUNCIO),
+        )
+        rec = tuple(r["recurrence"] or ())
+        if is_recurring(rec):
+            for day in occurrences(
+                base.starts_on, rec, window_start=h_lo, window_end=h_hi, start_time=base.start_time
+            ):
+                events.append(replace(base, occurs_on=day))
+        else:
+            events.append(base)
+    dated = find_conflicts_dated(events)
+    pairs = [(a, b) for a, b, _ in dated]
+    day_of = {(a, b): d for a, b, d in dated}
+    detected = set(pairs)
+    # Reconciliar los PENDIENTES: borrar los conflictos que ya no se detectan (el criterio cambió,
+    # o el solape desapareció al re-consolidar). Preserva 'resolved'/'dismissed' (decisiones
+    # humanas) — solo toca 'pending'. Así re-correr la consolidación auto-corrige el ruido viejo.
+    existing_pending = {
+        (int(a), int(b))
+        for a, b in conn.execute(
+            text(
+                "SELECT consolidated_a_id, consolidated_b_id FROM mod_calendar_conflicts "
+                "WHERE user_id = :uid AND status = 'pending'"
+            ),
+            {"uid": user_id},
+        ).all()
+    }
+    for a, b in existing_pending - detected:
+        conn.execute(
+            text(
+                "DELETE FROM mod_calendar_conflicts WHERE user_id = :uid "
+                "AND consolidated_a_id = :a AND consolidated_b_id = :b AND status = 'pending'"
+            ),
+            {"uid": user_id, "a": a, "b": b},
+        )
+    for a, b in pairs:
+        conn.execute(
+            text(
+                """
+                INSERT INTO mod_calendar_conflicts
+                  (user_id, consolidated_a_id, consolidated_b_id, reason, occurs_on)
+                VALUES (:uid, :a, :b, 'time_overlap_high_priority', :day)
+                ON CONFLICT (consolidated_a_id, consolidated_b_id) DO NOTHING
+                """
+            ),
+            {"uid": user_id, "a": a, "b": b, "day": day_of[(a, b)]},
+        )
+    return len(pairs)
+
+
+def _set_outcomes(conn: Connection, outcome_to_ids: dict[str, list[int]]) -> None:
+    for outcome, ids in outcome_to_ids.items():
+        if ids:
+            conn.execute(
+                text("UPDATE mod_calendar_events SET processing_outcome = :o WHERE id = ANY(:ids)"),
+                {"o": outcome, "ids": ids},
+            )
+
+
+def _tombstone_orphans(conn: Connection, user_id: int) -> int:
+    """Tombstonea (`deleted_source='orphaned'`) los consolidados que se quedaron SIN ningún miembro
+    vivo: sus eventos crudos se borraron (los links se van en cascada) o quedaron todos `cancelled`
+    en el proveedor. Sin esto son fantasmas eternos: pintan el calendario y hasta se pushearían al
+    proveedor. Corre ANTES de `_detect_conflicts` para que la reconciliación de pendings purgue sus
+    conflictos en la misma corrida. Si el grupo vuelve a tener miembros, `_write_consolidated` lo
+    resucita (a diferencia del tombstone 'user')."""
+    result = conn.execute(
+        text(
+            """
+            UPDATE mod_calendar_consolidated c
+            SET deleted = TRUE, deleted_source = 'orphaned', updated_at = NOW()
+            WHERE c.user_id = :uid AND NOT c.deleted
+              AND NOT EXISTS (
+                  SELECT 1 FROM mod_calendar_event_links l
+                  JOIN mod_calendar_events e ON e.id = l.event_id
+                  WHERE l.consolidated_id = c.id
+                    AND e.provider_status IS DISTINCT FROM 'cancelled')
+            """
+        ),
+        {"uid": user_id},
+    )
+    return result.rowcount
+
+
+# --- Geocoding del lugar (automático, gateado por MEMEX_CALENDAR_GEOCODE) ----------- #
+# El `location` del consolidado es texto libre; si el flag está prendido y hay key, se RESUELVE
+# contra el catálogo de lugares (`geo_places`, single-writer memex.geo.places) al final de cada
+# consolidación: el evento queda con FK `place_id` + las coords denormalizadas. Idempotente (solo
+# lo que falta o cambió de texto; los ZERO_RESULTS quedan cacheados y no se reintentan) y
+# best-effort (cualquier fallo de Maps NO rompe la consolidación, que ya está commiteada). El
+# dedupe es doble: por texto normalizado EN la corrida (mismo texto = 1 resolución para N filas)
+# y por caché persistente en geo_place_resolutions.
+
+_GEOCODE_FLAG = "MEMEX_CALENDAR_GEOCODE"
+
+
+def _is_geocodable(location: str) -> bool:
+    """`True` si el texto vale la pena geocodificar: no vacío y sin pinta de URL/enlace virtual."""
+    low = location.strip().lower()
+    return bool(low) and "://" not in low and "www." not in low
+
+
+def _pending_geocode(conn: Connection, user_id: int) -> list[tuple[int, str]]:
+    """(id, location) de consolidados con lugar geocodificable pendiente de resolver.
+
+    Pendiente = el texto es nuevo/cambió (`geo_geocoded_from IS DISTINCT FROM location` — también
+    cubre el nunca intentado), o quedó geocodificado por el código viejo SIN FK al catálogo
+    (backfill), o su lugar se borró del catálogo (FK en SET NULL → se re-teje). OJO: una fila
+    ZERO_RESULTS (geo_lat NULL + geo_geocoded_from = location) NO es pendiente — el predicado
+    anterior (`geo_lat IS NULL OR …`) la re-llamaba eternamente."""
+    rows = conn.execute(
+        text(
+            """
+            SELECT id, location FROM mod_calendar_consolidated
+            WHERE user_id = :uid AND NOT deleted AND location <> ''
+              AND (geo_geocoded_from IS DISTINCT FROM location
+                   OR (place_id IS NULL AND geo_lat IS NOT NULL))
+            """
+        ),
+        {"uid": user_id},
+    ).all()
+    return [(int(i), str(loc)) for i, loc in rows if _is_geocodable(str(loc))]
+
+
+def _group_by_norm(rows: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    """Agrupa los pendientes por texto NORMALIZADO preservando orden: el primer texto crudo del
+    grupo es el representante (la query al proveedor y, si crea lugar, su `name`). Pura."""
+    groups: dict[str, list[tuple[int, str]]] = {}
+    for cons_id, location in rows:
+        groups.setdefault(normalize(location), []).append((cons_id, location))
+    return list(groups.values())
+
+
+def _apply_resolution(
+    conn: Connection, group: list[tuple[int, str]], place: PlaceRecord | None
+) -> int:
+    """Estampa la resolución de UN texto en todas sus filas: FK `place_id` (BIGINT al catálogo —
+    no confundir con `geo_place_id` TEXT, el id del PROVEEDOR denormalizado) + coords DEL LUGAR.
+    `geo_geocoded_from` se escribe con el location PROPIO de cada fila (no la query del
+    representante): el guard de pendientes compara contra `location` y un texto ajeno la
+    re-marcaría eternamente. Devuelve cuántas filas quedaron con lugar."""
+    for cons_id, location in group:
+        conn.execute(
+            text(
+                """
+                UPDATE mod_calendar_consolidated SET
+                    place_id = :place_id,
+                    geo_lat = :lat, geo_lng = :lng, geo_place_id = :pid,
+                    geo_geocoded_from = :loc, geo_geocoded_at = NOW()
+                WHERE id = :id
+                """
+            ),
+            {
+                "id": cons_id,
+                "loc": location,
+                "place_id": place.id if place is not None else None,
+                "lat": place.lat if place is not None else None,
+                "lng": place.lng if place is not None else None,
+                "pid": place.provider_place_id if place is not None else None,
+            },
+        )
+    return len(group) if place is not None else 0
+
+
+def _clear_stale_geo(conn: Connection, user_id: int) -> int:
+    """Limpia el geo de filas cuyo `location` quedó vacío (un merge/update lo puede vaciar): sin
+    esto el evento mostraría un lugar fantasma en UI/API. Barato y sin red."""
+    result = conn.execute(
+        text(
+            """
+            UPDATE mod_calendar_consolidated SET
+                place_id = NULL, geo_lat = NULL, geo_lng = NULL, geo_place_id = NULL,
+                geo_geocoded_from = NULL, geo_geocoded_at = NULL
+            WHERE user_id = :uid AND location = '' AND geo_geocoded_from IS NOT NULL
+            """
+        ),
+        {"uid": user_id},
+    )
+    return result.rowcount
+
+
+async def _resolve_pending(user_id: int, rows: list[tuple[int, str]]) -> tuple[int, int]:
+    """Resuelve los pendientes contra el catálogo, deduplicando por texto EN la corrida.
+
+    UNA conexión para el lote: salir limpio = COMMIT, así el progreso parcial SE CONSERVA si un
+    `GeoError` (cuota / caído) corta a mitad — lo ya resuelto queda cacheado y la próxima corrida
+    no lo re-paga. `GeoConfigError` (sin key) propaga al caller. Devuelve (textos únicos
+    resueltos, filas que quedaron con lugar)."""
+    provider = build_provider_from_env()
+    unique = 0
+    with_place = 0
+    try:
+        with connection() as conn:
+            for group in _group_by_norm(rows):
+                try:
+                    place_id = await geo_places.resolve_place(conn, user_id, group[0][1], provider)
+                except GeoError as e:  # cuota / proveedor caído: corta el lote, conserva lo hecho
+                    _log.warning("calendar.geocode.failed", user_id=user_id, error=str(e))
+                    break
+                place = (
+                    geo_places.get_place(conn, user_id, place_id) if place_id is not None else None
+                )
+                with_place += _apply_resolution(conn, group, place)
+                unique += 1
+    finally:
+        await provider.aclose()
+    return unique, with_place
+
+
+def _geocode_consolidated(user_id: int) -> None:
+    """Geocodifica los lugares de los consolidados del user. Gateado por `MEMEX_CALENDAR_GEOCODE=1`
+    (default apagado: no gasta quota de Maps en tests ni en dev por defecto). Best-effort: sin key o
+    con Maps caído, loguea y vuelve sin romper la consolidación. Corre fuera de la tx principal."""
+    if os.environ.get(_GEOCODE_FLAG) != "1":
+        return
+    with connection() as conn:
+        cleared = _clear_stale_geo(conn, user_id)
+        pending = _pending_geocode(conn, user_id)
+    if cleared:
+        _log.info("calendar.geocode.cleared_stale", user_id=user_id, rows=cleared)
+    if not pending:
+        return
+    try:
+        unique, with_place = asyncio.run(_resolve_pending(user_id, pending))
+    except GeoConfigError as e:
+        _log.info("calendar.geocode.skip_no_key", error=str(e))
+        return
+    _log.info(
+        "calendar.geocode.done",
+        user_id=user_id,
+        pending=len(pending),
+        unique=unique,
+        geocoded=with_place,
+    )
+
+
+def apply_protection_rules(conn: Connection, user_id: int) -> int:
+    """Marca `protected` los eventos crudos cuyo título/lugar/descripción contengan alguno de los
+    textos de `protection_rules` (insensible a mayúsculas y acentos). Idempotente: solo toca los que
+    aún no lo están. Corre al inicio de cada consolidación, así lo que llega por extracción o por
+    el proveedor queda inamovible sin intervención. Devuelve cuántos marcó."""
+    rules = protection_rules(conn, user_id)
+    if not rules:
+        return 0
+    n = 0
+    for rule in rules:
+        n += conn.execute(
+            text(
+                """
+                UPDATE mod_calendar_events SET protected = TRUE
+                WHERE user_id = :uid AND NOT protected
+                  AND (memex_norm(title) LIKE memex_norm(:pat)
+                       OR memex_norm(location) LIKE memex_norm(:pat)
+                       OR memex_norm(description) LIKE memex_norm(:pat))
+                """
+            ),
+            {"uid": user_id, "pat": f"%{rule}%"},
+        ).rowcount
+    if n:
+        _log.info("calendar.protection.applied", user_id=user_id, marked=n, rules=len(rules))
+    return n
+
+
+def run_consolidation(user_id: int) -> ConsolidationStats:
+    """Reconstruye la proyección consolidada del user de forma estable e idempotente."""
+    stats = ConsolidationStats()
+    with connection() as conn:
+        stats.protected_by_rules = apply_protection_rules(conn, user_id)
+        stats.commitment_upgraded = apply_upgrade_rules(conn, user_id)
+        existing_cons = {
+            int(r[0])
+            for r in conn.execute(
+                text("SELECT id FROM mod_calendar_consolidated WHERE user_id = :uid"),
+                {"uid": user_id},
+            ).all()
+        }
+        normal, echo = _load_events(conn, user_id, existing_cons)
+        normal_ids = {e.event_id for e in normal}
+        by_id = {e.event_id: e for e in normal}
+        pairs = [
+            (a, b)
+            for a, b in _confirmed_pairs(conn, user_id)
+            if a in normal_ids and b in normal_ids
+        ]
+        pending_ids = _pending_event_ids(conn, user_id)
+
+        groups = build_groups(sorted(normal_ids), pairs)
+        outcomes: dict[str, list[int]] = {"unique": [], "duplicate": [], "echo": []}
+
+        for group_ids in groups:
+            stats.groups += 1
+            members = [by_id[i] for i in group_ids]
+            fields = merge_fields(members)
+
+            existing = sorted(
+                {
+                    int(r[0])
+                    for r in conn.execute(
+                        text(
+                            "SELECT DISTINCT consolidated_id FROM mod_calendar_event_links "
+                            "WHERE event_id = ANY(:ids)"
+                        ),
+                        {"ids": group_ids},
+                    ).all()
+                }
+            )
+            if not existing:
+                cons_id = _write_consolidated(conn, user_id, None, fields)
+                stats.consolidated += 1
+            else:
+                cons_id = existing[0]
+                changed = len(existing) > 1  # fusión de grupos → siempre reescribe
+                if changed:  # un par confirmado unió dos grupos previos → fusionar
+                    others = existing[1:]
+                    conn.execute(
+                        text(
+                            "UPDATE mod_calendar_event_links SET consolidated_id = :keep "
+                            "WHERE consolidated_id = ANY(:others)"
+                        ),
+                        {"keep": cons_id, "others": others},
+                    )
+                    conn.execute(
+                        text(
+                            "UPDATE mod_calendar_consolidated "
+                            "SET deleted = TRUE, deleted_source = COALESCE(deleted_source, "
+                            "'merge'), updated_at = NOW() WHERE id = ANY(:others)"
+                        ),
+                        {"others": others},
+                    )
+                    stats.merges += len(others)
+                else:
+                    # ¿cambió la membresía del consolidado? Si NO, dejamos sus campos tal cual
+                    # (estable): no pisamos el enriquecimiento del LLM (paso `merge`) ni churnéamos
+                    # la firma del write-back en cada corrida. Excepción: un tombstone AUTOMÁTICO
+                    # ('orphaned'/'merge') cuyo grupo volvió a tener miembros vivos (ej. el evento
+                    # se des-canceló en el proveedor) sí se reescribe — es el camino de revival,
+                    # y con membresía idéntica el guard de estabilidad lo dejaría muerto.
+                    current = {
+                        int(r[0])
+                        for r in conn.execute(
+                            text(
+                                "SELECT event_id FROM mod_calendar_event_links "
+                                "WHERE consolidated_id = :cid"
+                            ),
+                            {"cid": cons_id},
+                        ).all()
+                    }
+                    tomb = conn.execute(
+                        text(
+                            "SELECT deleted, deleted_source FROM mod_calendar_consolidated "
+                            "WHERE id = :cid"
+                        ),
+                        {"cid": cons_id},
+                    ).first()
+                    auto_tombstoned = bool(tomb is not None and tomb[0] and tomb[1] != "user")
+                    changed = set(group_ids) != current or auto_tombstoned
+                if changed:
+                    _write_consolidated(conn, user_id, cons_id, fields)
+                    stats.consolidated += 1
+                else:
+                    # Con membresia identica los campos quedan estables, pero el nivel de
+                    # compromiso es DERIVADO de los crudos (juez, regla, la palabra de la persona)
+                    # y debe reflejarse igual: solo ese par de columnas.
+                    conn.execute(
+                        text(
+                            "UPDATE mod_calendar_consolidated SET commitment = :c, "
+                            "commitment_evidence = :e, updated_at = NOW() "
+                            "WHERE id = :cid AND (commitment <> :c OR commitment_evidence <> :e)"
+                        ),
+                        {
+                            "c": fields.commitment,
+                            "e": fields.commitment_evidence[:300],
+                            "cid": cons_id,
+                        },
+                    )
+
+            for mid in group_ids:
+                _link(conn, user_id, cons_id, mid)
+
+            # outcomes del grupo (los que aún tienen un par 'candidate' sin resolver quedan pending)
+            for mid in group_ids:
+                if mid in pending_ids:
+                    continue
+                if len(group_ids) > 1 and mid != fields.winner_event_id:
+                    outcomes["duplicate"].append(mid)
+                else:
+                    outcomes["unique"].append(mid)
+
+        for eid, cons_id in echo.items():
+            _link(conn, user_id, cons_id, eid)
+            outcomes["echo"].append(eid)
+            stats.echoes += 1
+
+        _set_outcomes(conn, outcomes)
+        stats.orphans = _tombstone_orphans(conn, user_id)
+        stats.conflicts = _detect_conflicts(conn, user_id)
+        # Teje organiza/asiste evento→identidad en la MISMA tx (SQL puro, sin I/O → commitea atómico
+        # con la consolidación, a diferencia del geocode). Full-sweep: barato e idempotente.
+        weave_calendar_consolidated(conn, user_id)
+
+    _log.info(
+        "calendar.consolidate.done",
+        user_id=user_id,
+        groups=stats.groups,
+        consolidated=stats.consolidated,
+        merges=stats.merges,
+        echoes=stats.echoes,
+        orphans=stats.orphans,
+        conflicts=stats.conflicts,
+    )
+    # Geocoding del lugar → coords (automático si MEMEX_CALENDAR_GEOCODE=1; best-effort, fuera de la
+    # tx principal: un fallo de Maps no revierte la consolidación ya commiteada).
+    _geocode_consolidated(user_id)
+    return stats

@@ -1,0 +1,3 @@
+# Plugin selftest — no necesita credenciales ni nada del sistema.
+# Cuántos correos sintéticos emitir por corrida (para probar el caño).
+count = 2

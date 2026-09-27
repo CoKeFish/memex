@@ -1,0 +1,89 @@
+import { TriangleAlert } from "lucide-react"
+import { cn } from "@/lib/utils"
+import { EmptyState } from "@/components/common/data-state"
+import { Panel, PanelBody, PanelHeader } from "@/components/common/panel"
+import { StatusBadge } from "@/components/common/led"
+import { RelativeTime } from "@/components/common/time"
+import { formatDurationMs } from "@/lib/format"
+import { workerLabel, workerTone } from "@/lib/status"
+import { JOB_LABEL } from "@/data"
+import type { WorkerLatestRow } from "@/data"
+import type { WorkerJob } from "@/types/domain"
+import { flattenStats } from "./worker-stats"
+
+export function WorkersBoard({ items }: { items: WorkerLatestRow[] }) {
+  return (
+    <Panel>
+      <PanelHeader
+        eyebrow="Pipeline · workers"
+        title="Estado de los workers"
+        sub="Última corrida por job (worker_runs) — detecta corridas colgadas"
+      />
+      <PanelBody className="p-0">
+        {items.length === 0 ? (
+          <EmptyState title="Sin corridas de workers" hint="El scheduler todavía no corrió ningún job." />
+        ) : (
+          <ul className="divide-y divide-border">
+            {items.map(({ job, latest, isStale }) => (
+              <li
+                key={job}
+                className={cn("px-4 py-3", isStale && "bg-status-review/5 ring-1 ring-inset ring-status-review/30")}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-sm font-medium">{JOB_LABEL[job as WorkerJob] ?? job}</span>
+                    {latest ? (
+                      <StatusBadge
+                        tone={workerTone(latest.status)}
+                        label={workerLabel(latest.status)}
+                        pulse={latest.status === "running"}
+                      />
+                    ) : (
+                      <span className="eyebrow">sin corridas</span>
+                    )}
+                    {isStale && (
+                      <span className="inline-flex items-center gap-1 rounded border border-status-review/40 bg-status-review/10 px-1.5 py-0.5 text-[10px] font-medium text-status-review">
+                        <TriangleAlert className="size-3" /> colgado &gt;30 min
+                      </span>
+                    )}
+                  </div>
+                  {latest && (
+                    <div className="num flex items-center gap-3 text-xs text-muted-foreground">
+                      <span>
+                        inició <RelativeTime date={latest.startedAt} />
+                      </span>
+                      <span>
+                        {latest.finishedAt
+                          ? formatDurationMs(
+                              new Date(latest.finishedAt).getTime() - new Date(latest.startedAt).getTime(),
+                            )
+                          : "en curso"}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {latest && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {flattenStats(latest.stats).map(({ k, v }) => (
+                      <span
+                        key={k}
+                        className="num rounded bg-muted/50 px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                      >
+                        {k} <span className="font-medium text-foreground">{v}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {latest?.status === "error" && latest.error && (
+                  <p className="mt-2 font-mono text-[11px] text-status-error">{latest.error}</p>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </PanelBody>
+    </Panel>
+  )
+}

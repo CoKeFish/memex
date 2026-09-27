@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+import asyncio
+from builtins import type as _type
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime, timedelta
+from typing import Any, ClassVar, Literal, Protocol
+
+from pydantic import BaseModel
+
+from memex.core.cursors import FolderState, ImapCursor
+from memex.core.payloads import BasePayload, EmailPayload
+from memex.core.source import (
+    HEALTH_CODE_REAUTH_REQUIRED,
+    HealthResult,
+    Source,
+    SourceKind,
+    SourceRecord,
+)
+from memex.ingestors.imap.client import ImapClient
+from memex.ingestors.imap.config import ImapConfig
+from memex.ingestors.imap.oauth import OAuthError
+from memex.ingestors.imap.parser import parse_email_message
+from memex.logging import get_logger
+
+
+class _MailMessageLike(Protocol):
+    """Subset of imap_tools.MailMessage we actually use.
+
+    Documented as a Protocol for explicitness and to keep tests substitutable.
+    """
+
+    uid: str | None
+    flags: tuple[str, ...]
+    date: datetime | None
+    size: int
+    obj: Any  # underlying email.message.Message
+
+
+class ImapSource:
+    """IMAP Source — implements memex.core.source.Source[ImapCursor].
+
+    One ImapSource = one IMAP account (one set of credentials), processing
+    one or more folders. The cursor is `ImapCursor` (Pydantic); the runner
+    handles the JSONB ↔ ImapCursor conversion at the wire boundary, so this
+    class only ever sees the typed value.
+    """
+
+    type: ClassVar[str] = "imap"
+    kind: ClassVar[SourceKind] = SourceKind.EMAIL
+    payload_schema: ClassVar[_type[BasePayload]] = EmailPayload
+    config_schema: ClassVar[_type[BaseModel]] = ImapConfig
+    checkpoint_schema: ClassVar[_type[BaseModel]] = ImapCursor
+
+    def __init__(self, cfg: ImapConfig) -> None:
+        self.cfg = cfg
+        self._log = get_logger("memex.ingestors.imap.source", server=cfg.server)
+
+    async def health_check(self) -> HealthResult:
+        """Verify IMAP auth + connectivity by opening + closing a session.
+
+        Runs the blocking imap_tools work in a threadpool. Never raises —
+        any error becomes `status="unhealthy"` with the exception text.
+        """
+
+        def _probe() -> tuple[Literal["healthy", "unhealthy"], str, str | None]:
+            try:
+                with ImapClient(self.cfg) as client:
+                    # Touching one folder forces a real round-trip beyond login.
+                    folder = self.cfg.folders[0] if self.cfg.folders else "INBOX"
+                    client.folder_uidvalidity(folder)
+                return ("healthy", f"login ok, folder {folder!r} reachable", None)
+            except OAuthError as e:
+                # El refresh del token falló (Google responde `invalid_grant` cuando el refresh
+                # token caducó —app en modo prueba, 6 meses sin uso— o el usuario revocó el
+                # acceso). No hay reintento que lo arregle: hay que volver a consentir.
+                return (
+                    "unhealthy",
+                    "El acceso a la cuenta de Google caducó o fue revocado; volvé a conectarla "
+                    f"con Google. (detalle técnico: {e})",
+                    HEALTH_CODE_REAUTH_REQUIRED,
+                )
+            except Exception as e:
+                return ("unhealthy", f"{type(e).__name__}: {e}", None)
+
+        status, detail, code = await asyncio.to_thread(_probe)
+        return HealthResult(
+            status=status,
+            detail=detail,
+            checked_at=datetime.now(UTC),
+            code=code,
+        )
+
+    def fetch(self, checkpoint: ImapCursor) -> Iterable[SourceRecord]:
+        since_date = datetime.now(UTC) - timedelta(days=self.cfg.since_days)
+        mode = self.cfg.fetch_mode
+
+        with ImapClient(self.cfg) as client:
+            for folder in self.cfg.folders:
+                folder_log = self._log.bind(folder=folder, fetch_mode=mode)
+                current_uidvalidity = client.folder_uidvalidity(folder)
+
+                if mode == "range":
+                    messages = client.fetch_range(
+                        folder,
+                        since_date=self.cfg.fetch_since,
+                        until_date=self.cfg.fetch_until,
+                        limit=self.cfg.fetch_limit or 200,
+                    )
+                elif mode == "last":
+                    messages = client.fetch_last(folder, limit=self.cfg.fetch_limit or 50)
+                else:  # incremental por checkpoint
+                    folder_state = checkpoint.folders.get(folder)
+                    if folder_state is not None and folder_state.uidvalidity != current_uidvalidity:
+                        folder_log.warning(
+                            "uidvalidity_changed",
+                            old=folder_state.uidvalidity,
+                            new=current_uidvalidity,
+                        )
+                        last_uid = 0
+                    else:
+                        last_uid = folder_state.last_uid if folder_state else 0
+                    folder_log.info(
+                        "folder_fetch_start", last_uid=last_uid, uidvalidity=current_uidvalidity
+                    )
+                    messages = client.fetch_since_uid(
+                        folder,
+                        last_uid,
+                        since_date=since_date,
+                        batch_size=self.cfg.batch_size,
+                    )
+
+                count = 0
+                for mailmsg in messages:
+                    yield self._mailmsg_to_record(mailmsg, folder, current_uidvalidity)
+                    count += 1
+
+                folder_log.info("folder_fetch_end", count=count)
+
+    def fetch_one(self, uidvalidity: int, uid: int) -> SourceRecord | None:
+        """Re-trae UN mensaje por su identidad estable (UIDVALIDITY+UID) buscándolo en las carpetas
+        configuradas; None si ninguna carpeta tiene esa UIDVALIDITY o el UID ya no existe. Es el
+        camino de `memex.refetch` (reparar un payload ya ingerido con el parser actual)."""
+        with ImapClient(self.cfg) as client:
+            for folder in self.cfg.folders:
+                if client.folder_uidvalidity(folder) != uidvalidity:
+                    continue
+                for mailmsg in client.fetch_uids(folder, [uid]):
+                    return self._mailmsg_to_record(mailmsg, folder, uidvalidity)
+        return None
+
+    def advance_checkpoint(self, checkpoint: ImapCursor, last: SourceRecord) -> ImapCursor:
+        folder = last.payload.get("folder")
+        if not folder or not isinstance(folder, str):
+            return checkpoint
+
+        # external_id shape: imap:{server}:{uidvalidity}:{uid}
+        parts = last.external_id.split(":")
+        if len(parts) < 4 or parts[0] != "imap":
+            return checkpoint
+        try:
+            uidvalidity = int(parts[-2])
+            uid = int(parts[-1])
+        except ValueError:
+            return checkpoint
+
+        # Monotónico dentro de la misma uidvalidity: el cursor NUNCA retrocede aunque los records
+        # lleguen desordenados (range/last descendente) o dos corridas se solapen. Si cambió la
+        # uidvalidity (carpeta recreada / servidor migrado) arranca fresco en este uid.
+        prev = checkpoint.folders.get(folder)
+        if prev is not None and prev.uidvalidity == uidvalidity and prev.last_uid > uid:
+            uid = prev.last_uid
+        new_folders = dict(checkpoint.folders)
+        new_folders[folder] = FolderState(uidvalidity=uidvalidity, last_uid=uid)
+        return ImapCursor(folders=new_folders)
+
+    def _mailmsg_to_record(
+        self,
+        mailmsg: _MailMessageLike,
+        folder: str,
+        uidvalidity: int,
+    ) -> SourceRecord:
+        uid_str = mailmsg.uid or "0"
+        try:
+            uid = int(uid_str)
+        except ValueError:
+            uid = 0
+        flags = list(mailmsg.flags or ())
+        size_bytes = int(getattr(mailmsg, "size", 0) or 0)
+        internaldate = mailmsg.date
+        if internaldate is None:
+            internaldate = datetime.now(UTC)
+        elif internaldate.tzinfo is None:
+            internaldate = internaldate.replace(tzinfo=UTC)
+
+        return parse_email_message(
+            mailmsg.obj,
+            server=self.cfg.server,
+            folder=folder,
+            uidvalidity=uidvalidity,
+            uid=uid,
+            internaldate=internaldate,
+            flags=flags,
+            size_bytes=size_bytes,
+            max_body_bytes=self.cfg.max_body_bytes,
+            fetch_body=self.cfg.fetch_body,
+            extract_media=self.cfg.extract_media,
+            max_attachment_bytes=self.cfg.max_attachment_bytes,
+        )
+
+
+def make_source(cfg: dict[str, Any], env: Mapping[str, str] | None = None) -> Source[Any]:
+    """SourceFactory for IMAP — validates config dict and returns an ImapSource.
+
+    Matches the `SourceFactory` Protocol; this is what the registry returns when
+    `resolve("imap")` is called. `env` (resolved secrets from the vault, or None
+    for the os.environ fallback) is forwarded to `ImapConfig.from_source_config`.
+    """
+    imap_cfg = ImapConfig.from_source_config(cfg, env)
+    return ImapSource(imap_cfg)

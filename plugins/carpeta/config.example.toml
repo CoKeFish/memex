@@ -1,0 +1,8 @@
+# Plugin `carpeta`: los documentos que dejes acá entran a memex (extractos, facturas).
+# Copiá este archivo a ~/.memex-local-client/plugins/carpeta/config.toml
+# Carpeta vigilada. Dejá el archivo y el cliente local lo recoge en su próxima pasada.
+folder = "C:/Users/yo/Documents/memex"
+# Incluir subcarpetas.
+recursive = true
+# Ignora archivos más grandes que esto (MiB).
+max_mb = 10

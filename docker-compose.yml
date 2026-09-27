@@ -1,0 +1,300 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: memex-postgres
+    environment:
+      POSTGRES_USER: memex
+      POSTGRES_PASSWORD: memex
+      POSTGRES_DB: memex
+    ports:
+      # 5454 host → 5432 container — evita colisión con otros postgres locales
+      - "5454:5432"
+    volumes:
+      - memex_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Postgres EFÍMERO dedicado a la suite de tests (pytest apunta acá por default — ver
+  # tests/conftest.py, _PG_BASE). Datos en tmpfs (RAM): evita el I/O del volumen Docker sobre WSL2,
+  # que en Windows intermitentemente se cuelga ~3 min en un commit/CREATE DATABASE y dominaba el
+  # tiempo de cada test (~0.5s/test → ~5ms/test en RAM; suite ~61s → ~20s). NO comparte datos con la
+  # DB de dev `postgres`: otro puerto (5455), se vacía en cada reinicio. Durabilidad apagada porque
+  # los datos son descartables (cada sesión de pytest dropea/recrea sus DBs).
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: memex-postgres-test
+    command:
+      - "postgres"
+      - "-c"
+      - "fsync=off"
+      - "-c"
+      - "synchronous_commit=off"
+      - "-c"
+      - "full_page_writes=off"
+      - "-c"
+      - "max_connections=300"
+    environment:
+      POSTGRES_USER: memex
+      POSTGRES_PASSWORD: memex
+      POSTGRES_DB: postgres
+    ports:
+      - "5455:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: memex-minio
+    command: server /data --console-address ":9001"
+    environment:
+      # root user/password = credenciales S3 (access/secret key). Inyectadas por
+      # Doppler en prod; defaults locales de dev acá.
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-memexminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-memexminio-dev-secret}
+    ports:
+      - "9000:9000"  # API S3
+      - "9001:9001"  # consola web
+    volumes:
+      - memex_miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Sello de versión del código (ver memex.version). Construir con scripts/build_api.ps1.
+        MEMEX_CODE_VERSION: ${MEMEX_CODE_VERSION:-unknown}
+    container_name: memex-api
+    environment: &api_env
+      # Dentro del compose, postgres se resuelve por nombre de servicio.
+      MEMEX_DATABASE_URL: postgresql+psycopg://memex:memex@postgres:5432/memex
+      MEMEX_AUTH_ENFORCED: "false"
+      MEMEX_API_TOKEN: ""
+      MEMEX_LOG_LEVEL: INFO
+      # Telegram session files persistidos en volumen — sin esto cada reboot
+      # del container exige correr `memex-telegram auth` interactivo de nuevo.
+      # Las credenciales (api_id/api_hash/phone) van al VAULT (/cuenta), NO al env: el resolver
+      # ya no acepta credenciales de ingestor desde env/.env.
+      MEMEX_TG_SESSION_PATH: /var/lib/memex/telegram
+      # WhatsApp (dispositivo vinculado): la sesión whatsmeow por cuenta, en el mount de secrets.
+      MEMEX_WA_SESSION_PATH: /secrets/whatsapp
+      # LLM (memex.llm) — sin prefijo MEMEX_; inyectada por Doppler. El consumidor
+      # 'classifier' aún no existe, pero queda disponible desde ya.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Notificaciones: el canal telegram (mismo bot del asistente) lo usan el API (`channels
+      # test`, `POST /notifications/run`) y el job `notifications` del scheduler.
+      MEMEX_ASSISTANT_TELEGRAM_BOT_TOKEN: ${MEMEX_ASSISTANT_TELEGRAM_BOT_TOKEN:-}
+      # Anthropic (gate de relevancia, provider 'anthropic'). Inyectada por Doppler.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Codex CLI (gate de relevancia, provider 'codex'): la sesión de la suscripción vive en
+      # ./secrets/codex (auth.json copiado tras `codex login` en el host; re-copiar si la
+      # sesión muere). El sandbox propio de codex (landlock) no funciona dentro de docker:
+      # el contenedor ES el sandbox → danger-full-access solo acá.
+      CODEX_HOME: /secrets/codex
+      MEMEX_CODEX_SANDBOX: danger-full-access
+      # Contraseñas de adjuntos CIFRADOS (PDF/ZIP): p. ej. el número de documento con el que el
+      # banco protege los extractos. Lista separada por comas, inyectada por Doppler, redactada en
+      # logs (SecretStr) y NUNCA en la DB. Vacía → un adjunto cifrado queda en `error`.
+      MEMEX_ATTACHMENT_PASSWORDS: ${MEMEX_ATTACHMENT_PASSWORDS:-}
+      # Apify (memex.ingestors.social): el token va al VAULT (/cuenta) por cuenta social, NO al env.
+      # El resolver inyecta `MEMEX_APIFY_TOKEN` desde el vault al correr el ingestor.
+      # Almacenamiento de imágenes (memex.storage). El endpoint apunta al servicio
+      # minio del compose; las credenciales sin prefijo MEMEX_ (root user/password).
+      MEMEX_MINIO_ENDPOINT: http://minio:9000
+      MEMEX_MINIO_BUCKET: ${MEMEX_MINIO_BUCKET:-memex-media}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-memexminio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-memexminio-dev-secret}
+      # OCR (memex.ocr) — proveedor de visión OpenAI-compatible. Sin prefijo MEMEX_
+      # para la key (canónico, Doppler); base_url/model son config del despliegue.
+      OCR_API_KEY: ${OCR_API_KEY:-}
+      # Sin OCR_API_KEY, OcrConfig cae a la llave canónica de OpenAI (el proveedor default):
+      # tiene que llegar al contenedor o las fotos quedan `pending` para siempre.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      MEMEX_OCR_BASE_URL: ${MEMEX_OCR_BASE_URL:-}
+      MEMEX_OCR_MODEL: ${MEMEX_OCR_MODEL:-}
+      # Topes del OCR de PDF/ZIP (ver .env.example). Antes no se pasaban: lo puesto en .env no
+      # llegaba al contenedor. Vacío = default del código.
+      MEMEX_OCR_PDF_MAX_IMAGES: ${MEMEX_OCR_PDF_MAX_IMAGES:-}
+      MEMEX_OCR_PDF_MAX_PAGES: ${MEMEX_OCR_PDF_MAX_PAGES:-}
+      MEMEX_OCR_PDF_MIN_IMAGE_PX: ${MEMEX_OCR_PDF_MIN_IMAGE_PX:-}
+      MEMEX_OCR_PDF_TEXT_MIN_CHARS: ${MEMEX_OCR_PDF_TEXT_MIN_CHARS:-}
+      MEMEX_OCR_ZIP_MAX_ENTRIES: ${MEMEX_OCR_ZIP_MAX_ENTRIES:-}
+      MEMEX_OCR_ZIP_MAX_TOTAL_MB: ${MEMEX_OCR_ZIP_MAX_TOTAL_MB:-}
+      MEMEX_OCR_ZIP_MAX_ENTRY_MB: ${MEMEX_OCR_ZIP_MAX_ENTRY_MB:-}
+      # Documentos: tope por archivo subido (MiB). Las diapositivas de un curso pesan 10-70 MB.
+      MEMEX_DOCUMENTOS_MAX_MB: ${MEMEX_DOCUMENTOS_MAX_MB:-50}
+      # IMAP Gmail (OAuth2): el usuario/credencial va al VAULT (/cuenta vía OAuth), NO al env. Acá
+      # solo quedan las rutas de los archivos OAuth del cliente (identidad de la app, en ./secrets).
+      MEMEX_IMAP_GMAIL_CLIENT_SECRET_JSON: /secrets/google_client_secret.json
+      MEMEX_IMAP_GMAIL_TOKEN_JSON: /secrets/gmail_token.json
+      # OAuth web "Conectar con Google" del dashboard (/cuenta). Reusa el client_secret montado en
+      # ./secrets; el redirect base es el ORIGEN público del dashboard (dev = Vite :5173, que
+      # proxea /api → API). Si el client es 'installed' y Google rechaza el redirect, crear un
+      # cliente OAuth "Web application" con la URI {base}/api/oauth/google/callback y apuntar acá.
+      MEMEX_GOOGLE_OAUTH_CLIENT_SECRET_JSON: ${MEMEX_GOOGLE_OAUTH_CLIENT_SECRET_JSON:-/secrets/google_client_secret.json}
+      MEMEX_OAUTH_REDIRECT_BASE_URL: ${MEMEX_OAUTH_REDIRECT_BASE_URL:-http://localhost:5173}
+      # Llave maestra del vault (cifra los tokens) + firma del `state` de OAuth. HKDF tolera
+      # cualquier cadena → default de DEV (igual patrón que MINIO_SECRET_KEY). En prod overridear
+      # con un secreto real (Doppler: openssl rand -base64 48). Sin esto, "Conectar con Google"
+      # tira 500 al firmar el state.
+      MEMEX_SECRET_KEY: ${MEMEX_SECRET_KEY:-dev-only-master-key-no-usar-en-prod}
+      # Jobs del scheduler: el CSV es el arranque del daemon; si hay fila en `scheduler_settings`
+      # (toggle de /procesamiento o PATCH /processing/scheduler) manda la DB. El intervalo sí sale
+      # del env. `finance` = juez de duplicados (codex, costo 0) + consolidación: con él encendido
+      # un extracto recién subido termina de cruzarse con el correo solo.
+      MEMEX_SCHEDULER_ENABLED_JOBS: ${MEMEX_SCHEDULER_ENABLED_JOBS:-}
+      MEMEX_SCHEDULER_INTERVAL_FINANCE: ${MEMEX_SCHEDULER_INTERVAL_FINANCE:-PT1H}
+    ports:
+      - "8787:8787"
+    volumes:
+      - memex_telegram_sessions:/var/lib/memex/telegram
+      # OAuth de IMAP/calendar (client_secret + tokens). Gitignored. Montado RW para que el
+      # refresh del access_token pueda persistir el token actualizado.
+      - ./secrets:/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Daemon de procesamiento automático (memex-scheduler). IMPLEMENTADO pero APAGADO: está bajo el
+  # profile "scheduler", así que `docker compose up` NO lo arranca. Para desplegarlo cuando se quiera
+  # automatizar: `docker compose --profile scheduler up -d scheduler`. Aun corriendo, no procesa nada
+  # hasta que el toggle de /procesamiento (tabla scheduler_settings) lo arme (daemon_enabled +
+  # enabled_jobs); el daemon relee esa config cada tick. Apagado por default (filosofía del proyecto).
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: memex-scheduler
+    profiles: ["scheduler"]
+    # `python -m`: la imagen instala deps con --no-install-project (sin console scripts del
+    # proyecto); el código entra por PYTHONPATH=/app/src.
+    command: ["python", "-m", "memex.scheduler.cli", "daemon", "start"]
+    environment: *api_env
+    volumes:
+      - memex_telegram_sessions:/var/lib/memex/telegram
+      - ./secrets:/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Daemon de INGESTA agendada (memex-ingest-scheduler). IMPLEMENTADO pero APAGADO: bajo el profile
+  # "ingest-scheduler", así que `docker compose up` NO lo arranca. Para desplegarlo:
+  # `docker compose --profile ingest-scheduler up -d ingest-scheduler`. Aun corriendo no trae nada
+  # hasta que el toggle de /carga (tabla ingest_scheduler_settings) lo arme y haya fuentes con
+  # `fetch_schedule`; relee esa config cada tick. Comparte el env del API porque resuelve secretos del
+  # vault y corre los ingestors reales (IMAP/social/telegram). Apagado por default.
+  ingest-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: memex-ingest-scheduler
+    profiles: ["ingest-scheduler"]
+    # mismo caso que `scheduler`: sin console scripts en la imagen → python -m.
+    command: ["python", "-m", "memex.ingest_scheduler.cli", "daemon", "start"]
+    environment: *api_env
+    volumes:
+      - memex_telegram_sessions:/var/lib/memex/telegram
+      - ./secrets:/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Asistente conversacional (Telegram + codex + CLI memex). Bajo el profile "assistant": arranca con
+  # `docker compose --profile assistant up -d assistant`. Polling por default (no necesita puerto
+  # público); para webhook en un VPS: MEMEX_ASSISTANT_TRANSPORT=webhook + MEMEX_ASSISTANT_WEBHOOK_URL
+  # y publicar el puerto 8788. Transcripción por la API de OpenAI (OPENAI_API_KEY) por default.
+  assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: memex-assistant
+    profiles: ["assistant"]
+    command: ["python", "-m", "memex.assistant.cli", "run"]
+    environment:
+      <<: *api_env
+      MEMEX_ASSISTANT_TELEGRAM_BOT_TOKEN: ${MEMEX_ASSISTANT_TELEGRAM_BOT_TOKEN:-}
+      MEMEX_ASSISTANT_ALLOWED_USER_IDS: ${MEMEX_ASSISTANT_ALLOWED_USER_IDS:-}
+      MEMEX_ASSISTANT_TRANSPORT: ${MEMEX_ASSISTANT_TRANSPORT:-polling}
+      MEMEX_ASSISTANT_WEBHOOK_URL: ${MEMEX_ASSISTANT_WEBHOOK_URL:-}
+      MEMEX_ASSISTANT_STT: ${MEMEX_ASSISTANT_STT:-openai}
+      MEMEX_ASSISTANT_AUTO_EXECUTE: ${MEMEX_ASSISTANT_AUTO_EXECUTE:-finance register}
+      MEMEX_ASSISTANT_WORKDIR: /app
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ./secrets:/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Daemon de NOTIFICACIONES (memex-notifications): productores (resumen diario, recordatorios,
+  # tareas, alertas internas) + entrega por canales (Telegram: el mismo bot del asistente; solo
+  # envía, no hace polling). Bajo el profile "notifications":
+  # `docker compose --profile notifications up -d notifications`. Aun corriendo idlea hasta
+  # `memex-notifications enable` (tabla notification_settings) y un canal dado de alta.
+  notifications:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: memex-notifications
+    profiles: ["notifications"]
+    command: ["python", "-m", "memex.notifications.cli", "daemon", "start"]
+    environment:
+      <<: *api_env
+      MEMEX_ASSISTANT_TELEGRAM_BOT_TOKEN: ${MEMEX_ASSISTANT_TELEGRAM_BOT_TOKEN:-}
+      MEMEX_NOTIFICATIONS_DASHBOARD_URL: ${MEMEX_NOTIFICATIONS_DASHBOARD_URL:-}
+    # El productor `verificar_cuentas` prueba la sesión de Telegram y lee secretos: sin estos
+    # montajes daba «unhealthy» (falsa alarma), igual que el scheduler los necesita.
+    volumes:
+      - memex_telegram_sessions:/var/lib/memex/telegram
+      - ./secrets:/secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Dashboard (React/Vite) servido estático por nginx. Sin profile: arranca con el API en cada
+  # `docker compose up -d`, porque es la superficie con la que el usuario opera memex. Antes vivía
+  # como `npm run dev` en una terminal suelta que moría al cerrar la sesión. nginx proxya /api/* al
+  # contenedor `api` (ver frontend/nginx.conf), así el redirect de "Conectar con Google"
+  # (MEMEX_OAUTH_REDIRECT_BASE_URL=http://localhost:5173) sigue funcionando: 5173 es este servicio.
+  dashboard:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: memex-dashboard
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  memex_pgdata:
+  memex_telegram_sessions:
+  memex_miniodata:

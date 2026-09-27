@@ -1,0 +1,423 @@
+"""CLI `memex` — la interfaz ÚNICA del AGENTE (Hermes) sobre memex.
+
+Despacha a las CLIs de dominio (`memex-bienestar`, `memex-finance`, `memex-identidades`,
+`memex-calendar-sync`) exponiendo SOLO los comandos que el agente usa para registrar/consultar la
+vida del usuario; los de MANTENIMIENTO quedan fuera (blocklist/allowlist). No reimplementa nada:
+forwardea el resto de argv al `main` del dominio, así los flags y el `--json` (ÚLTIMA línea de
+stdout) son idénticos.
+
+Además implementa el flujo de EVENTO multi-hecho (`memex.agent_event`): `start` abre un evento y, a
+partir de ahí, los `register` se ENCOLAN (staging) en vez de persistir; `end` los procesa JUNTOS en
+una sola transacción (resuelve dependencias → dedup → consolidación), `cancel` los descarta. Un
+evento abierto por usuario. Determinista, sin LLM: el agente estructura; memex guarda, deduplica,
+consolida y conecta.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from collections.abc import Callable, Sequence
+from typing import Any
+
+from memex.agent_event import (
+    AgentEventError,
+    cancel_event,
+    close_event,
+    has_open_event,
+    stage_fact,
+    start_event,
+)
+from memex.db import connection
+from memex.geo.cli import main as _geo_main
+from memex.modules.asuntos.cli import main as _asuntos_main
+from memex.modules.bienestar.cli import main as _bienestar_main
+from memex.modules.calendar.cli import main as _calendar_main
+from memex.modules.finance.cli import main as _finance_main
+from memex.modules.identidades.cli import main as _identidades_main
+from memex.modules.tareas.cli import main as _tareas_main
+
+#: Grupos del agente → `main` de la CLI de dominio a la que se forwardea.
+_GROUPS: dict[str, Callable[[list[str]], int]] = {
+    "bienestar": _bienestar_main,
+    "finance": _finance_main,
+    "identidad": _identidades_main,
+    "tareas": _tareas_main,
+    "calendario": _calendar_main,
+    "asuntos": _asuntos_main,
+    "geo": _geo_main,
+}
+
+#: Subcomandos de MANTENIMIENTO (no del agente): se bloquean en la superficie `memex`.
+_BLOCKED: dict[str, frozenset[str]] = {
+    "finance": frozenset({"dedup", "consolidate", "recategorize"})
+}
+
+#: Grupos donde el agente SOLO usa estos subcomandos (allowlist): el resto es mantenimiento.
+#: `identidad` expone registro (add), consulta (list/search/show/relations/tree/candidates),
+#: jerarquía (set-parent/confirm-parent), edición (set-kind/add-id/affiliate/annotate),
+#: deduplicación (unify/resolve) y relaciones (relate/confirm-relation/unrelate); el mantenimiento
+#: (sync/merge/…) queda fuera. `calendario` ídem (pull/push/authorize/… son del operador).
+_ALLOWED: dict[str, frozenset[str]] = {
+    # `geo`: solo el catálogo de lugares de referencia; geocode/trip/ping son del operador.
+    "geo": frozenset({"places"}),
+    # `tareas`: alta, consulta y cambios de estado; `rm` es mantenimiento (el agente cancela).
+    "tareas": frozenset(
+        {"add", "list", "show", "done", "reopen", "cancel", "update", "merge", "help"}
+    ),
+    # `asuntos`: consulta y correcciones puntuales; assign/curate/maintain/settings/forget son
+    # mantenimiento (los corre el pipeline, el job o el operador).
+    "asuntos": frozenset(
+        {
+            "add",
+            "plan",
+            "nota",
+            "list",
+            "show",
+            "close",
+            "reopen",
+            "prioridad",
+            "vence",
+            "rename",
+            "merge",
+            "relate",
+            "delete",
+            "evidence",
+        }
+    ),
+    "identidad": frozenset(
+        {
+            "add",
+            "list",
+            "search",
+            "show",
+            "relations",
+            "tree",
+            "set-parent",
+            "confirm-parent",
+            "set-kind",
+            "add-id",
+            "affiliate",
+            "unify",
+            "annotate",
+            "relate",
+            "confirm-relation",
+            "unrelate",
+            "candidates",
+            "resolve",
+            "help",
+        }
+    ),
+    "calendario": frozenset(
+        {
+            "add",
+            "list",
+            "show",
+            "update",
+            "rm",
+            "fijar",
+            "fijar-regla",
+            "estado",
+            "conflicts",
+            "sync-status",
+            "help",
+        }
+    ),
+}
+
+#: Nombre de la CLI de MANTENIMIENTO por grupo (para los mensajes de bloqueo); el default
+#: `memex-<grupo>` no siempre existe (calendario → memex-calendar-sync).
+_MAINT_CLI: dict[str, str] = {
+    "tareas": "memex-tareas",
+    "asuntos": "memex-asuntos",
+    "identidad": "memex-identidades",
+    "calendario": "memex-calendar-sync",
+}
+
+#: (grupo, subcomando) → kind del hecho: los register que se ENCOLAN cuando hay un evento abierto.
+_STAGEABLE: dict[tuple[str, str], str] = {
+    ("identidad", "add"): "identidad",
+    ("finance", "register"): "finance",
+    ("bienestar", "register"): "bienestar",
+    ("tareas", "add"): "tareas",
+}
+
+#: Comandos top-level del flujo de evento (no son grupos).
+_EVENT_CMDS: frozenset[str] = frozenset({"start", "end", "cancel"})
+
+_HELP = """memex — interfaz del agente para registrar y consultar la vida del usuario.
+
+Uso: memex <grupo> <comando> [opciones]   |   memex <start|end|cancel>
+
+bienestar (salud y bienestar):
+  memex bienestar register     comida/higiene/ejercicio/grooming/salud
+  memex bienestar list         lista registros
+  memex bienestar summary      total + conteos
+  memex bienestar adherence    adherencia + rachas de hábitos
+  memex bienestar habit        define hábitos (add/list/rm)
+
+finance (gastos/ingresos):
+  memex finance register       registra una transacción (--json devuelve consolidated_id)
+  memex finance list           pagos con filtros (--q --category --direction --since --until)
+  memex finance summary        totales por contraparte|rubro|mes|moneda (--by, mismos filtros)
+  memex finance pending        pagos fallidos o pendientes SIN un pago exitoso posterior al mismo
+                               servicio (lo que falta regularizar; --days 30 --limit)
+  memex finance subs           suscripciones: qué se renueva, cuándo y cuánto (--all)
+  memex finance subs-detect    relee los cargos y deduce las suscripciones (sin LLM)
+  memex finance subs-set       cancela o descarta una suscripción (--id --status)
+  memex finance show           detalle de un pago consolidado (incluye el lugar resuelto)
+  memex finance set-place      asocia un lugar del catálogo a un pago ("este pago fue en X")
+  memex finance rm             borra un pago y sus crudas (--id; deshacer un registro)
+  memex finance rubro          "este comercio es comida": rubro por contraparte, se aplica a
+                               todo lo suyo, pasado y futuro (--counterparty --category
+                               [--note]; --list; --remove). Rubros: comida, transporte,
+                               software, servicios, educacion, salud, entretenimiento,
+                               compras, transferencia, traspaso, ingreso, rendimientos, otros
+
+identidad (directorio de personas/organizaciones/productos + sus relaciones):
+  memex identidad add          registra/resuelve una tarjeta de contacto (no duplica)
+  memex identidad list         enumera el directorio (--kind/--no-parent/--no-desc/--limit);
+                               --org <id|nombre> = personas afiliadas a esa organización (y sus
+                               sub-organizaciones) con rol e identificadores, en una llamada
+  memex identidad search       busca por nombre, alias o identificador (--q)
+  memex identidad show         ficha completa: identificadores, jerarquía, afiliaciones (--id)
+  memex identidad relations    relaciones de una identidad y su estado (--id)
+  memex identidad tree         jerarquía de pertenencia (quién pertenece a quién)
+  memex identidad set-parent   cuelga una identidad de su padre, o --clear para quitarlo
+  memex identidad confirm-parent  consolida el padre actual como confirmado
+  memex identidad set-kind     reclasifica (persona|organizacion|producto)
+  memex identidad add-id       agrega un identificador (email/handle/domain/…)
+  memex identidad affiliate    teje una persona con una organización
+  memex identidad unify        funde dos identidades, incluso de distinto tipo (--into/--from)
+  memex identidad annotate     agrega alias/descripción (la ve el desempate LLM)
+  memex identidad relate       confirma una relación entre dos identidades (--from/--to/--type)
+  memex identidad confirm-relation  promueve una pista a relación confirmada (--edge)
+  memex identidad unrelate     descarta una arista (--edge)
+  memex identidad candidates   pares dudosos pendientes (¿misma identidad real?)
+  memex identidad resolve      decide un par: --same fusiona / --distinct coexisten
+
+asuntos (storylines: hilos de vida inferidos de los mensajes — hackathon, grado, proyecto):
+  memex asuntos add            declara un asunto tuyo, que no nace de un mensaje (--name
+                               [--kind tramite|proyecto|evento|...] [--description]); es el paso
+                               previo a pedir el plan
+  memex asuntos plan           arma el plan: que hacer, donde, que llevar y cuanto cuesta, con
+                               busqueda web en FUENTES OFICIALES (--id [--context] [--city]
+                               [--dry-run]). Tarda varios minutos. Deja un proyecto con pasos
+  memex asuntos nota           contale algo al asunto en tus palabras (--id --text "..."):
+                               queda como hito y, si dice cuando va a hacer un paso o que
+                               algo ya esta hecho, le pone fecha al paso o lo marca hecho
+  memex asuntos list           lista asuntos (--status abierto,candidato,cerrado --kind
+                               --priority alta,normal,baja --q)
+  memex asuntos show           storyline: hitos, estado vigente, evidencia, relaciones (--id)
+  memex asuntos close          cierra un asunto con su estado final (--id --state)
+  memex asuntos reopen         reabre (--id)
+  memex asuntos vence          fecha límite del próximo paso (--id --date YYYY-MM-DD | none); si
+                               pasa sin novedad el asunto se cierra solo
+  memex asuntos prioridad      tu palabra sobre el seguimiento (--id --level alta|normal|baja
+                               [--reason]); alta = plazo/plata/derecho en juego o requisito de
+                               algo mayor; baja = seguimiento pasivo. Nadie la pisa después.
+  memex asuntos rename         renombra; el nombre anterior queda como alias (--id --name)
+  memex asuntos merge          funde dos asuntos (--into/--absorb)
+  memex asuntos relate         relación (--src --dst --type parte_de|requisito_de|continua)
+  memex asuntos evidence       agrega un mensaje (--add A --inbox N) o rechaza (--reject ID)
+  memex asuntos delete         borra un candidato/ruido (--id)
+
+geo (lugares de referencia del usuario):
+  memex geo places             lista tus lugares (casa, universidad, trabajo)
+  memex geo places add         declara uno (--name Casa --address "Calle 1 # 2-3, Bogotá"); el
+                               planificador lo usa para recomendar por cercanía
+
+tareas (pendientes accionables, con o sin fecha límite):
+  memex tareas add             crea una tarea (--title [--due YYYY-MM-DD] [--priority alta|baja]
+                               [--asunto <id|texto>] [--description]); dedup por título: si ya
+                               existe una pendiente igual devuelve esa (deduped=true); --force
+  memex tareas list            pendientes: vencidas primero, luego por fecha, sin fecha al final
+                               (--overdue, --due-before, --asunto, --q, --status completada|all)
+  memex tareas show            detalle (--id)
+  memex tareas done            marca completada (--id [--when]);  reopen la vuelve a pendiente
+  memex tareas cancel          cancela (--id)
+  memex tareas update          corrige título/fecha/prioridad/asunto (--id ...)
+  memex tareas merge           dos tareas que son la misma: --absorb se funde en --into (alias,
+                               detalle, fecha, enlaces, procedencia) y queda cancelada
+  Tareas ≠ calendario (eventos que OCURREN) ≠ asuntos (hilos inferidos): «tarea del curso
+  para el jueves» → tareas add --due --asunto; «recordame el 1 de octubre» → calendario add.
+
+calendario (eventos y agenda):
+  memex calendario add         crea un evento; recurrente con --every daily|weekly|monthly
+                               [--byday MO,TU,..] [--until YYYY-MM-DD | --count N] (sin fin si
+                               no hay until/count): UN evento maestro, como Google Calendar
+  memex calendario list        eventos en la ventana (--since/--until); los recurrentes vienen
+                               expandidos, una fila por ocurrencia (mismo id, series_id)
+  memex calendario show        detalle (fuentes, regla de recurrencia, próximas ocurrencias)
+  memex calendario update      corrige el evento (en un recurrente = toda la serie);
+                               --instance YYYY-MM-DD corrige SOLO esa ocurrencia (excepción);
+                               --instance D --following = esa y las siguientes
+  memex calendario rm          borra el evento (recurrente = la serie entera); definitivo;
+                               --instance YYYY-MM-DD cancela solo esa ocurrencia;
+                               --instance D --following termina la serie desde ese día
+  memex calendario estado      <id> confirmado|provisional|anuncio: corrige el estado (list/show
+                               lo traen: confirmado = inscrito/pagó/confirmó; provisional =
+                               participante sin confirmar; anuncio = convocatoria o evento
+                               abierto, no es un compromiso de la persona)
+  memex calendario fijar       fija un evento o serie: gana la consolidación, nada lo sobrescribe
+                               y cuenta para los conflictos (--off lo libera)
+  memex calendario fijar-regla add|rm|list --match T: lo que contenga T queda fijado solo
+                               («mis clases de inglés son inamovibles» → add --match <texto
+                               del título>)
+  memex calendario conflicts   conflictos de horario pendientes de revisión
+  memex calendario sync-status ¿la sincronización con Google está funcionando?
+
+evento multi-hecho (una factura = varios hechos del MISMO evento):
+  memex start                  abre un evento (los register siguientes se ENCOLAN, no persisten)
+  memex finance register ...   ┐ se acumulan en el evento
+  memex identidad add ...      ┘
+  memex end                    procesa TODO junto: ata identidad↔gasto, dedup, consolida (atómico)
+  memex cancel                 descarta el evento abierto
+
+Reglas:
+  start/end     un evento abierto por vez; al cerrar memex resuelve dependencias + dedup + consolida
+  --event <id>  (sin start/end) hechos del MISMO mensaje comparten el id
+  --json        la respuesta JSON es la ÚLTIMA línea de stdout
+
+Detalle de un comando: memex <grupo> <comando> -h   (o: memex <grupo> help)"""
+
+
+def help_text() -> str:
+    """La documentación del CLI tal como la ve el agente (misma salida de `memex help`)."""
+    return _HELP
+
+
+def _safe(s: str) -> str:
+    """Sanea para el encoding de la consola (cp1252 en Windows), como las CLIs de dominio."""
+    enc = sys.stdout.encoding or "utf-8"
+    return s.encode(enc, errors="replace").decode(enc, errors="replace")
+
+
+def _say(msg: str, *, err: bool = False) -> None:
+    print(_safe(msg), file=sys.stderr if err else sys.stdout)
+
+
+def _emit_json(obj: object) -> None:
+    print(_safe(json.dumps(obj, default=str, ensure_ascii=False)))
+
+
+def _err(msg: str) -> int:
+    print(_safe(msg), file=sys.stderr)
+    return 2
+
+
+def _extract_user(rest: Sequence[str]) -> int:
+    """Saca el `--user N` (o `--user=N`) del argv; default 1, como las CLIs de dominio."""
+    items = list(rest)
+    for i, a in enumerate(items):
+        if a == "--user" and i + 1 < len(items):
+            try:
+                return int(items[i + 1])
+            except ValueError:
+                return 1
+        if a.startswith("--user="):
+            try:
+                return int(a.split("=", 1)[1])
+            except ValueError:
+                return 1
+    return 1
+
+
+def _wants_json(rest: Sequence[str]) -> bool:
+    return "--json" in rest
+
+
+def _human_event(cmd: str, result: dict[str, Any]) -> str:
+    if cmd == "start":
+        return f"evento abierto: {result['event_id']} (los register se encolan hasta 'memex end')."
+    if cmd == "cancel":
+        return f"evento descartado: {result['event_id']}."
+    counts = result.get("counts", {})
+    tag = " (ya estaba cerrado)" if result.get("already_closed") else ""
+    return (
+        f"evento {result['event_id']} cerrado{tag}: identidad={counts.get('identidad', 0)} "
+        f"finance={counts.get('finance', 0)} bienestar={counts.get('bienestar', 0)}."
+    )
+
+
+def _event_command(cmd: str, rest: list[str]) -> int:
+    """`start` / `end` / `cancel`: cada uno en su propia tx. `end` envuelve TODO el procesamiento:
+    un hecho inválido → rollback total y el evento queda abierto (reintentable)."""
+    user_id = _extract_user(rest)
+    try:
+        with connection() as conn:
+            if cmd == "start":
+                result = start_event(conn, user_id)
+            elif cmd == "cancel":
+                result = cancel_event(conn, user_id)
+            else:  # end
+                result = close_event(conn, user_id)
+    except AgentEventError as e:
+        _say(str(e), err=True)
+        return 1
+    except Exception as e:  # un hecho inválido en `end`: rollback + mensaje al agente, no traceback
+        _say(f"error en 'memex {cmd}': {e}", err=True)
+        return 1
+    if _wants_json(rest):
+        _emit_json(result)
+    else:
+        _say(_human_event(cmd, result))
+    return 0
+
+
+def _maybe_stage(group: str, rest: list[str]) -> int | None:
+    """Si el comando es un `register` stageable y el user tiene un evento ABIERTO, lo ENCOLA y
+    devuelve el exit code. Si no hay evento abierto (o no es stageable), devuelve None → el caller
+    persiste inmediato (comportamiento de siempre)."""
+    kind = _STAGEABLE.get((group, rest[0])) if rest else None
+    if kind is None:
+        return None
+    user_id = _extract_user(rest)
+    with connection() as conn:
+        if not has_open_event(conn, user_id):
+            return None
+    try:
+        with connection() as conn:
+            staged = stage_fact(conn, user_id, kind, rest)
+    except (AgentEventError, ValueError) as e:
+        _say(str(e), err=True)
+        return 1
+    if _wants_json(rest):
+        _emit_json(staged)
+    else:
+        _say(
+            f"encolado en {staged['event_id']}: {kind} (#{staged['count']}); "
+            f"cerrá el evento con 'memex end'."
+        )
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] in ("help", "-h", "--help"):
+        print(_safe(_HELP))
+        return 0
+    cmd, rest = args[0], args[1:]
+    if cmd in _EVENT_CMDS:
+        return _event_command(cmd, rest)
+    dispatch = _GROUPS.get(cmd)
+    if dispatch is None:
+        return _err(f"comando desconocido: '{cmd}'. Probá: memex help")
+    maint_cli = _MAINT_CLI.get(cmd, f"memex-{cmd}")
+    if rest and rest[0] in _BLOCKED.get(cmd, frozenset()):
+        return _err(f"'{rest[0]}' es de mantenimiento, no del agente; usá '{maint_cli}' directo.")
+    allowed = _ALLOWED.get(cmd)
+    if allowed is not None and rest and rest[0] not in allowed:
+        return _err(
+            f"'{rest[0]}' no es del agente; con '{cmd}' solo: {', '.join(sorted(allowed))}. "
+            f"Mantenimiento: '{maint_cli}' directo."
+        )
+    # Con un evento ABIERTO, los register se ENCOLAN (no persisten) hasta 'memex end'.
+    staged = _maybe_stage(cmd, rest)
+    if staged is not None:
+        return staged
+    return dispatch(rest)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

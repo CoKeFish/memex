@@ -1,0 +1,777 @@
+"""Métricas de costo LLM sobre la tabla `llm_calls`.
+
+Dos endpoints para la vista /metricas:
+- `GET /metrics/llm/rollup` — agregaciones server-side (GROUP BY): KPIs, costo por fuente, por
+  módulo (de `purpose`), por modelo, matriz fuente x módulo y serie diaria. A diferencia de
+  finance (filas consolidadas + agregación en cliente), `llm_calls` es denso y append-only,
+  así que agregar en SQL evita traer todo al browser.
+- `GET /metrics/llm/calls` — auditoría: filas crudas con filtros incluir/excluir multi-valor, orden
+  por columna (whitelist) y paginación offset (necesita total para el pager "X-Y de N").
+
+El módulo se deriva de `purpose` con un único CASE (`_MODULE_CASE`) reusado en ambos endpoints. El
+bucket diario se fija a una TZ (`_BUCKET_TZ`) para que "hoy" no se parta a medianoche (created_at es
+TIMESTAMPTZ). `untabulated` (modelo sin precio) se deriva de datos: tokens>0 con cost_usd=0.
+"""
+
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import text
+
+from memex.api.auth import current_user_id
+from memex.api.schemas import ApifyRollup, ApifyRunList, LlmCallDetail, LlmCallList, LlmRollup
+from memex.db import connection
+from memex.logging import get_logger
+
+router = APIRouter(prefix="/metrics", tags=["metrics"])
+
+UserID = Annotated[int, Depends(current_user_id)]
+
+_log = get_logger("memex.api.metrics")
+
+#: TZ por defecto del bucket diario (cuando el cliente no manda `tz`). El front pasa su TZ activa
+#: (autodetectada/override) para que los días del eje coincidan con su reloj de pared. Default a
+#: Bogota (TZ del usuario), no asumir México; alineado con el default de `routers/logs.py`.
+_BUCKET_TZ = "America/Bogota"
+
+#: Deriva el módulo/etapa desde `purpose`. El literal `extract_grouped` va ANTES del wildcard
+#: `extract_%`; un purpose futuro desconocido cae al ELSE y se ve nombrado (no se pierde el gasto).
+#: Las fases internas de un dominio (calendar_dedup/merge, finance_dedup, identidades_*) se pliegan
+#: a su módulo: el corte responde "¿cuánto cuesta el dominio?"; para aislar una fase está la
+#: auditoría (`q=` busca en purpose).
+_MODULE_CASE = """
+    CASE
+        WHEN purpose = 'module_route' THEN 'routing'
+        WHEN purpose LIKE 'summarize%' THEN 'summarize'
+        WHEN purpose = 'extract_grouped' THEN 'grouped'
+        WHEN purpose LIKE 'extract_%' THEN substring(purpose FROM 'extract_(.*)')
+        WHEN purpose LIKE 'calendar%' THEN 'calendar'
+        WHEN purpose LIKE 'finance%' THEN 'finance'
+        WHEN purpose LIKE 'identidades%' THEN 'identidades'
+        WHEN purpose = 'ocr' THEN 'ocr'
+        ELSE purpose
+    END
+""".strip()
+
+#: Etiqueta de fuente: nombre real, o pseudo-fuente para las llamadas sin source (calendar cruza
+#: fuentes; el resto sin atribución = "(sin source)") — así el gasto sin source se VE, no se pierde.
+_SOURCE_LABEL = (
+    "COALESCE(a.alias, s.config->>'account_email', a.metadata->>'email', s.name, "
+    "CASE WHEN lc.purpose LIKE 'calendar%' THEN '(calendar)' ELSE '(sin source)' END)"
+)
+
+#: Columnas permitidas para ordenar la auditoría (nunca interpolar input del usuario como columna).
+_SORT_COLS = {"created_at": "created_at", "cost_usd": "cost_usd", "latency_ms": "latency_ms"}
+
+
+def _window(since: datetime | None, until: datetime | None, params: dict[str, Any]) -> str:
+    """WHERE de ventana sobre `llm_calls lc` (alias lc). Agrega :since/:until a `params`."""
+    clauses = ["lc.user_id = :uid"]
+    if since is not None:
+        clauses.append("lc.created_at >= :since")
+        params["since"] = since
+    if until is not None:
+        clauses.append("lc.created_at < :until")
+        params["until"] = until
+    return " AND ".join(clauses)
+
+
+def _resolve_tz(tz: str | None) -> str:
+    """Valida/resuelve la TZ del bucket diario. None → `_BUCKET_TZ`; nombre IANA inválido → 422.
+
+    El valor va al SQL como bind param (`:tz` en `AT TIME ZONE`), no es injection; pero un nombre
+    inválido reventaría en Postgres, así que se valida acá contra el catálogo IANA (zoneinfo).
+    """
+    if tz is None:
+        return _BUCKET_TZ
+    try:
+        ZoneInfo(tz)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"timezone inválida: {tz}") from exc
+    return tz
+
+
+@router.get("/llm/rollup", response_model=LlmRollup)
+async def llm_rollup(
+    user_id: UserID,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    tz: str | None = None,
+) -> dict[str, Any]:
+    """Agregaciones de costo LLM del rango [`since`, `until`) para la vista /metricas.
+
+    `tz` (IANA, p.ej. `America/Bogota`) fija la TZ del bucket diario para que "hoy"/los días del
+    cliente coincidan con su reloj de pared. Default: `_BUCKET_TZ`.
+    """
+    params: dict[str, Any] = {"uid": user_id, "tz": _resolve_tz(tz)}
+    where = _window(since, until, params)
+
+    with connection() as conn:
+        krow = (
+            conn.execute(
+                text(f"""
+                SELECT
+                    COUNT(*) AS calls,
+                    COALESCE(SUM(lc.cost_usd), 0) AS cost_usd,
+                    COALESCE(SUM(lc.prompt_tokens), 0) AS prompt_tokens,
+                    COALESCE(SUM(lc.completion_tokens), 0) AS completion_tokens,
+                    COALESCE(SUM(lc.cache_hit_tokens), 0) AS cache_hit_tokens,
+                    COUNT(*) FILTER (WHERE lc.status = 'error') AS errors,
+                    COALESCE(AVG(lc.latency_ms) FILTER (WHERE lc.status = 'ok'), 0)
+                        AS avg_latency_ms
+                FROM llm_calls lc
+                WHERE {where}
+            """),
+                params,
+            )
+            .mappings()
+            .one()
+        )
+
+        # Periodo anterior de igual longitud, solo si hay `since` (para la variación %). prev_calls
+        # distingue "periodo previo sin datos" (0) de "creció mucho" en el front (evita un % gigante
+        # contra una base casi vacía, p.ej. cuando la ingesta arrancó hace poco).
+        prev_cost: float | None = None
+        prev_calls: int | None = None
+        if since is not None:
+            until_eff = until if until is not None else datetime.now(UTC)
+            span = until_eff - since
+            prow = (
+                conn.execute(
+                    text(
+                        "SELECT COALESCE(SUM(cost_usd), 0) AS cost, COUNT(*) AS calls "
+                        "FROM llm_calls "
+                        "WHERE user_id = :uid AND created_at >= :ps AND created_at < :pe"
+                    ),
+                    {"uid": user_id, "ps": since - span, "pe": since},
+                )
+                .mappings()
+                .one()
+            )
+            prev_cost = float(prow["cost"])
+            prev_calls = int(prow["calls"])
+
+        by_source = (
+            conn.execute(
+                text(f"""
+                SELECT lc.source_id,
+                       {_SOURCE_LABEL} AS source_name,
+                       COUNT(*) AS calls,
+                       COALESCE(SUM(lc.prompt_tokens + lc.completion_tokens), 0) AS tokens,
+                       COALESCE(SUM(lc.cost_usd), 0) AS cost_usd
+                FROM llm_calls lc
+                LEFT JOIN sources s ON s.id = lc.source_id
+                LEFT JOIN accounts a ON a.id = s.account_id
+                WHERE {where}
+                GROUP BY lc.source_id, source_name
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        by_module = (
+            conn.execute(
+                text(f"""
+                SELECT {_MODULE_CASE} AS module,
+                       COUNT(*) AS calls,
+                       COALESCE(SUM(lc.prompt_tokens + lc.completion_tokens), 0) AS tokens,
+                       COALESCE(SUM(lc.cost_usd), 0) AS cost_usd
+                FROM llm_calls lc
+                WHERE {where}
+                GROUP BY module
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        by_model = (
+            conn.execute(
+                text(f"""
+                SELECT lc.model,
+                       COUNT(*) AS calls,
+                       COALESCE(SUM(lc.prompt_tokens), 0) AS prompt_tokens,
+                       COALESCE(SUM(lc.completion_tokens), 0) AS completion_tokens,
+                       COALESCE(SUM(lc.cost_usd), 0) AS cost_usd,
+                       (COALESCE(SUM(lc.prompt_tokens + lc.completion_tokens), 0) > 0
+                        AND COALESCE(SUM(lc.cost_usd), 0) = 0) AS untabulated
+                FROM llm_calls lc
+                WHERE {where}
+                GROUP BY lc.model
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        by_source_module = (
+            conn.execute(
+                text(f"""
+                SELECT lc.source_id,
+                       {_SOURCE_LABEL} AS source_name,
+                       {_MODULE_CASE} AS module,
+                       COUNT(*) AS calls,
+                       COALESCE(SUM(lc.cost_usd), 0) AS cost_usd
+                FROM llm_calls lc
+                LEFT JOIN sources s ON s.id = lc.source_id
+                LEFT JOIN accounts a ON a.id = s.account_id
+                WHERE {where}
+                GROUP BY lc.source_id, source_name, module
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        daily_rows = (
+            conn.execute(
+                text(f"""
+                SELECT (lc.created_at AT TIME ZONE :tz)::date AS day,
+                       {_MODULE_CASE} AS module,
+                       COALESCE(SUM(lc.cost_usd), 0) AS cost_usd
+                FROM llm_calls lc
+                WHERE {where}
+                GROUP BY day, module
+                ORDER BY day
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+    # Pivot de la serie diaria (formato largo → {day, total, by_module}).
+    daily_map: dict[str, dict[str, Any]] = {}
+    for r in daily_rows:
+        day = r["day"].isoformat()
+        entry = daily_map.setdefault(day, {"day": day, "total": 0.0, "by_module": {}})
+        cost = float(r["cost_usd"])
+        entry["by_module"][r["module"]] = cost
+        entry["total"] += cost
+    daily = [daily_map[d] for d in sorted(daily_map)]
+
+    prompt = int(krow["prompt_tokens"])
+    cache_hit = int(krow["cache_hit_tokens"])
+    calls = int(krow["calls"])
+    cost = float(krow["cost_usd"])
+    kpis = {
+        "cost_usd": cost,
+        "calls": calls,
+        "prompt_tokens": prompt,
+        "completion_tokens": int(krow["completion_tokens"]),
+        "cache_hit_tokens": cache_hit,
+        "cache_hit_ratio": (cache_hit / prompt) if prompt else 0.0,
+        "avg_cost_usd": (cost / calls) if calls else 0.0,
+        "avg_latency_ms": float(krow["avg_latency_ms"]),
+        "errors": int(krow["errors"]),
+        "prev_cost_usd": prev_cost,
+        "prev_calls": prev_calls,
+    }
+
+    _log.info("metrics.rollup", user_id=user_id, calls=calls, cost_usd=cost)
+    return {
+        "kpis": kpis,
+        "by_source": [
+            {
+                "source_id": r["source_id"],
+                "source_name": r["source_name"],
+                "calls": int(r["calls"]),
+                "tokens": int(r["tokens"]),
+                "cost_usd": float(r["cost_usd"]),
+            }
+            for r in by_source
+        ],
+        "by_module": [
+            {
+                "module": r["module"],
+                "calls": int(r["calls"]),
+                "tokens": int(r["tokens"]),
+                "cost_usd": float(r["cost_usd"]),
+            }
+            for r in by_module
+        ],
+        "by_model": [
+            {
+                "model": r["model"],
+                "calls": int(r["calls"]),
+                "prompt_tokens": int(r["prompt_tokens"]),
+                "completion_tokens": int(r["completion_tokens"]),
+                "cost_usd": float(r["cost_usd"]),
+                "untabulated": bool(r["untabulated"]),
+            }
+            for r in by_model
+        ],
+        "by_source_module": [
+            {
+                "source_id": r["source_id"],
+                "source_name": r["source_name"],
+                "module": r["module"],
+                "calls": int(r["calls"]),
+                "cost_usd": float(r["cost_usd"]),
+            }
+            for r in by_source_module
+        ],
+        "daily": daily,
+        "modules": [r["module"] for r in by_module],
+    }
+
+
+def _multi_filter(
+    col: str,
+    name: str,
+    values: list[Any] | None,
+    mode: str,
+    clauses: list[str],
+    params: dict[str, Any],
+) -> None:
+    """Filtro incluir/excluir multi-valor sobre `col` (= ANY) — vacío/None = sin filtro."""
+    if not values:
+        return
+    params[name] = values
+    expr = f"{col} = ANY(:{name})"
+    clauses.append(f"NOT ({expr})" if mode == "exclude" else expr)
+
+
+FilterMode = Literal["include", "exclude"]
+
+
+@router.get("/llm/calls", response_model=LlmCallList)
+async def llm_calls(
+    user_id: UserID,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    tz: str | None = None,
+    status: Annotated[list[str] | None, Query()] = None,
+    status_mode: FilterMode = "include",
+    module: Annotated[list[str] | None, Query()] = None,
+    module_mode: FilterMode = "include",
+    model: Annotated[list[str] | None, Query()] = None,
+    model_mode: FilterMode = "include",
+    source: Annotated[list[str] | None, Query(description="source_name (incl. pseudo)")] = None,
+    source_mode: FilterMode = "include",
+    q: str | None = None,
+    sort: Literal["created_at", "cost_usd", "latency_ms"] = "created_at",
+    dir: Literal["asc", "desc"] = "desc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    """Auditoría de `llm_calls`: filas crudas filtrables/ordenables/paginadas (debug).
+
+    Filtros incluir/excluir multi-valor por estado/módulo/modelo/fuente (aislar o excluir);
+    `q` busca substring en inbox/request/model/purpose. `sort`/`dir` salen de una whitelist fija.
+    """
+    _resolve_tz(tz)  # valida (422 si inválida); calls no bucketea por día → no se usa más
+    params: dict[str, Any] = {"uid": user_id, "limit": limit, "offset": offset}
+    where = _window(since, until, params)
+
+    filters: list[str] = []
+    _multi_filter("status", "status", status, status_mode, filters, params)
+    _multi_filter("module", "module", module, module_mode, filters, params)
+    _multi_filter("model", "model", model, model_mode, filters, params)
+    _multi_filter("source_name", "source", source, source_mode, filters, params)
+    if q:
+        params["q"] = f"%{q}%"
+        filters.append(
+            "(CAST(inbox_id AS TEXT) ILIKE :q OR request_id ILIKE :q "
+            "OR model ILIKE :q OR purpose ILIKE :q)"
+        )
+    filter_sql = (" WHERE " + " AND ".join(filters)) if filters else ""
+
+    col = _SORT_COLS[sort]
+    direction = "ASC" if dir == "asc" else "DESC"
+
+    sql = f"""
+        WITH c AS (
+            SELECT lc.id, lc.created_at, lc.purpose, {_MODULE_CASE} AS module, lc.model,
+                   lc.prompt_tokens, lc.completion_tokens, lc.cache_hit_tokens, lc.cost_usd,
+                   lc.latency_ms, lc.status, lc.error_message, lc.inbox_id, lc.source_id,
+                   lc.request_id, lc.metadata,
+                   {_SOURCE_LABEL} AS source_name
+            FROM llm_calls lc
+            LEFT JOIN sources s ON s.id = lc.source_id
+            LEFT JOIN accounts a ON a.id = s.account_id
+            WHERE {where}
+        )
+        SELECT id, created_at, purpose, module, model, prompt_tokens, completion_tokens,
+               cache_hit_tokens, cost_usd, latency_ms, status, error_message, inbox_id,
+               source_id, source_name, metadata, COUNT(*) OVER() AS total
+        FROM c{filter_sql}
+        ORDER BY {col} {direction}, id {direction}
+        LIMIT :limit OFFSET :offset
+    """
+    with connection() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+
+    total = int(rows[0]["total"]) if rows else 0
+    items = [
+        {
+            "id": r["id"],
+            "created_at": r["created_at"],
+            "purpose": r["purpose"],
+            "module": r["module"],
+            "model": r["model"],
+            "prompt_tokens": int(r["prompt_tokens"]),
+            "completion_tokens": int(r["completion_tokens"]),
+            "cache_hit_tokens": int(r["cache_hit_tokens"]),
+            "cost_usd": float(r["cost_usd"]),
+            "latency_ms": int(r["latency_ms"]),
+            "status": r["status"],
+            "error_message": r["error_message"],
+            "inbox_id": r["inbox_id"],
+            "source_id": r["source_id"],
+            "source_name": r["source_name"],
+            "metadata": r["metadata"],
+        }
+        for r in rows
+    ]
+    return {"items": items, "total": total}
+
+
+# ---- Apify (tabla apify_runs): gasto real de scraping social ------------------------------------
+
+#: La fuente puede haberse borrado (FK ON DELETE SET NULL): el gasto se conserva y se etiqueta.
+_APIFY_SOURCE_LABEL = (
+    "COALESCE(a.alias, s.config->>'account_email', a.metadata->>'email', "
+    "s.name, '(fuente borrada)')"
+)
+
+_APIFY_SORT_COLS = {
+    "created_at": "created_at",
+    "cost_usd": "cost_usd",
+    "items_scraped": "items_scraped",
+}
+
+
+def _apify_window(since: datetime | None, until: datetime | None, params: dict[str, Any]) -> str:
+    """WHERE de ventana sobre `apify_runs ar`. Agrega :since/:until a `params`."""
+    clauses = ["ar.user_id = :uid"]
+    if since is not None:
+        clauses.append("ar.created_at >= :since")
+        params["since"] = since
+    if until is not None:
+        clauses.append("ar.created_at < :until")
+        params["until"] = until
+    return " AND ".join(clauses)
+
+
+@router.get("/apify/rollup", response_model=ApifyRollup)
+async def apify_rollup(
+    user_id: UserID,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    tz: str | None = None,
+) -> dict[str, Any]:
+    """Agregaciones del gasto Apify del rango [`since`, `until`) para la vista /metricas.
+
+    Espejo del rollup LLM: KPIs + por fuente + por cuenta seguida + por plataforma + serie
+    diaria (bucket en la TZ del cliente). El costo es el que reporta Apify por run
+    (`usageTotalUsd`); los runs con costo aún no asentado suman 0 acá pero se ven en la
+    auditoría con cost NULL.
+    """
+    params: dict[str, Any] = {"uid": user_id, "tz": _resolve_tz(tz)}
+    where = _apify_window(since, until, params)
+
+    with connection() as conn:
+        krow = (
+            conn.execute(
+                text(f"""
+                SELECT
+                    COUNT(*) AS runs,
+                    COALESCE(SUM(ar.cost_usd), 0) AS cost_usd,
+                    COALESCE(SUM(ar.items_scraped), 0) AS items_scraped,
+                    COALESCE(SUM(ar.items_kept), 0) AS items_kept,
+                    COUNT(*) FILTER (WHERE ar.status <> 'ok') AS errors,
+                    COUNT(DISTINCT (ar.platform, ar.account)) AS accounts
+                FROM apify_runs ar
+                WHERE {where}
+            """),
+                params,
+            )
+            .mappings()
+            .one()
+        )
+
+        prev_cost: float | None = None
+        prev_runs: int | None = None
+        if since is not None:
+            until_eff = until if until is not None else datetime.now(UTC)
+            span = until_eff - since
+            prow = (
+                conn.execute(
+                    text(
+                        "SELECT COALESCE(SUM(cost_usd), 0) AS cost, COUNT(*) AS runs "
+                        "FROM apify_runs "
+                        "WHERE user_id = :uid AND created_at >= :ps AND created_at < :pe"
+                    ),
+                    {"uid": user_id, "ps": since - span, "pe": since},
+                )
+                .mappings()
+                .one()
+            )
+            prev_cost = float(prow["cost"])
+            prev_runs = int(prow["runs"])
+
+        by_source = (
+            conn.execute(
+                text(f"""
+                SELECT ar.source_id,
+                       {_APIFY_SOURCE_LABEL} AS source_name,
+                       COUNT(*) AS runs,
+                       COALESCE(SUM(ar.items_scraped), 0) AS items_scraped,
+                       COALESCE(SUM(ar.cost_usd), 0) AS cost_usd
+                FROM apify_runs ar
+                LEFT JOIN sources s ON s.id = ar.source_id
+                LEFT JOIN accounts a ON a.id = s.account_id
+                WHERE {where}
+                GROUP BY ar.source_id, source_name
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        by_account = (
+            conn.execute(
+                text(f"""
+                SELECT ar.platform, ar.account,
+                       COUNT(*) AS runs,
+                       COALESCE(SUM(ar.items_scraped), 0) AS items_scraped,
+                       COALESCE(SUM(ar.cost_usd), 0) AS cost_usd
+                FROM apify_runs ar
+                WHERE {where}
+                GROUP BY ar.platform, ar.account
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        by_platform = (
+            conn.execute(
+                text(f"""
+                SELECT ar.platform,
+                       COUNT(*) AS runs,
+                       COALESCE(SUM(ar.items_scraped), 0) AS items_scraped,
+                       COALESCE(SUM(ar.cost_usd), 0) AS cost_usd
+                FROM apify_runs ar
+                WHERE {where}
+                GROUP BY ar.platform
+                ORDER BY cost_usd DESC
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+        daily_rows = (
+            conn.execute(
+                text(f"""
+                SELECT (ar.created_at AT TIME ZONE :tz)::date AS day,
+                       ar.platform,
+                       COALESCE(SUM(ar.cost_usd), 0) AS cost_usd
+                FROM apify_runs ar
+                WHERE {where}
+                GROUP BY day, ar.platform
+                ORDER BY day
+            """),
+                params,
+            )
+            .mappings()
+            .all()
+        )
+
+    daily_map: dict[str, dict[str, Any]] = {}
+    for r in daily_rows:
+        day = r["day"].isoformat()
+        entry = daily_map.setdefault(day, {"day": day, "total": 0.0, "by_platform": {}})
+        cost = float(r["cost_usd"])
+        entry["by_platform"][r["platform"]] = cost
+        entry["total"] += cost
+    daily = [daily_map[d] for d in sorted(daily_map)]
+
+    runs = int(krow["runs"])
+    cost = float(krow["cost_usd"])
+    _log.info("metrics.apify.rollup", user_id=user_id, runs=runs, cost_usd=cost)
+    return {
+        "kpis": {
+            "cost_usd": cost,
+            "runs": runs,
+            "items_scraped": int(krow["items_scraped"]),
+            "items_kept": int(krow["items_kept"]),
+            "errors": int(krow["errors"]),
+            "accounts": int(krow["accounts"]),
+            "prev_cost_usd": prev_cost,
+            "prev_runs": prev_runs,
+        },
+        "by_source": [
+            {
+                "source_id": r["source_id"],
+                "source_name": r["source_name"],
+                "runs": int(r["runs"]),
+                "items_scraped": int(r["items_scraped"]),
+                "cost_usd": float(r["cost_usd"]),
+            }
+            for r in by_source
+        ],
+        "by_account": [
+            {
+                "platform": r["platform"],
+                "account": r["account"],
+                "runs": int(r["runs"]),
+                "items_scraped": int(r["items_scraped"]),
+                "cost_usd": float(r["cost_usd"]),
+            }
+            for r in by_account
+        ],
+        "by_platform": [
+            {
+                "platform": r["platform"],
+                "runs": int(r["runs"]),
+                "items_scraped": int(r["items_scraped"]),
+                "cost_usd": float(r["cost_usd"]),
+            }
+            for r in by_platform
+        ],
+        "daily": daily,
+        "platforms": [r["platform"] for r in by_platform],
+    }
+
+
+@router.get("/apify/runs", response_model=ApifyRunList)
+async def apify_runs_audit(
+    user_id: UserID,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    platform: Annotated[list[str] | None, Query()] = None,
+    platform_mode: FilterMode = "include",
+    account: Annotated[list[str] | None, Query()] = None,
+    account_mode: FilterMode = "include",
+    status: Annotated[list[str] | None, Query()] = None,
+    status_mode: FilterMode = "include",
+    q: str | None = None,
+    sort: Literal["created_at", "cost_usd", "items_scraped"] = "created_at",
+    dir: Literal["asc", "desc"] = "desc",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    """Auditoría de `apify_runs`: corridas de actor crudas, filtrables/ordenables/paginadas.
+
+    `q` busca substring en cuenta / actor / id de run de Apify. Mismo contrato de filtros
+    incluir/excluir y paginación que `/metrics/llm/calls`.
+    """
+    params: dict[str, Any] = {"uid": user_id, "limit": limit, "offset": offset}
+    where = _apify_window(since, until, params)
+
+    filters: list[str] = []
+    _multi_filter("platform", "platform", platform, platform_mode, filters, params)
+    _multi_filter("account", "account", account, account_mode, filters, params)
+    _multi_filter("status", "status", status, status_mode, filters, params)
+    if q:
+        params["q"] = f"%{q}%"
+        filters.append("(account ILIKE :q OR actor_id ILIKE :q OR apify_run_id ILIKE :q)")
+    filter_sql = (" WHERE " + " AND ".join(filters)) if filters else ""
+
+    col = _APIFY_SORT_COLS[sort]
+    direction = "ASC" if dir == "asc" else "DESC"
+
+    sql = f"""
+        WITH c AS (
+            SELECT ar.id, ar.created_at, ar.platform, ar.account, ar.actor_id, ar.apify_run_id,
+                   ar.status, ar.items_scraped, ar.items_kept, ar.cost_usd, ar.charged_events,
+                   ar.source_id, ar.ingestion_run_id, ar.started_at, ar.finished_at,
+                   {_APIFY_SOURCE_LABEL} AS source_name
+            FROM apify_runs ar
+            LEFT JOIN sources s ON s.id = ar.source_id
+            LEFT JOIN accounts a ON a.id = s.account_id
+            WHERE {where}
+        )
+        SELECT *, COUNT(*) OVER() AS total
+        FROM c{filter_sql}
+        ORDER BY {col} {direction}, id {direction}
+        LIMIT :limit OFFSET :offset
+    """
+    with connection() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+
+    total = int(rows[0]["total"]) if rows else 0
+    items = [
+        {
+            "id": r["id"],
+            "created_at": r["created_at"],
+            "platform": r["platform"],
+            "account": r["account"],
+            "actor_id": r["actor_id"],
+            "apify_run_id": r["apify_run_id"],
+            "status": r["status"],
+            "items_scraped": int(r["items_scraped"]),
+            "items_kept": int(r["items_kept"]),
+            "cost_usd": float(r["cost_usd"]) if r["cost_usd"] is not None else None,
+            "charged_events": r["charged_events"],
+            "source_id": r["source_id"],
+            "source_name": r["source_name"],
+            "ingestion_run_id": (
+                str(r["ingestion_run_id"]) if r["ingestion_run_id"] is not None else None
+            ),
+            "started_at": r["started_at"],
+            "finished_at": r["finished_at"],
+        }
+        for r in rows
+    ]
+    return {"items": items, "total": total}
+
+
+@router.get("/llm/calls/{call_id}", response_model=LlmCallDetail)
+async def llm_call_detail(call_id: int, user_id: UserID) -> dict[str, Any]:
+    """Detalle de UNA llamada `llm_calls` (auditoría por-llamada): igual que una fila del list
+    endpoint MÁS `response_text` (el texto crudo que devolvió el LLM). 404 si no existe / no es del
+    usuario."""
+    sql = f"""
+        SELECT lc.id, lc.created_at, lc.purpose, {_MODULE_CASE} AS module, lc.model,
+               lc.prompt_tokens, lc.completion_tokens, lc.cache_hit_tokens, lc.cost_usd,
+               lc.latency_ms, lc.status, lc.error_message, lc.inbox_id, lc.source_id,
+               {_SOURCE_LABEL} AS source_name, lc.metadata, lc.response_text
+        FROM llm_calls lc
+        LEFT JOIN sources s ON s.id = lc.source_id
+        LEFT JOIN accounts a ON a.id = s.account_id
+        WHERE lc.id = :id AND lc.user_id = :uid
+    """
+    with connection() as conn:
+        row = conn.execute(text(sql), {"id": call_id, "uid": user_id}).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="llm_call not found")
+    _log.info("metrics.llm.call_detail", user_id=user_id, call_id=call_id)
+    return {
+        "id": row["id"],
+        "created_at": row["created_at"],
+        "purpose": row["purpose"],
+        "module": row["module"],
+        "model": row["model"],
+        "prompt_tokens": int(row["prompt_tokens"]),
+        "completion_tokens": int(row["completion_tokens"]),
+        "cache_hit_tokens": int(row["cache_hit_tokens"]),
+        "cost_usd": float(row["cost_usd"]),
+        "latency_ms": int(row["latency_ms"]),
+        "status": row["status"],
+        "error_message": row["error_message"],
+        "inbox_id": row["inbox_id"],
+        "source_id": row["source_id"],
+        "source_name": row["source_name"],
+        "metadata": row["metadata"],
+        "response_text": row["response_text"],
+    }

@@ -1,0 +1,390 @@
+"""Organizador de PERTENENCIA («sub») de identidades con un LLMClient FALSO (sin red).
+
+Cubre: parseo ultra-defensivo (`_parse_links`); aplicación de links (`_apply_links`) — por id, por
+nombre nuevo (crea org `source='extraction'`, idempotente por `org_core`), reuso de padre existente,
+salto de self-parent y de ciclos; el helper `would_create_cycle`; el rename `cleaned_name` OFF/ON; y
+el worker `run_organize` end-to-end (aplica, cuenta, `LLMQuotaError` propaga)."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from decimal import Decimal
+from typing import Any
+
+import pytest
+from sqlalchemy import text
+
+from memex.db import connection
+from memex.llm import ChatMessage, LLMResult, LLMUsage, ResponseFormat
+from memex.llm.client import LLMQuotaError
+from memex.modules.identidades.hierarchy import (
+    HierarchyLink,
+    _apply_links,
+    _load_orgs,
+    _parse_links,
+    _serialize_orgs,
+    resolve_parent_name,
+    run_organize,
+    would_create_cycle,
+)
+
+
+class FakeLLM:
+    """Devuelve siempre el mismo `content`; cuenta llamadas. Cumple el Protocol LLMClient."""
+
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.calls = 0
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        response_format: ResponseFormat = "text",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResult:
+        self.calls += 1
+        return LLMResult(
+            content=self.content,
+            model="fake",
+            usage=LLMUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            cost_usd=Decimal("0"),
+            latency_ms=1,
+            finish_reason="stop",
+        )
+
+
+class QuotaLLM:
+    """LLMClient falso que agota cuota en cada llamada."""
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        model: str | None = None,
+        response_format: ResponseFormat = "text",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResult:
+        raise LLMQuotaError(402, "sin saldo")
+
+
+def _mk_org(conn: Any, name: str) -> int:
+    return int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'organizacion',:n) RETURNING id"
+            ),
+            {"n": name},
+        ).scalar_one()
+    )
+
+
+def _parent_of(conn: Any, identity_id: int) -> int | None:
+    row = conn.execute(
+        text("SELECT parent_identity_id FROM mod_identidades WHERE id = :i"), {"i": identity_id}
+    ).scalar()
+    return int(row) if row is not None else None
+
+
+# ----- _parse_links (puro) ------------------------------------------------------- #
+
+
+def test_parse_links_valid() -> None:
+    links = _parse_links('{"links": [{"child_id": 1, "parent_id": 2}]}', {1, 2})
+    assert links == [HierarchyLink(child_id=1, parent_id=2, parent_name=None, cleaned_name=None)]
+
+
+def test_parse_links_parent_name_and_cleaned() -> None:
+    links = _parse_links(
+        '{"links": [{"child_id": 1, "parent_name": "Acme", "cleaned_name": "Sub"}]}', {1}
+    )
+    assert links == [
+        HierarchyLink(child_id=1, parent_id=None, parent_name="Acme", cleaned_name="Sub")
+    ]
+
+
+def test_parse_links_garbage_is_empty() -> None:
+    assert _parse_links("no soy json", {1, 2}) == []
+    assert _parse_links('{"otra": 1}', {1, 2}) == []
+
+
+def test_parse_links_drops_unknown_child_and_parent() -> None:
+    # child 9 fuera de valid_ids → descartado; parent 9 inexistente + sin nombre → XOR falla
+    assert _parse_links('{"links": [{"child_id": 9, "parent_id": 1}]}', {1, 2}) == []
+    assert _parse_links('{"links": [{"child_id": 1, "parent_id": 9}]}', {1, 2}) == []
+
+
+def test_parse_links_xor_violations() -> None:
+    # ni padre ni nombre
+    assert _parse_links('{"links": [{"child_id": 1}]}', {1, 2}) == []
+    # ambos a la vez
+    both = '{"links": [{"child_id": 1, "parent_id": 2, "parent_name": "X"}]}'
+    assert _parse_links(both, {1, 2}) == []
+
+
+def test_parse_links_dedup_child_first_wins() -> None:
+    raw = '{"links": [{"child_id": 1, "parent_id": 2}, {"child_id": 1, "parent_id": 3}]}'
+    links = _parse_links(raw, {1, 2, 3})
+    assert len(links) == 1 and links[0].parent_id == 2
+
+
+# ----- would_create_cycle (DB) --------------------------------------------------- #
+
+
+def test_would_create_cycle(conn: Any) -> None:
+    a = _mk_org(conn, "A")
+    b = _mk_org(conn, "B")
+    conn.execute(
+        text("UPDATE mod_identidades SET parent_identity_id = :a WHERE id = :b"), {"a": a, "b": b}
+    )
+    # B ya cuelga de A; colgar A de B cerraría el ciclo.
+    assert would_create_cycle(conn, 1, a, b) is True
+    # colgar B de A ya es el estado actual (sin ciclo nuevo).
+    assert would_create_cycle(conn, 1, b, a) is False
+    # self-parent siempre es ciclo.
+    assert would_create_cycle(conn, 1, a, a) is True
+
+
+# ----- _apply_links (DB) --------------------------------------------------------- #
+
+
+def test_apply_links_by_id(conn: Any) -> None:
+    child = _mk_org(conn, "Steam")
+    parent = _mk_org(conn, "Valve Corporation")
+    linked, created, cleaned, skipped = _apply_links(
+        conn, 1, [HierarchyLink(child, parent, None, None)], apply_cleanup=False
+    )
+    assert (linked, created, cleaned, skipped) == (1, 0, 0, 0)
+    assert _parent_of(conn, child) == parent
+
+
+def test_apply_links_parent_by_unknown_name_no_crea_org(conn: Any) -> None:
+    """Un padre nombrado que no resuelve a una entrada existente ya NO crea una org: queda como
+    reclamo por nombre en el libro (sin padre), para que el curador o el dueño decidan. Antes acá
+    nacían duplicadas («Blockchain Acceleration Foundation» junto a «FIB»)."""
+    c1 = _mk_org(conn, "Producto A")
+    c2 = _mk_org(conn, "Producto B")
+    linked, created, _, skipped = _apply_links(
+        conn,
+        1,
+        [
+            HierarchyLink(c1, None, "Empresa Matriz", None),
+            HierarchyLink(c2, None, "Empresa Matriz", None),
+        ],
+        apply_cleanup=False,
+    )
+    assert (linked, created, skipped) == (0, 0, 2)
+    assert _parent_of(conn, c1) is None and _parent_of(conn, c2) is None
+    total = conn.execute(
+        text("SELECT count(*) FROM mod_identidades WHERE user_id = 1")
+    ).scalar_one()
+    assert total == 2  # no apareció 'Empresa Matriz'
+    unresolved = conn.execute(
+        text(
+            "SELECT source_id, target_name FROM mod_identidades_link_claims "
+            "WHERE user_id = 1 AND target_id IS NULL ORDER BY source_id"
+        )
+    ).all()
+    assert [tuple(r) for r in unresolved] == [(c1, "Empresa Matriz"), (c2, "Empresa Matriz")]
+
+
+def test_resolve_reuses_existing_parent_by_core(conn: Any) -> None:
+    existing = _mk_org(conn, "Valve Corporation")
+    assert resolve_parent_name(conn, 1, "Valve") == existing  # org_core('Valve')='valve'
+    assert resolve_parent_name(conn, 1, "Empresa que no existe") is None
+
+
+def test_apply_links_by_name_resuelve_existente_y_registra_reclamo(conn: Any) -> None:
+    child = _mk_org(conn, "Steam")
+    parent = _mk_org(conn, "Valve Corporation")
+    linked, created, _, skipped = _apply_links(
+        conn, 1, [HierarchyLink(child, None, "Valve", None)], apply_cleanup=False
+    )
+    assert (linked, created, skipped) == (1, 0, 0)
+    assert _parent_of(conn, child) == parent
+    row = conn.execute(
+        text(
+            "SELECT target_id, target_name, method, confidence FROM mod_identidades_link_claims "
+            "WHERE user_id = 1 AND source_id = :c"
+        ),
+        {"c": child},
+    ).one()
+    assert (row[0], row[1], row[2], float(row[3])) == (parent, "Valve", "organizer", 0.9)
+    # Re-aplicar el mismo link: idempotente (mismo reclamo, padre ya estaba → nada cambia).
+    linked2, _, _, skipped2 = _apply_links(
+        conn, 1, [HierarchyLink(child, None, "Valve", None)], apply_cleanup=False
+    )
+    assert (linked2, skipped2) == (0, 1)
+
+
+# ----- productos colgables (producto→empresa) ------------------------------------ #
+
+
+def _mk_producto(conn: Any, name: str) -> int:
+    return int(
+        conn.execute(
+            text(
+                "INSERT INTO mod_identidades (user_id, kind, display_name) "
+                "VALUES (1,'producto',:n) RETURNING id"
+            ),
+            {"n": name},
+        ).scalar_one()
+    )
+
+
+def test_load_orgs_incluye_productos(conn: Any) -> None:
+    org = _mk_org(conn, "Valve Corporation")
+    prod = _mk_producto(conn, "Steam")
+    entries = _load_orgs(conn, 1, 500)
+    by_id = {o.id: o for o in entries}
+    assert set(by_id) == {org, prod}
+    assert by_id[prod].kind == "producto"
+    # el producto va marcado en la lista que ve el LLM; la org no
+    serialized = _serialize_orgs(entries)
+    assert f"{prod}: Steam [producto]" in serialized
+    assert f"{org}: Valve Corporation\n" in serialized + "\n"
+
+
+def test_apply_links_producto_cuelga_de_org(conn: Any) -> None:
+    child = _mk_producto(conn, "Steam")
+    parent = _mk_org(conn, "Valve Corporation")
+    linked, created, _, skipped = _apply_links(
+        conn, 1, [HierarchyLink(child, parent, None, None)], apply_cleanup=False
+    )
+    assert (linked, created, skipped) == (1, 0, 0)
+    assert _parent_of(conn, child) == parent
+
+
+def test_resolve_parent_reusa_producto_existente(conn: Any) -> None:
+    # si el padre nombrado ya vive como PRODUCTO, se reusa — no se duplica como org
+    existing = _mk_producto(conn, "Battle.net")
+    assert resolve_parent_name(conn, 1, "Battle.net") == existing
+    assert (
+        conn.execute(text("SELECT count(*) FROM mod_identidades WHERE user_id = 1")).scalar_one()
+        == 1
+    )
+
+
+def test_apply_links_skips_cycle_and_self(conn: Any) -> None:
+    a = _mk_org(conn, "Uno")
+    b = _mk_org(conn, "Dos")
+    # A→B y B→A en el mismo lote: el primero aplica, el segundo cerraría ciclo → se salta.
+    linked, _, _, skipped = _apply_links(
+        conn,
+        1,
+        [HierarchyLink(a, b, None, None), HierarchyLink(b, a, None, None)],
+        apply_cleanup=False,
+    )
+    assert (linked, skipped) == (1, 1)
+    # exactamente uno quedó con padre (sin ciclo en la DB).
+    parents = [_parent_of(conn, a), _parent_of(conn, b)]
+    assert parents.count(None) == 1
+
+
+def test_apply_links_cleanup_off_then_on(conn: Any) -> None:
+    parent = _mk_org(conn, "Universidad del Norte")
+    child = _mk_org(conn, "Ingeniería Mecánica - Universidad del Norte")
+    link = HierarchyLink(child, parent, None, "Ingeniería Mecánica")
+    # OFF (default): no renombra.
+    _, _, cleaned_off, _ = _apply_links(conn, 1, [link], apply_cleanup=False)
+    assert cleaned_off == 0
+    name = conn.execute(
+        text("SELECT display_name FROM mod_identidades WHERE id = :c"), {"c": child}
+    ).scalar_one()
+    assert name == "Ingeniería Mecánica - Universidad del Norte"
+    # ON: renombra al sub y deja el original como alias.
+    _, _, cleaned_on, _ = _apply_links(conn, 1, [link], apply_cleanup=True)
+    assert cleaned_on == 1
+    row = conn.execute(
+        text("SELECT display_name, aliases FROM mod_identidades WHERE id = :c"), {"c": child}
+    ).first()
+    assert row is not None
+    assert row[0] == "Ingeniería Mecánica"
+    assert "Ingeniería Mecánica - Universidad del Norte" in row[1]
+
+
+def _pin(conn: Any, child: int, parent: int | None, source: str) -> None:
+    conn.execute(
+        text(
+            "UPDATE mod_identidades SET parent_identity_id = :p, "
+            "metadata = jsonb_set(metadata, '{parent_source}', to_jsonb(CAST(:s AS TEXT))) "
+            "WHERE id = :c"
+        ),
+        {"p": parent, "s": source, "c": child},
+    )
+
+
+def test_apply_links_skips_pinned_children(conn: Any) -> None:
+    # el padre decidido por el agente NO se pisa con la opinión del LLM
+    child = _mk_org(conn, "Programa X")
+    agent_parent = _mk_org(conn, "Universidad Y")
+    llm_parent = _mk_org(conn, "Otra Org")
+    _pin(conn, child, agent_parent, "agent")
+    linked, _, _, skipped = _apply_links(
+        conn, 1, [HierarchyLink(child, llm_parent, None, None)], apply_cleanup=False
+    )
+    assert (linked, skipped) == (0, 1)
+    assert _parent_of(conn, child) == agent_parent
+
+
+def test_apply_links_pinned_clear_no_relink_ni_padre_nuevo(conn: Any) -> None:
+    # un padre QUITADO a mano (parent NULL + parent_source manual) tampoco se re-linkea,
+    # y el padre-por-nombre del link saltado NO se crea (sin orgs huérfanas)
+    child = _mk_org(conn, "Suelta")
+    _pin(conn, child, None, "manual")
+    linked, created, _, skipped = _apply_links(
+        conn, 1, [HierarchyLink(child, None, "Nueva Matriz", None)], apply_cleanup=False
+    )
+    assert (linked, created, skipped) == (0, 0, 1)
+    assert _parent_of(conn, child) is None
+    total = conn.execute(
+        text("SELECT count(*) FROM mod_identidades WHERE user_id = 1")
+    ).scalar_one()
+    assert total == 1  # no apareció 'Nueva Matriz'
+
+
+# ----- run_organize (worker, LLM falso) ------------------------------------------ #
+
+
+@pytest.mark.asyncio
+async def test_run_organize_links_by_id() -> None:
+    with connection() as c:
+        steam = _mk_org(c, "Steam")
+        valve = _mk_org(c, "Valve Corporation")
+    fake = FakeLLM(f'{{"links": [{{"child_id": {steam}, "parent_id": {valve}}}]}}')
+    stats = await run_organize(1, client=fake)
+    assert (stats.orgs, stats.linked, stats.created) == (2, 1, 0)
+    with connection() as c:
+        assert _parent_of(c, steam) == valve
+
+
+@pytest.mark.asyncio
+async def test_run_organize_producto_end_to_end() -> None:
+    # e2e con LLM falso: un producto cuelga de su empresa (Steam→Valve, ahora con kinds reales)
+    with connection() as c:
+        steam = _mk_producto(c, "Steam")
+        valve = _mk_org(c, "Valve Corporation")
+    fake = FakeLLM(f'{{"links": [{{"child_id": {steam}, "parent_id": {valve}}}]}}')
+    stats = await run_organize(1, client=fake)
+    assert (stats.orgs, stats.linked, stats.created) == (2, 1, 0)
+    with connection() as c:
+        assert _parent_of(c, steam) == valve
+
+
+@pytest.mark.asyncio
+async def test_run_organize_empty_no_call() -> None:
+    fake = FakeLLM('{"links": []}')
+    stats = await run_organize(1, client=fake)
+    assert stats.orgs == 0 and fake.calls == 0  # sin orgs ni siquiera llama al LLM
+
+
+@pytest.mark.asyncio
+async def test_run_organize_quota_propagates() -> None:
+    with connection() as c:
+        _mk_org(c, "Una Org")
+    with pytest.raises(LLMQuotaError):
+        await run_organize(1, client=QuotaLLM())

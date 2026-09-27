@@ -1,0 +1,220 @@
+"""Gateway — surface única para clientes externos (memex_local_client + futuros).
+
+Tres endpoints bajo /gateway/plugins/{plugin_name}/:
+
+- POST  /state   — get-or-create del source asociado al plugin; devuelve
+                   `{source_id, cursor, created}`. Es la operación que el
+                   cliente externo hace primero para conocer su estado.
+- PUT   /cursor  — actualiza el checkpoint persistido del plugin.
+- POST  /ingest  — persiste un batch de records. El `source_id` viene del
+                   URL, no del payload — los records pasan SourceRecord-shaped
+                   sin esa columna.
+
+Todas las operaciones loggean eventos estructurados (`gateway.state.fetched`,
+`gateway.cursor.updated`, `gateway.ingest.received`, `gateway.ingest.committed`)
+con `plugin`, `user_id`, `source_id` y counts para que el audit log sirva
+para correlacionar con lo que el cliente externo cree haber enviado.
+
+Restricción: `plugin_name` debe coincidir con `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`
+— validado a nivel de router para impedir creación accidental por path
+malformado.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import Connection, text
+
+from memex.api.auth import current_user_id
+from memex.api.ingest_service import ingest_records
+from memex.api.schemas import (
+    GatewayCursorRequest,
+    GatewayIngestStats,
+    GatewayPluginIngestRequest,
+    GatewayStateRequest,
+    GatewayStateResponse,
+    IngestRequest,
+)
+from memex.core import checkpoint
+from memex.core.observability import ingestion_run
+from memex.db import connection
+from memex.ingestors.runner import RunStats
+from memex.logging import get_logger
+from memex.sources import kind_types
+
+router = APIRouter(prefix="/gateway", tags=["gateway"])
+
+UserID = Annotated[int, Depends(current_user_id)]
+
+_log = get_logger("memex.gateway")
+
+_PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def _validate_plugin_name(name: str) -> None:
+    if not _PLUGIN_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=400,
+            detail="plugin_name must match ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+        )
+
+
+def _ensure_source(
+    conn: Connection, *, user_id: int, name: str, source_type: str
+) -> tuple[int, bool]:
+    """Get-or-create por (user_id, name). Devuelve (source_id, fue_creado)."""
+    existing = conn.execute(
+        text("SELECT id, type FROM sources WHERE user_id = :uid AND name = :name"),
+        {"uid": user_id, "name": name},
+    ).first()
+    if existing is not None:
+        return int(existing[0]), False
+    new_id = conn.execute(
+        text(
+            "INSERT INTO sources (user_id, name, type, config) "
+            "VALUES (:uid, :name, :type, '{}'::jsonb) RETURNING id"
+        ),
+        {"uid": user_id, "name": name, "type": source_type},
+    ).scalar()
+    assert new_id is not None
+    return int(new_id), True
+
+
+def _resolve_source_id(conn: Connection, user_id: int, name: str) -> int:
+    sid = conn.execute(
+        text("SELECT id FROM sources WHERE user_id = :uid AND name = :name"),
+        {"uid": user_id, "name": name},
+    ).scalar()
+    if sid is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"plugin {name!r} not registered; call POST /gateway/plugins/{name}/state first",
+        )
+    return int(sid)
+
+
+@router.post("/plugins/{plugin_name}/state", response_model=GatewayStateResponse)
+async def plugin_state(
+    plugin_name: str,
+    body: GatewayStateRequest,
+    user_id: UserID,
+) -> dict[str, Any]:
+    _validate_plugin_name(plugin_name)
+    # Validar el source_type contra los tipos con SourceKind registrado: un tipo desconocido crearía
+    # una source "zombie" que el work-set de extracción (enumera por kind_types) nunca procesaría.
+    if body.source_type not in kind_types():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"source_type {body.source_type!r} desconocido (conocidos: {sorted(kind_types())})"
+            ),
+        )
+    with connection() as conn:
+        source_id, created = _ensure_source(
+            conn, user_id=user_id, name=plugin_name, source_type=body.source_type
+        )
+        # El cliente local reporta su email; lo guardamos en config.account_email para rotular la
+        # fuente (las del gateway no tienen `account` con vault).
+        if body.account_email:
+            conn.execute(
+                text(
+                    "UPDATE sources SET config = config || "
+                    "jsonb_build_object('account_email', CAST(:em AS TEXT)) WHERE id = :sid"
+                ),
+                {"em": body.account_email, "sid": source_id},
+            )
+        cursor = checkpoint.get_cursor(conn, source_id)
+    _log.info(
+        "gateway.state.fetched",
+        plugin=plugin_name,
+        user_id=user_id,
+        source_id=source_id,
+        action="created" if created else "existed",
+        source_type=body.source_type,
+        has_cursor=cursor is not None,
+    )
+    return {"source_id": source_id, "cursor": cursor, "created": created}
+
+
+@router.put("/plugins/{plugin_name}/cursor", response_model=GatewayStateResponse)
+async def plugin_cursor(
+    plugin_name: str,
+    body: GatewayCursorRequest,
+    user_id: UserID,
+) -> dict[str, Any]:
+    _validate_plugin_name(plugin_name)
+    with connection() as conn:
+        source_id = _resolve_source_id(conn, user_id, plugin_name)
+        checkpoint.save_cursor(conn, source_id, body.cursor)
+    _log.info(
+        "gateway.cursor.updated",
+        plugin=plugin_name,
+        user_id=user_id,
+        source_id=source_id,
+    )
+    return {"source_id": source_id, "cursor": body.cursor, "created": False}
+
+
+@router.post("/plugins/{plugin_name}/ingest", response_model=GatewayIngestStats)
+async def plugin_ingest(
+    plugin_name: str,
+    body: GatewayPluginIngestRequest,
+    user_id: UserID,
+) -> dict[str, Any]:
+    _validate_plugin_name(plugin_name)
+    with connection() as conn:
+        source_id = _resolve_source_id(conn, user_id, plugin_name)
+    _log.info(
+        "gateway.ingest.received",
+        plugin=plugin_name,
+        user_id=user_id,
+        source_id=source_id,
+        count=len(body.records),
+    )
+    # Cada POST del plugin es una CORRIDA de ingesta de su fuente (`ingestion_runs`,
+    # trigger='gateway'): así /stats/pipeline y la vista de carga ven a Outlook/Telegram-local
+    # igual que a Gmail (antes el gateway insertaba sin dejar corrida y la fuente parecía muerta).
+    with ingestion_run(user_id=user_id, source_id=source_id, trigger="gateway") as run:
+        try:
+            with connection() as conn:
+                # Mismo borde que /ingest: filtros → decode/persist de media → insert +
+                # contadores. Reusar `ingest_records` evita la divergencia previa (el gateway
+                # descartaba la media en silencio).
+                reqs = [
+                    IngestRequest(
+                        source_id=source_id,
+                        external_id=r.external_id,
+                        occurred_at=r.occurred_at,
+                        payload=r.payload,
+                        dedupe_keys=r.dedupe_keys,
+                        media=r.media,
+                    )
+                    for r in body.records
+                ]
+                counts = ingest_records(conn, user_id, reqs)
+        except Exception as exc:
+            run.fail(exc)
+            raise
+        run.finalize(
+            RunStats(
+                posted=len(body.records),
+                inserted=int(counts["inserted"]),
+                duplicates=int(counts["duplicates"]),
+                errors=int(counts["errors"]),
+                filtered=int(counts["filtered"]),
+            )
+        )
+    _log.info(
+        "gateway.ingest.committed",
+        plugin=plugin_name,
+        user_id=user_id,
+        source_id=source_id,
+        inserted=counts["inserted"],
+        duplicates=counts["duplicates"],
+        errors=counts["errors"],
+        filtered=counts["filtered"],
+    )
+    return {"source_id": source_id, **counts}

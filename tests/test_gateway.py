@@ -1,0 +1,228 @@
+"""Tests del gateway — endpoints /gateway/plugins/{name}/state, /cursor, /ingest."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from sqlalchemy import text
+
+from memex.db import connection
+
+
+def _record(eid: str) -> dict[str, Any]:
+    return {
+        "external_id": eid,
+        "occurred_at": "2026-05-27T10:00:00Z",
+        "payload": {"hello": "world", "n": eid},
+        "dedupe_keys": [f"msgid:<{eid}@host>"],
+    }
+
+
+# ---------------- state ----------------
+
+
+def test_state_creates_source_when_missing(client: Any) -> None:
+    r = client.post("/gateway/plugins/outlook-test/state", json={"source_type": "outlook"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["created"] is True
+    assert body["cursor"] is None
+    assert isinstance(body["source_id"], int)
+
+
+def test_state_returns_existing_source_unchanged(client: Any) -> None:
+    first = client.post("/gateway/plugins/p1/state", json={"source_type": "imap"}).json()
+    second = client.post("/gateway/plugins/p1/state", json={"source_type": "imap"}).json()
+    assert second["source_id"] == first["source_id"]
+    assert second["created"] is False
+
+
+def test_state_rejects_malformed_plugin_name(client: Any) -> None:
+    r = client.post("/gateway/plugins/has spaces/state", json={"source_type": "imap"})
+    assert r.status_code in (400, 404)  # FastAPI puede rechazar el path antes
+    r = client.post("/gateway/plugins/-leading-dash/state", json={"source_type": "imap"})
+    assert r.status_code == 400
+
+
+def test_state_returns_existing_cursor(client: Any) -> None:
+    state = client.post("/gateway/plugins/p2/state", json={"source_type": "imap"}).json()
+    cursor = {"last_received_at": "2026-05-27T10:00:00+00:00"}
+    client.put("/gateway/plugins/p2/cursor", json={"cursor": cursor})
+    re_state = client.post("/gateway/plugins/p2/state", json={"source_type": "imap"}).json()
+    assert re_state["cursor"] == cursor
+    assert re_state["source_id"] == state["source_id"]
+
+
+# ---------------- cursor ----------------
+
+
+def test_cursor_put_unknown_plugin_is_404(client: Any) -> None:
+    r = client.put(
+        "/gateway/plugins/never-registered/cursor",
+        json={"cursor": {"x": 1}},
+    )
+    assert r.status_code == 404
+
+
+def test_cursor_roundtrip(client: Any) -> None:
+    client.post("/gateway/plugins/p3/state", json={"source_type": "imap"})
+    cur = {"last_received_at": "2026-01-01T00:00:00+00:00"}
+    r = client.put("/gateway/plugins/p3/cursor", json={"cursor": cur})
+    assert r.status_code == 200
+    assert r.json()["cursor"] == cur
+
+
+# ---------------- ingest ----------------
+
+
+def test_ingest_persists_and_counts(client: Any) -> None:
+    state = client.post("/gateway/plugins/p4/state", json={"source_type": "outlook"}).json()
+    sid = state["source_id"]
+    r = client.post(
+        "/gateway/plugins/p4/ingest",
+        json={"records": [_record("a"), _record("b"), _record("a")]},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"source_id": sid, "inserted": 2, "duplicates": 1, "errors": 0, "filtered": 0}
+
+    with connection() as c:
+        count = c.execute(
+            text("SELECT COUNT(*) FROM inbox WHERE source_id = :s"), {"s": sid}
+        ).scalar()
+    assert count == 2
+
+
+def test_ingest_unknown_plugin_is_404(client: Any) -> None:
+    r = client.post(
+        "/gateway/plugins/never-registered/ingest",
+        json={"records": [_record("x")]},
+    )
+    assert r.status_code == 404
+
+
+def test_ingest_empty_batch_ok(client: Any) -> None:
+    client.post("/gateway/plugins/p5/state", json={"source_type": "imap"})
+    r = client.post("/gateway/plugins/p5/ingest", json={"records": []})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["inserted"] == 0
+    assert body["duplicates"] == 0
+    assert body["errors"] == 0
+    assert body["filtered"] == 0
+
+
+def test_ingest_strips_source_id_field(client: Any) -> None:
+    """Si llega source_id en el record, debe ser ignorado — el gateway usa el del URL."""
+    client.post("/gateway/plugins/p6/state", json={"source_type": "imap"})
+    # Forzamos un source_id ajeno en cada record para verificar que NO termina en otra source.
+    poisoned = {**_record("p"), "source_id": 99999}
+    r = client.post("/gateway/plugins/p6/ingest", json={"records": [poisoned]})
+    assert r.status_code == 200
+    sid = r.json()["source_id"]
+    with connection() as c:
+        row = c.execute(text("SELECT source_id FROM inbox WHERE external_id = 'p'")).first()
+    assert row is not None
+    assert row[0] == sid
+
+
+def test_ingest_requires_auth_when_enforced(auth_client: Any) -> None:
+    # Sin token: 401 ya en /state.
+    r = auth_client.post("/gateway/plugins/auth-probe/state", json={"source_type": "imap"})
+    assert r.status_code == 401
+    # Con token correcto: 200.
+    r2 = auth_client.post(
+        "/gateway/plugins/auth-probe/state",
+        json={"source_type": "imap"},
+        headers={"Authorization": "Bearer secret-test"},
+    )
+    assert r2.status_code == 200
+
+
+def test_state_isolates_per_user(client: Any, seed_user2: int) -> None:
+    """Un plugin con el mismo nombre en otro user no debe ser visible."""
+    with connection() as c:
+        other_id = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (:u, 'shared', 'imap') RETURNING id"
+            ),
+            {"u": seed_user2},
+        ).scalar()
+    assert isinstance(other_id, int)
+    r = client.post("/gateway/plugins/shared/state", json={"source_type": "imap"})
+    assert r.status_code == 200
+    mine = r.json()
+    assert mine["source_id"] != other_id
+    assert mine["created"] is True
+
+
+def test_state_rejects_unknown_source_type(client: Any) -> None:
+    """Un source_type sin SourceKind registrado se rechaza (400): evita crear una source 'zombie'
+    que el work-set de extracción nunca procesaría."""
+    r = client.post("/gateway/plugins/weird/state", json={"source_type": "nope"})
+    assert r.status_code == 400
+
+
+# ---------------- account_email (identidad que reporta el cliente local) ----------------
+
+
+def test_state_persists_account_email(client: Any) -> None:
+    """El cliente local reporta el email en /state → se guarda en config.account_email."""
+    r = client.post(
+        "/gateway/plugins/uni/state",
+        json={"source_type": "imap", "account_email": "alumno@uni.edu"},
+    )
+    assert r.status_code == 200
+    with connection() as c:
+        cfg = c.execute(
+            text("SELECT config FROM sources WHERE id = :s"), {"s": r.json()["source_id"]}
+        ).scalar()
+    assert isinstance(cfg, dict)
+    assert cfg["account_email"] == "alumno@uni.edu"
+
+
+def test_state_account_email_refreshes_idempotent(client: Any) -> None:
+    """Re-reportar /state con otro email actualiza la config (idempotente)."""
+    first = client.post(
+        "/gateway/plugins/uni2/state",
+        json={"source_type": "imap", "account_email": "old@uni.edu"},
+    ).json()
+    client.post(
+        "/gateway/plugins/uni2/state",
+        json={"source_type": "imap", "account_email": "new@uni.edu"},
+    )
+    with connection() as c:
+        cfg = c.execute(
+            text("SELECT config FROM sources WHERE id = :s"), {"s": first["source_id"]}
+        ).scalar()
+    assert isinstance(cfg, dict)
+    assert cfg["account_email"] == "new@uni.edu"
+
+
+def test_state_without_account_email_leaves_config_clean(client: Any) -> None:
+    r = client.post("/gateway/plugins/uni3/state", json={"source_type": "imap"})
+    assert r.status_code == 200
+    with connection() as c:
+        cfg = c.execute(
+            text("SELECT config FROM sources WHERE id = :s"), {"s": r.json()["source_id"]}
+        ).scalar()
+    assert "account_email" not in (cfg or {})
+
+
+def test_ingest_records_an_ingestion_run(client: Any) -> None:
+    """Cada POST del plugin deja una corrida en `ingestion_runs` (trigger='gateway') con sus
+    contadores: así la vista de carga y /stats/pipeline ven a la fuente del gateway."""
+    state = client.post("/gateway/plugins/p9/state", json={"source_type": "outlook"}).json()
+    sid = state["source_id"]
+    r = client.post("/gateway/plugins/p9/ingest", json={"records": [_record("a"), _record("a")]})
+    assert r.status_code == 200
+    with connection() as c:
+        row = c.execute(
+            text(
+                "SELECT trigger, status, posted, inserted, duplicates FROM ingestion_runs "
+                "WHERE source_id = :s"
+            ),
+            {"s": sid},
+        ).one()
+    assert tuple(row) == ("gateway", "ok", 2, 1, 1)

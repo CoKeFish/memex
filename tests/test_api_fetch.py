@@ -1,0 +1,514 @@
+"""Tests del endpoint POST /sources/{id}/fetch (fetch a demanda in-process).
+
+Usa una `Source` stub (monkeypatch de `memex.sources.resolve`) que rinde `SourceRecord`
+fake — sin tocar IMAP real. Cubre: contadores reales vs dry-run, que el dry-run NO avanza
+el checkpoint y la corrida real SÍ, dedup contra el inbox real, y los 422/404 de borde.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+from pydantic import BaseModel
+from sqlalchemy import text
+
+from memex.core.source import ActorRunReport, SourceRecord
+from memex.db import connection
+
+
+class StubCursor(BaseModel):
+    seen: list[str] = []
+
+
+def _record(eid: str) -> SourceRecord:
+    return SourceRecord(
+        external_id=eid,
+        occurred_at=datetime(2026, 5, 23, 10, 0, tzinfo=UTC),
+        payload={"subject": eid, "body_text": "x"},
+        dedupe_keys=[f"msgid:<{eid}>"],
+    )
+
+
+class _StubSource:
+    """Mínimo para `run_ingestor`: checkpoint_schema + fetch + advance_checkpoint."""
+
+    checkpoint_schema = StubCursor
+
+    def __init__(self, records: list[SourceRecord]) -> None:
+        self._records = records
+
+    def fetch(self, checkpoint: StubCursor) -> Iterable[SourceRecord]:
+        yield from self._records
+
+    def advance_checkpoint(self, checkpoint: StubCursor, last: SourceRecord) -> StubCursor:
+        return StubCursor(seen=[*checkpoint.seen, last.external_id])
+
+
+@pytest.fixture
+def patch_source(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Devuelve un helper que instala una Source stub con los external_ids dados."""
+
+    def install(eids: list[str]) -> None:
+        stub = _StubSource([_record(e) for e in eids])
+        monkeypatch.setattr("memex.sources.resolve", lambda _t: lambda _cfg, env=None: stub)
+
+    return install
+
+
+def _checkpoint(source_id: int) -> dict[str, Any] | None:
+    with connection() as c:
+        row = c.execute(
+            text("SELECT cursor FROM source_checkpoints WHERE source_id = :sid"),
+            {"sid": source_id},
+        ).first()
+    return dict(row[0]) if row else None
+
+
+def _inbox_count() -> int:
+    with connection() as c:
+        return int(c.execute(text("SELECT COUNT(*) FROM inbox")).scalar() or 0)
+
+
+def test_fetch_real_inserts_and_advances_checkpoint(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    patch_source(["r1", "r2", "r3"])
+    r = client.post(f"/sources/{sid}/fetch")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["dry_run"] is False
+    assert (body["posted"], body["inserted"], body["duplicates"], body["filtered"]) == (3, 3, 0, 0)
+    assert _inbox_count() == 3
+    # La corrida real SÍ persiste el checkpoint.
+    assert _checkpoint(sid) is not None
+    # Quedó registrada en ingestion_runs como ok.
+    with connection() as c:
+        ok = c.execute(
+            text("SELECT COUNT(*) FROM ingestion_runs WHERE source_id = :sid AND status = 'ok'"),
+            {"sid": sid},
+        ).scalar()
+    assert ok and ok >= 1
+
+
+def test_fetch_dry_run_counts_without_writing(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    # Pre-insertar r1 para que el dry-run lo reporte como duplicado.
+    patch_source(["r1"])
+    assert client.post(f"/sources/{sid}/fetch").json()["inserted"] == 1
+    before = _inbox_count()
+    ckpt_before = _checkpoint(sid)
+
+    # Dry-run: r1 ya existe, r2/r3 son nuevos.
+    patch_source(["r1", "r2", "r3"])
+    r = client.post(f"/sources/{sid}/fetch", params={"dry_run": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["dry_run"] is True
+    assert (body["posted"], body["inserted"], body["duplicates"], body["filtered"]) == (3, 2, 1, 0)
+    # No escribió nada nuevo ni movió el checkpoint.
+    assert _inbox_count() == before
+    assert _checkpoint(sid) == ckpt_before
+
+
+def test_fetch_real_then_repeat_is_all_duplicates(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    patch_source(["a", "b"])
+    assert client.post(f"/sources/{sid}/fetch").json()["inserted"] == 2
+    # Segunda corrida con los mismos records → dedup por UNIQUE(source_id, external_id).
+    patch_source(["a", "b"])
+    body = client.post(f"/sources/{sid}/fetch").json()
+    assert (body["inserted"], body["duplicates"]) == (0, 2)
+    assert _inbox_count() == 2
+
+
+def test_fetch_invalid_mode_is_422(client: Any, seed_source: dict[str, Any]) -> None:
+    r = client.post(f"/sources/{seed_source['id']}/fetch", params={"mode": "bogus"})
+    assert r.status_code == 422
+
+
+def test_fetch_range_requires_since(client: Any, seed_source: dict[str, Any]) -> None:
+    r = client.post(f"/sources/{seed_source['id']}/fetch", params={"mode": "range"})
+    assert r.status_code == 422
+
+
+def test_fetch_last_inserts_without_advancing_checkpoint(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    patch_source(["x1", "x2"])
+    r = client.post(f"/sources/{sid}/fetch", params={"mode": "last", "limit": 5})
+    assert r.status_code == 200
+    assert r.json()["inserted"] == 2
+    assert _inbox_count() == 2
+    # backfill ad-hoc: NO mueve el cursor incremental
+    assert _checkpoint(sid) is None
+
+
+def test_fetch_range_inserts_without_advancing_checkpoint(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    patch_source(["r1", "r2", "r3"])
+    r = client.post(f"/sources/{sid}/fetch", params={"mode": "range", "since": "2026-01-01"})
+    assert r.status_code == 200
+    assert r.json()["inserted"] == 3
+    assert _checkpoint(sid) is None
+
+
+def test_fetch_unknown_source_type_is_422(client: Any) -> None:
+    with connection() as c:
+        sid = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) VALUES (1, 'weird', 'nope') RETURNING id"
+            )
+        ).scalar()
+    r = client.post(f"/sources/{sid}/fetch")
+    assert r.status_code == 422
+
+
+def test_fetch_cross_tenant_is_404(client: Any, seed_user2: int) -> None:
+    with connection() as c:
+        sid = c.execute(
+            text("INSERT INTO sources (user_id, name, type) VALUES (:u, 's', 'imap') RETURNING id"),
+            {"u": seed_user2},
+        ).scalar()
+    r = client.post(f"/sources/{sid}/fetch")
+    assert r.status_code == 404
+
+
+# --- Fetch por-cuenta (redes): param `accounts` --------------------------------------------
+
+
+def _make_social_source(client: Any, handles: list[str]) -> int:
+    cfg = {"accounts": [{"account": h, "priority": False} for h in handles]}
+    r = client.post("/sources", json={"name": "x-fetch-test", "type": "x", "config": cfg})
+    assert r.status_code == 201
+    return int(r.json()["id"])
+
+
+def test_fetch_accounts_param_filters_allowlist(
+    client: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = _make_social_source(client, ["nasa", "spacex"])
+    captured: dict[str, Any] = {}
+
+    def factory(cfg: dict[str, Any], env: Any = None) -> _StubSource:
+        captured.update(cfg)
+        return _StubSource([_record("p1")])
+
+    monkeypatch.setattr("memex.sources.resolve", lambda _t: factory)
+    r = client.post(f"/sources/{sid}/fetch", params={"accounts": ["@NASA"], "dry_run": True})
+    assert r.status_code == 200
+    # Solo la cuenta pedida llega al ingestor (normalizada)…
+    assert [a["account"] for a in captured["accounts"]] == ["nasa"]
+    # …y la allowlist persistida NO cambia (el override es transitorio).
+    full = client.get(f"/sources/{sid}").json()
+    assert [a["account"] for a in full["config"]["accounts"]] == ["nasa", "spacex"]
+
+
+def test_fetch_accounts_param_rejects_unknown_handle(client: Any) -> None:
+    sid = _make_social_source(client, ["nasa"])
+    r = client.post(f"/sources/{sid}/fetch", params={"accounts": ["spacex"]})
+    assert r.status_code == 422
+
+
+def test_fetch_accounts_param_rejects_non_social(client: Any, seed_source: dict[str, Any]) -> None:
+    r = client.post(f"/sources/{seed_source['id']}/fetch", params={"accounts": ["nasa"]})
+    assert r.status_code == 422
+
+
+# --- Trazabilidad de costos (apify_runs / api_cost_usd) -------------------------------------
+
+
+class _ReportingStub(_StubSource):
+    """Stub social-like: además del fetch, expone reports de runs de actor (ActorRunReporting)."""
+
+    def __init__(
+        self,
+        records: list[SourceRecord],
+        reports: list[ActorRunReport],
+        *,
+        explode: bool = False,
+    ) -> None:
+        super().__init__(records)
+        self._reports = reports
+        self._explode = explode
+
+    def fetch(self, checkpoint: StubCursor) -> Iterable[SourceRecord]:
+        yield from self._records
+        if self._explode:
+            raise RuntimeError("boom post-scrape")
+
+    def pop_run_reports(self) -> list[ActorRunReport]:
+        out, self._reports = self._reports, []
+        return out
+
+
+def _cost_report(cost: float | None, *, account: str = "nasa") -> ActorRunReport:
+    return ActorRunReport(
+        platform="x",
+        account=account,
+        actor_id="apidojo/tweet-scraper",
+        apify_run_id="RA",
+        status="ok",
+        items_scraped=1,
+        items_kept=1,
+        cost_usd=cost,
+        charged_events=None,
+        started_at=None,
+        finished_at=None,
+    )
+
+
+def _apify_rows(source_id: int) -> list[dict[str, Any]]:
+    with connection() as c:
+        rows = c.execute(
+            text(
+                "SELECT account, cost_usd, ingestion_run_id FROM apify_runs "
+                "WHERE source_id = :sid ORDER BY id"
+            ),
+            {"sid": source_id},
+        ).mappings()
+        return [dict(r) for r in rows]
+
+
+def _install_reporting(monkeypatch: pytest.MonkeyPatch, stub: _ReportingStub) -> None:
+    monkeypatch.setattr("memex.sources.resolve", lambda _t: lambda _cfg, env=None: stub)
+
+
+def test_fetch_returns_api_cost_and_persists_runs(
+    client: Any, seed_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sid = seed_source["id"]
+    stub = _ReportingStub(
+        [_record("c1")], [_cost_report(0.0021), _cost_report(0.0009, account="spacex")]
+    )
+    _install_reporting(monkeypatch, stub)
+    r = client.post(f"/sources/{sid}/fetch")
+    assert r.status_code == 200
+    assert r.json()["api_cost_usd"] == 0.003
+    rows = _apify_rows(sid)
+    assert [x["account"] for x in rows] == ["nasa", "spacex"]
+    assert all(x["ingestion_run_id"] is not None for x in rows)
+    # El agregado quedó en la corrida.
+    with connection() as c:
+        agg = c.execute(
+            text("SELECT api_cost_usd FROM ingestion_runs WHERE source_id = :sid"), {"sid": sid}
+        ).scalar()
+    assert agg is not None and float(agg) == 0.003
+
+
+def test_fetch_dry_run_still_persists_cost_rows(
+    client: Any, seed_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """El dry-run no escribe inbox pero el actor corre y COBRA: el gasto queda trazado."""
+    sid = seed_source["id"]
+    _install_reporting(monkeypatch, _ReportingStub([_record("d1")], [_cost_report(0.0021)]))
+    r = client.post(f"/sources/{sid}/fetch", params={"dry_run": True})
+    assert r.status_code == 200
+    assert r.json()["api_cost_usd"] == 0.0021
+    [row] = _apify_rows(sid)
+    assert row["ingestion_run_id"] is None  # sin corrida de ingesta en dry-run
+
+
+def test_fetch_failure_still_persists_cost(
+    client: Any, seed_source: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Si la corrida falla DESPUÉS del scrape, la plata ya se gastó: el report se persiste igual."""
+    sid = seed_source["id"]
+    _install_reporting(
+        monkeypatch, _ReportingStub([_record("f1")], [_cost_report(0.0021)], explode=True)
+    )
+    r = client.post(f"/sources/{sid}/fetch")
+    assert r.status_code == 502
+    [row] = _apify_rows(sid)
+    assert float(row["cost_usd"]) == 0.0021
+    with connection() as c:
+        run = (
+            c.execute(
+                text(
+                    "SELECT status, api_cost_usd FROM ingestion_runs WHERE source_id = :sid "
+                    "ORDER BY started_at DESC LIMIT 1"
+                ),
+                {"sid": sid},
+            )
+            .mappings()
+            .first()
+        )
+    assert run is not None
+    assert run["status"] == "failed"
+    assert run["api_cost_usd"] is not None and float(run["api_cost_usd"]) == 0.0021
+
+
+# --- Capacidades: el endpoint rechaza modos que el ingestor no honra -------------------------
+
+
+def test_fetch_mode_not_honored_by_type_is_422(client: Any) -> None:
+    """telegram solo honra incremental: un range explícito es 422 (antes corría un incremental
+    disfrazado, silencioso)."""
+    with connection() as c:
+        sid = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (1, 'tg', 'telegram') RETURNING id"
+            )
+        ).scalar()
+    r = client.post(f"/sources/{sid}/fetch", params={"mode": "range", "since": "2026-01-01"})
+    assert r.status_code == 422
+    assert "no soporta" in r.json()["detail"]
+
+
+def test_fetch_social_range_is_allowed(client: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    sid = _make_social_source(client, ["nasa"])
+    monkeypatch.setattr(
+        "memex.sources.resolve", lambda _t: lambda _cfg, env=None: _StubSource([_record("s1")])
+    )
+    r = client.post(
+        f"/sources/{sid}/fetch", params={"mode": "range", "since": "2026-01-01", "dry_run": True}
+    )
+    assert r.status_code == 200
+
+
+# --- Reclamo de barrido incremental (timeline de cobertura) --------------------------------
+# Una corrida incremental exitosa y no truncada de un tipo exhaustivo (imap) reclama
+# [última puesta al día, hoy] en ingest_swept_ranges; el ancla es source_checkpoints.updated_at.
+
+
+def _seed_checkpoint(source_id: int, updated_at: str) -> None:
+    with connection() as c:
+        c.execute(
+            text(
+                "INSERT INTO source_checkpoints (source_id, cursor, updated_at)"
+                " VALUES (:s, CAST(:cur AS JSONB), :ts)"
+            ),
+            {"s": source_id, "cur": '{"seen": []}', "ts": updated_at},
+        )
+
+
+def _checkpoint_updated_at(source_id: int) -> Any:
+    with connection() as c:
+        return c.execute(
+            text("SELECT updated_at FROM source_checkpoints WHERE source_id = :sid"),
+            {"sid": source_id},
+        ).scalar()
+
+
+def _swept_rows(source_id: int) -> list[tuple[str, str]]:
+    with connection() as c:
+        rows = c.execute(
+            text(
+                "SELECT range_start, range_end FROM ingest_swept_ranges "
+                "WHERE source_id = :s ORDER BY range_start, id"
+            ),
+            {"s": source_id},
+        ).all()
+    return [(str(r[0]), str(r[1])) for r in rows]
+
+
+def _today_sweep_excl() -> str:
+    """`hoy + 1` en la TZ de reclamo del runner (espeja _SWEEP_TZ = America/Bogota)."""
+    from zoneinfo import ZoneInfo
+
+    from memex.api.fetch_runner import _SWEEP_TZ
+
+    return (datetime.now(ZoneInfo(_SWEEP_TZ)).date() + timedelta(days=1)).isoformat()
+
+
+def test_incremental_with_checkpoint_claims_swept(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    # 12:00Z del 1 de junio = 07:00 en Bogotá → ancla 2026-06-01.
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a"])
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    assert _swept_rows(sid) == [("2026-06-01", _today_sweep_excl())]
+
+
+def test_incremental_without_checkpoint_claims_nothing(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    # Primera corrida (siembra solo since_days): no reclama el pasado.
+    sid = seed_source["id"]
+    patch_source(["a"])
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    assert _swept_rows(sid) == []
+
+
+def test_incremental_dry_run_claims_nothing(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a"])
+    assert client.post(f"/sources/{sid}/fetch", params={"dry_run": True}).status_code == 200
+    assert _swept_rows(sid) == []
+
+
+def test_incremental_non_exhaustive_type_claims_nothing(client: Any, patch_source: Any) -> None:
+    # Telegram trunca por batch_size total avanzando el cursor → no puede reclamar.
+    with connection() as c:
+        sid = c.execute(
+            text(
+                "INSERT INTO sources (user_id, name, type) "
+                "VALUES (1, 'tg-claims', 'telegram') RETURNING id"
+            )
+        ).scalar()
+    assert isinstance(sid, int)
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a"])
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    assert _swept_rows(sid) == []
+
+
+def test_incremental_truncated_run_claims_nothing(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    # posted >= batch_size → la corrida pudo quedar truncada: no se reclama.
+    sid = seed_source["id"]
+    with connection() as c:
+        c.execute(
+            text("UPDATE sources SET config = '{\"batch_size\": 2}'::jsonb WHERE id = :sid"),
+            {"sid": sid},
+        )
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a", "b"])
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    assert _swept_rows(sid) == []
+
+
+def test_incremental_repeat_run_does_not_duplicate_claim(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    patch_source(["a"])
+    client.post(f"/sources/{sid}/fetch")
+    # Segunda corrida del día: su reclamo [hoy, hoy+1) ya está contenido → skip_if_covered.
+    patch_source(["b"])
+    client.post(f"/sources/{sid}/fetch")
+    assert len(_swept_rows(sid)) == 1
+
+
+def test_incremental_empty_run_claims_and_touches_checkpoint(
+    client: Any, seed_source: dict[str, Any], patch_source: Any
+) -> None:
+    sid = seed_source["id"]
+    _seed_checkpoint(sid, "2026-06-01T12:00:00Z")
+    before = _checkpoint_updated_at(sid)
+    patch_source([])  # corrida vacía: nada nuevo en el buzón
+    assert client.post(f"/sources/{sid}/fetch").status_code == 200
+    # Reclama igual (vacío también es cobertura)...
+    assert _swept_rows(sid) == [("2026-06-01", _today_sweep_excl())]
+    # ...y "toca" el checkpoint para que la próxima corrida ancle desde hoy.
+    after = _checkpoint_updated_at(sid)
+    assert after > before
+    assert _checkpoint(sid) == {"seen": []}  # el cursor en sí no cambió

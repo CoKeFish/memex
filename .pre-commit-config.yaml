@@ -1,0 +1,61 @@
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.0
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.14
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+
+  # mypy corre via uv run para que use el venv del proyecto con todas las
+  # deps tipadas (pydantic, sqlalchemy, etc.). Pass-filenames=false porque
+  # mypy analiza el árbol completo, no por archivo modificado.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        args: [src, tests]
+
+      # Frontera del grafo: ningún módulo/API/CLI escribe el grafo en crudo (solo relations/).
+      - id: no-raw-graph-writes
+        name: no raw graph writes outside relations/
+        entry: uv run python scripts/lint_no_raw_graph_writes.py
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      # Datos personales: ningún commit lleva identificadores del dueño ni de terceros. La lista
+      # vive fuera del repo (~/.memex/personal-denylist.txt); sin lista, deja pasar con aviso.
+      - id: personal-data
+        name: sin datos personales (lista externa)
+        entry: uv run python scripts/check_personal_data.py
+        language: system
+        types: [text]
+        exclude: ^(uv\.lock|frontend/package-lock\.json)$
+
+      # pytest solo en pre-push — correr la suite completa (~1.8k tests) en cada
+      # commit sería demasiado lento. Bloquea solo cuando vas a empujar código.
+      - id: pytest
+        name: pytest (full suite, pre-push)
+        entry: uv run pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]

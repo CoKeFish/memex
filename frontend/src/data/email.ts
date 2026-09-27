@@ -1,0 +1,623 @@
+// Superficie de CORREOS contra la API real (no mocks). El resto del dashboard sigue en mocks
+// vía el barrel `@/data`. Estas funciones son async (a diferencia de los getters mock síncronos).
+
+import { apiDelete, apiGet, apiGetBlob, ApiError, apiPost } from "@/lib/api"
+import type {
+  FeedbackKind,
+  InboxExtraction,
+  InboxFeedback,
+  InboxLlmUsage,
+  InboxPayload,
+  InboxRow,
+  InboxWindow,
+  MediaAsset,
+  OcrStatus,
+  RelevanceMark,
+  RelevanceVerdict,
+  Source,
+  SourceType,
+  TraceNodeDto,
+} from "@/types/domain"
+
+interface FeedbackApi {
+  kinds: string[]
+  note: string | null
+  metadata?: Record<string, unknown>
+  status: string
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+function toFeedback(f: FeedbackApi): InboxFeedback {
+  return {
+    kinds: f.kinds as FeedbackKind[],
+    note: f.note ?? null,
+    metadata: f.metadata,
+    status: f.status,
+    createdAt: f.created_at ?? null,
+    updatedAt: f.updated_at ?? null,
+  }
+}
+
+interface RelevanceMarkApi {
+  is_relevant: boolean
+  reason: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+function toRelevanceMark(m: RelevanceMarkApi): RelevanceMark {
+  return {
+    isRelevant: m.is_relevant,
+    reason: m.reason ?? null,
+    createdAt: m.created_at ?? null,
+    updatedAt: m.updated_at ?? null,
+  }
+}
+
+interface RelevanceVerdictApi {
+  verdict: string
+  method: string
+  reason?: string | null
+  mode?: string | null
+  model?: string | null
+  rule_id?: number | null
+  rule_effect?: string | null
+  rule_sender_kind?: string | null
+  rule_sender_value?: string | null
+  rule_pattern?: string | null
+  rule_match_field?: string | null
+  created_at?: string | null
+}
+
+function toRelevanceVerdict(v: RelevanceVerdictApi): RelevanceVerdict {
+  return {
+    verdict: v.verdict as RelevanceVerdict["verdict"],
+    method: v.method as RelevanceVerdict["method"],
+    reason: v.reason ?? null,
+    mode: v.mode ?? null,
+    model: v.model ?? null,
+    ruleId: v.rule_id ?? null,
+    ruleEffect: (v.rule_effect ?? null) as RelevanceVerdict["ruleEffect"],
+    ruleSenderKind: v.rule_sender_kind ?? null,
+    ruleSenderValue: v.rule_sender_value ?? null,
+    rulePattern: v.rule_pattern ?? null,
+    ruleMatchField: v.rule_match_field ?? null,
+    createdAt: v.created_at ?? null,
+  }
+}
+
+interface SourceApiRow {
+  id: number
+  user_id: number
+  name: string
+  type: string
+  enabled: boolean
+  config: Record<string, unknown>
+  created_at: string
+  account_alias?: string | null
+  account_email?: string | null
+  token_source?: string | null
+  fetch_modes?: string[] | null
+  mode_caveats?: Record<string, string> | null
+  kind?: string | null
+}
+
+function toSource(r: SourceApiRow): Source {
+  return {
+    id: r.id,
+    name: r.name,
+    type: r.type as SourceType,
+    enabled: r.enabled,
+    createdAt: r.created_at,
+    config: r.config,
+    accountAlias: r.account_alias ?? null,
+    accountEmail: r.account_email ?? null,
+    tokenSource: (r.token_source ?? null) as Source["tokenSource"],
+    // Backend viejo sin el campo → asumir solo incremental (el default seguro).
+    fetchModes: r.fetch_modes ?? ["incremental"],
+    modeCaveats: r.mode_caveats ?? null,
+    kind: (r.kind ?? null) as Source["kind"],
+  }
+}
+
+/** Todas las fuentes del usuario (GET /sources). */
+export async function fetchSources(): Promise<Source[]> {
+  const rows = await apiGet<SourceApiRow[]>("/sources")
+  return rows.map(toSource)
+}
+
+/** Solo fuentes de correo (imap). */
+export async function fetchEmailSources(): Promise<Source[]> {
+  return (await fetchSources()).filter((s) => s.type === "imap")
+}
+
+/** Tipos de fuente que memex puede TRAER a demanda (tienen ingestor/factory). Espeja
+ * `_LAZY_FACTORIES` del backend (memex/sources). `outlook` NO está: es push-only (entra por el
+ * cliente local, no se puede pull-ear desde el dashboard). */
+export const PULLABLE_SOURCE_TYPES = new Set([
+  "imap",
+  "telegram",
+  "instagram",
+  "facebook",
+  "x",
+  "notion",
+])
+
+/** Tipos de fuente cuya ingesta pega contra una API de paga (Apify) → la UI avisa del costo. */
+export const PAID_API_TYPES = new Set(["instagram", "facebook", "x", "social"])
+
+/** Fuentes que se pueden traer a demanda (cualquier tipo con ingestor), no solo correo. */
+export async function fetchPullableSources(): Promise<Source[]> {
+  return (await fetchSources()).filter((s) => PULLABLE_SOURCE_TYPES.has(s.type))
+}
+
+/** Checkpoint actual de una fuente (GET /sources/{id}/checkpoint). El cursor es libre por
+ * ingestor; para imap suele traer {uidvalidity, last_uid}. null si la fuente aún no trajo nada. */
+export async function fetchSourceCheckpoint(
+  sourceId: number,
+): Promise<{ cursor: Record<string, unknown> | null }> {
+  return apiGet<{ cursor: Record<string, unknown> | null }>(`/sources/${sourceId}/checkpoint`)
+}
+
+export interface FetchResult {
+  posted: number
+  inserted: number
+  duplicates: number
+  errors: number
+  filtered: number
+  dry_run: boolean
+  ms_elapsed: number
+  /** Costo Apify real de ESTA corrida (también en dry-run, que gasta igual); null si no aplica. */
+  api_cost_usd?: number | null
+}
+
+export type FetchMode = "incremental" | "range" | "last"
+
+export interface FetchOpts {
+  dryRun?: boolean
+  mode?: FetchMode
+  /** range: YYYY-MM-DD inclusivo */
+  since?: string
+  /** range: YYYY-MM-DD exclusivo */
+  until?: string
+  /** last/range: tope de mensajes */
+  limit?: number
+  /** Solo redes: traer SOLO estas cuentas seguidas (subset de la allowlist). El cursor de las
+   * demás cuentas no se toca. */
+  accounts?: string[]
+}
+
+/** Dispara una corrida de ingesta a demanda. `dryRun` cuenta sin escribir. */
+export async function triggerFetch(sourceId: number, opts?: FetchOpts): Promise<FetchResult> {
+  const qs = new URLSearchParams()
+  if (opts?.dryRun) qs.set("dry_run", "true")
+  if (opts?.mode) qs.set("mode", opts.mode)
+  if (opts?.since) qs.set("since", opts.since)
+  if (opts?.until) qs.set("until", opts.until)
+  if (opts?.limit != null) qs.set("limit", String(opts.limit))
+  for (const a of opts?.accounts ?? []) qs.append("accounts", a)
+  const q = qs.toString()
+  return apiPost<FetchResult>(`/sources/${sourceId}/fetch${q ? `?${q}` : ""}`)
+}
+
+export interface AdHocResult {
+  inserted?: boolean | null
+  id?: number | null
+  reason?: string | null
+  would_insert?: boolean | null
+  validations?: Record<string, unknown> | null
+}
+
+/**
+ * Inyecta un registro manual (POST /ingest). `payload` es el JSON tipado de la fuente
+ * (p. ej. EmailPayload). `externalId`/`occurredAt` se autogeneran si no se pasan.
+ */
+export async function ingestAdHoc(
+  sourceId: number,
+  payload: Record<string, unknown>,
+  opts?: { dryRun?: boolean; externalId?: string; occurredAt?: string },
+): Promise<AdHocResult> {
+  const body = {
+    source_id: sourceId,
+    external_id: opts?.externalId ?? `manual:${Date.now()}`,
+    occurred_at: opts?.occurredAt ?? new Date().toISOString(),
+    payload,
+  }
+  return apiPost<AdHocResult>("/ingest", body, { dryRun: opts?.dryRun })
+}
+
+export interface InboxStatsResponse {
+  sources: Record<string, { total: number; pending: number; errored: number }>
+}
+
+/** Conteos del inbox por fuente (GET /inbox/stats). */
+export async function fetchInboxStats(): Promise<InboxStatsResponse> {
+  return apiGet<InboxStatsResponse>("/inbox/stats")
+}
+
+// ---- Lectura del inbox (GET /inbox, /inbox/{id}) ------------------------------
+
+interface InboxApiRow {
+  id: number
+  source_id: number
+  external_id: string
+  occurred_at: string
+  received_at: string
+  payload: Record<string, unknown>
+  processed_at: string | null
+  process_error: string | null
+  attempts: number
+  classification?: { tier: string; metadata?: Record<string, unknown> | null } | null
+  summarized?: boolean
+  extracted?: boolean
+  summary?: {
+    id?: number | null
+    tier: string
+    content: string
+    created_at?: string | null
+    metadata?: Record<string, unknown> | null
+  } | null
+  extraction?: InboxExtraction | null
+  /** Árbol de traza jerárquica (camelCase, ya en la forma que consume el front). null ⇒ sin árbol. */
+  trace?: TraceNodeDto[] | null
+  failures?: {
+    stage: string
+    status: string
+    attempts: number
+    last_error: string
+    updated_at: string
+  }[]
+  llm?: {
+    calls: number
+    cost_usd: number
+    prompt_tokens: number
+    completion_tokens: number
+    items: {
+      request_id?: string | null
+      purpose: string
+      model: string
+      prompt_tokens: number
+      completion_tokens: number
+      cost_usd: number
+      latency_ms: number
+      status: string
+      error_message?: string | null
+      created_at?: string | null
+      metadata?: Record<string, unknown> | null
+    }[]
+  } | null
+  media?: {
+    id: number
+    sha256: string
+    content_type: string
+    filename: string | null
+    extension: string | null
+    size_bytes: number
+    ocr_status: string
+    ocr_model: string | null
+    ocr_text: string | null
+    ocr_error: string | null
+    ocr_attempts: number
+    ocr_done_at?: string | null
+  }[]
+  feedback?: FeedbackApi | null
+  relevance?: RelevanceMarkApi | null
+  relevance_verdict?: RelevanceVerdictApi | null
+  versions?: {
+    ingested: string | null
+    classified: string | null
+    relevance: string | null
+    extracted: string | null
+  } | null
+}
+
+function toMediaAsset(m: NonNullable<InboxApiRow["media"]>[number]): MediaAsset {
+  return {
+    id: m.id,
+    sha256: m.sha256,
+    contentType: m.content_type,
+    sizeBytes: m.size_bytes,
+    filename: m.filename,
+    extension: m.extension,
+    ocrStatus: m.ocr_status as OcrStatus,
+    ocrModel: m.ocr_model,
+    ocrText: m.ocr_text ?? "",
+    ocrError: m.ocr_error,
+    ocrAttempts: m.ocr_attempts,
+  }
+}
+
+function toLlmUsage(l: InboxApiRow["llm"]): InboxLlmUsage | null {
+  if (!l) return null
+  return {
+    calls: l.calls,
+    costUsd: l.cost_usd,
+    promptTokens: l.prompt_tokens,
+    completionTokens: l.completion_tokens,
+    items: l.items.map((c) => ({
+      requestId: c.request_id ?? null,
+      purpose: c.purpose,
+      model: c.model,
+      promptTokens: c.prompt_tokens,
+      completionTokens: c.completion_tokens,
+      costUsd: c.cost_usd,
+      latencyMs: c.latency_ms,
+      status: c.status,
+      errorMessage: c.error_message ?? null,
+      createdAt: c.created_at ?? null,
+      metadata: c.metadata ?? null,
+    })),
+  }
+}
+
+function toInboxRow(r: InboxApiRow): InboxRow {
+  const media = (r.media ?? []).map(toMediaAsset)
+  // OCR concatenado (assets ok) → el preview "Input al LLM" muestra lo que ve el LLM (espeja el
+  // string_agg del backend en orchestrator._load_one_workrow).
+  const ocrText = media
+    .filter((m) => m.ocrStatus === "ok" && m.ocrText.trim())
+    .map((m) => m.ocrText.trim())
+    .join("\n")
+  return {
+    id: r.id,
+    sourceId: r.source_id,
+    externalId: r.external_id,
+    occurredAt: r.occurred_at,
+    receivedAt: r.received_at,
+    // El backend devuelve el payload como dict arbitrario; renderPayload sniffa las claves
+    // en runtime (no depende del tipo estático), así que casteamos vía unknown.
+    payload: r.payload as unknown as InboxPayload,
+    processedAt: r.processed_at,
+    processError: r.process_error,
+    attempts: r.attempts,
+    ocrText: ocrText || undefined,
+    classification: r.classification ?? null,
+    summarized: r.summarized ?? false,
+    extracted: r.extracted ?? false,
+    summary: r.summary
+      ? {
+          id: r.summary.id ?? null,
+          tier: r.summary.tier,
+          content: r.summary.content,
+          createdAt: r.summary.created_at ?? null,
+          metadata: r.summary.metadata ?? null,
+        }
+      : null,
+    extraction: r.extraction ?? null,
+    trace: r.trace ?? null,
+    llm: toLlmUsage(r.llm),
+    media,
+    feedback: r.feedback ? toFeedback(r.feedback) : null,
+    relevance: r.relevance ? toRelevanceMark(r.relevance) : null,
+    relevanceVerdict: r.relevance_verdict ? toRelevanceVerdict(r.relevance_verdict) : null,
+    versions: r.versions ?? null,
+    failures: (r.failures ?? []).map((f) => ({
+      stage: f.stage,
+      status: f.status,
+      attempts: f.attempts,
+      lastError: f.last_error,
+      updatedAt: f.updated_at,
+    })),
+  }
+}
+
+/** Registra feedback rápido de un mensaje — POST /inbox/{id}/feedback. */
+export async function reportFeedback(
+  id: number,
+  body: { kinds: string[]; note?: string | null },
+): Promise<InboxFeedback> {
+  return toFeedback(await apiPost<FeedbackApi>(`/inbox/${id}/feedback`, body))
+}
+
+/** Marca / actualiza la relevancia de un mensaje (override por-mensaje) — POST /inbox/{id}/relevance.
+ * Sin motivo: el campo se retiró del diálogo (nada lo consumía); el upsert backend pisa con null
+ * los motivos viejos al re-marcar — aceptado. */
+export async function setRelevanceMark(id: number, isRelevant: boolean): Promise<RelevanceMark> {
+  return toRelevanceMark(
+    await apiPost<RelevanceMarkApi>(`/inbox/${id}/relevance`, { is_relevant: isRelevant, reason: null }),
+  )
+}
+
+/** Quita la marca de relevancia de un mensaje — DELETE /inbox/{id}/relevance. */
+export async function clearRelevanceMark(id: number): Promise<void> {
+  await apiDelete<void>(`/inbox/${id}/relevance`)
+}
+
+/** Override manual del tier de clasificación — POST /inbox/{id}/classification. */
+export async function setClassification(
+  id: number,
+  tier: string,
+): Promise<{ tier: string; metadata?: Record<string, unknown> | null }> {
+  return apiPost<{ tier: string; metadata?: Record<string, unknown> | null }>(
+    `/inbox/${id}/classification`,
+    { tier },
+  )
+}
+
+/**
+ * Object URL del blob original de un adjunto (GET /media/{id}). El caller debe revocarlo con
+ * `URL.revokeObjectURL` al desmontar. `download` fuerza la descarga (Content-Disposition attachment).
+ * Se baja con el mismo Bearer que el resto (por eso no se puede usar `<img src>` directo).
+ */
+export async function fetchMediaBlobUrl(id: number, opts?: { download?: boolean }): Promise<string> {
+  const blob = await apiGetBlob(`/media/${id}${opts?.download ? "?download=true" : ""}`)
+  return URL.createObjectURL(blob)
+}
+
+export type ProcessScope = "individual" | "window"
+
+export interface SummarizeResult {
+  status: string
+  messages?: number
+  content?: string | null
+  tier?: string | null
+  calls?: number
+  cost_usd?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+}
+
+export interface ExtractResult {
+  status: string
+  items?: number
+  discarded?: number
+  by_module?: Record<string, number>
+  done?: boolean
+  modules?: string[]
+  finance?: Record<string, unknown>[]
+  calendar?: Record<string, unknown>[]
+  hackathones?: Record<string, unknown>[]
+  calls?: number
+  cost_usd?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+}
+
+function phaseQuery(opts?: { scope?: ProcessScope; force?: boolean }): string {
+  const qs = new URLSearchParams()
+  if (opts?.scope) qs.set("scope", opts.scope)
+  if (opts?.force) qs.set("force", "true")
+  const q = qs.toString()
+  return q ? `?${q}` : ""
+}
+
+/** Resume (LLM) un mensaje o su ventana — POST /inbox/{id}/summarize. */
+export async function summarizeInboxItem(
+  id: number,
+  opts?: { scope?: ProcessScope; force?: boolean },
+): Promise<SummarizeResult> {
+  return apiPost<SummarizeResult>(`/inbox/${id}/summarize${phaseQuery(opts)}`)
+}
+
+/** Extrae (módulos finance/calendar, LLM) sobre un mensaje o su ventana — POST /inbox/{id}/extract. */
+export async function extractInboxItem(
+  id: number,
+  opts?: { scope?: ProcessScope; force?: boolean },
+): Promise<ExtractResult> {
+  return apiPost<ExtractResult>(`/inbox/${id}/extract${phaseQuery(opts)}`)
+}
+
+export interface ProcessResult {
+  inbox_id: number
+  tier: string
+  reason: string
+  classified: boolean
+  already: boolean
+}
+
+export interface ReprocessResult {
+  targets: number
+  stages: string[]
+  /** Resultado por etapa: {media:{assets_created,…}, ocr:{ok,…}, …} o {<stage>:{error}}. */
+  results: Record<string, Record<string, unknown>>
+}
+
+/** Re-aplica etapas (media/ocr/classify/summarize/extract) a un mensaje — POST /inbox/{id}/reprocess. */
+export async function reprocessInboxItem(
+  id: number,
+  stages: string[],
+  force = false,
+): Promise<ReprocessResult> {
+  return apiPost<ReprocessResult>(`/inbox/${id}/reprocess`, { stages, force })
+}
+
+/** Procesa (clasifica) un mensaje puntual — POST /inbox/{id}/process. Determinista, sin LLM. */
+export async function processInboxItem(id: number): Promise<ProcessResult> {
+  return apiPost<ProcessResult>(`/inbox/${id}/process`)
+}
+
+interface InboxApiList {
+  items: InboxApiRow[]
+  /** Opaco: número con `order=asc`, keyset `"<iso>|<id>"` con `order=recent`. Se devuelve tal cual. */
+  next_cursor: number | string | null
+}
+
+export const INBOX_PAGE_SIZE = 500
+
+export interface InboxFeedPage {
+  /** Filas en el orden del servidor: occurred_at DESC (lo más nuevo primero). */
+  rows: InboxRow[]
+  /** Quedan páginas más antiguas por pedir. */
+  hasMore: boolean
+  /** Páginas efectivamente cargadas (≤ las pedidas si la fuente se acabó antes). */
+  pages: number
+}
+
+/**
+ * Trae las `pages` páginas más RECIENTES del inbox (`order=recent`: occurred_at DESC con cursor
+ * keyset). El feed arranca con 1 página y pide la siguiente al llegar al final, así ninguna fila
+ * nueva queda afuera por un tope fijo (antes: id ASC acumulando hasta 2000 → con 2963 filas, las
+ * 963 más nuevas eran invisibles).
+ */
+export async function fetchInboxRecent(opts: {
+  sourceId?: number
+  pages: number
+}): Promise<InboxFeedPage> {
+  const out: InboxRow[] = []
+  let cursor: string | null = null
+  let hasMore = false
+  let loaded = 0
+  while (loaded < opts.pages) {
+    const qs = new URLSearchParams({ order: "recent", limit: String(INBOX_PAGE_SIZE) })
+    if (opts.sourceId != null) qs.set("source_id", String(opts.sourceId))
+    if (cursor != null) qs.set("cursor", cursor)
+    const page = await apiGet<InboxApiList>(`/inbox?${qs.toString()}`)
+    out.push(...page.items.map(toInboxRow))
+    loaded += 1
+    hasMore = page.next_cursor != null && page.items.length > 0
+    if (!hasMore) break
+    cursor = String(page.next_cursor)
+  }
+  return { rows: out, hasMore, pages: loaded }
+}
+
+export interface InboxNeighbor {
+  id: number
+  occurredAt: string
+  /** Asunto o comienzo del texto, para el tooltip del botón. */
+  label: string
+}
+
+export interface InboxNeighbors {
+  /** El inmediatamente MÁS NUEVO en el orden del feed (arriba en la lista). */
+  prev: InboxNeighbor | null
+  /** El inmediatamente MÁS ANTIGUO (abajo en la lista). */
+  next: InboxNeighbor | null
+}
+
+/** Vecinos de un mensaje en el orden del feed (GET /inbox/{id}/neighbors), acotados a la fuente
+ * activa del feed si se pasa `sourceId`. */
+export async function fetchInboxNeighbors(id: number, sourceId?: number): Promise<InboxNeighbors> {
+  const qs = sourceId != null ? `?source_id=${sourceId}` : ""
+  const r = await apiGet<{
+    prev: { id: number; occurred_at: string; label: string } | null
+    next: { id: number; occurred_at: string; label: string } | null
+  }>(`/inbox/${id}/neighbors${qs}`)
+  const map = (n: { id: number; occurred_at: string; label: string } | null) =>
+    n ? { id: n.id, occurredAt: n.occurred_at, label: n.label } : null
+  return { prev: map(r.prev), next: map(r.next) }
+}
+
+/** Un registro del inbox por id (GET /inbox/{id}); 404 → null. */
+export async function fetchInboxItem(id: number): Promise<InboxRow | null> {
+  try {
+    return toInboxRow(await apiGet<InboxApiRow>(`/inbox/${id}`))
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null
+    throw e
+  }
+}
+
+interface InboxWindowApi {
+  mode: "summary" | "prospective" | "none"
+  summary_id?: number | null
+  members: InboxApiRow[]
+}
+
+/** Lote de procesamiento de un mensaje — GET /inbox/{id}/window: con quiénes se resumió
+ * (mode "summary") o se resumiría hoy (mode "prospective"). Orden conversacional. */
+export async function fetchInboxWindow(id: number): Promise<InboxWindow> {
+  const r = await apiGet<InboxWindowApi>(`/inbox/${id}/window`)
+  return { mode: r.mode, summaryId: r.summary_id ?? null, members: r.members.map(toInboxRow) }
+}

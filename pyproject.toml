@@ -1,0 +1,189 @@
+[project]
+name = "memex"
+version = "0.1.0"
+description = "Personal life-data consolidation — store + views layer"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0,<3.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "pydantic-settings>=2.6",
+    "structlog>=24.4",
+    "httpx>=0.28.1",
+    "imap-tools>=1.7",
+    "boto3>=1.35",
+    "python-dotenv>=1.0",
+    "google-auth-oauthlib>=1.2",
+    "google-auth>=2.35",
+    "pywin32>=311; sys_platform == 'win32'",
+    "telethon>=1.38,<2",
+    # WhatsApp como dispositivo vinculado (whatsmeow en Go envuelto para Python).
+    "neonize>=0.4.3,<0.5",
+    "pymupdf>=1.24",
+    "pyzipper>=0.4.0",
+    "cryptography>=44",
+    "argon2-cffi>=23",
+    # Dominio registrable (eTLD+1) del remitente de correo: colapsa subdominios al dominio que la org
+    # posee (mail.acme.com → acme.com) vía la Public Suffix List. Se usa OFFLINE (snapshot PSL
+    # embebido, suffix_list_urls=()), determinista, sin red — ver normalize.registrable_domain.
+    "tldextract>=5",
+    # Detección de comunidades del grafo de relaciones (cúmulos). louvain_communities es PURO-Python
+    # (sin scipy/build nativo — importa en Windows). PINEADO a 3.6.x a propósito: un bump de minor
+    # reordena las particiones de Louvain → cambia las `signature` de los cúmulos → re-validación
+    # masiva; subir networkx es un evento de re-clusterización DELIBERADO (ver relations/clustering.py).
+    "networkx>=3.6,<3.7",
+    "python-telegram-bot>=22.5",
+    "python-multipart>=0.0.32",
+    # Bloqueo semántico (memex/semantic): embeddings LOCALES (ONNX en CPU, sin red en runtime) de
+    # títulos para proponer candidatos a «misma cosa» al juez. El modelo se hornea en la imagen
+    # (Dockerfile, FASTEMBED_CACHE_PATH); ~240 MB; ~1,4 ms por título.
+    "fastembed>=0.8,<0.9",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+    "pytest>=9.0.3",
+    "respx>=0.21",
+    "pytest-asyncio>=1.4.0",
+    "pytest-xdist>=3.6",
+    "pytest-timeout>=2.3",
+    "types-python-dateutil>=2.9.0.20260807",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/memex", "src/memex_local_client"]
+
+[project.scripts]
+memex = "memex.agent_cli:main"
+memex-local-client = "memex_local_client.cli:main"
+memex-filters = "memex.cli.filters:main"
+memex-imap = "memex.ingestors.imap.cli:main"
+memex-telegram = "memex.ingestors.telegram.cli:main"
+memex-social = "memex.ingestors.social.cli:main"
+memex-classify = "memex.classifier.cli:main"
+memex-extract = "memex.modules.cli:main"
+memex-process = "memex.modules.cli:main_process"
+memex-ocr = "memex.ocr.cli:main"
+memex-documentos = "memex.documentos.cli:main"
+memex-reprocess = "memex.reprocess_cli:main"
+memex-inbox-repair = "memex.core.inbox_time_repair:main"
+memex-sources = "memex.core.source_merge:main"
+memex-relevance = "memex.relevance.cli:main"
+memex-calendar-sync = "memex.modules.calendar.cli:main"
+memex-finance = "memex.modules.finance.cli:main"
+memex-identidades = "memex.modules.identidades.cli:main"
+memex-asuntos = "memex.modules.asuntos.cli:main"
+memex-bienestar = "memex.modules.bienestar.cli:main"
+memex-tareas = "memex.modules.tareas.cli:main"
+memex-scheduler = "memex.scheduler.cli:main"
+memex-ingest-scheduler = "memex.ingest_scheduler.cli:main"
+memex-geo = "memex.geo.cli:main"
+memex-transport = "memex.transport.cli:main"
+memex-notifications = "memex.notifications.cli:main"
+memex-graph = "memex.relations.cli:main"
+memex-llm = "memex.llm.cli:main"
+memex-webcontext = "memex.webcontext.cli:main"
+memex-inspect = "memex.inspect_cli:main"
+memex-assistant = "memex.assistant.cli:main"
+
+[project.optional-dependencies]
+stt-local = [
+    "faster-whisper>=1.1",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# T20 (flake8-print): print/pprint prohibidos en código de app (ADR-007: todo sale por structlog
+# hacia log_events). Los CLIs/experiments/scripts quedan exentos abajo: print ES su UI.
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "T20"]
+
+[tool.ruff.lint.per-file-ignores]
+"migrations/*" = ["E501"]
+"src/**/cli.py" = ["T20"]
+"src/**/*_cli.py" = ["T20"]
+"src/memex/cli/*" = ["T20"]
+"tests/**" = ["T20"]
+"experiments/**" = ["T20"]
+"scripts/**" = ["T20"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+# faster-whisper (extra opcional `stt-local`) no trae py.typed: se importa lazy en UN punto
+# (memex/assistant/stt.py) y se trata como `Any` ahí.
+module = "faster_whisper.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# neonize (cliente de WhatsApp) no trae py.typed: se importa lazy en ingestors/whatsapp y
+# sus eventos/protobufs se tratan como `Any` ahí; nuestro payload y la store quedan tipados.
+module = "neonize.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Telethon no incluye un py.typed marker — sus tipos son dinámicos.
+# Aceptamos `Any` en los puntos de contacto (parser, client, cli) y mantenemos
+# las garantías de tipos en nuestros propios payloads/cursors.
+module = "telethon.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# boto3/botocore tampoco traen py.typed — mismos términos que telethon: los
+# aceptamos como `Any` SOLO en memex/storage (el único punto de contacto), con
+# nuestras firmas tipadas hacia afuera.
+module = ["boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# PyMuPDF trae py.typed pero sus anotaciones son INCOMPLETAS (Document no declara
+# __iter__, varias funciones quedan sin tipar). `follow_imports = skip` lo trata como
+# `Any` en el único punto de contacto (memex/ocr/pdf.py); nuestras firmas hacia afuera
+# (PdfExtract/PdfImage) sí están tipadas y los retornos se envuelven en bytes/int/str.
+module = "pymupdf"
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# pyzipper no trae py.typed — mismos términos que pymupdf: lo tratamos como `Any` en el único
+# punto de contacto (memex/ocr/zip.py), con nuestras firmas (ZipUnpack/ZipEntry) tipadas hacia afuera.
+module = "pyzipper"
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# networkx trae py.typed pero sus anotaciones de community/* son incompletas. Mismos términos que
+# telethon: lo tratamos como `Any` en el único punto de contacto (memex/relations/clustering.py),
+# con nuestras firmas (CandidateCluster/detect_clusters) tipadas hacia afuera.
+module = "networkx.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `-n auto` paraleliza la suite con pytest-xdist (una DB por worker, ver tests/conftest.py).
+# Para depurar un test con -s/pdb sin workers: agregar `-n0` al comando.
+addopts = "-ra --tb=short --strict-markers -n auto"
+# Backstop anti-cuelgue (pytest-timeout): ningún test legítimo se acerca a 120s — el peor caso
+# real es el primer test de cada worker, que paga el setup de sesión (construir la plantilla
+# migrada la primera vez + clonarla). Un test colgado mata su worker con stack dump en vez de
+# colgar la suite (y el pre-push) para siempre.
+timeout = 120
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"

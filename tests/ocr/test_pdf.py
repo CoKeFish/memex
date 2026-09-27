@@ -1,0 +1,212 @@
+"""extract_pdf / assemble_pdf_text: rutas texto/escaneado, topes, filtros y errores.
+
+Puro (sin DB ni red): los PDFs de fixture se generan in-memory con el propio PyMuPDF, así no hay
+binarios checkeados al repo y todo es reproducible en CI.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pymupdf
+import pytest
+
+from memex.ocr.pdf import (
+    PdfCaps,
+    PdfCorruptError,
+    PdfEncryptedError,
+    assemble_pdf_text,
+    extract_pdf,
+)
+from tests.ocr._pdf_fixtures import digital_pdf, encrypted_pdf, scanned_pdf
+
+
+def _drain_events(q: Any, event: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    while not q.empty():
+        records.append(q.get_nowait())
+    return [r for r in records if r["event"] == event]
+
+
+def test_digital_text_only() -> None:
+    ex = extract_pdf(digital_pdf(), caps=PdfCaps())
+    assert ex.mode == "text"
+    assert "FACTURA" in ex.text_layer
+    assert ex.images == ()
+    assert ex.page_count == 1
+    assert ex.skipped_reason is None
+
+
+def test_digital_with_embedded_images() -> None:
+    ex = extract_pdf(digital_pdf(image_px=(300, 300)), caps=PdfCaps())
+    assert ex.mode == "text"
+    assert "FACTURA" in ex.text_layer
+    assert len(ex.images) == 2
+    assert all(img.png_bytes[:4] == b"\x89PNG" for img in ex.images)
+    assert all(img.content_type == "image/png" for img in ex.images)
+
+
+def test_images_over_cap_skips_image_step() -> None:
+    ex = extract_pdf(digital_pdf(image_px=(300, 300, 300)), caps=PdfCaps(max_images=2))
+    assert ex.mode == "skipped_images"
+    assert ex.images == ()  # 3 > 2 → se omiten todas, queda solo el texto
+    assert ex.skipped_reason == "images_over_cap"
+    assert "FACTURA" in ex.text_layer
+
+
+def test_tiny_images_filtered() -> None:
+    ex = extract_pdf(digital_pdf(image_px=(300, 50)), caps=PdfCaps(min_image_px=200))
+    assert ex.mode == "text"
+    assert len(ex.images) == 1  # la de 50px (< 200) se ignora (logo/ícono/tracking pixel)
+
+
+def test_scanned_rasterizes_pages() -> None:
+    ex = extract_pdf(scanned_pdf(pages=3), caps=PdfCaps())
+    assert ex.mode == "scanned"
+    assert ex.text_layer == ""
+    assert len(ex.images) == 3
+    assert all("raster" in img.origin for img in ex.images)
+    assert all(img.png_bytes[:4] == b"\x89PNG" for img in ex.images)
+
+
+def test_scanned_respects_page_cap() -> None:
+    ex = extract_pdf(scanned_pdf(pages=7), caps=PdfCaps(max_pages=2))
+    assert ex.mode == "scanned"
+    assert len(ex.images) == 2
+
+
+def test_short_text_routes_to_scanned() -> None:
+    # "hola" (4 chars) < text_min_chars (32) → se trata como escaneado y se rasteriza la página.
+    ex = extract_pdf(digital_pdf(text="hola"), caps=PdfCaps())
+    assert ex.mode == "scanned"
+    assert len(ex.images) == 1
+
+
+def test_text_min_chars_threshold_override() -> None:
+    ex = extract_pdf(digital_pdf(text="hola"), caps=PdfCaps(text_min_chars=3))
+    assert ex.mode == "text"
+    assert "hola" in ex.text_layer
+
+
+# ---------- fallos por-imagen / por-página: se saltan CON rastro ------------------- #
+
+
+def test_broken_embedded_image_skipped_with_log(
+    sink_capture: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Una imagen embebida que no normaliza se salta del OCR (best-effort) — su contenido se
+    pierde de la transcripción, así que debe quedar `ocr.pdf.image_skipped` con el porqué."""
+    pdf = digital_pdf(image_px=(300,))  # construir ANTES de romper Pixmap
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("pixmap roto")
+
+    monkeypatch.setattr(pymupdf, "Pixmap", boom)
+    ex = extract_pdf(pdf, caps=PdfCaps())
+
+    assert ex.mode == "text"
+    assert ex.images == ()  # la única imagen calificante se saltó
+    events = _drain_events(sink_capture, "ocr.pdf.image_skipped")
+    assert len(events) == 1
+    assert events[0]["level"] == "warning"
+    fields = json.loads(events[0]["fields"])
+    assert fields["exc_type"] == "RuntimeError"
+    assert isinstance(fields["xref"], int)
+
+
+def test_page_raster_failure_skipped_with_log(
+    sink_capture: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Una página que no rasteriza se salta (best-effort) — esa página nunca se OCR-ea, así que
+    debe quedar `ocr.pdf.page_raster_failed` por cada hueco."""
+    pdf = scanned_pdf(pages=2)  # construir ANTES de romper get_pixmap
+
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("raster roto")
+
+    monkeypatch.setattr(pymupdf.Page, "get_pixmap", boom)
+    ex = extract_pdf(pdf, caps=PdfCaps())
+
+    assert ex.mode == "scanned"
+    assert ex.images == ()
+    events = _drain_events(sink_capture, "ocr.pdf.page_raster_failed")
+    assert [json.loads(e["fields"])["page"] for e in events] == [1, 2]
+
+
+def test_corrupt_bytes_raise() -> None:
+    with pytest.raises(PdfCorruptError):
+        extract_pdf(b"esto no es un PDF", caps=PdfCaps())
+
+
+def test_encrypted_pdf_no_pool_raises() -> None:
+    with pytest.raises(PdfEncryptedError):
+        extract_pdf(encrypted_pdf(), caps=PdfCaps())
+
+
+def test_encrypted_pdf_unlocked_with_password_pool() -> None:
+    pdf = encrypted_pdf(password="docID42", full_perms=True, text="cifrado total 123 ref XYZ987")
+    ex = extract_pdf(pdf, caps=PdfCaps(text_min_chars=5), passwords=("nope", "docID42"))
+    assert ex.mode == "text"
+    assert "XYZ987" in ex.text_layer
+
+
+def test_encrypted_pdf_wrong_pool_raises() -> None:
+    with pytest.raises(PdfEncryptedError):
+        extract_pdf(encrypted_pdf(password="docID42"), caps=PdfCaps(), passwords=("nope",))
+
+
+def test_assemble_orders_and_drops_empty() -> None:
+    assert assemble_pdf_text("  base  ", ["", "  uno ", "dos"]) == "base\n\nuno\n\ndos"
+    assert assemble_pdf_text("", []) == ""
+    assert assemble_pdf_text("", ["  solo  "]) == "solo"
+    assert assemble_pdf_text("solo texto", []) == "solo texto"
+
+
+def _slides_pdf(text_pages: int, image_only_pages: int, images_per_text_page: int = 3) -> bytes:
+    """Mazo de diapositivas: páginas con texto (y varias imágenes distintas) + páginas que son
+    pura imagen."""
+    import pymupdf
+
+    from tests.ocr._pdf_fixtures import ENOUGH_TEXT, make_png
+
+    doc = pymupdf.open()
+    n = 0
+    for _ in range(text_pages):
+        page = doc.new_page(width=600, height=400)
+        page.insert_text((40, 60), ENOUGH_TEXT, fontsize=12)
+        for k in range(images_per_text_page):
+            n += 1
+            page.insert_image(
+                pymupdf.Rect(40 + k * 120, 120, 140 + k * 120, 220),
+                stream=make_png(300, (0.2, 0.5, (n % 10) / 10)),
+            )
+    for j in range(image_only_pages):
+        page = doc.new_page(width=600, height=400)
+        page.insert_image(
+            pymupdf.Rect(20, 20, 580, 380), stream=make_png(300, (0.9, 0.3, (j % 10) / 10))
+        )
+    out = doc.tobytes()
+    doc.close()
+    return bytes(out)
+
+
+def test_slides_over_cap_rasterize_only_the_pages_without_text() -> None:
+    """Diapositivas: más imágenes que el tope → no se pierde toda la visión: se rasterizan solo las
+    páginas sin texto (acotadas por max_pages) y la capa de texto se conserva."""
+    ex = extract_pdf(_slides_pdf(text_pages=2, image_only_pages=3), caps=PdfCaps(max_images=2))
+    assert ex.mode == "mixed" and ex.skipped_reason == "images_over_cap"
+    assert [img.origin for img in ex.images] == ["page3-raster", "page4-raster", "page5-raster"]
+    assert "FACTURA" in ex.text_layer or len(ex.text_layer) >= 32
+    capped = extract_pdf(
+        _slides_pdf(text_pages=1, image_only_pages=4), caps=PdfCaps(max_images=2, max_pages=2)
+    )
+    assert capped.mode == "mixed" and [i.origin for i in capped.images] == [
+        "page2-raster",
+        "page3-raster",
+    ]
+    # sin páginas en blanco: sigue siendo skipped_images (solo texto)
+    only_text = extract_pdf(
+        _slides_pdf(text_pages=2, image_only_pages=0), caps=PdfCaps(max_images=2)
+    )
+    assert only_text.mode == "skipped_images" and only_text.images == ()
